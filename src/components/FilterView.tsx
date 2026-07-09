@@ -134,6 +134,9 @@ export default function FilterView({ entries, onOpenDay }: Props) {
                 </div>
               </div>
               <p className="text-sm text-slate-200 font-medium truncate">{schedule?.theme ?? '—'}</p>
+              {entry.title && (
+                <p className="text-xs text-blue-400 truncate mt-0.5 italic">"{entry.title}"</p>
+              )}
               <p className="text-xs text-slate-500 truncate mt-0.5">{entry.originalText.slice(0, 80)}</p>
               <div className="flex gap-3 mt-1">
                 <span className="text-xs text-slate-600">{entry.wordCount} pal.</span>

@@ -26,6 +26,7 @@ export function useEntries() {
     setEntries((prev) => {
       const existing: DayEntry = prev[patch.date] ?? {
         date: patch.date,
+        title: '',
         originalText: '',
         correctedText: '',
         observations: '',

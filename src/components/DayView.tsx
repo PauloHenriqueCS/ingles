@@ -26,6 +26,7 @@ const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
 export default function DayView({ date, entry, onSave, onBack }: Props) {
   const schedule = getScheduleForDate(date);
 
+  const [title, setTitle] = useState(entry?.title ?? '');
   const [originalText, setOriginalText] = useState(entry?.originalText ?? '');
   const [correctedText, setCorrectedText] = useState(entry?.correctedText ?? '');
   const [observations, setObservations] = useState(entry?.observations ?? '');
@@ -35,6 +36,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
+    setTitle(entry?.title ?? '');
     setOriginalText(entry?.originalText ?? '');
     setCorrectedText(entry?.correctedText ?? '');
     setObservations(entry?.observations ?? '');
@@ -47,7 +49,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   function handleSave() {
     const newStatus: Status =
       status === 'nao-iniciado' && originalText.trim().length > 0 ? 'escrito' : status;
-    onSave({ date, originalText, correctedText, observations, mainErrors, difficulty, status: newStatus });
+    onSave({ date, title, originalText, correctedText, observations, mainErrors, difficulty, status: newStatus });
     setStatus(newStatus);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -89,6 +91,18 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             <p className="text-sm mt-1">{schedule.grammarObjective}</p>
           </div>
         )}
+
+        {/* Title */}
+        <div>
+          <label className="text-xs text-slate-400 mb-2 block">Título do texto</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Ex: My Morning Routine"
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
+          />
+        </div>
 
         {/* Status selector */}
         <div>

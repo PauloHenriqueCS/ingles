@@ -96,7 +96,9 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
                 <span className="text-xs text-slate-400 w-20 shrink-0">
                   {new Date(e.date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
                 </span>
-                <span className="text-sm text-slate-300 truncate flex-1">{e.originalText.slice(0, 60)}…</span>
+                <span className="text-sm text-slate-300 truncate flex-1">
+                  {e.title ? e.title : e.originalText.slice(0, 60) + '…'}
+                </span>
                 <StatusBadge status={e.status} />
               </button>
             ))}

@@ -13,6 +13,7 @@ export interface DaySchedule {
 
 export interface DayEntry {
   date: string;
+  title: string;
   originalText: string;
   correctedText: string;
   observations: string;
