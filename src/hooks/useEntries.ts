@@ -34,6 +34,7 @@ function makeDefault(date: string): DayEntry {
     status: 'nao-iniciado',
     wordCount: 0,
     updatedAt: new Date().toISOString(),
+    aiReview: null,
   };
 }
 

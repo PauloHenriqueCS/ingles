@@ -2,6 +2,31 @@ export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
 export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day';
 
+export interface VocabularyItem {
+  word: string;
+  meaning: string;
+  example: string;
+}
+
+export interface AIFeedback {
+  overallScore: number;
+  estimatedLevel: string;
+  grammarGoalMet: boolean;
+  scores: {
+    grammar: number;
+    vocabulary: number;
+    naturalness: number;
+    fluency: number;
+  };
+  correctedText: string;
+  mainErrors: string[];
+  errorExplanations: string;
+  newVocabulary: VocabularyItem[];
+  nativeSuggestion: string;
+  teacherSummary: string;
+  optionalChallenge: string;
+}
+
 export interface DaySchedule {
   date: string;
   theme: string;
@@ -9,6 +34,8 @@ export interface DaySchedule {
   verbTense: string;
   isWeekend: boolean;
   weekendActivity?: 'revisao' | 'descanso';
+  level?: string;
+  estimatedTime?: number;
 }
 
 export interface DayEntry {
@@ -22,6 +49,7 @@ export interface DayEntry {
   status: Status;
   wordCount: number;
   updatedAt: string;
+  aiReview: AIFeedback | null;
 }
 
 export type EntriesStore = Record<string, DayEntry>;

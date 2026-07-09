@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { DayEntry, EntriesStore } from '../types';
+import { DayEntry, EntriesStore, AIFeedback } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 
 interface DBRow {
@@ -18,6 +18,7 @@ interface DBRow {
   status: string;
   word_count: number;
   updated_at: string;
+  ai_review: AIFeedback | null;
 }
 
 function rowToEntry(row: DBRow): DayEntry {
@@ -32,6 +33,7 @@ function rowToEntry(row: DBRow): DayEntry {
     status: (row.status as DayEntry['status']) ?? 'nao-iniciado',
     wordCount: row.word_count ?? 0,
     updatedAt: row.updated_at ?? new Date().toISOString(),
+    aiReview: row.ai_review ?? null,
   };
 }
 
@@ -54,6 +56,7 @@ function entryToRow(entry: DayEntry): Omit<DBRow, 'updated_at'> & { updated_at: 
     status: entry.status,
     word_count: entry.wordCount,
     updated_at: entry.updatedAt,
+    ai_review: entry.aiReview ?? null,
   };
 }
 

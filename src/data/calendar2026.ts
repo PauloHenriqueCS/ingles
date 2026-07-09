@@ -1,5 +1,13 @@
 import { DaySchedule } from '../types';
 
+const MONTH_LEVEL: Record<number, string> = {
+  1: 'A2', 2: 'A2', 3: 'A2',
+  4: 'B1', 5: 'B1', 6: 'B1',
+  7: 'B1/B2', 8: 'B1/B2', 9: 'B1/B2',
+  10: 'B2', 11: 'B2',
+  12: 'B1-B2',
+};
+
 const MONTH_GRAMMAR: Record<number, { verbTense: string; objective: string }> = {
   1: { verbTense: 'Present Simple', objective: 'Descrever hábitos, rotinas e fatos gerais' },
   2: { verbTense: 'Present Continuous', objective: 'Descrever ações em progresso e mudanças temporárias' },
@@ -149,6 +157,8 @@ export function getScheduleForDate(dateStr: string): DaySchedule | null {
     theme,
     grammarObjective: grammar.objective,
     verbTense: grammar.verbTense,
+    level: MONTH_LEVEL[month],
+    estimatedTime: 15,
   };
 }
 
