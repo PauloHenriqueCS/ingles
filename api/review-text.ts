@@ -1,5 +1,8 @@
-import { createOpenAIClient, AI_MODEL } from '../src/services/openai';
+import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
+
+// Keep in sync with src/config/ai.ts
+const AI_MODEL = 'gpt-5-mini';
 
 const SYSTEM_PROMPT = `Você é um professor particular de inglês para um brasileiro chamado Paulo.
 
@@ -36,9 +39,7 @@ Schema obrigatório:
       "correctExample": ""
     }
   ],
-  "mainErrors": [
-    ""
-  ],
+  "mainErrors": [""],
   "newVocabulary": [
     {
       "word": "",
@@ -69,28 +70,14 @@ Regras:
 - Avaliar se o objetivo gramatical foi cumprido
 - O rewriteChallenge deve ser opcional e simples`;
 
-function buildUserMessage(opts: {
-  originalText: string;
-  theme: string;
-  grammarGoal: string;
-  mainTense: string;
-}): string {
-  return `Tema do dia: ${opts.theme || '—'}
-Objetivo gramatical: ${opts.grammarGoal || '—'}
-Tempo verbal esperado: ${opts.mainTense || '—'}
-
-Texto do aluno:
-"""
-${opts.originalText.trim()}
-"""`;
-}
-
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY não configurada. Adicione a variável de ambiente no Vercel.' });
+    return res.status(500).json({
+      error: 'OPENAI_API_KEY não configurada. Adicione a variável no Vercel → Settings → Environment Variables.',
+    });
   }
 
   const { entryId, originalText, theme, grammarGoal, mainTense } = req.body ?? {};
@@ -99,14 +86,23 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({ error: 'originalText é obrigatório' });
   }
 
+  const userMessage = `Tema do dia: ${theme || '—'}
+Objetivo gramatical: ${grammarGoal || '—'}
+Tempo verbal esperado: ${mainTense || '—'}
+
+Texto do aluno:
+"""
+${originalText.trim()}
+"""`;
+
   try {
-    const openai = createOpenAIClient(apiKey);
+    const openai = new OpenAI({ apiKey });
 
     const completion = await openai.chat.completions.create({
       model: AI_MODEL,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserMessage({ originalText, theme, grammarGoal, mainTense }) },
+        { role: 'user', content: userMessage },
       ],
     });
 
@@ -119,7 +115,7 @@ export default async function handler(req: any, res: any) {
       const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         return res.status(500).json({
-          error: `Modelo não retornou JSON válido. Resposta: ${rawContent.slice(0, 200)}`,
+          error: `Modelo não retornou JSON válido. Resposta: ${rawContent.slice(0, 300)}`,
         });
       }
       feedback = JSON.parse(jsonMatch[0]);
@@ -127,6 +123,7 @@ export default async function handler(req: any, res: any) {
 
     const reviewedAt = new Date().toISOString();
 
+    // Persist to Supabase (non-fatal if it fails)
     if (entryId) {
       try {
         const supabase = createClient(
@@ -162,7 +159,7 @@ export default async function handler(req: any, res: any) {
     return res.json({ feedback, reviewedAt });
   } catch (err: any) {
     const message = err?.message ?? 'Erro interno';
-    const detail = err?.error?.message ?? err?.status ?? '';
+    const detail = err?.error?.message ?? '';
     console.error('Review error:', err);
     return res.status(500).json({
       error: detail ? `${message} — ${detail}` : message,
