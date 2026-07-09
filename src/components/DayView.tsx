@@ -121,7 +121,8 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       }).catch((err) => {
         console.error('Erro ao salvar revisão no histórico:', err);
         setHistoryState('failed');
-        setTimeout(() => setHistoryState('idle'), 8000);
+        setReviewError(`Histórico: ${err instanceof Error ? err.message : String(err)}`);
+        setTimeout(() => { setHistoryState('idle'); setReviewError(null); }, 10000);
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
@@ -244,6 +245,16 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           </button>
         </div>
 
+        {historyState === 'saving' && (
+          <p className="text-xs text-slate-500 text-center py-1">Salvando no histórico...</p>
+        )}
+        {historyState === 'saved' && (
+          <p className="text-xs text-green-500 text-center py-1">✓ Revisão salva no histórico.</p>
+        )}
+        {historyState === 'failed' && reviewError && (
+          <p className="text-xs text-amber-400 text-center py-1 break-all">{reviewError}</p>
+        )}
+
         {reviewState === 'loading' && (
           <div className="bg-slate-800 rounded-xl p-8 text-center space-y-3">
             <p className="text-3xl">🧠</p>
@@ -276,15 +287,6 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           />
         )}
 
-        {historyState === 'saving' && (
-          <p className="text-xs text-slate-500 text-center py-1">Salvando no histórico...</p>
-        )}
-        {historyState === 'saved' && (
-          <p className="text-xs text-green-500 text-center py-1">✓ Revisão salva no histórico.</p>
-        )}
-        {historyState === 'failed' && (
-          <p className="text-xs text-amber-500 text-center py-1">Revisão gerada, mas não foi possível salvar no histórico agora.</p>
-        )}
       </div>
     </div>
   );
