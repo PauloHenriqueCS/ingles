@@ -50,10 +50,6 @@ export default function App() {
     );
   }
 
-  if (!user) {
-    return <LoginPage />;
-  }
-
   if (view === 'day') {
     return (
       <DayView
