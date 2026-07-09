@@ -2,40 +2,31 @@ export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
 export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day';
 
-export interface GrammarFeedbackItem {
-  title: string;
-  explanationPt: string;
-  wrongExample: string;
-  correctExample: string;
+export interface MainMistake {
+  original: string;
+  correct: string;
+  explanation: string;
 }
 
 export interface VocabularyItem {
   word: string;
-  meaningPt: string;
+  meaningPtBr: string;
   example: string;
-}
-
-export interface NaturalExpression {
-  original: string;
-  better: string;
-  explanationPt: string;
 }
 
 export interface AIFeedback {
   score: number;
-  cefrLevel: string;
-  grammarScore: number;
-  vocabularyScore: number;
-  naturalnessScore: number;
-  fluencyScore: number;
-  correctedText: string;
+  level: string;
+  grammar: number;
+  vocabulary: number;
+  naturalness: number;
+  fluency: number;
   summary: string;
-  grammarFeedback: GrammarFeedbackItem[];
-  mainErrors: string[];
+  correctedText: string;
+  mainMistakes: MainMistake[];
   newVocabulary: VocabularyItem[];
-  naturalExpressions: NaturalExpression[];
-  grammarGoalAchieved: boolean;
-  rewriteChallenge: string;
+  objectiveFeedback: string;
+  nextPractice: string;
 }
 
 export interface DaySchedule {
@@ -77,11 +68,11 @@ export interface MonthStats {
 export interface AIStats {
   reviewedCount: number;
   avgScore: number;
-  avgGrammarScore: number;
-  avgVocabularyScore: number;
-  avgNaturalnessScore: number;
-  avgFluencyScore: number;
-  latestCefrLevel: string | null;
+  avgGrammar: number;
+  avgVocabulary: number;
+  avgNaturalness: number;
+  avgFluency: number;
+  latestLevel: string | null;
   monthlyAvgScores: { month: number; avgScore: number; count: number }[];
 }
 

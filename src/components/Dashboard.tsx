@@ -66,9 +66,9 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
             <h2 className="text-sm font-medium text-slate-300">Avaliação IA</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-500">{aiStats.reviewedCount} revisões</span>
-              {aiStats.latestCefrLevel && (
+              {aiStats.latestLevel && (
                 <span className="px-2 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">
-                  {aiStats.latestCefrLevel}
+                  {aiStats.latestLevel}
                 </span>
               )}
             </div>
@@ -76,10 +76,10 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
 
           <div className="grid grid-cols-2 gap-2">
             <MiniScoreCard label="Nota média" value={aiStats.avgScore} />
-            <MiniScoreCard label="Gramática" value={aiStats.avgGrammarScore} />
-            <MiniScoreCard label="Vocabulário" value={aiStats.avgVocabularyScore} />
-            <MiniScoreCard label="Naturalidade" value={aiStats.avgNaturalnessScore} />
-            <MiniScoreCard label="Fluência" value={aiStats.avgFluencyScore} />
+            <MiniScoreCard label="Gramática" value={aiStats.avgGrammar} />
+            <MiniScoreCard label="Vocabulário" value={aiStats.avgVocabulary} />
+            <MiniScoreCard label="Naturalidade" value={aiStats.avgNaturalness} />
+            <MiniScoreCard label="Fluência" value={aiStats.avgFluency} />
           </div>
 
           {/* Monthly evolution */}

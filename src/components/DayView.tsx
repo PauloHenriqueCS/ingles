@@ -1,8 +1,5 @@
 import { useState, useEffect } from 'react';
-import {
-  DayEntry, Difficulty, Status, AIFeedback,
-  GrammarFeedbackItem, VocabularyItem, NaturalExpression,
-} from '../types';
+import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 
@@ -56,7 +53,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         date, title, originalText,
         correctedText: aiReview?.correctedText ?? entry?.correctedText ?? '',
         observations: entry?.observations ?? '',
-        mainErrors: aiReview ? aiReview.mainErrors.join('\n') : (entry?.mainErrors ?? ''),
+        mainErrors: aiReview ? aiReview.mainMistakes.map((m) => m.original).join('\n') : (entry?.mainErrors ?? ''),
         difficulty, status: finalStatus, aiReview, reviewedAt,
       });
       setStatus(finalStatus);
@@ -102,7 +99,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         date, title, originalText,
         correctedText: feedback.correctedText,
         observations: entry?.observations ?? '',
-        mainErrors: feedback.mainErrors.join('\n'),
+        mainErrors: feedback.mainMistakes.map((m) => m.original).join('\n'),
         difficulty, status: 'corrigido', aiReview: feedback, reviewedAt: ts,
       });
       setStatus('corrigido');
@@ -236,11 +233,17 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         )}
 
         {reviewState === 'error' && (
-          <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-1">
+          <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-2">
             <p className="text-red-300 text-sm font-medium">Erro ao revisar</p>
             {reviewError && (
               <p className="text-red-400 text-xs break-all">{reviewError}</p>
             )}
+            <button
+              onClick={() => { setReviewState('idle'); setReviewError(null); }}
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              Tentar novamente
+            </button>
           </div>
         )}
 
@@ -279,14 +282,14 @@ function TeacherReport({
       </div>
 
       <ScoresCard review={review} />
-      <GrammarGoalCard achieved={review.grammarGoalAchieved} objective={grammarObjective} />
-      <CorrectedTextCard text={review.correctedText} />
-      {review.mainErrors.length > 0 && <MainErrorsCard errors={review.mainErrors} />}
-      {review.grammarFeedback.length > 0 && <GrammarExplanationsCard items={review.grammarFeedback} />}
-      {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
-      {review.naturalExpressions.length > 0 && <NaturalExpressionsCard items={review.naturalExpressions} />}
       {review.summary && <SummaryCard text={review.summary} />}
-      {review.rewriteChallenge && <ChallengeCard text={review.rewriteChallenge} />}
+      <CorrectedTextCard text={review.correctedText} />
+      {review.mainMistakes.length > 0 && <MainMistakesCard items={review.mainMistakes} />}
+      {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
+      {review.objectiveFeedback && (
+        <ObjectiveFeedbackCard text={review.objectiveFeedback} objective={grammarObjective} />
+      )}
+      {review.nextPractice && <NextPracticeCard text={review.nextPractice} />}
 
       <button
         onClick={onReviewAgain}
@@ -299,7 +302,7 @@ function TeacherReport({
   );
 }
 
-// ── Score cards ───────────────────────────────────────────────────────────────
+// ── Scores card ───────────────────────────────────────────────────────────────
 
 function ScoresCard({ review }: { review: AIFeedback }) {
   const scoreColor =
@@ -317,16 +320,16 @@ function ScoresCard({ review }: { review: AIFeedback }) {
         <div className="text-right space-y-2">
           <p className="text-xs text-slate-400 uppercase tracking-wider">Writing Level</p>
           <span className="block px-3 py-1.5 rounded-lg bg-blue-900 text-blue-300 text-lg font-bold">
-            {review.cefrLevel}
+            {review.level}
           </span>
         </div>
       </div>
 
       <div className="space-y-2.5 pt-2 border-t border-slate-700">
-        <ScoreBar label="Gramática" value={review.grammarScore} />
-        <ScoreBar label="Vocabulário" value={review.vocabularyScore} />
-        <ScoreBar label="Naturalidade" value={review.naturalnessScore} />
-        <ScoreBar label="Fluência" value={review.fluencyScore} />
+        <ScoreBar label="Gramática" value={review.grammar} />
+        <ScoreBar label="Vocabulário" value={review.vocabulary} />
+        <ScoreBar label="Naturalidade" value={review.naturalness} />
+        <ScoreBar label="Fluência" value={review.fluency} />
       </div>
     </div>
   );
@@ -347,27 +350,18 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
   );
 }
 
-// ── Goal card ─────────────────────────────────────────────────────────────────
+// ── Summary ───────────────────────────────────────────────────────────────────
 
-function GrammarGoalCard({ achieved, objective }: { achieved: boolean; objective: string }) {
+function SummaryCard({ text }: { text: string }) {
   return (
-    <div className={`rounded-xl p-4 flex items-start gap-3 ${
-      achieved
-        ? 'bg-green-900/20 border border-green-800/30'
-        : 'bg-amber-900/20 border border-amber-800/30'
-    }`}>
-      <span className="text-xl mt-0.5">{achieved ? '✅' : '⚠️'}</span>
-      <div>
-        <p className={`text-sm font-semibold ${achieved ? 'text-green-300' : 'text-amber-300'}`}>
-          {achieved ? 'Objetivo gramatical cumprido' : 'Continue praticando o objetivo'}
-        </p>
-        {objective && <p className="text-xs text-slate-400 mt-0.5">{objective}</p>}
-      </div>
+    <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-5 space-y-2">
+      <p className="text-xs text-blue-400 font-medium uppercase tracking-wider">Resumo do Professor</p>
+      <p className="text-slate-200 text-sm leading-relaxed">{text}</p>
     </div>
   );
 }
 
-// ── Corrected text ─────────────────────────────────────────────────────────────
+// ── Corrected text ────────────────────────────────────────────────────────────
 
 function CorrectedTextCard({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -390,37 +384,26 @@ function CorrectedTextCard({ text }: { text: string }) {
   );
 }
 
-// ── Errors ────────────────────────────────────────────────────────────────────
+// ── Main mistakes ─────────────────────────────────────────────────────────────
 
-function MainErrorsCard({ errors }: { errors: string[] }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Principais Erros</p>
-      <div className="flex flex-wrap gap-2">
-        {errors.map((err, i) => (
-          <span key={i} className="px-2.5 py-1 rounded-lg bg-red-900/40 border border-red-800/50 text-red-300 text-xs">
-            {err}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function GrammarExplanationsCard({ items }: { items: GrammarFeedbackItem[] }) {
+function MainMistakesCard({ items }: { items: MainMistake[] }) {
   return (
     <div className="bg-slate-800 rounded-xl p-5 space-y-4">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Explicações Gramaticais</p>
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Principais Erros</p>
       {items.map((item, i) => (
-        <div key={i} className="space-y-2 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
-          <p className="text-sm font-semibold text-slate-200">{item.title}</p>
-          <p className="text-xs text-slate-400 leading-relaxed">{item.explanationPt}</p>
-          {item.wrongExample && (
-            <div className="space-y-1">
-              <p className="text-xs text-red-400">✗ {item.wrongExample}</p>
-              <p className="text-xs text-green-400">✓ {item.correctExample}</p>
-            </div>
-          )}
+        <div key={i} className="space-y-1.5 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
+          <div className="flex gap-2 text-xs">
+            <span className="text-slate-500 shrink-0 w-24">Você escreveu:</span>
+            <span className="text-red-400 italic">"{item.original}"</span>
+          </div>
+          <div className="flex gap-2 text-xs">
+            <span className="text-slate-500 shrink-0 w-24">Correção:</span>
+            <span className="text-green-400 italic">"{item.correct}"</span>
+          </div>
+          <div className="flex gap-2 text-xs">
+            <span className="text-slate-500 shrink-0 w-24">Explicação:</span>
+            <span className="text-slate-300 leading-relaxed">{item.explanation}</span>
+          </div>
         </div>
       ))}
     </div>
@@ -438,7 +421,7 @@ function VocabularyCard({ items }: { items: VocabularyItem[] }) {
           <div key={i} className="border-b border-slate-700 last:border-0 pb-3 last:pb-0">
             <div className="flex items-baseline gap-2 mb-0.5">
               <span className="text-blue-400 font-semibold text-sm">{item.word}</span>
-              <span className="text-slate-500 text-xs">{item.meaningPt}</span>
+              <span className="text-slate-500 text-xs">{item.meaningPtBr}</span>
             </div>
             <p className="text-slate-400 text-xs italic">"{item.example}"</p>
           </div>
@@ -448,55 +431,43 @@ function VocabularyCard({ items }: { items: VocabularyItem[] }) {
   );
 }
 
-// ── Natural expressions ───────────────────────────────────────────────────────
+// ── Objective feedback ────────────────────────────────────────────────────────
 
-function NaturalExpressionsCard({ items }: { items: NaturalExpression[] }) {
+function ObjectiveFeedbackCard({ text, objective }: { text: string; objective: string }) {
+  const achieved = /cumpr|atingi|usou|utilizou|sim|yes/i.test(text);
   return (
-    <div className="bg-emerald-900/20 border border-emerald-800/30 rounded-xl p-5 space-y-4">
-      <p className="text-xs text-emerald-400 font-medium uppercase tracking-wider">Expressões Mais Naturais</p>
-      {items.map((item, i) => (
-        <div key={i} className="space-y-1.5 border-b border-emerald-900/40 last:border-0 pb-3 last:pb-0">
-          <div className="flex gap-2 text-xs">
-            <span className="text-slate-500 shrink-0">Você:</span>
-            <span className="text-slate-400 italic">"{item.original}"</span>
-          </div>
-          <div className="flex gap-2 text-xs">
-            <span className="text-emerald-500 shrink-0">Melhor:</span>
-            <span className="text-emerald-300 italic">"{item.better}"</span>
-          </div>
-          {item.explanationPt && (
-            <p className="text-xs text-slate-500">{item.explanationPt}</p>
-          )}
-        </div>
-      ))}
+    <div className={`rounded-xl p-4 space-y-2 ${
+      achieved
+        ? 'bg-green-900/20 border border-green-800/30'
+        : 'bg-amber-900/20 border border-amber-800/30'
+    }`}>
+      <div className="flex items-center gap-2">
+        <span className="text-lg">{achieved ? '✅' : '⚠️'}</span>
+        <p className={`text-xs font-medium uppercase tracking-wider ${achieved ? 'text-green-400' : 'text-amber-400'}`}>
+          Feedback do Objetivo
+        </p>
+      </div>
+      {objective && <p className="text-xs text-slate-500 italic">{objective}</p>}
+      <p className="text-sm text-slate-200 leading-relaxed">{text}</p>
     </div>
   );
 }
 
-// ── Summary & challenge ───────────────────────────────────────────────────────
+// ── Next practice ─────────────────────────────────────────────────────────────
 
-function SummaryCard({ text }: { text: string }) {
+function NextPracticeCard({ text }: { text: string }) {
   return (
-    <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-blue-400 font-medium uppercase tracking-wider">Resumo do Professor</p>
-      <p className="text-slate-200 text-sm leading-relaxed">{text}</p>
-    </div>
-  );
-}
-
-function ChallengeCard({ text }: { text: string }) {
-  return (
-    <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-3">
+    <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-2">
       <div className="flex items-center gap-2">
         <span className="text-lg">🎯</span>
-        <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Desafio</p>
+        <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
     </div>
   );
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (

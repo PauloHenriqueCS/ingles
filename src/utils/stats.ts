@@ -64,7 +64,6 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
     monthlyStats.push({ month: m, year: 2026, written: writtenDays.length, total: weekdays.length, totalWords: monthWords });
   }
 
-  // AI stats
   const reviewedEntries = writtenEntries.filter((e) => e.aiReview != null);
 
   const monthlyAvgScores = [];
@@ -87,11 +86,11 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
   const aiStats: AIStats = {
     reviewedCount: reviewedEntries.length,
     avgScore: avg(reviewedEntries.map((e) => e.aiReview!.score)),
-    avgGrammarScore: avg(reviewedEntries.map((e) => e.aiReview!.grammarScore)),
-    avgVocabularyScore: avg(reviewedEntries.map((e) => e.aiReview!.vocabularyScore)),
-    avgNaturalnessScore: avg(reviewedEntries.map((e) => e.aiReview!.naturalnessScore)),
-    avgFluencyScore: avg(reviewedEntries.map((e) => e.aiReview!.fluencyScore)),
-    latestCefrLevel: latestReviewed[0]?.aiReview?.cefrLevel ?? null,
+    avgGrammar: avg(reviewedEntries.map((e) => e.aiReview!.grammar)),
+    avgVocabulary: avg(reviewedEntries.map((e) => e.aiReview!.vocabulary)),
+    avgNaturalness: avg(reviewedEntries.map((e) => e.aiReview!.naturalness)),
+    avgFluency: avg(reviewedEntries.map((e) => e.aiReview!.fluency)),
+    latestLevel: latestReviewed[0]?.aiReview?.level ?? null,
     monthlyAvgScores,
   };
 

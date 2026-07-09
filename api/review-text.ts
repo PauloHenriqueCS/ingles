@@ -1,74 +1,65 @@
 import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
 
-// Keep in sync with src/config/ai.ts
 const AI_MODEL = 'gpt-4o-mini';
 
-const SYSTEM_PROMPT = `Você é um professor particular de inglês para um brasileiro chamado Paulo.
+const SYSTEM_PROMPT = `Você é um professor de inglês para brasileiros adultos iniciantes.
 
-Objetivo do aluno:
-- melhorar escrita em inglês
-- ganhar constância
-- evoluir para inglês profissional
-- preparar-se futuramente para entrevistas internacionais como Software Engineer
+Avalie o texto em inglês escrito pelo usuário.
 
-Analise o texto abaixo considerando:
-- tema do dia
-- objetivo gramatical
-- tempo verbal esperado
-- nível estimado de escrita
+Responda sempre em português do Brasil, exceto nos campos de texto corrigido, exemplos e palavras em inglês.
 
-Retorne APENAS JSON válido, sem markdown, sem comentários e sem texto fora do JSON.
+Você deve ser didático, direto e encorajador. Não seja agressivo. O objetivo é ensinar, não humilhar.
 
-Schema obrigatório:
+Analise:
+- gramática
+- vocabulário
+- naturalidade
+- fluência
+- cumprimento do objetivo do dia
+
+Retorne somente JSON válido. Não use markdown. Não escreva nada antes ou depois do JSON.
+
+Formato obrigatório:
 
 {
-  "score": 0,
-  "cefrLevel": "A1",
-  "grammarScore": 0,
-  "vocabularyScore": 0,
-  "naturalnessScore": 0,
-  "fluencyScore": 0,
-  "correctedText": "",
-  "summary": "",
-  "grammarFeedback": [
+  "score": number,
+  "level": "A1" | "A2" | "B1" | "B2" | "C1" | "C2",
+  "grammar": number,
+  "vocabulary": number,
+  "naturalness": number,
+  "fluency": number,
+  "summary": string,
+  "correctedText": string,
+  "mainMistakes": [
     {
-      "title": "",
-      "explanationPt": "",
-      "wrongExample": "",
-      "correctExample": ""
+      "original": string,
+      "correct": string,
+      "explanation": string
     }
   ],
-  "mainErrors": [""],
   "newVocabulary": [
     {
-      "word": "",
-      "meaningPt": "",
-      "example": ""
+      "word": string,
+      "meaningPtBr": string,
+      "example": string
     }
   ],
-  "naturalExpressions": [
-    {
-      "original": "",
-      "better": "",
-      "explanationPt": ""
-    }
-  ],
-  "grammarGoalAchieved": true,
-  "rewriteChallenge": ""
+  "objectiveFeedback": string,
+  "nextPractice": string
 }
 
 Regras:
-- score deve ser de 0 a 100
-- cefrLevel deve ser A1, A2, B1, B2, C1 ou C2
-- grammarScore, vocabularyScore, naturalnessScore e fluencyScore devem ser de 0 a 100
-- Explicações devem ser em português
-- correctedText deve estar em inglês
-- Seja honesto, mas motivador
-- Não inventar erro se o texto estiver correto
-- Se o texto for muito curto, informar isso no summary e dar nota proporcional
-- Avaliar se o objetivo gramatical foi cumprido
-- O rewriteChallenge deve ser opcional e simples`;
+- score deve ir de 0 a 100.
+- grammar, vocabulary, naturalness e fluency devem ir de 0 a 100.
+- level deve ser A1, A2, B1, B2, C1 ou C2.
+- correctedText deve corrigir o texto mantendo a ideia original do aluno, em inglês.
+- mainMistakes deve conter no máximo 5 erros principais.
+- newVocabulary deve conter de 3 a 5 itens.
+- objectiveFeedback deve explicar se o objetivo gramatical do dia foi cumprido.
+- nextPractice deve ser uma tarefa curta e prática para o próximo treino.
+- Se o texto for muito curto, avalie mesmo assim e explique no summary que a nota ficou baixa por falta de conteúdo.
+- Se o texto estiver vazio ou quase vazio, retorne score 0 e peça para o usuário escrever pelo menos 3 frases.`;
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
@@ -114,16 +105,23 @@ ${originalText.trim()}
     } catch {
       const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
+        console.error('Non-JSON response from model:', rawContent.slice(0, 500));
         return res.status(500).json({
-          error: `Modelo não retornou JSON válido. Resposta: ${rawContent.slice(0, 300)}`,
+          error: 'O professor está com dificuldades para responder. Tente novamente em alguns instantes.',
         });
       }
-      feedback = JSON.parse(jsonMatch[0]);
+      try {
+        feedback = JSON.parse(jsonMatch[0]);
+      } catch {
+        console.error('Failed to parse extracted JSON:', jsonMatch[0].slice(0, 500));
+        return res.status(500).json({
+          error: 'O professor está com dificuldades para responder. Tente novamente em alguns instantes.',
+        });
+      }
     }
 
     const reviewedAt = new Date().toISOString();
 
-    // Persist to Supabase (non-fatal if it fails)
     if (entryId) {
       try {
         const supabase = createClient(
@@ -135,18 +133,18 @@ ${originalText.trim()}
           .update({
             corrected_text: feedback.correctedText ?? null,
             ai_score: feedback.score ?? null,
-            cefr_level: feedback.cefrLevel ?? null,
-            grammar_score: feedback.grammarScore ?? null,
-            vocabulary_score: feedback.vocabularyScore ?? null,
-            naturalness_score: feedback.naturalnessScore ?? null,
-            fluency_score: feedback.fluencyScore ?? null,
+            cefr_level: feedback.level ?? null,
+            grammar_score: feedback.grammar ?? null,
+            vocabulary_score: feedback.vocabulary ?? null,
+            naturalness_score: feedback.naturalness ?? null,
+            fluency_score: feedback.fluency ?? null,
             ai_summary: feedback.summary ?? null,
-            grammar_feedback: feedback.grammarFeedback ?? null,
-            ai_main_errors: feedback.mainErrors ?? null,
+            grammar_feedback: feedback.mainMistakes ?? null,
+            ai_main_errors: feedback.mainMistakes?.map((m: any) => m.original) ?? null,
             new_vocabulary: feedback.newVocabulary ?? null,
-            natural_expressions: feedback.naturalExpressions ?? null,
-            grammar_goal_achieved: feedback.grammarGoalAchieved ?? null,
-            rewrite_challenge: feedback.rewriteChallenge ?? null,
+            natural_expressions: null,
+            grammar_goal_achieved: null,
+            rewrite_challenge: feedback.nextPractice ?? null,
             reviewed_at: reviewedAt,
             status: 'corrigido',
           })

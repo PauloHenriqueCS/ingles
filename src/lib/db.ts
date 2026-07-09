@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { DayEntry, EntriesStore, AIFeedback, GrammarFeedbackItem, VocabularyItem, NaturalExpression } from '../types';
+import { DayEntry, EntriesStore, AIFeedback, MainMistake, VocabularyItem } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 
 interface DBRow {
@@ -18,7 +18,6 @@ interface DBRow {
   status: string;
   word_count: number;
   updated_at: string;
-  // AI review columns (v2)
   ai_score: number | null;
   cefr_level: string | null;
   grammar_score: number | null;
@@ -26,10 +25,10 @@ interface DBRow {
   naturalness_score: number | null;
   fluency_score: number | null;
   ai_summary: string | null;
-  grammar_feedback: GrammarFeedbackItem[] | null;
+  grammar_feedback: any[] | null;
   ai_main_errors: string[] | null;
-  new_vocabulary: VocabularyItem[] | null;
-  natural_expressions: NaturalExpression[] | null;
+  new_vocabulary: any[] | null;
+  natural_expressions: any[] | null;
   grammar_goal_achieved: boolean | null;
   rewrite_challenge: string | null;
   reviewed_at: string | null;
@@ -38,21 +37,31 @@ interface DBRow {
 function rowToEntry(row: DBRow): DayEntry {
   let aiReview: AIFeedback | null = null;
   if (row.ai_score != null) {
+    const rawMistakes: any[] = Array.isArray(row.grammar_feedback) ? row.grammar_feedback : [];
+    const mainMistakes: MainMistake[] = rawMistakes
+      .filter((m) => m && typeof m === 'object' && 'original' in m)
+      .map((m) => ({ original: m.original ?? '', correct: m.correct ?? '', explanation: m.explanation ?? '' }));
+
+    const rawVocab: any[] = Array.isArray(row.new_vocabulary) ? row.new_vocabulary : [];
+    const newVocabulary: VocabularyItem[] = rawVocab.map((v) => ({
+      word: v.word ?? '',
+      meaningPtBr: v.meaningPtBr ?? v.meaningPt ?? '',
+      example: v.example ?? '',
+    }));
+
     aiReview = {
       score: row.ai_score,
-      cefrLevel: row.cefr_level ?? '',
-      grammarScore: row.grammar_score ?? 0,
-      vocabularyScore: row.vocabulary_score ?? 0,
-      naturalnessScore: row.naturalness_score ?? 0,
-      fluencyScore: row.fluency_score ?? 0,
-      correctedText: row.corrected_text ?? '',
+      level: row.cefr_level ?? '',
+      grammar: row.grammar_score ?? 0,
+      vocabulary: row.vocabulary_score ?? 0,
+      naturalness: row.naturalness_score ?? 0,
+      fluency: row.fluency_score ?? 0,
       summary: row.ai_summary ?? '',
-      grammarFeedback: row.grammar_feedback ?? [],
-      mainErrors: row.ai_main_errors ?? [],
-      newVocabulary: row.new_vocabulary ?? [],
-      naturalExpressions: row.natural_expressions ?? [],
-      grammarGoalAchieved: row.grammar_goal_achieved ?? false,
-      rewriteChallenge: row.rewrite_challenge ?? '',
+      correctedText: row.corrected_text ?? '',
+      mainMistakes,
+      newVocabulary,
+      objectiveFeedback: '',
+      nextPractice: row.rewrite_challenge ?? '',
     };
   }
 
@@ -92,20 +101,19 @@ function entryToRow(entry: DayEntry): Omit<DBRow, 'updated_at'> & { updated_at: 
     status: entry.status,
     word_count: entry.wordCount,
     updated_at: entry.updatedAt,
-    // AI review columns
     ai_score: r?.score ?? null,
-    cefr_level: r?.cefrLevel ?? null,
-    grammar_score: r?.grammarScore ?? null,
-    vocabulary_score: r?.vocabularyScore ?? null,
-    naturalness_score: r?.naturalnessScore ?? null,
-    fluency_score: r?.fluencyScore ?? null,
+    cefr_level: r?.level ?? null,
+    grammar_score: r?.grammar ?? null,
+    vocabulary_score: r?.vocabulary ?? null,
+    naturalness_score: r?.naturalness ?? null,
+    fluency_score: r?.fluency ?? null,
     ai_summary: r?.summary ?? null,
-    grammar_feedback: r?.grammarFeedback ?? null,
-    ai_main_errors: r?.mainErrors ?? null,
+    grammar_feedback: r?.mainMistakes ?? null,
+    ai_main_errors: r?.mainMistakes?.map((m) => m.original) ?? null,
     new_vocabulary: r?.newVocabulary ?? null,
-    natural_expressions: r?.naturalExpressions ?? null,
-    grammar_goal_achieved: r?.grammarGoalAchieved ?? null,
-    rewrite_challenge: r?.rewriteChallenge ?? null,
+    natural_expressions: null,
+    grammar_goal_achieved: null,
+    rewrite_challenge: r?.nextPractice ?? null,
     reviewed_at: entry.reviewedAt ?? null,
   };
 }
