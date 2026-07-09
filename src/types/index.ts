@@ -1,6 +1,6 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history';
+export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution';
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
 export interface MainMistake {
@@ -96,6 +96,23 @@ export interface AIStats {
   avgFluency: number;
   latestLevel: string | null;
   monthlyAvgScores: { month: number; avgScore: number; count: number }[];
+}
+
+export interface EnglishDailyTheme {
+  title: string;
+  themePtBr: string;
+  themeEn: string;
+  objective: string;
+  level: CefrLevel;
+  estimatedTimeMinutes: number;
+  instructions: string[];
+  requiredGrammar: string[];
+  suggestedVocabulary: VocabularyItem[];
+  useTheseWords: string[];
+  exampleSentence: string;
+  successCriteria: string[];
+  difficulty: 'easy' | 'medium' | 'hard';
+  category: string;
 }
 
 export interface DashboardStats {

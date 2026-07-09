@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem } from '../types';
+import { useState, useEffect, useRef } from 'react';
+import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
+import DailyThemeCard from './DailyThemeCard';
 
 interface Props {
   date: string;
@@ -34,6 +35,8 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [historyState, setHistoryState] = useState<HistoryState>('idle');
+  const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     setTitle(entry?.title ?? '');
@@ -46,6 +49,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setReviewError(null);
     setSaveState('idle');
     setHistoryState('idle');
+    setDailyTheme(null);
   }, [date, entry]);
 
   async function handleSaveDraft() {
@@ -80,8 +84,8 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         body: JSON.stringify({
           entryId: date,
           originalText,
-          theme: schedule?.theme ?? '',
-          grammarGoal: schedule?.grammarObjective ?? '',
+          theme: dailyTheme?.themeEn || schedule?.theme || '',
+          grammarGoal: dailyTheme?.objective || schedule?.grammarObjective || '',
           mainTense: schedule?.verbTense ?? '',
         }),
       });
@@ -112,9 +116,9 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       saveEnglishReview({
         originalText,
         feedback,
-        category: schedule?.theme ?? undefined,
-        difficulty: difficulty ?? undefined,
-        objective: schedule?.grammarObjective ?? undefined,
+        category: dailyTheme?.category || schedule?.theme || undefined,
+        difficulty: difficulty ?? dailyTheme?.difficulty ?? undefined,
+        objective: dailyTheme?.objective || schedule?.grammarObjective || undefined,
       }).then(() => {
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
@@ -162,6 +166,15 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       </header>
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-4 pb-10">
+        <DailyThemeCard
+          theme={dailyTheme}
+          onThemeReady={setDailyTheme}
+          onStartWriting={() => {
+            textareaRef.current?.focus();
+            textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}
+        />
+
         {schedule && !schedule.isWeekend && (
           <div className="bg-slate-800 rounded-xl p-4 space-y-2">
             <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -204,6 +217,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             <span className="text-xs text-slate-500">{words} palavras</span>
           </div>
           <textarea
+            ref={textareaRef}
             value={originalText}
             onChange={(e) => setOriginalText(e.target.value)}
             placeholder="Escreva seu texto em inglês aqui..."

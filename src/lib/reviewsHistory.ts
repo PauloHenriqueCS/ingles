@@ -38,12 +38,15 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
   };
 }
 
-export async function fetchEnglishReviews(): Promise<EnglishReviewSaved[]> {
-  const { data, error } = await supabase
+export async function fetchEnglishReviews(limit?: number): Promise<EnglishReviewSaved[]> {
+  let query = supabase
     .from('english_reviews')
     .select('*')
     .order('created_at', { ascending: false });
 
+  if (limit) query = query.limit(limit);
+
+  const { data, error } = await query;
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => rowToReview(row as Record<string, unknown>));
 }
