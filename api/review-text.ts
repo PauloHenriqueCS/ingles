@@ -145,6 +145,7 @@ ${originalText.trim()}
             natural_expressions: null,
             grammar_goal_achieved: null,
             rewrite_challenge: feedback.nextPractice ?? null,
+
             reviewed_at: reviewedAt,
             status: 'corrigido',
           })
