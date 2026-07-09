@@ -8,6 +8,7 @@ import FilterView from './components/FilterView';
 import DayView from './components/DayView';
 import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
+import MemoryView from './components/MemoryView';
 import BottomNav from './components/BottomNav';
 
 export default function App() {
@@ -85,6 +86,9 @@ export default function App() {
         )}
         {view === 'evolution' && (
           <EvolutionView onNavigate={setView} />
+        )}
+        {view === 'memory' && (
+          <MemoryView onNavigate={setView} />
         )}
       </main>
       <BottomNav current={view} onChange={setView} />

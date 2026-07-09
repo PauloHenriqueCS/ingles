@@ -1,6 +1,6 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution';
+export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory';
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
 export interface MainMistake {
@@ -113,6 +113,35 @@ export interface EnglishDailyTheme {
   successCriteria: string[];
   difficulty: 'easy' | 'medium' | 'hard';
   category: string;
+}
+
+export interface RecurringMistake {
+  original: string;
+  correct: string;
+  explanation: string;
+  count: number;
+}
+
+export interface EnglishLearningMemory {
+  id: string;
+  userId: string | null;
+  currentLevel: string;
+  averageScore: number;
+  weakestSkill: string | null;
+  strongestSkill: string | null;
+  recurringMistakes: RecurringMistake[];
+  grammarFocus: string[];
+  vocabularyLearned: VocabularyItem[];
+  vocabularyToReview: VocabularyItem[];
+  recommendedNextFocus: string | null;
+  recommendedNextTheme: string | null;
+  teacherSummary: string | null;
+  totalReviews: number;
+  practicedDays: number;
+  currentStreak: number;
+  lastReviewAt: string | null;
+  updatedAt: string;
+  createdAt: string;
 }
 
 export interface DashboardStats {

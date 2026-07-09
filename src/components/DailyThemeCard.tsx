@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { EnglishDailyTheme } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
+import { fetchLearningMemory } from '../lib/learningMemory';
 
 type GenState = 'idle' | 'loading' | 'error';
 
@@ -20,8 +21,26 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
     setGenState('loading');
     setErrorMsg(null);
     try {
-      const reviews = await fetchEnglishReviews(10);
-      const context = buildLearningContextForTheme(reviews);
+      // Prefer consolidated memory; fall back to reviews-based context
+      const memory = await fetchLearningMemory();
+      let context;
+      if (memory) {
+        context = {
+          currentLevel: memory.currentLevel,
+          averageScore: memory.averageScore,
+          weakestSkill: memory.weakestSkill,
+          grammarFocus: memory.grammarFocus,
+          recentMistakes: memory.recurringMistakes
+            .slice(0, 5)
+            .map((m) => m.explanation || `${m.original} → ${m.correct}`),
+          recentVocabulary: memory.vocabularyToReview.slice(0, 8).map((v) => v.word),
+          lastObjectives: memory.recommendedNextFocus ? [memory.recommendedNextFocus] : [],
+          lastNextPractices: memory.recommendedNextTheme ? [memory.recommendedNextTheme] : [],
+        };
+      } else {
+        const reviews = await fetchEnglishReviews(10);
+        context = buildLearningContextForTheme(reviews);
+      }
       const res = await fetch('/api/generate-theme', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

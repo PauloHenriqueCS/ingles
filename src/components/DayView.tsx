@@ -3,6 +3,7 @@ import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, 
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
+import { updateLearningMemory } from '../lib/learningMemory';
 import DailyThemeCard from './DailyThemeCard';
 
 interface Props {
@@ -122,6 +123,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       }).then(() => {
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
+        updateLearningMemory().catch((err) => console.error('Memory update failed:', err));
       }).catch((err) => {
         console.error('Erro ao salvar revisão no histórico:', err);
         setHistoryState('failed');

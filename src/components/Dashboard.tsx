@@ -1,6 +1,8 @@
-import { EntriesStore } from '../types';
+import { useState, useEffect } from 'react';
+import { EntriesStore, EnglishLearningMemory } from '../types';
 import { computeStats } from '../utils/stats';
 import { MONTH_NAMES_PT } from '../data/calendar2026';
+import { fetchLearningMemory } from '../lib/learningMemory';
 
 interface Props {
   entries: EntriesStore;
@@ -10,6 +12,11 @@ interface Props {
 
 export default function Dashboard({ entries, today, onOpenDay }: Props) {
   const stats = computeStats(entries);
+  const [memory, setMemory] = useState<EnglishLearningMemory | null>(null);
+
+  useEffect(() => {
+    fetchLearningMemory().then(setMemory).catch(() => {});
+  }, []);
 
   const recentWritten = Object.values(entries)
     .filter((e) => e.originalText.trim().length > 0)
@@ -106,6 +113,20 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
                   ))}
               </div>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Recommended focus from learning memory */}
+      {memory?.recommendedNextFocus && (
+        <div className="bg-amber-900/20 border border-amber-800/30 rounded-lg p-4 mb-6">
+          <div className="flex items-center gap-2 mb-2">
+            <span>🎯</span>
+            <h2 className="text-sm font-medium text-amber-400">Foco recomendado</h2>
+          </div>
+          <p className="text-slate-200 text-sm leading-relaxed">{memory.recommendedNextFocus}</p>
+          {memory.recommendedNextTheme && (
+            <p className="text-xs text-slate-500 mt-2 italic">{memory.recommendedNextTheme}</p>
           )}
         </div>
       )}

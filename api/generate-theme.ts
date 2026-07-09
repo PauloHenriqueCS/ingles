@@ -98,6 +98,11 @@ function buildUserMessage(ctx: Record<string, unknown>): string {
   lines.push(`Média de nota: ${ctx.averageScore ?? 0}/100`);
   lines.push(`Habilidade mais fraca: ${ctx.weakestSkill || 'desconhecida'}`);
 
+  const grammarFocus = Array.isArray(ctx.grammarFocus) ? (ctx.grammarFocus as string[]) : [];
+  if (grammarFocus.length > 0) {
+    lines.push(`Tópicos de gramática para reforçar: ${grammarFocus.join(', ')}`);
+  }
+
   const mistakes = Array.isArray(ctx.recentMistakes) ? (ctx.recentMistakes as string[]) : [];
   if (mistakes.length > 0) {
     lines.push('Erros recentes:');
