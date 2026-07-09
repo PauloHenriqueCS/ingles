@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
 
 // Keep in sync with src/config/ai.ts
-const AI_MODEL = 'gpt-5-mini';
+const AI_MODEL = 'gpt-4o-mini';
 
 const SYSTEM_PROMPT = `Você é um professor particular de inglês para um brasileiro chamado Paulo.
 
