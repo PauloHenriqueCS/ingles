@@ -11,6 +11,7 @@ const tabs: { view: View; label: string; icon: string }[] = [
   { view: 'year', label: 'Anual', icon: '📈' },
   { view: 'filters', label: 'Filtros', icon: '🔍' },
   { view: 'history', label: 'Histórico', icon: '📋' },
+  { view: 'evolution', label: 'Evolução', icon: '🚀' },
 ];
 
 export default function BottomNav({ current, onChange }: Props) {
