@@ -10,6 +10,7 @@ const tabs: { view: View; label: string; icon: string }[] = [
   { view: 'month', label: 'Calendário', icon: '📅' },
   { view: 'year', label: 'Anual', icon: '📈' },
   { view: 'filters', label: 'Filtros', icon: '🔍' },
+  { view: 'history', label: 'Histórico', icon: '📋' },
 ];
 
 export default function BottomNav({ current, onChange }: Props) {

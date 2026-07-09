@@ -1,6 +1,6 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day';
+export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history';
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
 export interface MainMistake {
@@ -28,6 +28,27 @@ export interface AIFeedback {
   newVocabulary: VocabularyItem[];
   objectiveFeedback: string;
   nextPractice: string;
+}
+
+export interface EnglishReviewSaved {
+  id: string;
+  originalText: string;
+  correctedText: string | null;
+  score: number;
+  level: CefrLevel;
+  grammar: number;
+  vocabulary: number;
+  naturalness: number;
+  fluency: number;
+  summary: string | null;
+  mainMistakes: MainMistake[];
+  newVocabulary: VocabularyItem[];
+  objectiveFeedback: string | null;
+  nextPractice: string | null;
+  category: string | null;
+  difficulty: string | null;
+  objective: string | null;
+  createdAt: string;
 }
 
 export interface DaySchedule {

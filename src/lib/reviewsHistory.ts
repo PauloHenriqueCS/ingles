@@ -1,0 +1,49 @@
+import { supabase } from './supabase';
+import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem } from '../types';
+
+function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
+  const rawMistakes = Array.isArray(row.main_mistakes) ? row.main_mistakes as Record<string, unknown>[] : [];
+  const mainMistakes: MainMistake[] = rawMistakes.map((m) => ({
+    original: String(m.original ?? ''),
+    correct: String(m.correct ?? ''),
+    explanation: String(m.explanation ?? ''),
+  }));
+
+  const rawVocab = Array.isArray(row.new_vocabulary) ? row.new_vocabulary as Record<string, unknown>[] : [];
+  const newVocabulary: VocabularyItem[] = rawVocab.map((v) => ({
+    word: String(v.word ?? ''),
+    meaningPtBr: String(v.meaningPtBr ?? v.meaningPt ?? ''),
+    example: String(v.example ?? ''),
+  }));
+
+  return {
+    id: String(row.id ?? ''),
+    originalText: String(row.original_text ?? ''),
+    correctedText: row.corrected_text != null ? String(row.corrected_text) : null,
+    score: Number(row.score ?? 0),
+    level: (String(row.level ?? 'A1')) as CefrLevel,
+    grammar: Number(row.grammar ?? 0),
+    vocabulary: Number(row.vocabulary ?? 0),
+    naturalness: Number(row.naturalness ?? 0),
+    fluency: Number(row.fluency ?? 0),
+    summary: row.summary != null ? String(row.summary) : null,
+    mainMistakes,
+    newVocabulary,
+    objectiveFeedback: row.objective_feedback != null ? String(row.objective_feedback) : null,
+    nextPractice: row.next_practice != null ? String(row.next_practice) : null,
+    category: row.category != null ? String(row.category) : null,
+    difficulty: row.difficulty != null ? String(row.difficulty) : null,
+    objective: row.objective != null ? String(row.objective) : null,
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+export async function fetchEnglishReviews(): Promise<EnglishReviewSaved[]> {
+  const { data, error } = await supabase
+    .from('english_reviews')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(error.message);
+  return (data ?? []).map((row) => rowToReview(row as Record<string, unknown>));
+}
