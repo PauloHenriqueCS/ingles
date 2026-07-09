@@ -32,6 +32,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [aiReview, setAiReview] = useState<AIFeedback | null>(entry?.aiReview ?? null);
   const [reviewedAt, setReviewedAt] = useState<string | null>(entry?.reviewedAt ?? null);
   const [reviewState, setReviewState] = useState<ReviewState>(entry?.aiReview ? 'done' : 'idle');
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
@@ -42,6 +43,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setAiReview(entry?.aiReview ?? null);
     setReviewedAt(entry?.reviewedAt ?? null);
     setReviewState(entry?.aiReview ? 'done' : 'idle');
+    setReviewError(null);
     setSaveState('idle');
   }, [date, entry]);
 
@@ -69,6 +71,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   async function handleReview() {
     if (!originalText.trim()) return;
     setReviewState('loading');
+    setReviewError(null);
     try {
       const res = await fetch('/api/ai/review-text', {
         method: 'POST',
@@ -81,9 +84,17 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           mainTense: schedule?.verbTense ?? '',
         }),
       });
-      if (!res.ok) throw new Error('Review failed');
-      const { feedback, reviewedAt: rat } = await res.json() as { feedback: AIFeedback; reviewedAt: string };
-      const ts = rat ?? new Date().toISOString();
+      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string };
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`Servidor retornou status ${res.status}`);
+      }
+      if (!res.ok) {
+        throw new Error(data.error ?? `Erro ${res.status}`);
+      }
+      const feedback = data.feedback!;
+      const ts = data.reviewedAt ?? new Date().toISOString();
       setAiReview(feedback);
       setReviewedAt(ts);
       setReviewState('done');
@@ -95,9 +106,11 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         difficulty, status: 'corrigido', aiReview: feedback, reviewedAt: ts,
       });
       setStatus('corrigido');
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setReviewError(msg);
       setReviewState('error');
-      setTimeout(() => setReviewState('idle'), 4000);
+      setTimeout(() => { setReviewState('idle'); setReviewError(null); }, 8000);
     }
   }
 
@@ -223,8 +236,11 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         )}
 
         {reviewState === 'error' && (
-          <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center">
-            <p className="text-red-300 text-sm">Erro ao revisar. Verifique sua conexão e tente novamente.</p>
+          <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-1">
+            <p className="text-red-300 text-sm font-medium">Erro ao revisar</p>
+            {reviewError && (
+              <p className="text-red-400 text-xs break-all">{reviewError}</p>
+            )}
           </div>
         )}
 

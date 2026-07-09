@@ -88,29 +88,47 @@ ${opts.originalText.trim()}
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'OPENAI_API_KEY não configurada. Adicione a variável de ambiente no Vercel.' });
+  }
+
   const { entryId, originalText, theme, grammarGoal, mainTense } = req.body ?? {};
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
-    return res.status(400).json({ error: 'originalText is required' });
+    return res.status(400).json({ error: 'originalText é obrigatório' });
   }
 
   try {
-    const openai = createOpenAIClient(process.env.OPENAI_API_KEY ?? '');
+    const openai = createOpenAIClient(apiKey);
 
     const completion = await openai.chat.completions.create({
       model: AI_MODEL,
-      response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: buildUserMessage({ originalText, theme, grammarGoal, mainTense }) },
       ],
     });
 
-    const rawContent = completion.choices[0]?.message?.content ?? '{}';
-    const feedback = JSON.parse(rawContent);
+    const rawContent = completion.choices[0]?.message?.content ?? '';
+
+    // Try direct parse first, then regex extraction
+    let feedback: any;
+    try {
+      feedback = JSON.parse(rawContent);
+    } catch {
+      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return res.status(500).json({
+          error: `Modelo não retornou JSON válido. Resposta: ${rawContent.slice(0, 200)}`,
+        });
+      }
+      feedback = JSON.parse(jsonMatch[0]);
+    }
+
     const reviewedAt = new Date().toISOString();
 
-    // Persist AI results to Supabase (non-blocking on failure)
+    // Persist to Supabase (non-blocking on failure)
     if (entryId) {
       try {
         const supabase = createClient(
@@ -145,7 +163,12 @@ export default async function handler(req: any, res: any) {
 
     return res.json({ feedback, reviewedAt });
   } catch (err: any) {
+    const message = err?.message ?? 'Erro interno';
+    // Surface OpenAI error details (model not found, quota, etc.)
+    const detail = err?.error?.message ?? err?.status ?? '';
     console.error('Review error:', err);
-    return res.status(500).json({ error: err.message ?? 'Internal server error' });
+    return res.status(500).json({
+      error: detail ? `${message} — ${detail}` : message,
+    });
   }
 }
