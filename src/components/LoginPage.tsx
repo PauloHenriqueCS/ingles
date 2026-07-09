@@ -1,52 +1,71 @@
 import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 
-type State = 'idle' | 'loading' | 'sent' | 'error';
+type Mode = 'login' | 'signup';
+type State = 'idle' | 'loading' | 'error' | 'signup_sent';
 
 export default function LoginPage() {
+  const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [state, setState] = useState<State>('idle');
   const [errorMsg, setErrorMsg] = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const trimmed = email.trim();
-    if (!trimmed) return;
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) return;
     setState('loading');
     setErrorMsg('');
 
-    const redirectTo = window.location.hostname === 'localhost'
-      ? `${window.location.origin}/auth/callback`
-      : 'https://ingles-lemon.vercel.app/auth/callback';
-    const { error } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: { emailRedirectTo: redirectTo },
-    });
-
-    if (error) {
-      setErrorMsg(error.message);
-      setState('error');
+    if (mode === 'login') {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: trimmedEmail,
+        password,
+      });
+      if (error) {
+        setErrorMsg(translateError(error.message));
+        setState('error');
+      }
+      // On success, useAuth picks up the session change automatically
     } else {
-      setState('sent');
+      const { data, error } = await supabase.auth.signUp({
+        email: trimmedEmail,
+        password,
+      });
+      if (error) {
+        setErrorMsg(translateError(error.message));
+        setState('error');
+      } else if (data.session) {
+        // Auto-confirmed — useAuth will update and App.tsx will render the main view
+      } else {
+        setState('signup_sent');
+      }
     }
   }
 
-  if (state === 'sent') {
+  function switchMode(next: Mode) {
+    setMode(next);
+    setState('idle');
+    setErrorMsg('');
+  }
+
+  if (state === 'signup_sent') {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
         <div className="max-w-sm w-full text-center space-y-4">
           <div className="text-4xl">📬</div>
-          <h1 className="text-xl font-bold text-slate-100">Verifique seu email</h1>
+          <h1 className="text-xl font-bold text-slate-100">Confirme seu email</h1>
           <p className="text-slate-400 text-sm leading-relaxed">
-            Enviamos um link de acesso para{' '}
+            Enviamos um link de confirmação para{' '}
             <span className="text-slate-200 font-medium">{email.trim()}</span>.
-            Clique no link para entrar no app.
+            Clique no link para ativar sua conta.
           </p>
           <button
-            onClick={() => setState('idle')}
+            onClick={() => switchMode('login')}
             className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
-            Usar outro email
+            Já confirmei → Fazer login
           </button>
         </div>
       </div>
@@ -57,8 +76,11 @@ export default function LoginPage() {
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="max-w-sm w-full space-y-6">
         <div className="text-center space-y-1">
+          <p className="text-3xl mb-2">📝</p>
           <h1 className="text-2xl font-bold text-slate-100">English Writing</h1>
-          <p className="text-slate-400 text-sm">Entre com seu email para acessar</p>
+          <p className="text-slate-400 text-sm">
+            {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}
+          </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -67,7 +89,7 @@ export default function LoginPage() {
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); if (state === 'error') setState('idle'); }}
               placeholder="seu@email.com"
               className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
               autoFocus
@@ -75,10 +97,24 @@ export default function LoginPage() {
             />
           </div>
 
+          <div>
+            <label className="text-xs text-slate-400 block mb-1.5">Senha</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => { setPassword(e.target.value); if (state === 'error') setState('idle'); }}
+              placeholder="••••••••"
+              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
+              required
+              minLength={6}
+            />
+            {mode === 'signup' && (
+              <p className="text-xs text-slate-600 mt-1">Mínimo 6 caracteres</p>
+            )}
+          </div>
+
           {state === 'error' && (
-            <p className="text-xs text-red-400">
-              {errorMsg || 'Erro ao enviar o link. Tente novamente.'}
-            </p>
+            <p className="text-xs text-red-400">{errorMsg || 'Erro ao entrar. Tente novamente.'}</p>
           )}
 
           <button
@@ -86,14 +122,45 @@ export default function LoginPage() {
             disabled={state === 'loading'}
             className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {state === 'loading' ? 'Enviando...' : 'Enviar link de acesso'}
+            {state === 'loading'
+              ? (mode === 'login' ? 'Entrando...' : 'Criando conta...')
+              : (mode === 'login' ? 'Entrar' : 'Criar conta')}
           </button>
         </form>
 
-        <p className="text-center text-xs text-slate-600">
-          Sem senha. Você recebe um link de acesso por email.
-        </p>
+        <div className="text-center">
+          {mode === 'login' ? (
+            <p className="text-xs text-slate-500">
+              Não tem conta?{' '}
+              <button
+                onClick={() => switchMode('signup')}
+                className="text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                Criar conta
+              </button>
+            </p>
+          ) : (
+            <p className="text-xs text-slate-500">
+              Já tem conta?{' '}
+              <button
+                onClick={() => switchMode('login')}
+                className="text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                Fazer login
+              </button>
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
+}
+
+function translateError(msg: string): string {
+  if (/invalid login credentials/i.test(msg)) return 'Email ou senha incorretos.';
+  if (/email not confirmed/i.test(msg)) return 'Confirme seu email antes de entrar.';
+  if (/user already registered/i.test(msg)) return 'Este email já está cadastrado. Faça login.';
+  if (/password should be at least/i.test(msg)) return 'A senha deve ter pelo menos 6 caracteres.';
+  if (/rate limit/i.test(msg)) return 'Muitas tentativas. Aguarde um momento.';
+  return msg;
 }

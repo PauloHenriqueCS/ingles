@@ -13,6 +13,7 @@ import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
 import BottomNav from './components/BottomNav';
 import AuthCallback from './components/AuthCallback';
+import LoginPage from './components/LoginPage';
 
 export default function App() {
   const today = new Date().toISOString().split('T')[0];
@@ -22,7 +23,7 @@ export default function App() {
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries();
-  const { loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
 
   function openDay(date: string) {
     setPrevView(view);
@@ -36,6 +37,10 @@ export default function App() {
 
   if (window.location.pathname === '/auth/callback') {
     return <AuthCallback />;
+  }
+
+  if (!authLoading && !user) {
+    return <LoginPage />;
   }
 
   if (authLoading || loading) {
