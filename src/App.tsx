@@ -15,7 +15,7 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
-  const { entries, getEntry, saveEntry } = useEntries();
+  const { entries, loading, syncError, getEntry, saveEntry } = useEntries();
 
   function openDay(date: string) {
     setPrevView(view);
@@ -25,6 +25,17 @@ export default function App() {
 
   function closeDay() {
     setView(prevView);
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-slate-400 text-sm">Carregando seus textos...</p>
+        </div>
+      </div>
+    );
   }
 
   if (view === 'day') {
@@ -40,6 +51,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
+      {syncError && (
+        <div className="bg-amber-900/60 border-b border-amber-700 px-4 py-2 text-xs text-amber-200 text-center">
+          {syncError}
+        </div>
+      )}
       <main className="flex-1 overflow-auto pb-16">
         {view === 'dashboard' && (
           <Dashboard entries={entries} today={today} onOpenDay={openDay} />

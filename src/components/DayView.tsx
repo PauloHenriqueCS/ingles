@@ -6,7 +6,7 @@ import { countWords } from '../utils/wordCount';
 interface Props {
   date: string;
   entry: DayEntry | null;
-  onSave: (patch: Partial<DayEntry> & { date: string }) => void;
+  onSave: (patch: Partial<DayEntry> & { date: string }) => Promise<void>;
   onBack: () => void;
 }
 
@@ -23,6 +23,8 @@ const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
   { value: 'dificil', label: 'Difícil', cls: 'bg-red-700 text-red-100' },
 ];
 
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 export default function DayView({ date, entry, onSave, onBack }: Props) {
   const schedule = getScheduleForDate(date);
 
@@ -33,7 +35,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [mainErrors, setMainErrors] = useState(entry?.mainErrors ?? '');
   const [difficulty, setDifficulty] = useState<Difficulty>(entry?.difficulty ?? null);
   const [status, setStatus] = useState<Status>(entry?.status ?? 'nao-iniciado');
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
     setTitle(entry?.title ?? '');
@@ -43,16 +45,24 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setMainErrors(entry?.mainErrors ?? '');
     setDifficulty(entry?.difficulty ?? null);
     setStatus(entry?.status ?? 'nao-iniciado');
-    setSaved(false);
+    setSaveState('idle');
   }, [date, entry]);
 
-  function handleSave() {
-    const newStatus: Status =
-      status === 'nao-iniciado' && originalText.trim().length > 0 ? 'escrito' : status;
-    onSave({ date, title, originalText, correctedText, observations, mainErrors, difficulty, status: newStatus });
-    setStatus(newStatus);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  async function handleSave(overrideStatus?: Status) {
+    const finalStatus: Status =
+      overrideStatus ??
+      (status === 'nao-iniciado' && originalText.trim().length > 0 ? 'escrito' : status);
+
+    setSaveState('saving');
+    try {
+      await onSave({ date, title, originalText, correctedText, observations, mainErrors, difficulty, status: finalStatus });
+      setStatus(finalStatus);
+      setSaveState('saved');
+      setTimeout(() => setSaveState('idle'), 2000);
+    } catch {
+      setSaveState('error');
+      setTimeout(() => setSaveState('idle'), 3000);
+    }
   }
 
   const dateObj = new Date(date + 'T12:00:00');
@@ -62,9 +72,20 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
 
   const words = countWords(originalText);
 
+  const saveLabel =
+    saveState === 'saving' ? 'Salvando...' :
+    saveState === 'saved' ? '✓ Salvo!' :
+    saveState === 'error' ? 'Erro ao salvar' :
+    'Salvar';
+
+  const saveCls =
+    saveState === 'saving' ? 'bg-slate-600 text-slate-300' :
+    saveState === 'saved' ? 'bg-green-600 text-white' :
+    saveState === 'error' ? 'bg-red-700 text-white' :
+    'bg-blue-600 hover:bg-blue-500 text-white';
+
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      {/* Header */}
       <div className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10">
         <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
         <div className="flex-1 min-w-0">
@@ -75,7 +96,6 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       </div>
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-5 pb-24">
-        {/* Schedule info */}
         {schedule && !schedule.isWeekend && (
           <div className="bg-slate-800 rounded-lg p-4 space-y-1">
             <InfoRow label="Tema" value={schedule.theme} />
@@ -190,13 +210,13 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         {/* Quick action buttons */}
         <div className="flex gap-2">
           <button
-            onClick={() => { setStatus('corrigido'); }}
+            onClick={() => handleSave('corrigido')}
             className="flex-1 py-2 rounded-lg bg-amber-700/50 text-amber-200 text-sm font-medium hover:bg-amber-700 transition-colors"
           >
             Marcar corrigido
           </button>
           <button
-            onClick={() => { setStatus('revisado'); }}
+            onClick={() => handleSave('revisado')}
             className="flex-1 py-2 rounded-lg bg-green-700/50 text-green-200 text-sm font-medium hover:bg-green-700 transition-colors"
           >
             Marcar revisado
@@ -204,17 +224,13 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         </div>
       </div>
 
-      {/* Save button fixed */}
       <div className="fixed bottom-0 left-0 right-0 p-4 bg-slate-900 border-t border-slate-700">
         <button
-          onClick={handleSave}
-          className={`w-full py-3 rounded-xl font-semibold text-sm transition-all ${
-            saved
-              ? 'bg-green-600 text-white'
-              : 'bg-blue-600 hover:bg-blue-500 text-white'
-          }`}
+          onClick={() => handleSave()}
+          disabled={saveState === 'saving'}
+          className={`w-full py-3 rounded-xl font-semibold text-sm transition-all ${saveCls}`}
         >
-          {saved ? '✓ Salvo!' : 'Salvar'}
+          {saveLabel}
         </button>
       </div>
     </div>
