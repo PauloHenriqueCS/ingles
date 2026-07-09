@@ -1,6 +1,7 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
 export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day';
+export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
 export interface MainMistake {
   original: string;
@@ -16,7 +17,7 @@ export interface VocabularyItem {
 
 export interface AIFeedback {
   score: number;
-  level: string;
+  level: CefrLevel;
   grammar: number;
   vocabulary: number;
   naturalness: number;

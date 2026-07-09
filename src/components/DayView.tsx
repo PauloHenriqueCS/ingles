@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
+import { saveEnglishReview } from '../lib/reviews';
 
 interface Props {
   date: string;
@@ -18,6 +19,7 @@ const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
 
 type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type HistoryState = 'idle' | 'saving' | 'saved' | 'failed';
 
 export default function DayView({ date, entry, onSave, onBack }: Props) {
   const schedule = getScheduleForDate(date);
@@ -31,6 +33,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [reviewState, setReviewState] = useState<ReviewState>(entry?.aiReview ? 'done' : 'idle');
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [historyState, setHistoryState] = useState<HistoryState>('idle');
 
   useEffect(() => {
     setTitle(entry?.title ?? '');
@@ -42,6 +45,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setReviewState(entry?.aiReview ? 'done' : 'idle');
     setReviewError(null);
     setSaveState('idle');
+    setHistoryState('idle');
   }, [date, entry]);
 
   async function handleSaveDraft() {
@@ -103,6 +107,22 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         difficulty, status: 'corrigido', aiReview: feedback, reviewedAt: ts,
       });
       setStatus('corrigido');
+
+      setHistoryState('saving');
+      saveEnglishReview({
+        originalText,
+        feedback,
+        category: schedule?.theme ?? undefined,
+        difficulty: difficulty ?? undefined,
+        objective: schedule?.grammarObjective ?? undefined,
+      }).then(() => {
+        setHistoryState('saved');
+        setTimeout(() => setHistoryState('idle'), 6000);
+      }).catch((err) => {
+        console.error('Erro ao salvar revisão no histórico:', err);
+        setHistoryState('failed');
+        setTimeout(() => setHistoryState('idle'), 8000);
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
       setReviewError(msg);
@@ -254,6 +274,16 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             onReviewAgain={handleReview}
             reviewing={isReviewing}
           />
+        )}
+
+        {historyState === 'saving' && (
+          <p className="text-xs text-slate-500 text-center py-1">Salvando no histórico...</p>
+        )}
+        {historyState === 'saved' && (
+          <p className="text-xs text-green-500 text-center py-1">✓ Revisão salva no histórico.</p>
+        )}
+        {historyState === 'failed' && (
+          <p className="text-xs text-amber-500 text-center py-1">Revisão gerada, mas não foi possível salvar no histórico agora.</p>
         )}
       </div>
     </div>

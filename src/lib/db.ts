@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { DayEntry, EntriesStore, AIFeedback, MainMistake, VocabularyItem } from '../types';
+import { DayEntry, EntriesStore, AIFeedback, CefrLevel, MainMistake, VocabularyItem } from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 
 interface DBRow {
@@ -51,7 +51,7 @@ function rowToEntry(row: DBRow): DayEntry {
 
     aiReview = {
       score: row.ai_score,
-      level: row.cefr_level ?? '',
+      level: (row.cefr_level ?? 'A1') as CefrLevel,
       grammar: row.grammar_score ?? 0,
       vocabulary: row.vocabulary_score ?? 0,
       naturalness: row.naturalness_score ?? 0,
