@@ -12,7 +12,6 @@ import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
 import BottomNav from './components/BottomNav';
-import LoginPage from './components/LoginPage';
 import AuthCallback from './components/AuthCallback';
 
 export default function App() {
@@ -23,7 +22,7 @@ export default function App() {
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries();
-  const { user, loading: authLoading } = useAuth();
+  const { loading: authLoading } = useAuth();
 
   function openDay(date: string) {
     setPrevView(view);
