@@ -37,6 +37,8 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [historyState, setHistoryState] = useState<HistoryState>('idle');
   const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
+  const [ptDraftOpen, setPtDraftOpen] = useState(false);
+  const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -211,6 +213,43 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             placeholder="Ex: My Morning Routine"
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
           />
+        </div>
+
+        {/* Portuguese draft — local only, never sent anywhere */}
+        <div className="border border-slate-700 rounded-xl overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setPtDraftOpen((o) => !o)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left bg-slate-800 hover:bg-slate-750 transition-colors"
+          >
+            <div>
+              <span className="text-sm text-slate-300 font-medium">Ideia em português</span>
+              <span className="text-xs text-slate-500 ml-2">opcional</span>
+            </div>
+            <span className="text-slate-500 text-xs">{ptDraftOpen ? '▲' : '▼'}</span>
+          </button>
+          {ptDraftOpen && (
+            <div className="px-4 pb-4 pt-2 bg-slate-800/60 space-y-2">
+              <p className="text-xs text-slate-500">
+                Esse rascunho é só para você. A IA vai avaliar apenas o texto em inglês.
+              </p>
+              <textarea
+                value={ptDraft}
+                onChange={(e) => setPtDraft(e.target.value)}
+                placeholder="Escreva aqui sua ideia em português. Esse texto não será corrigido nem salvo."
+                className="w-full bg-slate-700 border border-slate-600 rounded-lg p-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-slate-500 min-h-[120px] resize-none"
+              />
+              {ptDraft && (
+                <button
+                  type="button"
+                  onClick={() => setPtDraft('')}
+                  className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  Limpar rascunho
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div>
