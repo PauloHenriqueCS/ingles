@@ -5,6 +5,7 @@ import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
 import { updateLearningMemory } from '../lib/learningMemory';
 import DailyThemeCard from './DailyThemeCard';
+import RewriteSection from './RewriteSection';
 
 interface Props {
   date: string;
@@ -334,12 +335,15 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         )}
 
         {reviewState === 'done' && aiReview && (
-          <TeacherReport
-            review={aiReview}
-            grammarObjective={schedule?.grammarObjective ?? ''}
-            onReviewAgain={handleReview}
-            reviewing={isReviewing}
-          />
+          <>
+            <TeacherReport
+              review={aiReview}
+              grammarObjective={schedule?.grammarObjective ?? ''}
+              onReviewAgain={handleReview}
+              reviewing={isReviewing}
+            />
+            <RewriteSection originalText={originalText} aiReview={aiReview} />
+          </>
         )}
 
       </div>

@@ -115,6 +115,17 @@ export interface EnglishDailyTheme {
   category: string;
 }
 
+export interface RewriteComparisonResult {
+  improvementScore: number;
+  fixedMistakesCount: number;
+  remainingMistakesCount: number;
+  fixedMistakes: { mistake: string; original: string; rewrite: string; feedback: string }[];
+  remainingMistakes: { mistake: string; rewrite: string; correct: string; feedback: string }[];
+  newIssues: { issue: string; rewrite: string; suggestion: string }[];
+  overallFeedback: string;
+  nextAction: string;
+}
+
 export interface RecurringMistake {
   original: string;
   correct: string;
