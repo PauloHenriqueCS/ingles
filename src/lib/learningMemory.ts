@@ -200,13 +200,21 @@ export function buildLearningMemoryFromReviews(
 
 export async function fetchLearningMemory(): Promise<EnglishLearningMemory | null> {
   try {
-    const { data, error } = await supabase
+    const { data: { user } } = await supabase.auth.getUser();
+
+    let query = supabase
       .from('english_learning_memory')
       .select('*')
-      .is('user_id', null)
       .order('updated_at', { ascending: false })
       .limit(1);
 
+    if (user) {
+      query = query.eq('user_id', user.id);
+    } else {
+      query = query.is('user_id', null);
+    }
+
+    const { data, error } = await query;
     if (error || !data || data.length === 0) return null;
     return rowToMemory(data[0] as Record<string, unknown>);
   } catch {
@@ -215,6 +223,7 @@ export async function fetchLearningMemory(): Promise<EnglishLearningMemory | nul
 }
 
 export async function updateLearningMemory(): Promise<EnglishLearningMemory> {
+  const { data: { user } } = await supabase.auth.getUser();
   const reviews = await fetchEnglishReviews(50);
   const memory = buildLearningMemoryFromReviews(reviews);
 
@@ -251,7 +260,7 @@ export async function updateLearningMemory(): Promise<EnglishLearningMemory> {
   } else {
     const { data, error } = await supabase
       .from('english_learning_memory')
-      .insert([{ user_id: null, ...dbPayload }])
+      .insert([{ user_id: user?.id ?? null, ...dbPayload }])
       .select();
 
     if (error) throw new Error(error.message);

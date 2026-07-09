@@ -7,7 +7,6 @@ export interface SaveReviewParams {
   category?: string;
   difficulty?: string;
   objective?: string;
-  userId?: string;
 }
 
 export async function saveEnglishReview(params: SaveReviewParams): Promise<{ id: string }> {
@@ -15,13 +14,15 @@ export async function saveEnglishReview(params: SaveReviewParams): Promise<{ id:
   if (typeof params.feedback.score !== 'number') throw new Error('score inválido');
   if (!params.feedback.level) throw new Error('level inválido');
 
+  const { data: { user } } = await supabase.auth.getUser();
+
   const mainMistakes = Array.isArray(params.feedback.mainMistakes) ? params.feedback.mainMistakes : [];
   const newVocabulary = Array.isArray(params.feedback.newVocabulary) ? params.feedback.newVocabulary : [];
 
   const { data, error } = await supabase
     .from('english_reviews')
     .insert({
-      user_id: params.userId ?? null,
+      user_id: user?.id ?? null,
       original_text: params.originalText.trim(),
       corrected_text: params.feedback.correctedText ?? null,
       score: params.feedback.score,

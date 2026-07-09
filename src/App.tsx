@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { View } from './types';
 import { useEntries } from './hooks/useEntries';
+import { useAuth } from './hooks/useAuth';
+import { supabase } from './lib/supabase';
 import Dashboard from './components/Dashboard';
 import MonthView from './components/MonthView';
 import YearView from './components/YearView';
@@ -10,6 +12,8 @@ import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
 import BottomNav from './components/BottomNav';
+import LoginPage from './components/LoginPage';
+import AuthCallback from './components/AuthCallback';
 
 export default function App() {
   const today = new Date().toISOString().split('T')[0];
@@ -19,6 +23,7 @@ export default function App() {
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries();
+  const { user, loading: authLoading } = useAuth();
 
   function openDay(date: string) {
     setPrevView(view);
@@ -30,15 +35,23 @@ export default function App() {
     setView(prevView);
   }
 
-  if (loading) {
+  if (window.location.pathname === '/auth/callback') {
+    return <AuthCallback />;
+  }
+
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-slate-400 text-sm">Carregando seus textos...</p>
+          <p className="text-slate-400 text-sm">Carregando...</p>
         </div>
       </div>
     );
+  }
+
+  if (!user) {
+    return <LoginPage />;
   }
 
   if (view === 'day') {
@@ -92,6 +105,12 @@ export default function App() {
         )}
       </main>
       <BottomNav current={view} onChange={setView} />
+      <button
+        onClick={() => supabase.auth.signOut()}
+        className="fixed top-3 right-4 text-xs text-slate-600 hover:text-slate-400 transition-colors z-50"
+      >
+        Sair
+      </button>
     </div>
   );
 }
