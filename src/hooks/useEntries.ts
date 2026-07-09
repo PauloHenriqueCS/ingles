@@ -35,6 +35,7 @@ function makeDefault(date: string): DayEntry {
     wordCount: 0,
     updatedAt: new Date().toISOString(),
     aiReview: null,
+    reviewedAt: null,
   };
 }
 

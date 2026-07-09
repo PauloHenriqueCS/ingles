@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, VocabularyItem } from '../types';
+import {
+  DayEntry, Difficulty, Status, AIFeedback,
+  GrammarFeedbackItem, VocabularyItem, NaturalExpression,
+} from '../types';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 
@@ -27,6 +30,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [difficulty, setDifficulty] = useState<Difficulty>(entry?.difficulty ?? null);
   const [status, setStatus] = useState<Status>(entry?.status ?? 'nao-iniciado');
   const [aiReview, setAiReview] = useState<AIFeedback | null>(entry?.aiReview ?? null);
+  const [reviewedAt, setReviewedAt] = useState<string | null>(entry?.reviewedAt ?? null);
   const [reviewState, setReviewState] = useState<ReviewState>(entry?.aiReview ? 'done' : 'idle');
   const [saveState, setSaveState] = useState<SaveState>('idle');
 
@@ -36,6 +40,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setDifficulty(entry?.difficulty ?? null);
     setStatus(entry?.status ?? 'nao-iniciado');
     setAiReview(entry?.aiReview ?? null);
+    setReviewedAt(entry?.reviewedAt ?? null);
     setReviewState(entry?.aiReview ? 'done' : 'idle');
     setSaveState('idle');
   }, [date, entry]);
@@ -50,7 +55,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         correctedText: aiReview?.correctedText ?? entry?.correctedText ?? '',
         observations: entry?.observations ?? '',
         mainErrors: aiReview ? aiReview.mainErrors.join('\n') : (entry?.mainErrors ?? ''),
-        difficulty, status: finalStatus, aiReview,
+        difficulty, status: finalStatus, aiReview, reviewedAt,
       });
       setStatus(finalStatus);
       setSaveState('saved');
@@ -65,27 +70,29 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     if (!originalText.trim()) return;
     setReviewState('loading');
     try {
-      const res = await fetch('/api/review', {
+      const res = await fetch('/api/ai/review-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: originalText,
+          entryId: date,
+          originalText,
           theme: schedule?.theme ?? '',
-          verbTense: schedule?.verbTense ?? '',
-          grammarObjective: schedule?.grammarObjective ?? '',
-          level: schedule?.level ?? 'B1',
+          grammarGoal: schedule?.grammarObjective ?? '',
+          mainTense: schedule?.verbTense ?? '',
         }),
       });
       if (!res.ok) throw new Error('Review failed');
-      const { feedback } = await res.json() as { feedback: AIFeedback };
+      const { feedback, reviewedAt: rat } = await res.json() as { feedback: AIFeedback; reviewedAt: string };
+      const ts = rat ?? new Date().toISOString();
       setAiReview(feedback);
+      setReviewedAt(ts);
       setReviewState('done');
       await onSave({
         date, title, originalText,
         correctedText: feedback.correctedText,
         observations: entry?.observations ?? '',
         mainErrors: feedback.mainErrors.join('\n'),
-        difficulty, status: 'corrigido', aiReview: feedback,
+        difficulty, status: 'corrigido', aiReview: feedback, reviewedAt: ts,
       });
       setStatus('corrigido');
     } catch {
@@ -98,7 +105,6 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('pt-BR', {
     weekday: 'long', day: 'numeric', month: 'long',
   });
-
   const isReviewing = reviewState === 'loading';
 
   const saveBtnCls =
@@ -201,10 +207,10 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           </button>
           <button
             onClick={handleReview}
-            disabled={!originalText.trim() || reviewState === 'loading'}
+            disabled={!originalText.trim() || isReviewing}
             className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {reviewState === 'loading' ? '⏳ Analisando...' : '🤖 Revisar com IA'}
+            {isReviewing ? '⏳ Analisando...' : '🤖 Revisar com IA'}
           </button>
         </div>
 
@@ -225,6 +231,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         {reviewState === 'done' && aiReview && (
           <TeacherReport
             review={aiReview}
+            grammarObjective={schedule?.grammarObjective ?? ''}
             onReviewAgain={handleReview}
             reviewing={isReviewing}
           />
@@ -238,10 +245,12 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
 
 function TeacherReport({
   review,
+  grammarObjective,
   onReviewAgain,
   reviewing,
 }: {
   review: AIFeedback;
+  grammarObjective: string;
   onReviewAgain: () => void;
   reviewing: boolean;
 }) {
@@ -249,19 +258,19 @@ function TeacherReport({
     <div className="space-y-4">
       <div className="flex items-center gap-2 py-2">
         <div className="h-px flex-1 bg-slate-700" />
-        <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">Revisão do Professor</span>
+        <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">Relatório do Professor</span>
         <div className="h-px flex-1 bg-slate-700" />
       </div>
 
-      <OverallScoreCard review={review} />
-      <ScoresCard scores={review.scores} />
+      <ScoresCard review={review} />
+      <GrammarGoalCard achieved={review.grammarGoalAchieved} objective={grammarObjective} />
       <CorrectedTextCard text={review.correctedText} />
-      {review.mainErrors.length > 0 && <ErrorBadgesCard errors={review.mainErrors} />}
-      {review.errorExplanations && <ErrorExplanationsCard text={review.errorExplanations} />}
+      {review.mainErrors.length > 0 && <MainErrorsCard errors={review.mainErrors} />}
+      {review.grammarFeedback.length > 0 && <GrammarExplanationsCard items={review.grammarFeedback} />}
       {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
-      {review.nativeSuggestion && <NativeSuggestionCard text={review.nativeSuggestion} />}
-      {review.teacherSummary && <TeacherSummaryCard text={review.teacherSummary} />}
-      {review.optionalChallenge && <ChallengeCard text={review.optionalChallenge} />}
+      {review.naturalExpressions.length > 0 && <NaturalExpressionsCard items={review.naturalExpressions} />}
+      {review.summary && <SummaryCard text={review.summary} />}
+      {review.rewriteChallenge && <ChallengeCard text={review.rewriteChallenge} />}
 
       <button
         onClick={onReviewAgain}
@@ -274,43 +283,34 @@ function TeacherReport({
   );
 }
 
-function OverallScoreCard({ review }: { review: AIFeedback }) {
-  const color =
-    review.overallScore >= 75 ? 'text-green-400' :
-    review.overallScore >= 50 ? 'text-amber-400' :
-    'text-red-400';
+// ── Score cards ───────────────────────────────────────────────────────────────
+
+function ScoresCard({ review }: { review: AIFeedback }) {
+  const scoreColor =
+    review.score >= 75 ? 'text-green-400' :
+    review.score >= 50 ? 'text-amber-400' : 'text-red-400';
+
   return (
-    <div className="bg-slate-800 rounded-xl p-5">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider mb-4">Nota Geral</p>
+    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
       <div className="flex items-center justify-between">
-        <span className={`text-6xl font-bold tabular-nums ${color}`}>{review.overallScore}</span>
+        <div>
+          <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Nota Geral</p>
+          <span className={`text-6xl font-bold tabular-nums ${scoreColor}`}>{review.score}</span>
+          <span className="text-slate-500 text-lg">/100</span>
+        </div>
         <div className="text-right space-y-2">
-          <span className="block px-3 py-1 rounded-lg bg-blue-900 text-blue-300 text-sm font-bold">
-            {review.estimatedLevel}
-          </span>
-          <span className={`block text-xs font-medium ${review.grammarGoalMet ? 'text-green-400' : 'text-amber-400'}`}>
-            {review.grammarGoalMet ? '✓ Meta gramatical atingida' : '○ Continue praticando a meta'}
+          <p className="text-xs text-slate-400 uppercase tracking-wider">Writing Level</p>
+          <span className="block px-3 py-1.5 rounded-lg bg-blue-900 text-blue-300 text-lg font-bold">
+            {review.cefrLevel}
           </span>
         </div>
       </div>
-    </div>
-  );
-}
 
-function ScoresCard({ scores }: { scores: AIFeedback['scores'] }) {
-  const items = [
-    { label: 'Gramática', value: scores.grammar },
-    { label: 'Vocabulário', value: scores.vocabulary },
-    { label: 'Naturalidade', value: scores.naturalness },
-    { label: 'Fluência', value: scores.fluency },
-  ];
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Detalhamento</p>
-      <div className="space-y-3">
-        {items.map((item) => (
-          <ScoreBar key={item.label} label={item.label} value={item.value} />
-        ))}
+      <div className="space-y-2.5 pt-2 border-t border-slate-700">
+        <ScoreBar label="Gramática" value={review.grammarScore} />
+        <ScoreBar label="Vocabulário" value={review.vocabularyScore} />
+        <ScoreBar label="Naturalidade" value={review.naturalnessScore} />
+        <ScoreBar label="Fluência" value={review.fluencyScore} />
       </div>
     </div>
   );
@@ -319,18 +319,39 @@ function ScoresCard({ scores }: { scores: AIFeedback['scores'] }) {
 function ScoreBar({ label, value }: { label: string; value: number }) {
   const color =
     value >= 75 ? 'bg-green-500' :
-    value >= 50 ? 'bg-amber-500' :
-    'bg-red-500';
+    value >= 50 ? 'bg-amber-500' : 'bg-red-500';
   return (
     <div className="flex items-center gap-3">
       <span className="text-xs text-slate-400 w-24 shrink-0">{label}</span>
       <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${value}%` }} />
+        <div className={`h-full ${color} rounded-full`} style={{ width: `${value}%` }} />
       </div>
       <span className="text-xs text-slate-300 w-7 text-right tabular-nums">{value}</span>
     </div>
   );
 }
+
+// ── Goal card ─────────────────────────────────────────────────────────────────
+
+function GrammarGoalCard({ achieved, objective }: { achieved: boolean; objective: string }) {
+  return (
+    <div className={`rounded-xl p-4 flex items-start gap-3 ${
+      achieved
+        ? 'bg-green-900/20 border border-green-800/30'
+        : 'bg-amber-900/20 border border-amber-800/30'
+    }`}>
+      <span className="text-xl mt-0.5">{achieved ? '✅' : '⚠️'}</span>
+      <div>
+        <p className={`text-sm font-semibold ${achieved ? 'text-green-300' : 'text-amber-300'}`}>
+          {achieved ? 'Objetivo gramatical cumprido' : 'Continue praticando o objetivo'}
+        </p>
+        {objective && <p className="text-xs text-slate-400 mt-0.5">{objective}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Corrected text ─────────────────────────────────────────────────────────────
 
 function CorrectedTextCard({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -353,16 +374,15 @@ function CorrectedTextCard({ text }: { text: string }) {
   );
 }
 
-function ErrorBadgesCard({ errors }: { errors: string[] }) {
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+function MainErrorsCard({ errors }: { errors: string[] }) {
   return (
     <div className="bg-slate-800 rounded-xl p-5 space-y-3">
       <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Principais Erros</p>
       <div className="flex flex-wrap gap-2">
         {errors.map((err, i) => (
-          <span
-            key={i}
-            className="px-2.5 py-1 rounded-lg bg-red-900/40 border border-red-800/50 text-red-300 text-xs"
-          >
+          <span key={i} className="px-2.5 py-1 rounded-lg bg-red-900/40 border border-red-800/50 text-red-300 text-xs">
             {err}
           </span>
         ))}
@@ -371,25 +391,38 @@ function ErrorBadgesCard({ errors }: { errors: string[] }) {
   );
 }
 
-function ErrorExplanationsCard({ text }: { text: string }) {
+function GrammarExplanationsCard({ items }: { items: GrammarFeedbackItem[] }) {
   return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Explicações</p>
-      <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
+    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Explicações Gramaticais</p>
+      {items.map((item, i) => (
+        <div key={i} className="space-y-2 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
+          <p className="text-sm font-semibold text-slate-200">{item.title}</p>
+          <p className="text-xs text-slate-400 leading-relaxed">{item.explanationPt}</p>
+          {item.wrongExample && (
+            <div className="space-y-1">
+              <p className="text-xs text-red-400">✗ {item.wrongExample}</p>
+              <p className="text-xs text-green-400">✓ {item.correctExample}</p>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
 
+// ── Vocabulary ────────────────────────────────────────────────────────────────
+
 function VocabularyCard({ items }: { items: VocabularyItem[] }) {
   return (
     <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Novo Vocabulário</p>
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Vocabulário Novo</p>
       <div className="space-y-3">
         {items.map((item, i) => (
           <div key={i} className="border-b border-slate-700 last:border-0 pb-3 last:pb-0">
             <div className="flex items-baseline gap-2 mb-0.5">
               <span className="text-blue-400 font-semibold text-sm">{item.word}</span>
-              <span className="text-slate-500 text-xs">{item.meaning}</span>
+              <span className="text-slate-500 text-xs">{item.meaningPt}</span>
             </div>
             <p className="text-slate-400 text-xs italic">"{item.example}"</p>
           </div>
@@ -399,16 +432,34 @@ function VocabularyCard({ items }: { items: VocabularyItem[] }) {
   );
 }
 
-function NativeSuggestionCard({ text }: { text: string }) {
+// ── Natural expressions ───────────────────────────────────────────────────────
+
+function NaturalExpressionsCard({ items }: { items: NaturalExpression[] }) {
   return (
-    <div className="bg-emerald-900/20 border border-emerald-800/30 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-emerald-400 font-medium uppercase tracking-wider">Como um nativo diria</p>
-      <p className="text-slate-200 text-sm leading-relaxed italic">"{text}"</p>
+    <div className="bg-emerald-900/20 border border-emerald-800/30 rounded-xl p-5 space-y-4">
+      <p className="text-xs text-emerald-400 font-medium uppercase tracking-wider">Expressões Mais Naturais</p>
+      {items.map((item, i) => (
+        <div key={i} className="space-y-1.5 border-b border-emerald-900/40 last:border-0 pb-3 last:pb-0">
+          <div className="flex gap-2 text-xs">
+            <span className="text-slate-500 shrink-0">Você:</span>
+            <span className="text-slate-400 italic">"{item.original}"</span>
+          </div>
+          <div className="flex gap-2 text-xs">
+            <span className="text-emerald-500 shrink-0">Melhor:</span>
+            <span className="text-emerald-300 italic">"{item.better}"</span>
+          </div>
+          {item.explanationPt && (
+            <p className="text-xs text-slate-500">{item.explanationPt}</p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
 
-function TeacherSummaryCard({ text }: { text: string }) {
+// ── Summary & challenge ───────────────────────────────────────────────────────
+
+function SummaryCard({ text }: { text: string }) {
   return (
     <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-5 space-y-3">
       <p className="text-xs text-blue-400 font-medium uppercase tracking-wider">Resumo do Professor</p>

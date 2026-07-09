@@ -1,9 +1,13 @@
-import { EntriesStore, DashboardStats, MonthStats } from '../types';
+import { EntriesStore, DashboardStats, MonthStats, AIStats } from '../types';
 import { getWeekdaysInMonth } from '../data/calendar2026';
 
 function isWritten(entry: { status: string; originalText: string } | undefined): boolean {
   if (!entry) return false;
   return entry.status !== 'nao-iniciado' && entry.originalText.trim().length > 0;
+}
+
+function avg(nums: number[]): number {
+  return nums.length > 0 ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : 0;
 }
 
 export function computeStats(entries: EntriesStore, today: Date = new Date()): DashboardStats {
@@ -22,7 +26,6 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
     return new Date(e.date + 'T12:00:00').getFullYear() === currentYear;
   }).length;
 
-  // All 2026 weekdays up to today
   const allWeekdays: string[] = [];
   for (let m = 1; m <= 12; m++) {
     allWeekdays.push(...getWeekdaysInMonth(2026, m));
@@ -61,5 +64,36 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
     monthlyStats.push({ month: m, year: 2026, written: writtenDays.length, total: weekdays.length, totalWords: monthWords });
   }
 
-  return { textsThisMonth, textsThisYear, currentStreak, bestStreak, totalWords, avgWords, monthlyStats };
+  // AI stats
+  const reviewedEntries = writtenEntries.filter((e) => e.aiReview != null);
+
+  const monthlyAvgScores = [];
+  for (let m = 1; m <= 12; m++) {
+    const monthReviewed = reviewedEntries.filter((e) => {
+      const d = new Date(e.date + 'T12:00:00');
+      return d.getMonth() + 1 === m && d.getFullYear() === currentYear;
+    });
+    monthlyAvgScores.push({
+      month: m,
+      avgScore: avg(monthReviewed.map((e) => e.aiReview!.score)),
+      count: monthReviewed.length,
+    });
+  }
+
+  const latestReviewed = reviewedEntries
+    .filter((e) => e.reviewedAt)
+    .sort((a, b) => (b.reviewedAt ?? '').localeCompare(a.reviewedAt ?? ''));
+
+  const aiStats: AIStats = {
+    reviewedCount: reviewedEntries.length,
+    avgScore: avg(reviewedEntries.map((e) => e.aiReview!.score)),
+    avgGrammarScore: avg(reviewedEntries.map((e) => e.aiReview!.grammarScore)),
+    avgVocabularyScore: avg(reviewedEntries.map((e) => e.aiReview!.vocabularyScore)),
+    avgNaturalnessScore: avg(reviewedEntries.map((e) => e.aiReview!.naturalnessScore)),
+    avgFluencyScore: avg(reviewedEntries.map((e) => e.aiReview!.fluencyScore)),
+    latestCefrLevel: latestReviewed[0]?.aiReview?.cefrLevel ?? null,
+    monthlyAvgScores,
+  };
+
+  return { textsThisMonth, textsThisYear, currentStreak, bestStreak, totalWords, avgWords, monthlyStats, aiStats };
 }

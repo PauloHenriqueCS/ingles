@@ -18,6 +18,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
 
   const todayEntry = entries[today];
   const todayWritten = todayEntry && todayEntry.originalText.trim().length > 0;
+  const { aiStats } = stats;
 
   return (
     <div className="p-4 max-w-lg mx-auto">
@@ -48,7 +49,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
         )}
       </button>
 
-      {/* Stats grid */}
+      {/* Writing stats */}
       <div className="grid grid-cols-2 gap-3 mb-6">
         <StatCard label="Textos este mês" value={stats.textsThisMonth} />
         <StatCard label="Textos este ano" value={stats.textsThisYear} />
@@ -58,7 +59,58 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
         <StatCard label="Média por texto" value={`${stats.avgWords} pal.`} />
       </div>
 
-      {/* Monthly consistency */}
+      {/* AI stats — shown only when at least one review exists */}
+      {aiStats.reviewedCount > 0 && (
+        <div className="bg-slate-800 rounded-lg p-4 mb-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-slate-300">Avaliação IA</h2>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">{aiStats.reviewedCount} revisões</span>
+              {aiStats.latestCefrLevel && (
+                <span className="px-2 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">
+                  {aiStats.latestCefrLevel}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <MiniScoreCard label="Nota média" value={aiStats.avgScore} />
+            <MiniScoreCard label="Gramática" value={aiStats.avgGrammarScore} />
+            <MiniScoreCard label="Vocabulário" value={aiStats.avgVocabularyScore} />
+            <MiniScoreCard label="Naturalidade" value={aiStats.avgNaturalnessScore} />
+            <MiniScoreCard label="Fluência" value={aiStats.avgFluencyScore} />
+          </div>
+
+          {/* Monthly evolution */}
+          {aiStats.monthlyAvgScores.some((m) => m.count > 0) && (
+            <div>
+              <p className="text-xs text-slate-500 mb-2">Evolução mensal</p>
+              <div className="space-y-1.5">
+                {aiStats.monthlyAvgScores
+                  .filter((m) => m.count > 0)
+                  .map((m) => (
+                    <div key={m.month} className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400 w-8">{MONTH_NAMES_PT[m.month - 1].slice(0, 3)}</span>
+                      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${
+                            m.avgScore >= 75 ? 'bg-green-500' :
+                            m.avgScore >= 50 ? 'bg-amber-500' : 'bg-red-500'
+                          }`}
+                          style={{ width: `${m.avgScore}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-slate-400 w-8 text-right tabular-nums">{m.avgScore}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Monthly writing consistency */}
       <div className="bg-slate-800 rounded-lg p-4 mb-6">
         <h2 className="text-sm font-medium text-slate-300 mb-3">Consistência mensal</h2>
         <div className="space-y-2">
@@ -99,7 +151,15 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
                 <span className="text-sm text-slate-300 truncate flex-1">
                   {e.title ? e.title : e.originalText.slice(0, 60) + '…'}
                 </span>
-                <StatusBadge status={e.status} />
+                <div className="flex items-center gap-2 shrink-0">
+                  {e.aiReview && (
+                    <span className={`text-xs font-bold tabular-nums ${
+                      e.aiReview.score >= 75 ? 'text-green-400' :
+                      e.aiReview.score >= 50 ? 'text-amber-400' : 'text-red-400'
+                    }`}>{e.aiReview.score}</span>
+                  )}
+                  <StatusBadge status={e.status} />
+                </div>
               </button>
             ))}
           </div>
@@ -118,6 +178,18 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+function MiniScoreCard({ label, value }: { label: string; value: number }) {
+  const color =
+    value >= 75 ? 'text-green-400' :
+    value >= 50 ? 'text-amber-400' : 'text-red-400';
+  return (
+    <div className="bg-slate-700/50 rounded-lg p-2.5">
+      <p className="text-xs text-slate-500 mb-0.5">{label}</p>
+      <p className={`text-xl font-bold tabular-nums ${color}`}>{value}</p>
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     'escrito': 'text-blue-400',
@@ -131,5 +203,5 @@ function StatusBadge({ status }: { status: string }) {
     'revisado': 'Revisado',
     'nao-iniciado': '—',
   };
-  return <span className={`text-xs shrink-0 ${map[status] ?? ''}`}>{labels[status] ?? status}</span>;
+  return <span className={`text-xs ${map[status] ?? ''}`}>{labels[status] ?? status}</span>;
 }

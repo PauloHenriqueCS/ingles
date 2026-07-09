@@ -2,29 +2,40 @@ export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
 export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day';
 
+export interface GrammarFeedbackItem {
+  title: string;
+  explanationPt: string;
+  wrongExample: string;
+  correctExample: string;
+}
+
 export interface VocabularyItem {
   word: string;
-  meaning: string;
+  meaningPt: string;
   example: string;
 }
 
+export interface NaturalExpression {
+  original: string;
+  better: string;
+  explanationPt: string;
+}
+
 export interface AIFeedback {
-  overallScore: number;
-  estimatedLevel: string;
-  grammarGoalMet: boolean;
-  scores: {
-    grammar: number;
-    vocabulary: number;
-    naturalness: number;
-    fluency: number;
-  };
+  score: number;
+  cefrLevel: string;
+  grammarScore: number;
+  vocabularyScore: number;
+  naturalnessScore: number;
+  fluencyScore: number;
   correctedText: string;
+  summary: string;
+  grammarFeedback: GrammarFeedbackItem[];
   mainErrors: string[];
-  errorExplanations: string;
   newVocabulary: VocabularyItem[];
-  nativeSuggestion: string;
-  teacherSummary: string;
-  optionalChallenge: string;
+  naturalExpressions: NaturalExpression[];
+  grammarGoalAchieved: boolean;
+  rewriteChallenge: string;
 }
 
 export interface DaySchedule {
@@ -50,6 +61,7 @@ export interface DayEntry {
   wordCount: number;
   updatedAt: string;
   aiReview: AIFeedback | null;
+  reviewedAt: string | null;
 }
 
 export type EntriesStore = Record<string, DayEntry>;
@@ -62,6 +74,17 @@ export interface MonthStats {
   totalWords: number;
 }
 
+export interface AIStats {
+  reviewedCount: number;
+  avgScore: number;
+  avgGrammarScore: number;
+  avgVocabularyScore: number;
+  avgNaturalnessScore: number;
+  avgFluencyScore: number;
+  latestCefrLevel: string | null;
+  monthlyAvgScores: { month: number; avgScore: number; count: number }[];
+}
+
 export interface DashboardStats {
   textsThisMonth: number;
   textsThisYear: number;
@@ -70,4 +93,5 @@ export interface DashboardStats {
   totalWords: number;
   avgWords: number;
   monthlyStats: MonthStats[];
+  aiStats: AIStats;
 }
