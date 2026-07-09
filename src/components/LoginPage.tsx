@@ -15,7 +15,9 @@ export default function LoginPage() {
     setState('loading');
     setErrorMsg('');
 
-    const redirectTo = `${window.location.origin}/auth/callback`;
+    const redirectTo = window.location.hostname === 'localhost'
+      ? `${window.location.origin}/auth/callback`
+      : 'https://ingles-lemon.vercel.app/auth/callback';
     const { error } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: { emailRedirectTo: redirectTo },
