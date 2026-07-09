@@ -73,7 +73,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setReviewState('loading');
     setReviewError(null);
     try {
-      const res = await fetch('/api/ai/review-text', {
+      const res = await fetch('/api/review-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

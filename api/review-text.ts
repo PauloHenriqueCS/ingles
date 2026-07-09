@@ -1,4 +1,4 @@
-import { createOpenAIClient, AI_MODEL } from '../../src/services/openai';
+import { createOpenAIClient, AI_MODEL } from '../src/services/openai';
 import { createClient } from '@supabase/supabase-js';
 
 const SYSTEM_PROMPT = `Você é um professor particular de inglês para um brasileiro chamado Paulo.
@@ -112,7 +112,6 @@ export default async function handler(req: any, res: any) {
 
     const rawContent = completion.choices[0]?.message?.content ?? '';
 
-    // Try direct parse first, then regex extraction
     let feedback: any;
     try {
       feedback = JSON.parse(rawContent);
@@ -128,7 +127,6 @@ export default async function handler(req: any, res: any) {
 
     const reviewedAt = new Date().toISOString();
 
-    // Persist to Supabase (non-blocking on failure)
     if (entryId) {
       try {
         const supabase = createClient(
@@ -164,7 +162,6 @@ export default async function handler(req: any, res: any) {
     return res.json({ feedback, reviewedAt });
   } catch (err: any) {
     const message = err?.message ?? 'Erro interno';
-    // Surface OpenAI error details (model not found, quota, etc.)
     const detail = err?.error?.message ?? err?.status ?? '';
     console.error('Review error:', err);
     return res.status(500).json({
