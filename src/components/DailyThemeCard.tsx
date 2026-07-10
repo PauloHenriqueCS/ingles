@@ -12,16 +12,66 @@ interface Props {
   onStartWriting: () => void;
 }
 
+const ACTIVITY_TYPE_LABELS: Record<string, string> = {
+  narrative: 'Narrativa',
+  story_continuation: 'Continuar história',
+  dialogue: 'Diálogo',
+  debate: 'Debate',
+  opinion_essay: 'Opinião',
+  email_formal: 'E-mail formal',
+  email_informal: 'E-mail informal',
+  whatsapp_chat: 'Chat / WhatsApp',
+  job_interview: 'Entrevista de emprego',
+  meeting_notes: 'Reunião',
+  bug_report: 'Bug report',
+  customer_support: 'Suporte ao cliente',
+  travel_diary: 'Diário de viagem',
+  restaurant_scene: 'Restaurante',
+  hotel_checkin: 'Check-in no hotel',
+  airport_situation: 'Aeroporto',
+  shopping: 'Compras',
+  process_explanation: 'Explicar processo',
+  instructions: 'Instruções',
+  comparison: 'Comparação',
+  image_description: 'Descrever imagem',
+  movie_review: 'Review de filme',
+  book_review: 'Review de livro',
+  product_review: 'Review de produto',
+  recommendation: 'Recomendação',
+  persuasion: 'Persuasão',
+  problem_solving: 'Resolver problema',
+  future_planning: 'Planejar futuro',
+  daily_journal: 'Diário pessoal',
+  creative_writing: 'Escrita criativa',
+  decision_making: 'Tomada de decisão',
+};
+
+function formatActivityType(type: string): string {
+  return ACTIVITY_TYPE_LABELS[type] ?? type.replace(/_/g, ' ');
+}
+
 export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: Props) {
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
   const isLoading = genState === 'loading';
 
   async function generate() {
     setGenState('loading');
     setErrorMsg(null);
+
+    // Capture the currently displayed theme before resetting state,
+    // so we can send it as the excluded theme on "Gerar outro tema".
+    const excludedTheme = theme
+      ? {
+          title: theme.title,
+          activityType: theme.activityType,
+          context: theme.context,
+          semanticSummary: theme.semanticSummary,
+        }
+      : null;
+
     try {
-      // Prefer consolidated memory; fall back to reviews-based context
       const memory = await fetchLearningMemory();
       let context;
       if (memory) {
@@ -41,14 +91,23 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         const reviews = await fetchEnglishReviews(10);
         context = buildLearningContextForTheme(reviews);
       }
+
       const res = await fetch('/api/generate-theme', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ learningContext: context }),
+        body: JSON.stringify({
+          learningContext: context,
+          previousThemeId: currentThemeId,
+          excludedTheme,
+        }),
       });
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar tema');
-      onThemeReady(data.theme as EnglishDailyTheme);
+
+      const newTheme = data.theme as EnglishDailyTheme;
+      onThemeReady(newTheme);
+      setCurrentThemeId(data.themeId ?? null);
       setGenState('idle');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Erro ao gerar tema');
@@ -97,11 +156,22 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
       {/* Theme ready */}
       {theme && !isLoading && (
         <div className="px-4 pb-4 space-y-4">
-          <p className="text-xs text-blue-400 italic">
-            Hoje seu treino foi criado com base no seu histórico recente.
-          </p>
 
-          {/* Title + badges */}
+          {/* Activity type + context tags */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {theme.activityType && (
+              <span className="px-2 py-0.5 rounded bg-indigo-900/50 border border-indigo-700/40 text-indigo-300 text-xs font-medium">
+                {formatActivityType(theme.activityType)}
+              </span>
+            )}
+            {theme.context && (
+              <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-400 text-xs">
+                {theme.context.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+
+          {/* Title + level/diff/time badges */}
           <div className="space-y-1.5">
             <p className="text-base font-bold text-slate-100">{theme.title}</p>
             <div className="flex items-center gap-2 flex-wrap">
@@ -111,16 +181,34 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             </div>
           </div>
 
-          {/* Theme text */}
-          <div className="space-y-2">
-            <p className="text-sm text-slate-200 leading-relaxed">{theme.themePtBr}</p>
+          {/* Mission — the concrete task */}
+          {theme.mission ? (
+            <div className="bg-slate-700/50 rounded-lg p-3 space-y-1">
+              <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">Sua missão</p>
+              <p className="text-sm text-slate-200 leading-relaxed">{theme.mission}</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-sm text-slate-200 leading-relaxed">{theme.themePtBr}</p>
+            </div>
+          )}
+
+          {/* Theme in English */}
+          {theme.themeEn && (
             <p className="text-sm text-blue-300 font-medium italic">{theme.themeEn}</p>
-            {theme.objective && (
+          )}
+
+          {/* Objective */}
+          {theme.objective && (
+            <div className="space-y-0.5">
               <p className="text-xs text-slate-400 leading-relaxed">
                 <span className="text-slate-500">Objetivo: </span>{theme.objective}
               </p>
-            )}
-          </div>
+              {theme.whyThisActivity && (
+                <p className="text-xs text-slate-500 italic leading-relaxed">{theme.whyThisActivity}</p>
+              )}
+            </div>
+          )}
 
           {/* Instructions */}
           {theme.instructions.length > 0 && (
@@ -196,6 +284,13 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
                   </li>
                 ))}
               </ul>
+            </Section>
+          )}
+
+          {/* Extra challenge */}
+          {theme.extraChallenge && (
+            <Section title="Desafio extra">
+              <p className="text-xs text-amber-400 leading-relaxed">{theme.extraChallenge}</p>
             </Section>
           )}
 

@@ -98,7 +98,10 @@ export interface AIStats {
   monthlyAvgScores: { month: number; avgScore: number; count: number }[];
 }
 
+export type ThemeStatus = 'generated' | 'completed' | 'skipped' | 'regenerated';
+
 export interface EnglishDailyTheme {
+  // legacy fields (maintained for backward compat)
   title: string;
   themePtBr: string;
   themeEn: string;
@@ -113,6 +116,29 @@ export interface EnglishDailyTheme {
   successCriteria: string[];
   difficulty: 'easy' | 'medium' | 'hard';
   category: string;
+  // new fields from intelligent generation
+  id?: string;
+  mission?: string;
+  activityType?: string;
+  context?: string;
+  semanticSummary?: string;
+  whyThisActivity?: string;
+  extraChallenge?: string;
+}
+
+export interface GeneratedTheme {
+  id: string;
+  userId: string | null;
+  title: string;
+  description: string | null;
+  grammarFocus: string[];
+  activityType: string | null;
+  context: string | null;
+  semanticSummary: string | null;
+  difficulty: 'easy' | 'medium' | 'hard';
+  vocabulary: string[];
+  createdAt: string;
+  status: ThemeStatus;
 }
 
 export interface RewriteComparisonResult {
