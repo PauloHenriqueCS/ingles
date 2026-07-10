@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { EnglishDailyTheme } from '../types';
+import { EnglishDailyTheme, ResponseExample } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
@@ -258,6 +258,11 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             </Section>
           )}
 
+          {/* Response examples */}
+          {theme.responseExamples && theme.responseExamples.length > 0 && (
+            <ResponseExamplesSection examples={theme.responseExamples} />
+          )}
+
           {/* Success criteria */}
           {theme.successCriteria.length > 0 && (
             <Section title="Missão cumprida quando...">
@@ -356,6 +361,43 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="space-y-1.5">
       <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">{title}</p>
       {children}
+    </div>
+  );
+}
+
+function ResponseExamplesSection({ examples }: { examples: ResponseExample[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="space-y-1.5">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 w-full text-left"
+      >
+        <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">
+          Exemplos de resposta
+        </p>
+        <span className="text-slate-600 text-xs">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="space-y-3">
+          <p className="text-xs text-slate-600 italic">
+            Apenas inspiração — use outro contexto, não copie.
+          </p>
+          {examples.map((ex, i) => (
+            <div key={i} className="rounded-lg bg-slate-700/30 border border-slate-600/30 px-3 py-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-1.5 py-0.5 rounded bg-blue-900/60 text-blue-300 text-xs font-bold">
+                  {ex.level}
+                </span>
+                {ex.note && (
+                  <span className="text-xs text-slate-500 italic">{ex.note}</span>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{ex.text}</p>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

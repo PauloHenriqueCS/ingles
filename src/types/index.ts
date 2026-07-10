@@ -100,6 +100,12 @@ export interface AIStats {
 
 export type ThemeStatus = 'generated' | 'completed' | 'skipped' | 'regenerated';
 
+export interface ResponseExample {
+  level: string;
+  text: string;
+  note?: string;
+}
+
 export interface EnglishDailyTheme {
   // legacy fields (maintained for backward compat)
   title: string;
@@ -129,6 +135,7 @@ export interface EnglishDailyTheme {
   whyThisActivity?: string;
   extraChallenge?: string;
   grammarTips?: Record<string, string>;
+  responseExamples?: ResponseExample[];
 }
 
 export interface GeneratedTheme {

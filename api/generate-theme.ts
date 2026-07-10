@@ -135,7 +135,12 @@ Retorne somente JSON válido. Sem markdown. Sem texto antes ou depois do JSON.
   "successCriteria": string[],
   "extraChallenge": string,
   "category": string,
-  "grammarTips": {"GrammarName": "dica em português relacionada à missão atual"}
+  "grammarTips": {"GrammarName": "dica em português relacionada à missão atual"},
+  "responseExamples": [
+    { "level": "A1", "text": "texto curto em inglês (~3 frases)", "note": "observação curta em português" },
+    { "level": "A2", "text": "texto médio em inglês (~5 frases, mais natural)", "note": "observação curta em português" },
+    { "level": "B1", "text": "texto longo em inglês (7-10 frases, com conectores)", "note": "observação curta em português" }
+  ]
 }
 
 Regras de preenchimento:
@@ -160,7 +165,14 @@ Regras de preenchimento:
 - successCriteria: 3-5 critérios mensuráveis
 - extraChallenge: desafio extra opcional (string vazia se não houver)
 - category: work/travel/entertainment/opinion/personal/technical/social
-- grammarTips: objeto com uma dica por estrutura gramatical em requiredGrammar. Chave = nome exato da gramática. Valor = 1-2 frases em português dizendo como usar aquela estrutura especificamente nesta missão. Exemplo: {"Present Perfect": "Use o Present Perfect para descrever mudanças no seu projeto sem dizer exatamente quando aconteceram."}`;
+- grammarTips: objeto com uma dica por estrutura gramatical em requiredGrammar. Chave = nome exato da gramática. Valor = 1-2 frases em português dizendo como usar aquela estrutura especificamente nesta missão. Exemplo: {"Present Perfect": "Use o Present Perfect para descrever mudanças no seu projeto sem dizer exatamente quando aconteceram."}
+- responseExamples: 2 a 3 exemplos em inglês que INSPIREM o aluno a escrever, mas NÃO sejam a resposta da missão.
+  OBRIGATÓRIO: use personagens diferentes, outra situação, outro contexto — mas o mesmo objetivo, gramática e tipo de vocabulário da missão.
+  level A1: ~3 frases simples e diretas.
+  level A2: ~5 frases, mais natural, com um conector.
+  level B1: 7-10 frases, fluente, com conectores variados (however, although, therefore, in addition).
+  note: observação curta em português sobre o que torna o exemplo bom (ex: "Observe o uso de 'however' para contraste.")
+  Nunca use o mesmo personagem, empresa, situação ou cidade da missão original.`;
 
 // ── Build user message ────────────────────────────────────────────────────────
 
@@ -406,6 +418,7 @@ function normalizeTheme(parsed: any): Record<string, unknown> {
       parsed.grammarTips && typeof parsed.grammarTips === 'object' && !Array.isArray(parsed.grammarTips)
         ? parsed.grammarTips
         : {},
+    responseExamples: Array.isArray(parsed.responseExamples) ? parsed.responseExamples : [],
   };
 }
 

@@ -22,6 +22,9 @@ export interface GrammarContent {
   structure: GrammarStructure;
   examples: GrammarExample[];
   commonMistakes: GrammarMistake[];
+  tips?: string[];
+  traps?: string[];
+  finalSummaryPt?: string;
 }
 
 const DB: Record<string, GrammarContent> = {
