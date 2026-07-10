@@ -203,3 +203,31 @@ export interface DashboardStats {
   monthlyStats: MonthStats[];
   aiStats: AIStats;
 }
+
+export interface ReviewGroupItem {
+  id: string;
+  reviewGroupId: string;
+  originalValue: string;
+  correctedValue: string;
+  explanation: string | null;
+  originalSentence: string | null;
+  createdAt: string;
+}
+
+export interface ReviewGroup {
+  id: string;
+  userId: string;
+  sourceReviewId: string;
+  sourceEntryDate: string | null;
+  originalTheme: string | null;
+  status: 'scheduled' | 'active' | 'mastered';
+  reviewLevel: number;
+  nextReviewAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PendingReviewGroup {
+  group: ReviewGroup;
+  items: ReviewGroupItem[];
+}

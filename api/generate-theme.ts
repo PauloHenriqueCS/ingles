@@ -448,7 +448,7 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
 
-  const { learningContext, previousThemeId, excludedTheme } = req.body ?? {};
+  const { mode: _mode, reviewGroup: _reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
 
   // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {

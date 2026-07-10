@@ -4,6 +4,7 @@ import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
+import { fetchPendingReviewGroup } from '../lib/pendingReview';
 import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
@@ -69,7 +70,14 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
       : null;
 
     try {
-      const memory = await fetchLearningMemory();
+      const [memory, pendingReview] = await Promise.all([
+        fetchLearningMemory(),
+        fetchPendingReviewGroup().catch((err) => {
+          console.error('Failed to fetch pending review group:', err);
+          return null;
+        }),
+      ]);
+
       let context;
       if (memory) {
         context = {
@@ -94,6 +102,8 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
+          mode: pendingReview ? 'review' : 'normal',
+          reviewGroup: pendingReview ?? null,
           learningContext: context,
           previousThemeId: currentThemeId,
           excludedTheme,
