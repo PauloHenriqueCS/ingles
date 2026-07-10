@@ -181,6 +181,18 @@ create policy "elm_delete" on public.english_learning_memory
 -- 5. grammar_explanations -- cache global, so autenticados escrevem
 -- =====================================================================
 
+create table if not exists public.grammar_explanations (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  content    jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists grammar_explanations_name_lower_idx
+  on public.grammar_explanations (lower(name));
+
+alter table public.grammar_explanations enable row level security;
+
 drop policy if exists "anon_all"  on public.grammar_explanations;
 drop policy if exists "ge_select" on public.grammar_explanations;
 drop policy if exists "ge_insert" on public.grammar_explanations;
