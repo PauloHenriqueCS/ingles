@@ -128,6 +128,7 @@ export interface EnglishDailyTheme {
   semanticSummary?: string;
   whyThisActivity?: string;
   extraChallenge?: string;
+  grammarTips?: Record<string, string>;
 }
 
 export interface GeneratedTheme {

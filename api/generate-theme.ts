@@ -134,7 +134,8 @@ Retorne somente JSON válido. Sem markdown. Sem texto antes ou depois do JSON.
   "exampleSentence": string,
   "successCriteria": string[],
   "extraChallenge": string,
-  "category": string
+  "category": string,
+  "grammarTips": {"GrammarName": "dica em português relacionada à missão atual"}
 }
 
 Regras de preenchimento:
@@ -158,7 +159,8 @@ Regras de preenchimento:
 - useTheseWords: 4-8 palavras úteis para a missão
 - successCriteria: 3-5 critérios mensuráveis
 - extraChallenge: desafio extra opcional (string vazia se não houver)
-- category: work/travel/entertainment/opinion/personal/technical/social`;
+- category: work/travel/entertainment/opinion/personal/technical/social
+- grammarTips: objeto com uma dica por estrutura gramatical em requiredGrammar. Chave = nome exato da gramática. Valor = 1-2 frases em português dizendo como usar aquela estrutura especificamente nesta missão. Exemplo: {"Present Perfect": "Use o Present Perfect para descrever mudanças no seu projeto sem dizer exatamente quando aconteceram."}`;
 
 // ── Build user message ────────────────────────────────────────────────────────
 
@@ -400,6 +402,10 @@ function normalizeTheme(parsed: any): Record<string, unknown> {
     successCriteria: Array.isArray(parsed.successCriteria) ? parsed.successCriteria : [],
     extraChallenge: String(parsed.extraChallenge || ''),
     category: String(parsed.category || 'daily-life'),
+    grammarTips:
+      parsed.grammarTips && typeof parsed.grammarTips === 'object' && !Array.isArray(parsed.grammarTips)
+        ? parsed.grammarTips
+        : {},
   };
 }
 

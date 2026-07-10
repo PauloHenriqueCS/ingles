@@ -3,6 +3,7 @@ import { EnglishDailyTheme } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
+import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
 
@@ -48,6 +49,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
+  const [grammarModal, setGrammarModal] = useState<string | null>(null);
   const isLoading = genState === 'loading';
 
   async function generate() {
@@ -199,9 +201,19 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             <Section title="Gramática">
               <div className="flex flex-wrap gap-1.5">
                 {theme.requiredGrammar.map((g, i) => (
-                  <span key={i} className="px-2 py-0.5 bg-purple-900/40 border border-purple-800/40 rounded text-xs text-purple-300">
-                    {g}
-                  </span>
+                  <div key={i} className="flex items-center gap-1">
+                    <span className="px-2 py-0.5 bg-purple-900/40 border border-purple-800/40 rounded text-xs text-purple-300">
+                      {g}
+                    </span>
+                    <button
+                      onClick={() => setGrammarModal(g)}
+                      className="w-5 h-5 flex items-center justify-center rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700 transition-colors text-xs leading-none"
+                      aria-label={`Explicação de ${g}`}
+                      title={`Ver explicação de ${g}`}
+                    >
+                      ⓘ
+                    </button>
+                  </div>
                 ))}
               </div>
             </Section>
@@ -284,6 +296,13 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             </button>
           </div>
         </div>
+      )}
+      {grammarModal && (
+        <GrammarHelpModal
+          grammarName={grammarModal}
+          missionTip={theme?.grammarTips?.[grammarModal]}
+          onClose={() => setGrammarModal(null)}
+        />
       )}
     </div>
   );
