@@ -180,23 +180,6 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           }}
         />
 
-        {schedule && !schedule.isWeekend && (
-          <div className="bg-slate-800 rounded-xl p-4 space-y-2">
-            <div className="flex items-center gap-2 flex-wrap mb-1">
-              {schedule.level && (
-                <span className="px-2 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">
-                  {schedule.level}
-                </span>
-              )}
-              {schedule.estimatedTime && (
-                <span className="text-xs text-slate-500">⏱ {schedule.estimatedTime} min</span>
-              )}
-            </div>
-            <InfoRow label="Tempo verbal" value={schedule.verbTense} />
-            <InfoRow label="Objetivo" value={schedule.grammarObjective} />
-          </div>
-        )}
-
         {schedule?.isWeekend && (
           <div className="bg-slate-800 rounded-xl p-4 text-center text-slate-400">
             <p className="text-2xl mb-2">{schedule.weekendActivity === 'descanso' ? '😴' : '📖'}</p>
@@ -554,17 +537,6 @@ function NextPracticeCard({ text }: { text: string }) {
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
-    </div>
-  );
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex gap-2 text-sm">
-      <span className="text-slate-500 shrink-0 w-24">{label}:</span>
-      <span className="text-slate-200">{value}</span>
     </div>
   );
 }
