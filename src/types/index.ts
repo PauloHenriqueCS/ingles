@@ -123,7 +123,6 @@ export interface EnglishDailyTheme {
   missionTask?: string;
   format?: string;
   conflict?: string;
-  objective?: string;
   activityType?: string;
   context?: string;
   semanticSummary?: string;
