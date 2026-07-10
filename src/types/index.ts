@@ -119,6 +119,11 @@ export interface EnglishDailyTheme {
   // new fields from intelligent generation
   id?: string;
   mission?: string;
+  missionSetup?: string;
+  missionTask?: string;
+  format?: string;
+  conflict?: string;
+  objective?: string;
   activityType?: string;
   context?: string;
   semanticSummary?: string;

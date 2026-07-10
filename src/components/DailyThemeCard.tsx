@@ -12,42 +12,36 @@ interface Props {
   onStartWriting: () => void;
 }
 
-const ACTIVITY_TYPE_LABELS: Record<string, string> = {
-  narrative: 'Narrativa',
-  story_continuation: 'Continuar história',
-  dialogue: 'Diálogo',
-  debate: 'Debate',
-  opinion_essay: 'Opinião',
-  email_formal: 'E-mail formal',
-  email_informal: 'E-mail informal',
-  whatsapp_chat: 'Chat / WhatsApp',
-  job_interview: 'Entrevista de emprego',
-  meeting_notes: 'Reunião',
-  bug_report: 'Bug report',
-  customer_support: 'Suporte ao cliente',
-  travel_diary: 'Diário de viagem',
-  restaurant_scene: 'Restaurante',
-  hotel_checkin: 'Check-in no hotel',
-  airport_situation: 'Aeroporto',
-  shopping: 'Compras',
-  process_explanation: 'Explicar processo',
-  instructions: 'Instruções',
-  comparison: 'Comparação',
-  image_description: 'Descrever imagem',
-  movie_review: 'Review de filme',
-  book_review: 'Review de livro',
-  product_review: 'Review de produto',
-  recommendation: 'Recomendação',
-  persuasion: 'Persuasão',
-  problem_solving: 'Resolver problema',
-  future_planning: 'Planejar futuro',
-  daily_journal: 'Diário pessoal',
-  creative_writing: 'Escrita criativa',
-  decision_making: 'Tomada de decisão',
+const FORMAT_LABELS: Record<string, string> = {
+  'e-mail': 'E-mail',
+  'diário': 'Diário',
+  'mensagem': 'Mensagem',
+  'conversa': 'Conversa',
+  'entrevista': 'Entrevista',
+  'relatório': 'Relatório',
+  'review': 'Review',
+  'história': 'História',
+  'carta': 'Carta',
+  'postagem': 'Postagem',
+  'comentário': 'Comentário',
+  'apresentação': 'Apresentação',
+  'explicação': 'Explicação',
+  'tutorial': 'Tutorial',
+  'debate': 'Debate',
+  'opinião': 'Opinião',
+  // legacy activity_type values
+  'email_formal': 'E-mail formal',
+  'email_informal': 'E-mail informal',
+  'whatsapp_chat': 'Chat / WhatsApp',
+  'job_interview': 'Entrevista',
+  'movie_review': 'Review de filme',
+  'narrative': 'Narrativa',
 };
 
-function formatActivityType(type: string): string {
-  return ACTIVITY_TYPE_LABELS[type] ?? type.replace(/_/g, ' ');
+function formatLabel(format: string | undefined, activityType: string | undefined): string | null {
+  const key = format || activityType;
+  if (!key) return null;
+  return FORMAT_LABELS[key] ?? key.replace(/_/g, ' ');
 }
 
 export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: Props) {
@@ -60,12 +54,12 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
     setGenState('loading');
     setErrorMsg(null);
 
-    // Capture the currently displayed theme before resetting state,
-    // so we can send it as the excluded theme on "Gerar outro tema".
     const excludedTheme = theme
       ? {
           title: theme.title,
+          format: theme.format,
           activityType: theme.activityType,
+          conflict: theme.conflict,
           context: theme.context,
           semanticSummary: theme.semanticSummary,
         }
@@ -103,14 +97,13 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar tema');
+      if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar missão');
 
-      const newTheme = data.theme as EnglishDailyTheme;
-      onThemeReady(newTheme);
+      onThemeReady(data.theme as EnglishDailyTheme);
       setCurrentThemeId(data.themeId ?? null);
       setGenState('idle');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Erro ao gerar tema');
+      setErrorMsg(err instanceof Error ? err.message : 'Erro ao gerar missão');
       setGenState('error');
     }
   }
@@ -119,15 +112,15 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
     <div className="bg-slate-800 rounded-xl overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-2">
-        <span className="text-base">✨</span>
-        <p className="text-sm font-semibold text-slate-100">Tema do dia</p>
+        <span className="text-base">🎯</span>
+        <p className="text-sm font-semibold text-slate-100">Missão do dia</p>
       </div>
 
       {/* Loading */}
       {isLoading && (
         <div className="px-4 pb-6 flex flex-col items-center gap-3 py-4">
           <div className="w-7 h-7 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs text-slate-400">Gerando seu tema personalizado...</p>
+          <p className="text-xs text-slate-400">Criando sua missão...</p>
         </div>
       )}
 
@@ -136,11 +129,11 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         <div className="px-4 pb-4 space-y-3">
           {genState === 'error' ? (
             <p className="text-xs text-red-400">
-              {errorMsg || 'Não foi possível gerar o tema agora. Tente novamente.'}
+              {errorMsg || 'Não foi possível gerar a missão. Tente novamente.'}
             </p>
           ) : (
             <p className="text-xs text-slate-400">
-              Não sabe o que escrever hoje? A IA cria um exercício personalizado baseado no seu histórico.
+              A IA cria uma missão personalizada baseada no seu histórico. Cada missão é uma situação real para resolver.
             </p>
           )}
           <button
@@ -148,20 +141,20 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             disabled={isLoading}
             className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 transition-colors"
           >
-            {genState === 'error' ? 'Tentar novamente' : 'Gerar tema com IA'}
+            {genState === 'error' ? 'Tentar novamente' : 'Receber missão'}
           </button>
         </div>
       )}
 
-      {/* Theme ready */}
+      {/* Mission ready */}
       {theme && !isLoading && (
         <div className="px-4 pb-4 space-y-4">
 
-          {/* Activity type + context tags */}
+          {/* Format + context + level/diff/time badges */}
           <div className="flex items-center gap-2 flex-wrap">
-            {theme.activityType && (
+            {formatLabel(theme.format, theme.activityType) && (
               <span className="px-2 py-0.5 rounded bg-indigo-900/50 border border-indigo-700/40 text-indigo-300 text-xs font-medium">
-                {formatActivityType(theme.activityType)}
+                {formatLabel(theme.format, theme.activityType)}
               </span>
             )}
             {theme.context && (
@@ -169,50 +162,30 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
                 {theme.context.replace(/_/g, ' ')}
               </span>
             )}
+            <LevelBadge level={theme.level} />
+            <DiffBadge difficulty={theme.difficulty} />
+            <span className="text-xs text-slate-500">⏱ {theme.estimatedTimeMinutes} min</span>
           </div>
 
-          {/* Title + level/diff/time badges */}
-          <div className="space-y-1.5">
-            <p className="text-base font-bold text-slate-100">{theme.title}</p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <LevelBadge level={theme.level} />
-              <DiffBadge difficulty={theme.difficulty} />
-              <span className="text-xs text-slate-500">⏱ {theme.estimatedTimeMinutes} min</span>
-            </div>
-          </div>
+          {/* Title */}
+          <p className="text-base font-bold text-slate-100">{theme.title}</p>
 
-          {/* Mission — the concrete task */}
-          {theme.mission ? (
-            <div className="bg-slate-700/50 rounded-lg p-3 space-y-1">
-              <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">Sua missão</p>
-              <p className="text-sm text-slate-200 leading-relaxed">{theme.mission}</p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm text-slate-200 leading-relaxed">{theme.themePtBr}</p>
-            </div>
-          )}
+          {/* Mission card — the centerpiece */}
+          <MissionCard theme={theme} />
 
-          {/* Theme in English */}
+          {/* English command */}
           {theme.themeEn && (
             <p className="text-sm text-blue-300 font-medium italic">{theme.themeEn}</p>
           )}
 
-          {/* Objective */}
-          {theme.objective && (
-            <div className="space-y-0.5">
-              <p className="text-xs text-slate-400 leading-relaxed">
-                <span className="text-slate-500">Objetivo: </span>{theme.objective}
-              </p>
-              {theme.whyThisActivity && (
-                <p className="text-xs text-slate-500 italic leading-relaxed">{theme.whyThisActivity}</p>
-              )}
-            </div>
+          {/* Why this activity */}
+          {theme.whyThisActivity && (
+            <p className="text-xs text-slate-500 italic leading-relaxed">{theme.whyThisActivity}</p>
           )}
 
           {/* Instructions */}
           {theme.instructions.length > 0 && (
-            <Section title="Instruções">
+            <Section title="Como fazer">
               <ol className="space-y-1 list-decimal list-inside">
                 {theme.instructions.map((item, i) => (
                   <li key={i} className="text-xs text-slate-300 leading-relaxed">{item}</li>
@@ -236,7 +209,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
 
           {/* Suggested vocabulary */}
           {theme.suggestedVocabulary.length > 0 && (
-            <Section title="Vocabulário sugerido">
+            <Section title="Vocabulário útil para esta missão">
               <div className="space-y-2">
                 {theme.suggestedVocabulary.map((v, i) => (
                   <div key={i}>
@@ -255,7 +228,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
 
           {/* Use these words */}
           {theme.useTheseWords.length > 0 && (
-            <Section title="Tente usar estas palavras">
+            <Section title="Palavras para usar">
               <div className="flex flex-wrap gap-1.5">
                 {theme.useTheseWords.map((w, i) => (
                   <span key={i} className="px-2 py-0.5 bg-slate-700 rounded text-xs text-slate-300 font-mono">
@@ -275,7 +248,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
 
           {/* Success criteria */}
           {theme.successCriteria.length > 0 && (
-            <Section title="Critérios de sucesso">
+            <Section title="Missão cumprida quando...">
               <ul className="space-y-1">
                 {theme.successCriteria.map((c, i) => (
                   <li key={i} className="flex gap-2 text-xs text-slate-300">
@@ -301,13 +274,13 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
               disabled={isLoading}
               className="flex-1 py-2.5 rounded-xl text-xs font-medium text-slate-400 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 transition-colors"
             >
-              Gerar outro tema
+              Outra missão
             </button>
             <button
               onClick={onStartWriting}
               className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
             >
-              Começar texto
+              Aceitar missão
             </button>
           </div>
         </div>
@@ -315,6 +288,49 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
     </div>
   );
 }
+
+// ── Mission card ──────────────────────────────────────────────────────────────
+
+function MissionCard({ theme }: { theme: EnglishDailyTheme }) {
+  const hasConflict = Boolean(theme.conflict);
+  const hasSplit = Boolean(theme.missionSetup && theme.missionTask);
+
+  return (
+    <div className="rounded-xl overflow-hidden border border-slate-600/50">
+      {/* Conflict badge */}
+      {hasConflict && (
+        <div className="bg-amber-900/30 border-b border-amber-800/30 px-4 py-2 flex items-center gap-2">
+          <span className="text-amber-400 text-xs">⚡</span>
+          <span className="text-xs text-amber-300 font-medium">{theme.conflict}</span>
+        </div>
+      )}
+
+      {/* Mission text */}
+      <div className="bg-slate-700/40 px-4 py-3 space-y-2">
+        {hasSplit ? (
+          <>
+            <p className="text-sm text-slate-100 leading-relaxed font-medium">{theme.missionSetup}</p>
+            <p className="text-sm text-slate-300 leading-relaxed">{theme.missionTask}</p>
+          </>
+        ) : (
+          <p className="text-sm text-slate-200 leading-relaxed">
+            {theme.mission || theme.themePtBr}
+          </p>
+        )}
+
+        {/* Objective tag */}
+        {theme.objective && (
+          <div className="pt-1">
+            <span className="text-xs text-slate-500">Objetivo: </span>
+            <span className="text-xs text-slate-400">{theme.objective}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Shared components ─────────────────────────────────────────────────────────
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
