@@ -3,6 +3,7 @@ import { EnglishDailyTheme, ResponseExample } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
+import { getAuthHeader } from '../lib/apiAuth';
 import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
@@ -88,9 +89,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         context = buildLearningContextForTheme(reviews);
       }
 
+      const authHeader = await getAuthHeader();
       const res = await fetch('/api/generate-theme', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           learningContext: context,
           previousThemeId: currentThemeId,

@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
+import { requireAuth } from './_auth';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -57,6 +58,9 @@ function parseJson(raw: string): any | null {
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
   const { grammarName } = req.body ?? {};
   if (!grammarName || typeof grammarName !== 'string') {
     return res.status(400).json({ error: 'grammarName is required' });
@@ -64,12 +68,14 @@ export default async function handler(req: any, res: any) {
 
   const trimmed = grammarName.trim();
 
+  // Use anon client for grammar_explanations (shared public cache)
   const supabase = createClient(
     process.env.VITE_SUPABASE_URL ?? '',
-    process.env.VITE_SUPABASE_ANON_KEY ?? ''
+    process.env.VITE_SUPABASE_ANON_KEY ?? '',
+    { global: { headers: { Authorization: req.headers['authorization'] ?? '' } } }
   );
 
-  // Check cache — case-insensitive
+  // Check cache
   try {
     const { data: cached } = await supabase
       .from('grammar_explanations')
@@ -84,7 +90,6 @@ export default async function handler(req: any, res: any) {
     console.error('Cache lookup failed:', e);
   }
 
-  // Generate with AI
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
 
@@ -112,7 +117,7 @@ export default async function handler(req: any, res: any) {
     return res.status(500).json({ error: err?.message ?? 'Erro ao gerar explicação.' });
   }
 
-  // Persist to cache
+  // Persist to shared cache
   try {
     await supabase
       .from('grammar_explanations')
@@ -121,7 +126,6 @@ export default async function handler(req: any, res: any) {
       .single();
   } catch (e) {
     console.error('Failed to cache grammar explanation:', e);
-    // Non-fatal — still return to user
   }
 
   return res.json({ content, cached: false });

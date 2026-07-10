@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
+import { getAuthHeader } from '../lib/apiAuth';
 
 type CompareState = 'idle' | 'loading' | 'done' | 'error';
 
@@ -25,9 +26,10 @@ export default function RewriteSection({ originalText, aiReview }: Props) {
     setCompareState('loading');
     setResult(null);
     try {
+      const authHeader = await getAuthHeader();
       const res = await fetch('/api/compare-rewrite', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           originalText,
           correctedText: aiReview.correctedText,

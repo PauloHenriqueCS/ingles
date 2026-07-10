@@ -4,6 +4,7 @@ import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
 import { updateLearningMemory } from '../lib/learningMemory';
+import { getAuthHeader } from '../lib/apiAuth';
 import DailyThemeCard from './DailyThemeCard';
 import RewriteSection from './RewriteSection';
 
@@ -82,9 +83,10 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setReviewState('loading');
     setReviewError(null);
     try {
+      const authHeader = await getAuthHeader();
       const res = await fetch('/api/review-text', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           entryId: date,
           originalText,

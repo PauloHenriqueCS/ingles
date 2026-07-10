@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { createClient } from '@supabase/supabase-js';
+import { requireAuth } from './_auth';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -64,6 +64,10 @@ Regras:
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.status(500).json({
@@ -105,18 +109,12 @@ ${originalText.trim()}
     } catch {
       const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        console.error('Non-JSON response from model:', rawContent.slice(0, 500));
-        return res.status(500).json({
-          error: 'O professor está com dificuldades para responder. Tente novamente em alguns instantes.',
-        });
+        return res.status(500).json({ error: 'O professor está com dificuldades para responder. Tente novamente.' });
       }
       try {
         feedback = JSON.parse(jsonMatch[0]);
       } catch {
-        console.error('Failed to parse extracted JSON:', jsonMatch[0].slice(0, 500));
-        return res.status(500).json({
-          error: 'O professor está com dificuldades para responder. Tente novamente em alguns instantes.',
-        });
+        return res.status(500).json({ error: 'O professor está com dificuldades para responder. Tente novamente.' });
       }
     }
 
@@ -124,10 +122,6 @@ ${originalText.trim()}
 
     if (entryId) {
       try {
-        const supabase = createClient(
-          process.env.VITE_SUPABASE_URL ?? '',
-          process.env.VITE_SUPABASE_ANON_KEY ?? ''
-        );
         await supabase
           .from('writing_entries')
           .update({
@@ -145,11 +139,11 @@ ${originalText.trim()}
             natural_expressions: null,
             grammar_goal_achieved: null,
             rewrite_challenge: feedback.nextPractice ?? null,
-
             reviewed_at: reviewedAt,
             status: 'corrigido',
           })
-          .eq('entry_date', entryId);
+          .eq('entry_date', entryId)
+          .eq('user_id', userId);
       } catch (dbErr) {
         console.error('Supabase update error:', dbErr);
       }

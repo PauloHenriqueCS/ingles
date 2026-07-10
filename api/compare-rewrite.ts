@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { requireAuth } from './_auth';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -101,6 +102,9 @@ function buildUserMessage(
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });

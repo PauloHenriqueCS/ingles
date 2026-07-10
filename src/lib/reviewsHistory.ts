@@ -40,17 +40,13 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
 
 export async function fetchEnglishReviews(limit?: number): Promise<EnglishReviewSaved[]> {
   const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return [];
 
   let query = supabase
     .from('english_reviews')
     .select('*')
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false });
-
-  if (user) {
-    query = query.eq('user_id', user.id);
-  } else {
-    query = query.is('user_id', null);
-  }
 
   if (limit) query = query.limit(limit);
 

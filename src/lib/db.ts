@@ -4,6 +4,7 @@ import { getScheduleForDate } from '../data/calendar2026';
 
 interface DBRow {
   entry_date: string;
+  user_id: string | null;
   month: number;
   year: number;
   theme: string;
@@ -81,12 +82,13 @@ function rowToEntry(row: DBRow): DayEntry {
   };
 }
 
-function entryToRow(entry: DayEntry): Omit<DBRow, 'updated_at'> & { updated_at: string } {
+function entryToRow(entry: DayEntry, userId: string): Omit<DBRow, 'updated_at'> & { updated_at: string } {
   const schedule = getScheduleForDate(entry.date);
   const d = new Date(entry.date + 'T12:00:00');
   const r = entry.aiReview;
   return {
     entry_date: entry.date,
+    user_id: userId,
     month: d.getMonth() + 1,
     year: d.getFullYear(),
     theme: schedule?.theme ?? '',
@@ -119,9 +121,13 @@ function entryToRow(entry: DayEntry): Omit<DBRow, 'updated_at'> & { updated_at: 
 }
 
 export async function fetchAllEntries(): Promise<EntriesStore> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return {};
+
   const { data, error } = await supabase
     .from('writing_entries')
-    .select('*');
+    .select('*')
+    .eq('user_id', user.id);
 
   if (error) throw new Error(error.message);
 
@@ -134,10 +140,13 @@ export async function fetchAllEntries(): Promise<EntriesStore> {
 }
 
 export async function upsertEntry(entry: DayEntry): Promise<void> {
-  const row = entryToRow(entry);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Não autenticado');
+
+  const row = entryToRow(entry, user.id);
   const { error } = await supabase
     .from('writing_entries')
-    .upsert(row, { onConflict: 'entry_date' });
+    .upsert(row, { onConflict: 'user_id,entry_date' });
 
   if (error) throw new Error(error.message);
 }

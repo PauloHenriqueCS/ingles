@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { createClient } from '@supabase/supabase-js';
+import { requireAuth } from './_auth';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -441,35 +441,35 @@ function parseRawContent(raw: string): any | null {
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
 
   const { learningContext, previousThemeId, excludedTheme } = req.body ?? {};
 
-  const supabase = createClient(
-    process.env.VITE_SUPABASE_URL ?? '',
-    process.env.VITE_SUPABASE_ANON_KEY ?? ''
-  );
-
-  // Mark previous theme as regenerated
+  // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {
     try {
       await supabase
         .from('generated_themes')
         .update({ status: 'regenerated' })
-        .eq('id', previousThemeId);
+        .eq('id', previousThemeId)
+        .eq('user_id', userId);
     } catch (e) {
       console.error('Failed to update previous theme status:', e);
     }
   }
 
-  // Fetch recent theme history
+  // Fetch recent theme history for THIS user only
   let recentThemes: RecentThemeRow[] = [];
   try {
     const { data } = await supabase
       .from('generated_themes')
       .select('title, activity_type, context, semantic_summary')
-      .is('user_id', null)
+      .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(30);
     recentThemes = (data ?? []) as RecentThemeRow[];
@@ -550,7 +550,7 @@ export default async function handler(req: any, res: any) {
     const { data, error } = await supabase
       .from('generated_themes')
       .insert({
-        user_id: null,
+        user_id: userId,
         title: theme.title,
         description: theme.mission,
         grammar_focus: theme.requiredGrammar,

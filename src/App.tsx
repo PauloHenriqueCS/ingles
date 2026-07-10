@@ -22,8 +22,8 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
-  const { entries, loading, syncError, getEntry, saveEntry } = useEntries();
   const { user, loading: authLoading } = useAuth();
+  const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
   function openDay(date: string) {
     setPrevView(view);
@@ -106,7 +106,12 @@ export default function App() {
       </main>
       <BottomNav current={view} onChange={setView} />
       <button
-        onClick={() => supabase.auth.signOut()}
+        onClick={() => {
+          if (user?.id) {
+            localStorage.removeItem(`english-calendar-entries-v2-${user.id}`);
+          }
+          supabase.auth.signOut();
+        }}
         className="fixed top-3 right-4 text-xs text-slate-600 hover:text-slate-400 transition-colors z-50"
       >
         Sair
