@@ -4,6 +4,7 @@ import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
 import { updateLearningMemory } from '../lib/learningMemory';
+import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
 import DailyThemeCard from './DailyThemeCard';
 import RewriteSection from './RewriteSection';
@@ -125,10 +126,18 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
         category: dailyTheme?.category || schedule?.theme || undefined,
         difficulty: difficulty ?? dailyTheme?.difficulty ?? undefined,
         objective: dailyTheme?.objective || schedule?.grammarObjective || undefined,
-      }).then(() => {
+      }).then(({ id: reviewId }) => {
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
         updateLearningMemory().catch((err) => console.error('Memory update failed:', err));
+        if (feedback.mainMistakes.length > 0) {
+          createReviewGroupFromReview({
+            reviewId,
+            mistakes: feedback.mainMistakes,
+            entryDate: date,
+            theme: dailyTheme?.themeEn || schedule?.theme || undefined,
+          }).catch((err) => console.error('Review group creation failed:', err));
+        }
       }).catch((err) => {
         console.error('Erro ao salvar revisão no histórico:', err);
         setHistoryState('failed');
