@@ -1,50 +1,45 @@
--- ═══════════════════════════════════════════════════════════════════════
--- MIGRAÇÃO MULTIUSUÁRIO — Execute no Supabase SQL Editor
--- ═══════════════════════════════════════════════════════════════════════
+-- MIGRACAO MULTIUSUARIO
+-- Execute no Supabase SQL Editor
 
--- ─────────────────────────────────────────────────────────────────────
--- 1. writing_entries — adicionar user_id e corrigir RLS
--- ─────────────────────────────────────────────────────────────────────
+-- =====================================================================
+-- PASSO 0: Descubra seu user_id antes de continuar
+--   SELECT id FROM auth.users;
+-- Guarde o UUID para usar no PASSO 1a abaixo.
+-- =====================================================================
 
--- Adicionar coluna user_id (nullable para não quebrar dados existentes)
+-- =====================================================================
+-- 1. writing_entries -- adicionar user_id e corrigir RLS
+-- =====================================================================
+
 alter table public.writing_entries
   add column if not exists user_id uuid references auth.users(id) on delete cascade;
 
--- Índice para consultas por usuário
 create index if not exists writing_entries_user_id_idx
   on public.writing_entries(user_id);
 
--- Índice composto: busca por usuário + data (padrão mais comum)
 create index if not exists writing_entries_user_date_idx
   on public.writing_entries(user_id, entry_date desc);
 
--- ⚠ ASSOCIAR DADOS EXISTENTES AO USUÁRIO CORRETO
--- Antes de ativar as políticas, execute:
---   SELECT id FROM auth.users;
--- Copie o UUID do seu usuário e execute:
---   UPDATE public.writing_entries SET user_id = '<cole-seu-uuid-aqui>' WHERE user_id IS NULL;
+-- PASSO 1a: Associe os dados existentes ao seu usuario.
+-- Substitua pelo UUID obtido no PASSO 0 e execute esta linha separadamente:
+-- UPDATE public.writing_entries SET user_id = 'cole-seu-uuid-aqui' WHERE user_id IS NULL;
 
--- Trocar a restrição de unicidade: de (entry_date) para (user_id, entry_date)
--- Isso permite que dois usuários tenham entrada no mesmo dia
-do $$ begin
-  if exists (
-    select 1 from pg_constraint
-    where conrelid = 'public.writing_entries'::regclass
-      and conname = 'writing_entries_entry_date_key'
-      and contype = 'u'
-  ) then
-    alter table public.writing_entries drop constraint writing_entries_entry_date_key;
-  end if;
-end $$;
+-- Trocar unicidade de (entry_date) para (user_id, entry_date)
+alter table public.writing_entries
+  drop constraint if exists writing_entries_entry_date_key;
 
 create unique index if not exists writing_entries_user_entry_date_unique
   on public.writing_entries(user_id, entry_date);
 
--- Remover políticas antigas (abertas)
-drop policy if exists "anon_all"           on public.writing_entries;
-drop policy if exists "authenticated_all"  on public.writing_entries;
+-- Remover politicas antigas abertas
+drop policy if exists "anon_all"          on public.writing_entries;
+drop policy if exists "authenticated_all" on public.writing_entries;
+drop policy if exists "we_select"         on public.writing_entries;
+drop policy if exists "we_insert"         on public.writing_entries;
+drop policy if exists "we_update"         on public.writing_entries;
+drop policy if exists "we_delete"         on public.writing_entries;
 
--- Políticas por usuário
+-- Politicas por usuario
 create policy "we_select" on public.writing_entries
   for select to authenticated using (auth.uid() = user_id);
 
@@ -58,17 +53,16 @@ create policy "we_update" on public.writing_entries
 create policy "we_delete" on public.writing_entries
   for delete to authenticated using (auth.uid() = user_id);
 
--- ─────────────────────────────────────────────────────────────────────
--- 2. generated_themes — corrigir políticas (user_id já existe na tabela)
--- ─────────────────────────────────────────────────────────────────────
+-- =====================================================================
+-- 2. generated_themes -- corrigir RLS (user_id ja existe na tabela)
+-- =====================================================================
 
--- Tornar user_id não-nulo após associar dados existentes
--- (Se houver linhas com user_id null, elas precisam ser associadas primeiro)
+drop policy if exists "anon_all"   on public.generated_themes;
+drop policy if exists "gt_select"  on public.generated_themes;
+drop policy if exists "gt_insert"  on public.generated_themes;
+drop policy if exists "gt_update"  on public.generated_themes;
+drop policy if exists "gt_delete"  on public.generated_themes;
 
--- Remover políticas antigas
-drop policy if exists "anon_all" on public.generated_themes;
-
--- Políticas por usuário
 create policy "gt_select" on public.generated_themes
   for select to authenticated using (auth.uid() = user_id);
 
@@ -82,9 +76,9 @@ create policy "gt_update" on public.generated_themes
 create policy "gt_delete" on public.generated_themes
   for delete to authenticated using (auth.uid() = user_id);
 
--- ─────────────────────────────────────────────────────────────────────
--- 3. english_reviews — criar com RLS completo
--- ─────────────────────────────────────────────────────────────────────
+-- =====================================================================
+-- 3. english_reviews -- criar tabela com RLS completo
+-- =====================================================================
 
 create table if not exists public.english_reviews (
   id                uuid primary key default gen_random_uuid(),
@@ -98,8 +92,8 @@ create table if not exists public.english_reviews (
   naturalness       integer not null default 0,
   fluency           integer not null default 0,
   summary           text,
-  main_mistakes     jsonb not null default '[]'::jsonb,
-  new_vocabulary    jsonb not null default '[]'::jsonb,
+  main_mistakes     jsonb not null default '[]',
+  new_vocabulary    jsonb not null default '[]',
   objective_feedback text,
   next_practice     text,
   category          text,
@@ -134,9 +128,9 @@ create policy "er_update" on public.english_reviews
 create policy "er_delete" on public.english_reviews
   for delete to authenticated using (auth.uid() = user_id);
 
--- ─────────────────────────────────────────────────────────────────────
--- 4. english_learning_memory — criar com RLS completo
--- ─────────────────────────────────────────────────────────────────────
+-- =====================================================================
+-- 4. english_learning_memory -- criar tabela com RLS completo
+-- =====================================================================
 
 create table if not exists public.english_learning_memory (
   id                      uuid primary key default gen_random_uuid(),
@@ -145,10 +139,10 @@ create table if not exists public.english_learning_memory (
   average_score           integer not null default 0,
   weakest_skill           text,
   strongest_skill         text,
-  recurring_mistakes      jsonb not null default '[]'::jsonb,
-  grammar_focus           jsonb not null default '[]'::jsonb,
-  vocabulary_learned      jsonb not null default '[]'::jsonb,
-  vocabulary_to_review    jsonb not null default '[]'::jsonb,
+  recurring_mistakes      jsonb not null default '[]',
+  grammar_focus           jsonb not null default '[]',
+  vocabulary_learned      jsonb not null default '[]',
+  vocabulary_to_review    jsonb not null default '[]',
   recommended_next_focus  text,
   recommended_next_theme  text,
   teacher_summary         text,
@@ -183,11 +177,14 @@ create policy "elm_update" on public.english_learning_memory
 create policy "elm_delete" on public.english_learning_memory
   for delete to authenticated using (auth.uid() = user_id);
 
--- ─────────────────────────────────────────────────────────────────────
--- 5. grammar_explanations — cache global, só autenticados escrevem
--- ─────────────────────────────────────────────────────────────────────
+-- =====================================================================
+-- 5. grammar_explanations -- cache global, so autenticados escrevem
+-- =====================================================================
 
-drop policy if exists "anon_all" on public.grammar_explanations;
+drop policy if exists "anon_all"  on public.grammar_explanations;
+drop policy if exists "ge_select" on public.grammar_explanations;
+drop policy if exists "ge_insert" on public.grammar_explanations;
+drop policy if exists "ge_update" on public.grammar_explanations;
 
 create policy "ge_select" on public.grammar_explanations
   for select to authenticated using (true);
