@@ -1,11 +1,13 @@
 import { supabase } from './supabase';
 import { MainMistake } from '../types';
+import { getNextActivePracticeDate } from './activePracticeDate';
 
 interface CreateGroupParams {
   reviewId: string;
   mistakes: MainMistake[];
   entryDate?: string;
   theme?: string;
+  activeWeekdays?: number[];
 }
 
 export async function createReviewGroupFromReview({
@@ -13,14 +15,16 @@ export async function createReviewGroupFromReview({
   mistakes,
   entryDate,
   theme,
+  activeWeekdays = [1, 2, 3, 4, 5],
 }: CreateGroupParams): Promise<void> {
   if (mistakes.length === 0) return;
 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Não autenticado');
 
-  const nextReviewAt = new Date();
-  nextReviewAt.setDate(nextReviewAt.getDate() + 2);
+  const rawDate = new Date();
+  rawDate.setUTCDate(rawDate.getUTCDate() + 2);
+  const nextReviewAt = getNextActivePracticeDate(rawDate, activeWeekdays);
 
   const { data: group, error: groupError } = await supabase
     .from('review_groups')

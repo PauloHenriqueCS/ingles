@@ -1,8 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { supabase } from './lib/supabase';
+import {
+  fetchLearningSettings,
+  fetchActiveDayOverrides,
+  addLearningDayOverride,
+  DEFAULT_SETTINGS,
+  LearningSettings,
+} from './lib/learningSettings';
 import Dashboard from './components/Dashboard';
 import MonthView from './components/MonthView';
 import YearView from './components/YearView';
@@ -22,8 +29,33 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [learningSettings, setLearningSettings] = useState<LearningSettings>(DEFAULT_SETTINGS);
+  const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchLearningSettings().then(setLearningSettings).catch(() => {});
+    loadMonthOverrides(currentMonth, currentYear);
+  }, [user?.id]);
+
+  function loadMonthOverrides(month: number, year: number) {
+    fetchActiveDayOverrides(year, month).then(setMonthOverrides).catch(() => {});
+  }
+
+  function handleChangeMonth(month: number, year: number) {
+    setCurrentMonth(month);
+    setCurrentYear(year);
+    loadMonthOverrides(month, year);
+  }
+
+  async function handleActivateDay(date: string) {
+    await addLearningDayOverride(date);
+    const m = parseInt(date.slice(5, 7), 10);
+    const y = parseInt(date.slice(0, 4), 10);
+    loadMonthOverrides(m, y);
+  }
 
   function openDay(date: string) {
     setPrevView(view);
@@ -61,6 +93,8 @@ export default function App() {
         entry={getEntry(selectedDate)}
         onSave={saveEntry}
         onBack={closeDay}
+        activeWeekdays={learningSettings.activeWeekdays}
+        onActivateDay={handleActivateDay}
       />
     );
   }
@@ -81,8 +115,11 @@ export default function App() {
             entries={entries}
             currentMonth={currentMonth}
             currentYear={currentYear}
-            onChangeMonth={(m, y) => { setCurrentMonth(m); setCurrentYear(y); }}
+            onChangeMonth={handleChangeMonth}
             onOpenDay={openDay}
+            activeWeekdays={learningSettings.activeWeekdays}
+            overrideDates={monthOverrides}
+            onSettingsChange={setLearningSettings}
           />
         )}
         {view === 'year' && (
@@ -101,7 +138,7 @@ export default function App() {
           <EvolutionView onNavigate={setView} />
         )}
         {view === 'memory' && (
-          <MemoryView onNavigate={setView} />
+          <MemoryView onNavigate={setView} onSettingsChange={setLearningSettings} />
         )}
       </main>
       <BottomNav current={view} onChange={setView} />

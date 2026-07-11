@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult } from '../types';
+import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
+import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
 import { updateLearningMemory } from '../lib/learningMemory';
@@ -15,6 +16,8 @@ interface Props {
   entry: DayEntry | null;
   onSave: (patch: Partial<DayEntry> & { date: string }) => Promise<void>;
   onBack: () => void;
+  activeWeekdays?: number[];
+  onActivateDay?: (date: string) => Promise<void>;
 }
 
 const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
@@ -27,8 +30,25 @@ type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type HistoryState = 'idle' | 'saving' | 'saved' | 'failed';
 
-export default function DayView({ date, entry, onSave, onBack }: Props) {
-  const schedule = getScheduleForDate(date);
+export default function DayView({ date, entry, onSave, onBack, activeWeekdays = [1,2,3,4,5], onActivateDay }: Props) {
+  const dow = new Date(date + 'T12:00:00').getDay();
+  const isScheduledDay = activeWeekdays.includes(dow);
+
+  const [hasOverride, setHasOverride] = useState<boolean | null>(isScheduledDay ? false : null);
+
+  useEffect(() => {
+    if (isScheduledDay) { setHasOverride(false); return; }
+    setHasOverride(null);
+    checkLearningDayOverride(date)
+      .then(setHasOverride)
+      .catch(() => setHasOverride(false));
+  }, [date, isScheduledDay]);
+
+  const overrideDates = hasOverride ? [date] : [];
+  const schedule = getScheduleForDate(date, activeWeekdays, overrideDates);
+  const isPracticeDay = schedule?.isPracticeDay ?? true;
+  const hasContent = !!(entry?.originalText?.trim());
+  const showInactiveMessage = !isPracticeDay && hasOverride !== null && !hasContent;
 
   const [title, setTitle] = useState(entry?.title ?? '');
   const [originalText, setOriginalText] = useState(entry?.originalText ?? '');
@@ -60,6 +80,16 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setDailyTheme(null);
     setReviewSchedule(null);
   }, [date, entry]);
+
+  async function handleActivateDay() {
+    try {
+      await addLearningDayOverride(date);
+      setHasOverride(true);
+      await onActivateDay?.(date);
+    } catch {
+      // silent — user can still write regardless
+    }
+  }
 
   async function handleSaveDraft() {
     const finalStatus: Status =
@@ -144,6 +174,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             mistakes: feedback.mainMistakes,
             entryDate: date,
             theme: dailyTheme?.themeEn || schedule?.theme || undefined,
+            activeWeekdays,
           }).catch((err) => console.error('Review group creation failed:', err));
         }
       }).catch((err) => {
@@ -196,6 +227,10 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       </header>
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-4 pb-10">
+        {showInactiveMessage ? (
+          <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
+        ) : (
+          <>
         <DailyThemeCard
           theme={dailyTheme}
           onThemeReady={setDailyTheme}
@@ -204,14 +239,6 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
             textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }}
         />
-
-        {schedule?.isWeekend && (
-          <div className="bg-slate-800 rounded-xl p-4 text-center text-slate-400">
-            <p className="text-2xl mb-2">{schedule.weekendActivity === 'descanso' ? '😴' : '📖'}</p>
-            <p className="font-medium text-slate-300">{schedule.theme}</p>
-            <p className="text-sm mt-1">{schedule.grammarObjective}</p>
-          </div>
-        )}
 
         <div>
           <label className="text-xs text-slate-400 mb-2 block">Título</label>
@@ -358,6 +385,9 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
               reviewing={isReviewing}
             />
             <RewriteSection originalText={originalText} aiReview={aiReview} />
+          </>
+        )}
+
           </>
         )}
 
@@ -669,6 +699,35 @@ function RequiredWordsTracker({ validation }: { validation: ValidationResult }) 
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Inactive day card ─────────────────────────────────────────────────────────
+
+function InactiveDayCard({ schedule, onActivate }: { schedule: DaySchedule | null; onActivate: () => void }) {
+  const isWeekend = schedule?.isWeekend ?? false;
+  const isDescanso = schedule?.weekendActivity === 'descanso';
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-6 text-center space-y-4">
+      <p className="text-3xl">{isWeekend ? (isDescanso ? '😴' : '📖') : '📅'}</p>
+      <div>
+        <p className="font-medium text-slate-300">
+          {isWeekend ? schedule?.theme : 'Dia inativo'}
+        </p>
+        <p className="text-sm text-slate-400 mt-1">
+          {isWeekend
+            ? schedule?.grammarObjective
+            : 'Este dia não está nos seus dias de prática. Configure os dias ativos em Memória → Dias de prática.'}
+        </p>
+      </div>
+      <button
+        onClick={onActivate}
+        className="px-5 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors"
+      >
+        Praticar hoje mesmo
+      </button>
     </div>
   );
 }

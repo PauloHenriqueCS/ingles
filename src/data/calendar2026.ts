@@ -117,31 +117,36 @@ function getWeekOfYear(date: Date): number {
   return Math.floor(diff / (7 * 24 * 60 * 60 * 1000));
 }
 
-export function getScheduleForDate(dateStr: string): DaySchedule | null {
+export function getScheduleForDate(
+  dateStr: string,
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+  overrideDates: string[] = []
+): DaySchedule | null {
   const date = new Date(dateStr + 'T12:00:00');
   if (date.getFullYear() !== 2026) return null;
 
   const dow = date.getDay();
+  const isWeekend = dow === 0 || dow === 6;
+  const isPracticeDay = activeWeekdays.includes(dow) || overrideDates.includes(dateStr);
 
-  if (dow === 0) {
+  if (!isPracticeDay) {
+    const weekendActivity = dow === 0 ? 'descanso' : dow === 6 ? 'revisao' : undefined;
     return {
       date: dateStr,
-      isWeekend: true,
-      weekendActivity: 'descanso',
-      theme: 'Domingo — Descanso',
-      grammarObjective: 'Dia de descanso. Relaxe e recarregue as energias.',
-      verbTense: '—',
-    };
-  }
-
-  if (dow === 6) {
-    return {
-      date: dateStr,
-      isWeekend: true,
-      weekendActivity: 'revisao',
-      theme: 'Sábado — Revisão da Semana',
-      grammarObjective: 'Reler os textos da semana, identificar padrões e corrigir erros.',
-      verbTense: 'Revisão',
+      isWeekend,
+      isPracticeDay: false,
+      weekendActivity,
+      theme: dow === 0
+        ? 'Domingo — Descanso'
+        : dow === 6
+        ? 'Sábado — Revisão da Semana'
+        : 'Dia inativo',
+      grammarObjective: dow === 0
+        ? 'Dia de descanso. Relaxe e recarregue as energias.'
+        : dow === 6
+        ? 'Reler os textos da semana, identificar padrões e corrigir erros.'
+        : 'Este dia não está configurado para prática.',
+      verbTense: dow === 6 ? 'Revisão' : '—',
     };
   }
 
@@ -153,7 +158,8 @@ export function getScheduleForDate(dateStr: string): DaySchedule | null {
 
   return {
     date: dateStr,
-    isWeekend: false,
+    isWeekend,
+    isPracticeDay: true,
     theme,
     grammarObjective: grammar.objective,
     verbTense: grammar.verbTense,
@@ -173,10 +179,15 @@ export function getAllDatesInMonth(year: number, month: number): string[] {
   return dates;
 }
 
-export function getWeekdaysInMonth(year: number, month: number): string[] {
+export function getWeekdaysInMonth(
+  year: number,
+  month: number,
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+  overrideDates: string[] = []
+): string[] {
   return getAllDatesInMonth(year, month).filter((dateStr) => {
     const dow = new Date(dateStr + 'T12:00:00').getDay();
-    return dow !== 0 && dow !== 6;
+    return activeWeekdays.includes(dow) || overrideDates.includes(dateStr);
   });
 }
 

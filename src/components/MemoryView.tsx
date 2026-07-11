@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import { EnglishLearningMemory, RecurringMistake, VocabularyItem, View } from '../types';
 import { fetchLearningMemory, updateLearningMemory } from '../lib/learningMemory';
+import { LearningSettings } from '../lib/learningSettings';
 
 type LoadState = 'loading' | 'done' | 'empty' | 'error';
 
 interface Props {
   onNavigate: (v: View) => void;
+  onSettingsChange?: (settings: LearningSettings) => void;
 }
 
 export default function MemoryView({ onNavigate }: Props) {
@@ -194,6 +196,7 @@ export default function MemoryView({ onNavigate }: Props) {
             )}
           </>
         )}
+
       </div>
     </div>
   );

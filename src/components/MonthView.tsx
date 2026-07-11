@@ -1,5 +1,7 @@
+import { useState, useEffect } from 'react';
 import { EntriesStore, Status } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
+import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
 
 interface Props {
   entries: EntriesStore;
@@ -7,6 +9,9 @@ interface Props {
   currentYear: number;
   onChangeMonth: (month: number, year: number) => void;
   onOpenDay: (date: string) => void;
+  activeWeekdays?: number[];
+  overrideDates?: string[];
+  onSettingsChange?: (settings: LearningSettings) => void;
 }
 
 const STATUS_COLORS: Record<Status, string> = {
@@ -18,12 +23,46 @@ const STATUS_COLORS: Record<Status, string> = {
 
 const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 
-export default function MonthView({ entries, currentMonth, currentYear, onChangeMonth, onOpenDay }: Props) {
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
+export default function MonthView({
+  entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
+  activeWeekdays = [1,2,3,4,5], overrideDates = [], onSettingsChange,
+}: Props) {
   const today = new Date().toISOString().split('T')[0];
   const dates = getAllDatesInMonth(currentYear, currentMonth);
-
   const firstDow = new Date(dates[0] + 'T12:00:00').getDay();
   const blanks = Array(firstDow).fill(null);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedDays, setSelectedDays] = useState<number[]>(activeWeekdays);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
+
+  useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
+
+  function toggleDay(dow: number) {
+    setSelectedDays((prev) => {
+      if (prev.includes(dow)) {
+        if (prev.length <= 1) return prev;
+        return prev.filter((d) => d !== dow);
+      }
+      return [...prev, dow].sort((a, b) => a - b);
+    });
+  }
+
+  async function saveSettings() {
+    setSaveState('saving');
+    try {
+      const settings: LearningSettings = { activeWeekdays: selectedDays };
+      await saveLearningSettings(settings);
+      onSettingsChange?.(settings);
+      setSaveState('saved');
+      setTimeout(() => setSaveState('idle'), 2500);
+    } catch {
+      setSaveState('error');
+      setTimeout(() => setSaveState('idle'), 3000);
+    }
+  }
 
   function prev() {
     if (currentMonth === 1) onChangeMonth(12, currentYear - 1);
@@ -69,7 +108,7 @@ export default function MonthView({ entries, currentMonth, currentYear, onChange
         {dates.map((dateStr) => {
           const date = new Date(dateStr + 'T12:00:00');
           const dow = date.getDay();
-          const isWeekend = dow === 0 || dow === 6;
+          const isInactive = !activeWeekdays.includes(dow) && !overrideDates.includes(dateStr);
           const entry = entries[dateStr];
           const status: Status = entry?.status ?? 'nao-iniciado';
           const isToday = dateStr === today;
@@ -81,11 +120,11 @@ export default function MonthView({ entries, currentMonth, currentYear, onChange
               onClick={() => onOpenDay(dateStr)}
               className={`
                 aspect-square rounded-md flex flex-col items-center justify-center text-xs font-medium transition-all
-                ${isWeekend ? 'opacity-40 cursor-default' : 'hover:ring-1 hover:ring-blue-400 cursor-pointer'}
+                ${isInactive ? 'opacity-40 cursor-default' : 'hover:ring-1 hover:ring-blue-400 cursor-pointer'}
                 ${isToday ? 'ring-2 ring-blue-400' : ''}
-                ${hasText ? STATUS_COLORS[status] : isWeekend ? 'bg-slate-800' : 'bg-slate-700'}
+                ${hasText ? STATUS_COLORS[status] : isInactive ? 'bg-slate-800' : 'bg-slate-700'}
               `}
-              disabled={isWeekend}
+              disabled={isInactive}
             >
               <span className={isToday ? 'text-white font-bold' : 'text-slate-300'}>
                 {date.getDate()}
@@ -102,7 +141,7 @@ export default function MonthView({ entries, currentMonth, currentYear, onChange
           {(() => {
             const monthDates = dates.filter((d) => {
               const dow = new Date(d + 'T12:00:00').getDay();
-              return dow !== 0 && dow !== 6;
+              return activeWeekdays.includes(dow) || overrideDates.includes(d);
             });
             const written = monthDates.filter((d) => entries[d]?.originalText?.trim().length > 0).length;
             const revised = monthDates.filter((d) => entries[d]?.status === 'revisado').length;
@@ -115,6 +154,54 @@ export default function MonthView({ entries, currentMonth, currentYear, onChange
           })()}
         </div>
       )}
+
+      {/* Practice days config */}
+      <div className="mt-4">
+        <button
+          onClick={() => setSettingsOpen((o) => !o)}
+          className="w-full flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl text-xs text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          <span>⚙ Dias de prática</span>
+          <span>{settingsOpen ? '▲' : '▼'}</span>
+        </button>
+
+        {settingsOpen && (
+          <div className="mt-2 bg-slate-800 rounded-xl p-4 space-y-3">
+            <p className="text-xs text-slate-500">Dias da semana ativos. Mínimo 1 dia.</p>
+            <div className="flex gap-2 flex-wrap">
+              {DOW_LABELS.map((label, dow) => {
+                const active = selectedDays.includes(dow);
+                return (
+                  <button
+                    key={dow}
+                    onClick={() => toggleDay(dow)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                      active
+                        ? 'bg-blue-600 border-blue-500 text-white'
+                        : 'bg-slate-700 border-slate-600 text-slate-400 hover:border-slate-500'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              onClick={saveSettings}
+              disabled={saveState === 'saving' || selectedDays.length === 0}
+              className={`w-full py-2 rounded-lg text-xs font-medium transition-colors ${
+                saveState === 'saved'
+                  ? 'bg-green-700 text-white'
+                  : saveState === 'error'
+                  ? 'bg-red-800 text-white'
+                  : 'bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white'
+              }`}
+            >
+              {saveState === 'saving' ? 'Salvando...' : saveState === 'saved' ? '✓ Salvo!' : saveState === 'error' ? 'Erro' : 'Salvar'}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

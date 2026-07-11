@@ -73,6 +73,7 @@ export interface DaySchedule {
   grammarObjective: string;
   verbTense: string;
   isWeekend: boolean;
+  isPracticeDay: boolean;
   weekendActivity?: 'revisao' | 'descanso';
   level?: string;
   estimatedTime?: number;
