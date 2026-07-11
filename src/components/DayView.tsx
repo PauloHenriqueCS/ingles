@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult } from '../types';
+import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
@@ -95,6 +95,10 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           theme: dailyTheme?.themeEn || schedule?.theme || '',
           grammarGoal: dailyTheme?.objective || schedule?.grammarObjective || '',
           mainTense: schedule?.verbTense ?? '',
+          mode: dailyTheme?.mode ?? 'normal',
+          reviewGroupId: dailyTheme?.reviewGroupId ?? null,
+          missionTitle: dailyTheme?.title ?? '',
+          studentLevel: dailyTheme?.level ?? '',
         }),
       });
       let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string };
@@ -381,6 +385,9 @@ function TeacherReport({
       {review.summary && <SummaryCard text={review.summary} />}
       <CorrectedTextCard text={review.correctedText} />
       {review.mainMistakes.length > 0 && <MainMistakesCard items={review.mainMistakes} />}
+      {review.requiredWordEvaluation && review.requiredWordEvaluation.length > 0 && (
+        <RequiredWordEvaluationCard items={review.requiredWordEvaluation} />
+      )}
       {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
       {review.objectiveFeedback && (
         <ObjectiveFeedbackCard text={review.objectiveFeedback} objective={grammarObjective} />
@@ -559,6 +566,38 @@ function NextPracticeCard({ text }: { text: string }) {
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
+    </div>
+  );
+}
+
+// ── Required word evaluation card ────────────────────────────────────────────
+
+function RequiredWordEvaluationCard({ items }: { items: RequiredWordEvaluation[] }) {
+  return (
+    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Palavras Obrigatórias</p>
+      <div className="space-y-4">
+        {items.map((item, i) => {
+          const isCorrect = item.status === 'correct';
+          return (
+            <div key={i} className="space-y-1.5 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
+              <div className="flex items-center gap-2">
+                <span className={`text-base leading-none ${isCorrect ? 'text-green-400' : 'text-red-400'}`}>
+                  {isCorrect ? '✓' : '✕'}
+                </span>
+                <span className="font-mono text-sm font-semibold text-slate-100">{item.requiredWord}</span>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed pl-5">{item.explanation}</p>
+              {item.usedExcerpt && (
+                <p className="text-xs text-slate-500 italic pl-5">"{item.usedExcerpt}"</p>
+              )}
+              {item.suggestedCorrection && (
+                <p className="text-xs text-green-400 italic pl-5">Sugestão: "{item.suggestedCorrection}"</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -15,6 +15,21 @@ export interface VocabularyItem {
   example: string;
 }
 
+export type RequiredWordEvaluationStatus =
+  | 'correct'
+  | 'incorrect_spelling'
+  | 'incorrect_usage'
+  | 'missing'
+  | 'forced_usage';
+
+export interface RequiredWordEvaluation {
+  requiredWord: string;
+  status: RequiredWordEvaluationStatus;
+  usedExcerpt: string | null;
+  explanation: string;
+  suggestedCorrection: string | null;
+}
+
 export interface AIFeedback {
   score: number;
   level: CefrLevel;
@@ -28,6 +43,7 @@ export interface AIFeedback {
   newVocabulary: VocabularyItem[];
   objectiveFeedback: string;
   nextPractice: string;
+  requiredWordEvaluation?: RequiredWordEvaluation[];
 }
 
 export interface EnglishReviewSaved {
