@@ -192,9 +192,11 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             <p className="text-sm text-blue-300 font-medium italic">{theme.themeEn}</p>
           )}
 
-          {/* Why this activity */}
-          {theme.whyThisActivity && (
-            <p className="text-xs text-slate-500 italic leading-relaxed">{theme.whyThisActivity}</p>
+          {/* Why this activity / pedagogical reason */}
+          {(theme.whyThisActivity || theme.pedagogicalReason) && (
+            <p className="text-xs text-slate-500 italic leading-relaxed">
+              {theme.whyThisActivity || theme.pedagogicalReason}
+            </p>
           )}
 
           {/* Instructions */}
@@ -226,6 +228,20 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
                       ⓘ
                     </button>
                   </div>
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {/* Required words (review mode) */}
+          {theme.requiredWords && theme.requiredWords.length > 0 && (
+            <Section title="Palavras obrigatórias">
+              <p className="text-xs text-slate-500 mb-1.5">Use todas estas palavras no seu texto.</p>
+              <div className="flex flex-wrap gap-1.5">
+                {theme.requiredWords.map((w, i) => (
+                  <span key={i} className="px-2 py-0.5 bg-amber-900/40 border border-amber-800/40 rounded text-xs text-amber-300 font-mono">
+                    {w}
+                  </span>
                 ))}
               </div>
             </Section>

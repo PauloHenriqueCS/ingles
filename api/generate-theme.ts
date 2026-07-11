@@ -174,6 +174,241 @@ Regras de preenchimento:
   note: observação curta em português sobre o que torna o exemplo bom (ex: "Observe o uso de 'however' para contraste.")
   Nunca use o mesmo personagem, empresa, situação ou cidade da missão original.`;
 
+// ── Review mode ───────────────────────────────────────────────────────────────
+
+const REVIEW_ACTIVITY_TYPES = [
+  'narrative', 'opinion', 'comparison', 'hypothetical', 'problem_solution',
+  'email', 'dialogue', 'planning', 'personal_experience', 'future_plan',
+  'explaining_a_process', 'decision_making',
+];
+
+const REVIEW_SYSTEM_PROMPT = `Você é um professor de inglês especializado em revisão espaçada para alunos brasileiros.
+
+TAREFA: Criar uma atividade de escrita nova e natural que obrigue o aluno a usar corretamente as palavras e expressões que ele errou em um texto anterior.
+
+FORMATOS DISPONÍVEIS (activityType):
+${REVIEW_ACTIVITY_TYPES.join(' | ')}
+
+PROCESSO OBRIGATÓRIO (interno — não expor):
+PASSO 1: Ler todos os erros e entender o contexto original.
+PASSO 2: Identificar uma nova situação em que TODAS as palavras corrigidas caibam naturalmente.
+PASSO 3: Escolher um activityType DIFERENTE do último utilizado.
+PASSO 4: Criar a missão — situação clara + tarefa específica.
+PASSO 5: Verificar se TODAS as requiredWords combinam organicamente com a missão.
+PASSO 6: Gerar o JSON completo.
+
+REGRAS ABSOLUTAS:
+1. requiredWords deve conter EXATAMENTE os corrected_value do grupo — sem adicionar, remover ou substituir.
+2. Preservar expressões compostas (ex: "from 8 a.m. to 6 p.m.") como uma única entrada — nunca separar.
+3. Não pedir ao aluno para reescrever o mesmo texto original.
+4. Todas as requiredWords devem caber naturalmente na nova situação.
+5. suggestedVocabulary não deve repetir nenhuma palavra já presente em requiredWords.
+6. Não expor raciocínio — apenas o JSON final.
+7. activityType deve ser da lista de formatos disponíveis.
+8. O campo reviewGroupId deve ser copiado exatamente como recebido.
+
+FORMATO DE RESPOSTA — somente JSON válido, sem markdown:
+
+{
+  "title": "string (nome curto e específico)",
+  "missionSetup": "string (a situação em português — comece com 'Você...', 'Seu...', etc.)",
+  "missionTask": "string (o que escrever e por quê em português)",
+  "mission": "string (missionSetup + ' ' + missionTask)",
+  "themePtBr": "string (mesmo valor de mission)",
+  "themeEn": "string (comando em inglês)",
+  "objective": "string",
+  "pedagogicalReason": "string (1-2 frases sobre por que esta atividade reforça esses erros)",
+  "activityType": "string (da lista de formatos)",
+  "format": "string (mesmo valor de activityType)",
+  "context": "string",
+  "conflict": "",
+  "semanticSummary": "string (Formato: X | Objetivo: Y | 1 frase do cenário)",
+  "level": "A1|A2|B1|B2|C1|C2",
+  "difficulty": "easy|medium|hard",
+  "estimatedTimeMinutes": 15,
+  "requiredGrammar": ["string"],
+  "requiredWords": ["string"],
+  "suggestedVocabulary": [{"word": "string", "meaningPtBr": "string", "example": "string"}],
+  "useTheseWords": [],
+  "instructions": ["string"],
+  "exampleSentence": "string",
+  "successCriteria": ["string"],
+  "extraChallenge": "",
+  "category": "string",
+  "grammarTips": {},
+  "responseExamples": [],
+  "mode": "review",
+  "reviewGroupId": "string"
+}`;
+
+interface ReviewItemPayload {
+  originalValue: string;
+  correctedValue: string;
+  explanation: string | null;
+  originalSentence: string | null;
+}
+
+interface ReviewGroupPayload {
+  group: {
+    id: string;
+    originalTheme: string | null;
+    sourceEntryDate: string | null;
+    reviewLevel: number;
+  };
+  items: ReviewItemPayload[];
+}
+
+function buildReviewUserMessage(
+  reviewGroup: ReviewGroupPayload,
+  recentThemes: RecentThemeRow[],
+  level: string,
+  attempt: number
+): string {
+  const lines: string[] = [];
+
+  lines.push('=== PERFIL DO ALUNO ===');
+  lines.push(`Nível: ${level}`);
+
+  lines.push('');
+  lines.push('=== GRUPO DE REVISÃO ===');
+  lines.push(`ID do grupo: ${reviewGroup.group.id}`);
+  if (reviewGroup.group.originalTheme) {
+    lines.push(`Tema original: ${reviewGroup.group.originalTheme}`);
+  }
+
+  lines.push('');
+  lines.push('Erros cometidos pelo aluno:');
+  reviewGroup.items.forEach((item, i) => {
+    lines.push(`[${i + 1}]`);
+    lines.push(`  Errado:  "${item.originalValue}"`);
+    lines.push(`  Correto: "${item.correctedValue}"`);
+    if (item.explanation) lines.push(`  Explicação: ${item.explanation}`);
+    if (item.originalSentence) lines.push(`  Frase original: "${item.originalSentence}"`);
+  });
+
+  const uniqueWords = [...new Set(reviewGroup.items.map((i) => i.correctedValue).filter(Boolean))];
+  lines.push('');
+  lines.push('=== PALAVRAS OBRIGATÓRIAS (copiar exatamente para requiredWords) ===');
+  uniqueWords.forEach((w) => lines.push(`  - "${w}"`));
+
+  if (recentThemes.length > 0) {
+    lines.push('');
+    lines.push('=== HISTÓRICO RECENTE (NÃO REPETIR FORMATO) ===');
+    recentThemes.slice(0, 5).forEach((t, i) => {
+      const fmt = extractField(t.semantic_summary, 'Formato') || t.activity_type || '—';
+      lines.push(`[${i + 1}] Formato: ${fmt} | Contexto: ${t.context || '—'} | "${t.title}"`);
+    });
+  }
+
+  if (attempt > 1) {
+    lines.push('');
+    lines.push(`⚠️ TENTATIVA ${attempt}: A resposta anterior foi inválida. Certifique-se de que:`);
+    lines.push('  - requiredWords contém EXATAMENTE as palavras listadas acima (sem adicionar nem remover)');
+    lines.push('  - reviewGroupId é copiado exatamente');
+    lines.push('  - activityType é diferente do último formato utilizado');
+  }
+
+  lines.push('');
+  lines.push(`IMPORTANTE: O campo reviewGroupId deve ser exatamente: "${reviewGroup.group.id}"`);
+  lines.push('Siga os 6 passos e gere uma atividade de revisão natural e envolvente.');
+
+  return lines.join('\n');
+}
+
+function normalizeReviewTheme(
+  parsed: any,
+  reviewGroupId: string,
+  expectedWords: string[]
+): Record<string, unknown> {
+  const missionSetup = String(parsed.missionSetup || '');
+  const missionTask = String(parsed.missionTask || '');
+  const mission =
+    String(parsed.mission || '') ||
+    (missionSetup && missionTask ? `${missionSetup} ${missionTask}`.trim() : '');
+
+  const rawRequired = Array.isArray(parsed.requiredWords)
+    ? parsed.requiredWords.map((w: any) => String(w).trim()).filter(Boolean)
+    : expectedWords;
+  const requiredWords = [...new Set<string>(rawRequired)];
+
+  const format = String(parsed.activityType || parsed.format || 'narrative');
+  const objective = String(parsed.objective || '');
+  const summaryParts: string[] = [];
+  if (format) summaryParts.push(`Formato: ${format}`);
+  if (objective) summaryParts.push(`Objetivo: ${objective}`);
+  const semanticSummary =
+    String(parsed.semanticSummary || '') || summaryParts.join(' | ');
+
+  return {
+    title: String(parsed.title || 'Revisão'),
+    missionSetup,
+    missionTask,
+    mission,
+    themePtBr: mission,
+    themeEn: String(parsed.themeEn || ''),
+    objective,
+    pedagogicalReason: String(parsed.pedagogicalReason || ''),
+    activityType: format,
+    format,
+    context: String(parsed.context || ''),
+    conflict: '',
+    semanticSummary,
+    level: VALID_LEVELS.has(parsed.level) ? parsed.level : 'A1',
+    difficulty: VALID_DIFFS.has(parsed.difficulty) ? parsed.difficulty : 'easy',
+    estimatedTimeMinutes: Number(parsed.estimatedTimeMinutes) || 15,
+    requiredGrammar: Array.isArray(parsed.requiredGrammar) ? parsed.requiredGrammar : [],
+    requiredWords,
+    suggestedVocabulary: Array.isArray(parsed.suggestedVocabulary)
+      ? parsed.suggestedVocabulary
+      : [],
+    useTheseWords: [],
+    instructions: Array.isArray(parsed.instructions) ? parsed.instructions : [],
+    exampleSentence: String(parsed.exampleSentence || ''),
+    successCriteria: Array.isArray(parsed.successCriteria) ? parsed.successCriteria : [],
+    extraChallenge: '',
+    category: String(parsed.category || 'review'),
+    grammarTips: {},
+    responseExamples: [],
+    mode: 'review',
+    reviewGroupId,
+  };
+}
+
+function validateReviewTheme(
+  theme: Record<string, unknown>,
+  expectedWords: string[],
+  reviewGroupId: string
+): string | null {
+  const rw = Array.isArray(theme.requiredWords) ? (theme.requiredWords as string[]) : [];
+
+  const missing = expectedWords.filter((w) => !rw.includes(w));
+  if (missing.length > 0) return `Palavras faltando em requiredWords: ${missing.join(', ')}`;
+
+  const extra = rw.filter((w) => !expectedWords.includes(w));
+  if (extra.length > 0) return `Palavras extras em requiredWords: ${extra.join(', ')}`;
+
+  if (rw.some((w) => !w?.trim())) return 'requiredWord vazia encontrada';
+
+  if (new Set(rw).size !== rw.length) return 'requiredWords contém duplicatas';
+
+  if (!String(theme.title || '').trim()) return 'title vazio';
+  if (!String(theme.mission || '').trim()) return 'mission vazia';
+
+  if (theme.mode !== 'review') return 'mode !== review';
+  if (theme.reviewGroupId !== reviewGroupId) return `reviewGroupId inválido: ${theme.reviewGroupId}`;
+
+  const reqLower = rw.map((w) => w.toLowerCase());
+  const suggested = Array.isArray(theme.suggestedVocabulary)
+    ? (theme.suggestedVocabulary as any[]).map((v) =>
+        String(typeof v === 'string' ? v : v?.word || '').toLowerCase()
+      )
+    : [];
+  const overlap = suggested.filter((w) => w && reqLower.includes(w));
+  if (overlap.length > 0) return `suggestedVocabulary repete requiredWords: ${overlap.join(', ')}`;
+
+  return null;
+}
+
 // ── Build user message ────────────────────────────────────────────────────────
 
 interface RecentThemeRow {
@@ -448,7 +683,7 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
 
-  const { mode: _mode, reviewGroup: _reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
+  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
 
   // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {
@@ -477,6 +712,110 @@ export default async function handler(req: any, res: any) {
     console.error('Failed to fetch recent themes:', e);
   }
 
+  const openai = new OpenAI({ apiKey });
+
+  // ── REVIEW MODE ──────────────────────────────────────────────────────────────
+  if (mode === 'review' && reviewGroup) {
+    const rg = reviewGroup as ReviewGroupPayload;
+    const group = rg.group;
+    const items = rg.items ?? [];
+
+    if (!group?.id || items.length === 0) {
+      return res.status(400).json({ error: 'Grupo de revisão inválido.', mode: 'review' });
+    }
+
+    const expectedWords = [...new Set<string>(items.map((i) => i.correctedValue).filter(Boolean))];
+    const level = String((learningContext as any)?.currentLevel || 'A1');
+
+    const MAX_REVIEW_ATTEMPTS = 3;
+    let reviewTheme: Record<string, unknown> | null = null;
+    let lastValidationError: string | null = null;
+
+    for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
+      let raw: string;
+      try {
+        const completion = await openai.chat.completions.create({
+          model: AI_MODEL,
+          temperature: 0.85 + (attempt - 1) * 0.08,
+          messages: [
+            { role: 'system', content: REVIEW_SYSTEM_PROMPT },
+            {
+              role: 'user',
+              content: buildReviewUserMessage(
+                { group, items },
+                recentThemes,
+                level,
+                attempt
+              ),
+            },
+          ],
+        });
+        raw = completion.choices[0]?.message?.content ?? '';
+      } catch (err: any) {
+        console.error(`Review attempt ${attempt} OpenAI error:`, err);
+        if (attempt >= MAX_REVIEW_ATTEMPTS) {
+          return res.status(500).json({
+            error: 'Não foi possível gerar a atividade de revisão. Tente novamente.',
+            mode: 'review',
+          });
+        }
+        continue;
+      }
+
+      const parsed = parseRawContent(raw);
+      if (!parsed) {
+        console.error(`Review attempt ${attempt}: JSON inválido`);
+        continue;
+      }
+
+      const candidate = normalizeReviewTheme(parsed, group.id, expectedWords);
+      lastValidationError = validateReviewTheme(candidate, expectedWords, group.id);
+
+      if (lastValidationError) {
+        console.warn(`Review attempt ${attempt} falhou validação: ${lastValidationError}`);
+        continue;
+      }
+
+      reviewTheme = candidate;
+      break;
+    }
+
+    if (!reviewTheme) {
+      console.error(`Review falhou após ${MAX_REVIEW_ATTEMPTS} tentativas. Último erro: ${lastValidationError}`);
+      return res.status(500).json({
+        error: 'Não foi possível gerar uma atividade de revisão válida. Tente novamente.',
+        mode: 'review',
+      });
+    }
+
+    let themeId: string | null = null;
+    try {
+      const { data, error } = await supabase
+        .from('generated_themes')
+        .insert({
+          user_id: userId,
+          title: reviewTheme.title,
+          description: reviewTheme.mission,
+          grammar_focus: reviewTheme.requiredGrammar,
+          activity_type: reviewTheme.activityType,
+          context: reviewTheme.context,
+          semantic_summary: reviewTheme.semanticSummary,
+          difficulty: reviewTheme.difficulty,
+          vocabulary: reviewTheme.requiredWords,
+          status: 'generated',
+        })
+        .select('id')
+        .single();
+      if (!error && data) themeId = (data as { id: string }).id;
+    } catch (e) {
+      console.error('Failed to save review theme:', e);
+    }
+
+    return res.json({ theme: reviewTheme, themeId, mode: 'review' });
+  }
+
+  // ── NORMAL MODE ──────────────────────────────────────────────────────────────
+
   // Inject excluded theme at the top so deduplication catches it immediately
   if (excludedTheme) {
     const alreadyPresent = recentThemes.some((t) => t.title === excludedTheme.title);
@@ -493,7 +832,6 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  const openai = new OpenAI({ apiKey });
   const MAX_ATTEMPTS = 3;
   let theme: Record<string, unknown> | null = null;
 
@@ -570,5 +908,5 @@ export default async function handler(req: any, res: any) {
     console.error('Failed to save generated theme:', e);
   }
 
-  return res.json({ theme, themeId });
+  return res.json({ theme, themeId, mode: 'normal' });
 }

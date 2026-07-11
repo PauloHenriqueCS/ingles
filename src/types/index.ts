@@ -136,6 +136,11 @@ export interface EnglishDailyTheme {
   extraChallenge?: string;
   grammarTips?: Record<string, string>;
   responseExamples?: ResponseExample[];
+  // review mode fields
+  mode?: 'normal' | 'review';
+  reviewGroupId?: string;
+  requiredWords?: string[];
+  pedagogicalReason?: string;
 }
 
 export interface GeneratedTheme {
