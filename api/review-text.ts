@@ -405,7 +405,9 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // ── Save review attempt (review mode only) ────────────────────────────────
+  // ── Save review attempt + apply schedule (review mode only) ─────────────
+
+  let reviewSchedule: Record<string, unknown> | null = null;
 
   if (isReviewMode && Array.isArray(feedback.requiredWordEvaluation)) {
     const evaluations = feedback.requiredWordEvaluation as RequiredWordEvaluation[];
@@ -445,11 +447,21 @@ export default async function handler(req: any, res: any) {
         if (itemsErr) {
           console.error('Erro ao salvar review_attempt_items:', itemsErr.message);
         }
+
+        // Aplicar agendamento de forma atômica via RPC
+        const { data: scheduleData, error: scheduleErr } = await supabase
+          .rpc('apply_review_schedule', { p_attempt_id: attempt.id });
+
+        if (scheduleErr) {
+          console.error('Erro ao aplicar agendamento:', scheduleErr.message);
+        } else {
+          reviewSchedule = scheduleData as Record<string, unknown>;
+        }
       }
     } catch {
       console.error('Erro ao salvar tentativa de revisão');
     }
   }
 
-  return res.json({ feedback, reviewedAt });
+  return res.json({ feedback, reviewedAt, reviewSchedule });
 }

@@ -253,6 +253,16 @@ export interface PendingReviewGroup {
   items: ReviewGroupItem[];
 }
 
+export interface ReviewScheduleResult {
+  applied?: boolean;
+  skipped?: boolean;
+  reason?: string;
+  newLevel?: number;
+  newStatus?: 'scheduled' | 'mastered';
+  intervalDays?: number | null;
+  overallResult?: 'passed' | 'failed';
+}
+
 export type RequiredWordStatus = 'found' | 'missing';
 
 export interface RequiredWordValidation {

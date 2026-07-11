@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation } from '../types';
+import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
@@ -41,6 +41,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [historyState, setHistoryState] = useState<HistoryState>('idle');
   const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
+  const [reviewSchedule, setReviewSchedule] = useState<ReviewScheduleResult | null>(null);
   const [ptDraftOpen, setPtDraftOpen] = useState(false);
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -57,6 +58,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     setSaveState('idle');
     setHistoryState('idle');
     setDailyTheme(null);
+    setReviewSchedule(null);
   }, [date, entry]);
 
   async function handleSaveDraft() {
@@ -101,7 +103,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           studentLevel: dailyTheme?.level ?? '',
         }),
       });
-      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string };
+      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; reviewSchedule?: ReviewScheduleResult };
       try {
         data = await res.json();
       } catch {
@@ -112,6 +114,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
       }
       const feedback = data.feedback!;
       const ts = data.reviewedAt ?? new Date().toISOString();
+      if (data.reviewSchedule?.applied) setReviewSchedule(data.reviewSchedule);
       setAiReview(feedback);
       setReviewedAt(ts);
       setReviewState('done');
@@ -345,6 +348,9 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
 
         {reviewState === 'done' && aiReview && (
           <>
+            {isReviewMode && reviewSchedule && (
+              <ScheduleResultCard schedule={reviewSchedule} />
+            )}
             <TeacherReport
               review={aiReview}
               grammarObjective={schedule?.grammarObjective ?? ''}
@@ -566,6 +572,37 @@ function NextPracticeCard({ text }: { text: string }) {
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
+    </div>
+  );
+}
+
+// ── Schedule result card ──────────────────────────────────────────────────────
+
+function ScheduleResultCard({ schedule }: { schedule: ReviewScheduleResult }) {
+  const isMastered = schedule.newStatus === 'mastered';
+  const isPassed = schedule.overallResult === 'passed';
+
+  const { bg, text, message } = isMastered
+    ? {
+        bg: 'bg-green-900/20 border border-green-800/30',
+        text: 'text-green-300',
+        message: '🏆 Muito bem! Você dominou este grupo de palavras.',
+      }
+    : isPassed
+    ? {
+        bg: 'bg-blue-900/20 border border-blue-800/30',
+        text: 'text-blue-300',
+        message: `✓ Revisão concluída. Essas palavras voltarão em ${schedule.intervalDays} dias.`,
+      }
+    : {
+        bg: 'bg-amber-900/20 border border-amber-800/30',
+        text: 'text-amber-300',
+        message: '⚠ Algumas palavras ainda precisam de prática. Elas voltarão em 2 dias.',
+      };
+
+  return (
+    <div className={`rounded-xl p-4 ${bg}`}>
+      <p className={`text-sm font-medium ${text}`}>{message}</p>
     </div>
   );
 }
