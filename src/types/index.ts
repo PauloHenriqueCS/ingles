@@ -236,3 +236,16 @@ export interface PendingReviewGroup {
   group: ReviewGroup;
   items: ReviewGroupItem[];
 }
+
+export type RequiredWordStatus = 'found' | 'missing';
+
+export interface RequiredWordValidation {
+  word: string;
+  status: RequiredWordStatus;
+}
+
+export interface ValidationResult {
+  words: RequiredWordValidation[];
+  allFound: boolean;
+  missingWords: string[];
+}

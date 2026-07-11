@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme } from '../types';
+import { DayEntry, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult } from '../types';
+import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview } from '../lib/reviews';
@@ -157,6 +158,12 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
     weekday: 'long', day: 'numeric', month: 'long',
   });
   const isReviewing = reviewState === 'loading';
+  const isReviewMode = dailyTheme?.mode === 'review';
+  const validation = useRequiredWordsValidation(
+    isReviewMode ? (dailyTheme?.requiredWords ?? []) : [],
+    originalText,
+  );
+  const canSubmit = !isReviewMode || validation.allFound;
 
   const saveBtnCls =
     saveState === 'saved' ? 'bg-green-700 text-white' :
@@ -278,6 +285,10 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           </div>
         </div>
 
+        {isReviewMode && validation.words.length > 0 && (
+          <RequiredWordsTracker validation={validation} />
+        )}
+
         <div className="flex gap-3">
           <button
             onClick={handleSaveDraft}
@@ -288,7 +299,7 @@ export default function DayView({ date, entry, onSave, onBack }: Props) {
           </button>
           <button
             onClick={handleReview}
-            disabled={!originalText.trim() || isReviewing}
+            disabled={!originalText.trim() || isReviewing || !canSubmit}
             className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {isReviewing ? '⏳ Analisando...' : '🤖 Revisar com IA'}
@@ -548,6 +559,40 @@ function NextPracticeCard({ text }: { text: string }) {
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
+    </div>
+  );
+}
+
+// ── Required words tracker ────────────────────────────────────────────────────
+
+function RequiredWordsTracker({ validation }: { validation: ValidationResult }) {
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
+      <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">
+        Palavras obrigatórias
+      </p>
+      <div className="space-y-1.5">
+        {validation.words.map((item, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <span className={`text-sm leading-none ${item.status === 'found' ? 'text-green-400' : 'text-slate-600'}`}>
+              {item.status === 'found' ? '✓' : '○'}
+            </span>
+            <span className={`text-sm font-mono ${item.status === 'found' ? 'text-green-300' : 'text-slate-400'}`}>
+              {item.word}
+            </span>
+          </div>
+        ))}
+      </div>
+      {!validation.allFound && (
+        <div className="pt-2 border-t border-slate-700">
+          <p className="text-xs text-amber-400 mb-1">Você ainda precisa utilizar:</p>
+          <ul className="space-y-0.5">
+            {validation.missingWords.map((word, i) => (
+              <li key={i} className="text-xs text-amber-300 font-mono">• {word}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
