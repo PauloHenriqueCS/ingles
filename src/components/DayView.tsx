@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult } from '../types';
+import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult, RewriteComparisonResult } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
-import { saveEnglishReview } from '../lib/reviews';
+import { saveEnglishReview, updateReviewV2 } from '../lib/reviews';
+import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { updateLearningMemory } from '../lib/learningMemory';
 import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
@@ -62,6 +63,9 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
   const [historyState, setHistoryState] = useState<HistoryState>('idle');
   const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
   const [reviewSchedule, setReviewSchedule] = useState<ReviewScheduleResult | null>(null);
+  const [reviewId, setReviewId] = useState<string | null>(null);
+  const [existingV2Text, setExistingV2Text] = useState<string | null>(null);
+  const [existingV2Comparison, setExistingV2Comparison] = useState<RewriteComparisonResult | null>(null);
   const [ptDraftOpen, setPtDraftOpen] = useState(false);
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -79,7 +83,30 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     setHistoryState('idle');
     setDailyTheme(null);
     setReviewSchedule(null);
+    setReviewId(null);
+    setExistingV2Text(null);
+    setExistingV2Comparison(null);
+    if (entry?.aiReview) {
+      fetchReviewByDate(date)
+        .then((r) => {
+          if (r) {
+            setReviewId(r.id);
+            setExistingV2Text(r.version2Text ?? null);
+            setExistingV2Comparison(r.version2Comparison ?? null);
+          }
+        })
+        .catch(() => {});
+    }
   }, [date, entry]);
+
+  function handleSaveV2(v2Text: string, v2Comparison: RewriteComparisonResult) {
+    if (!reviewId) return;
+    updateReviewV2(reviewId, v2Text, v2Comparison).catch((err) => {
+      console.error('Failed to save v2:', err);
+    });
+    setExistingV2Text(v2Text);
+    setExistingV2Comparison(v2Comparison);
+  }
 
   async function handleActivateDay() {
     try {
@@ -164,13 +191,16 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         category: dailyTheme?.category || schedule?.theme || undefined,
         difficulty: difficulty ?? dailyTheme?.difficulty ?? undefined,
         objective: dailyTheme?.objective || schedule?.grammarObjective || undefined,
-      }).then(({ id: reviewId }) => {
+        entryDate: date,
+        missionSnapshot: dailyTheme ?? undefined,
+      }).then(({ id }) => {
+        setReviewId(id);
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
         updateLearningMemory().catch((err) => console.error('Memory update failed:', err));
         if (feedback.mainMistakes.length > 0) {
           createReviewGroupFromReview({
-            reviewId,
+            reviewId: id,
             mistakes: feedback.mainMistakes,
             entryDate: date,
             theme: dailyTheme?.themeEn || schedule?.theme || undefined,
@@ -384,7 +414,15 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
               onReviewAgain={handleReview}
               reviewing={isReviewing}
             />
-            <RewriteSection originalText={originalText} aiReview={aiReview} />
+            <RewriteSection
+              key={reviewId ?? 'no-review'}
+              originalText={originalText}
+              aiReview={aiReview}
+              reviewId={reviewId ?? undefined}
+              initialV2Text={existingV2Text ?? undefined}
+              initialV2Comparison={existingV2Comparison ?? undefined}
+              onSaveV2={handleSaveV2}
+            />
           </>
         )}
 

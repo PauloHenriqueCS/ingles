@@ -65,6 +65,11 @@ export interface EnglishReviewSaved {
   difficulty: string | null;
   objective: string | null;
   createdAt: string;
+  entryDate: string | null;
+  missionSnapshot: EnglishDailyTheme | null;
+  version2Text: string | null;
+  version2Comparison: RewriteComparisonResult | null;
+  version2ImprovementScore: number | null;
 }
 
 export interface DaySchedule {

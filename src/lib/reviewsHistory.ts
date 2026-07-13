@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem } from '../types';
+import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 
 function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
   const rawMistakes = Array.isArray(row.main_mistakes) ? row.main_mistakes as Record<string, unknown>[] : [];
@@ -35,6 +35,11 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
     difficulty: row.difficulty != null ? String(row.difficulty) : null,
     objective: row.objective != null ? String(row.objective) : null,
     createdAt: String(row.created_at ?? ''),
+    entryDate: row.entry_date != null ? String(row.entry_date) : null,
+    missionSnapshot: row.mission_snapshot != null ? row.mission_snapshot as EnglishDailyTheme : null,
+    version2Text: row.version_2_text != null ? String(row.version_2_text) : null,
+    version2Comparison: row.version_2_comparison != null ? row.version_2_comparison as RewriteComparisonResult : null,
+    version2ImprovementScore: row.version_2_improvement_score != null ? Number(row.version_2_improvement_score) : null,
   };
 }
 
@@ -53,4 +58,22 @@ export async function fetchEnglishReviews(limit?: number): Promise<EnglishReview
   const { data, error } = await query;
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => rowToReview(row as Record<string, unknown>));
+}
+
+export async function fetchReviewByDate(date: string): Promise<EnglishReviewSaved | null> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const { data, error } = await supabase
+    .from('english_reviews')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('entry_date', date)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+  return rowToReview(data as Record<string, unknown>);
 }

@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { AIFeedback } from '../types';
+import { AIFeedback, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 
 export interface SaveReviewParams {
   originalText: string;
@@ -7,6 +7,8 @@ export interface SaveReviewParams {
   category?: string;
   difficulty?: string;
   objective?: string;
+  entryDate?: string;
+  missionSnapshot?: EnglishDailyTheme;
 }
 
 export async function saveEnglishReview(params: SaveReviewParams): Promise<{ id: string }> {
@@ -39,10 +41,28 @@ export async function saveEnglishReview(params: SaveReviewParams): Promise<{ id:
       category: params.category ?? null,
       difficulty: params.difficulty ?? null,
       objective: params.objective ?? null,
+      entry_date: params.entryDate ?? null,
+      mission_snapshot: params.missionSnapshot ?? null,
     })
     .select('id')
     .single();
 
   if (error) throw new Error(error.message);
   return { id: (data as { id: string }).id };
+}
+
+export async function updateReviewV2(
+  reviewId: string,
+  v2Text: string,
+  v2Comparison: RewriteComparisonResult,
+): Promise<void> {
+  const { error } = await supabase
+    .from('english_reviews')
+    .update({
+      version_2_text: v2Text,
+      version_2_comparison: v2Comparison,
+      version_2_improvement_score: v2Comparison.improvementScore,
+    })
+    .eq('id', reviewId);
+  if (error) throw new Error(error.message);
 }

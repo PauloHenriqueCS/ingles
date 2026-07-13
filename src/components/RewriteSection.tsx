@@ -7,13 +7,17 @@ type CompareState = 'idle' | 'loading' | 'done' | 'error';
 interface Props {
   originalText: string;
   aiReview: AIFeedback;
+  reviewId?: string;
+  initialV2Text?: string;
+  initialV2Comparison?: RewriteComparisonResult;
+  onSaveV2?: (v2Text: string, v2Comparison: RewriteComparisonResult) => void;
 }
 
-export default function RewriteSection({ originalText, aiReview }: Props) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [rewriteText, setRewriteText] = useState('');
-  const [compareState, setCompareState] = useState<CompareState>('idle');
-  const [result, setResult] = useState<RewriteComparisonResult | null>(null);
+export default function RewriteSection({ originalText, aiReview, initialV2Text, initialV2Comparison, onSaveV2 }: Props) {
+  const [isOpen, setIsOpen] = useState(!!(initialV2Text || initialV2Comparison));
+  const [rewriteText, setRewriteText] = useState(initialV2Text ?? '');
+  const [compareState, setCompareState] = useState<CompareState>(initialV2Comparison ? 'done' : 'idle');
+  const [result, setResult] = useState<RewriteComparisonResult | null>(initialV2Comparison ?? null);
   const [emptyWarning, setEmptyWarning] = useState(false);
   const isComparing = compareState === 'loading';
 
@@ -39,8 +43,10 @@ export default function RewriteSection({ originalText, aiReview }: Props) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Erro ao comparar');
-      setResult(data.result as RewriteComparisonResult);
+      const comparison = data.result as RewriteComparisonResult;
+      setResult(comparison);
       setCompareState('done');
+      onSaveV2?.(rewriteText.trim(), comparison);
     } catch {
       setCompareState('error');
     }

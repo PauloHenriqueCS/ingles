@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { EnglishReviewSaved, MainMistake, VocabularyItem } from '../types';
+import { EnglishReviewSaved, EnglishDailyTheme, RewriteComparisonResult, MainMistake, VocabularyItem } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 
 type LoadState = 'loading' | 'done' | 'error';
@@ -160,6 +160,11 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
           </div>
         )}
 
+        {/* Mission snapshot */}
+        {review.missionSnapshot && (
+          <MissionCard mission={review.missionSnapshot} />
+        )}
+
         {/* Original text */}
         <div className="bg-slate-800 rounded-xl p-4 space-y-2">
           <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Seu Texto Original</p>
@@ -205,6 +210,18 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
             </div>
             <p className="text-slate-300 text-sm leading-relaxed">{review.nextPractice}</p>
           </div>
+        )}
+
+        {/* Version 2 */}
+        {review.version2Text && (
+          <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+            <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Versão 2</p>
+            <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{review.version2Text}</p>
+          </div>
+        )}
+
+        {review.version2Comparison && (
+          <V2ComparisonCard comparison={review.version2Comparison} />
         )}
       </div>
     </div>
@@ -265,6 +282,58 @@ function VocabularyCard({ items }: { items: VocabularyItem[] }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Mission card ──────────────────────────────────────────────────────────────
+
+function MissionCard({ mission }: { mission: EnglishDailyTheme }) {
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Missão</p>
+      <p className="text-slate-200 text-sm font-semibold">{mission.title}</p>
+      {mission.mission && (
+        <p className="text-slate-400 text-xs leading-relaxed">{mission.mission}</p>
+      )}
+      {mission.objective && (
+        <p className="text-slate-500 text-xs italic">Objetivo: {mission.objective}</p>
+      )}
+    </div>
+  );
+}
+
+// ── V2 comparison card ────────────────────────────────────────────────────────
+
+function V2ComparisonCard({ comparison }: { comparison: RewriteComparisonResult }) {
+  const scoreColor =
+    comparison.improvementScore >= 75 ? 'text-green-400' :
+    comparison.improvementScore >= 50 ? 'text-amber-400' : 'text-red-400';
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado da Versão 2</p>
+      <div className="flex items-center gap-4">
+        <div>
+          <span className={`text-4xl font-bold tabular-nums ${scoreColor}`}>{comparison.improvementScore}</span>
+          <span className="text-slate-500 text-lg">/100</span>
+        </div>
+        <div className="flex gap-3 ml-auto">
+          <div className="text-center">
+            <p className="text-xl font-bold text-green-400 tabular-nums">{comparison.fixedMistakesCount}</p>
+            <p className="text-xs text-slate-500">corrigidos</p>
+          </div>
+          <div className="text-center">
+            <p className="text-xl font-bold text-amber-400 tabular-nums">{comparison.remainingMistakesCount}</p>
+            <p className="text-xs text-slate-500">restantes</p>
+          </div>
+        </div>
+      </div>
+      {comparison.overallFeedback && (
+        <p className="text-sm text-slate-300 leading-relaxed border-t border-slate-700 pt-3">
+          {comparison.overallFeedback}
+        </p>
+      )}
     </div>
   );
 }
