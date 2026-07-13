@@ -12,6 +12,7 @@ import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
 import DailyThemeCard from './DailyThemeCard';
 import RewriteSection from './RewriteSection';
+import PronunciationRecorder from './PronunciationRecorder';
 
 interface Props {
   date: string;
@@ -428,6 +429,11 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
               initialV2Text={existingV2Text ?? undefined}
               initialV2Comparison={existingV2Comparison ?? undefined}
               onSaveV2={handleSaveV2}
+            />
+            <PronunciationRecorder
+              key={`pronunciation-${reviewId ?? 'no-review'}-${!!existingV2Text}`}
+              referenceText={existingV2Text ?? aiReview.correctedText}
+              reviewId={reviewId}
             />
           </>
         )}
