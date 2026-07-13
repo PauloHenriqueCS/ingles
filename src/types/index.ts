@@ -303,3 +303,37 @@ export interface ValidationResult {
   allFound: boolean;
   missingWords: string[];
 }
+
+export type PronunciationAssessmentStatus = 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
+
+export interface PronunciationAssessment {
+  id: string;
+  userId: string;
+  textVersionId: string;
+  status: PronunciationAssessmentStatus;
+  referenceText: string;
+  languageCode: string;
+  azureRegion: string;
+  pronunciationScore: number | null;
+  accuracyScore: number | null;
+  fluencyScore: number | null;
+  completenessScore: number | null;
+  prosodyScore: number | null;
+  recognizedText: string | null;
+  wordsJson: unknown | null;
+  rawResultJson: unknown | null;
+  audioPath: string | null;
+  audioDurationSeconds: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PronunciationStatusResponse {
+  status: PronunciationAssessmentStatus | 'available';
+  canAnalyze: boolean;
+  assessmentId: string | null;
+}
