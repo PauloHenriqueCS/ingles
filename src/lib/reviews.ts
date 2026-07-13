@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { AIFeedback, EnglishDailyTheme, RewriteComparisonResult } from '../types';
+import { AIFeedback, MissionSnapshot, RewriteComparisonResult } from '../types';
 
 export interface SaveReviewParams {
   originalText: string;
@@ -8,7 +8,7 @@ export interface SaveReviewParams {
   difficulty?: string;
   objective?: string;
   entryDate?: string;
-  missionSnapshot?: EnglishDailyTheme;
+  missionSnapshot?: MissionSnapshot;
 }
 
 export async function saveEnglishReview(params: SaveReviewParams): Promise<{ id: string }> {

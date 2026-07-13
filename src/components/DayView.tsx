@@ -6,6 +6,7 @@ import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learnin
 import { countWords } from '../utils/wordCount';
 import { saveEnglishReview, updateReviewV2 } from '../lib/reviews';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
+import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
 import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
@@ -70,6 +71,13 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Reset mission + schedule only when navigating to a different day,
+  // NOT when entry changes (draft save), so dailyTheme survives draft saves
+  useEffect(() => {
+    setDailyTheme(null);
+    setReviewSchedule(null);
+  }, [date]);
+
   useEffect(() => {
     setTitle(entry?.title ?? '');
     setOriginalText(entry?.originalText ?? '');
@@ -81,8 +89,6 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     setReviewError(null);
     setSaveState('idle');
     setHistoryState('idle');
-    setDailyTheme(null);
-    setReviewSchedule(null);
     setReviewId(null);
     setExistingV2Text(null);
     setExistingV2Comparison(null);
@@ -192,7 +198,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         difficulty: difficulty ?? dailyTheme?.difficulty ?? undefined,
         objective: dailyTheme?.objective || schedule?.grammarObjective || undefined,
         entryDate: date,
-        missionSnapshot: dailyTheme ?? undefined,
+        missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : undefined,
       }).then(({ id }) => {
         setReviewId(id);
         setHistoryState('saved');

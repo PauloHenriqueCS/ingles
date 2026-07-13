@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
-import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
+import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem, RewriteComparisonResult } from '../types';
+import { parseMissionSnapshot } from './missionSnapshot';
 
 function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
   const rawMistakes = Array.isArray(row.main_mistakes) ? row.main_mistakes as Record<string, unknown>[] : [];
@@ -36,7 +37,7 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
     objective: row.objective != null ? String(row.objective) : null,
     createdAt: String(row.created_at ?? ''),
     entryDate: row.entry_date != null ? String(row.entry_date) : null,
-    missionSnapshot: row.mission_snapshot != null ? row.mission_snapshot as EnglishDailyTheme : null,
+    missionSnapshot: parseMissionSnapshot(row.mission_snapshot),
     version2Text: row.version_2_text != null ? String(row.version_2_text) : null,
     version2Comparison: row.version_2_comparison != null ? row.version_2_comparison as RewriteComparisonResult : null,
     version2ImprovementScore: row.version_2_improvement_score != null ? Number(row.version_2_improvement_score) : null,

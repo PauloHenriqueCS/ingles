@@ -46,6 +46,28 @@ export interface AIFeedback {
   requiredWordEvaluation?: RequiredWordEvaluation[];
 }
 
+export interface MissionSnapshot {
+  missionTitle: string;
+  missionSetup: string | null;
+  missionTask: string | null;
+  missionPromptPt: string | null;
+  missionPromptEn: string | null;
+  missionConflict: string | null;
+  missionGoal: string | null;
+  missionInstructions: string[];
+  missionGrammarTopics: string[];
+  missionUsefulVocabulary: VocabularyItem[];
+  missionRequiredWords: string[];
+  missionExampleAnswers: ResponseExample[];
+  missionCompletionCriteria: string[];
+  missionExtraChallenge: string | null;
+  missionDifficulty: 'easy' | 'medium' | 'hard' | null;
+  missionLevel: CefrLevel | null;
+  missionFormat: string | null;
+  missionContext: string | null;
+  missionGeneratedAt: string;
+}
+
 export interface EnglishReviewSaved {
   id: string;
   originalText: string;
@@ -66,7 +88,7 @@ export interface EnglishReviewSaved {
   objective: string | null;
   createdAt: string;
   entryDate: string | null;
-  missionSnapshot: EnglishDailyTheme | null;
+  missionSnapshot: MissionSnapshot | null;
   version2Text: string | null;
   version2Comparison: RewriteComparisonResult | null;
   version2ImprovementScore: number | null;

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { EnglishReviewSaved, EnglishDailyTheme, RewriteComparisonResult, MainMistake, VocabularyItem } from '../types';
+import { EnglishReviewSaved, MissionSnapshot, RewriteComparisonResult, MainMistake, VocabularyItem } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 
 type LoadState = 'loading' | 'done' | 'error';
@@ -68,45 +68,30 @@ function ReviewCard({ review, onOpen }: { review: EnglishReviewSaved; onOpen: ()
     review.score >= 75 ? 'text-green-400' :
     review.score >= 50 ? 'text-amber-400' : 'text-red-400';
 
-  const dateLabel = formatDate(review.createdAt);
+  const missionTitle = review.missionSnapshot?.missionTitle ?? review.category ?? null;
+  const hasV2 = !!review.version2Text;
 
   return (
-    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-0.5">
-          <p className="text-xs text-slate-400">{dateLabel}</p>
-          {review.category && (
-            <p className="text-sm font-medium text-slate-200 line-clamp-1">{review.category}</p>
-          )}
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="px-2 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">
-            {review.level}
-          </span>
-          <span className={`text-lg font-bold tabular-nums ${scoreColor}`}>{review.score}</span>
-        </div>
-      </div>
-
-      <div className="space-y-1 text-xs text-slate-400">
-        {review.difficulty && (
-          <p><span className="text-slate-500">Dificuldade:</span> <span className="capitalize">{review.difficulty}</span></p>
-        )}
-        {review.objective && (
-          <p><span className="text-slate-500">Objetivo:</span> {review.objective}</p>
-        )}
-      </div>
-
-      {review.summary && (
-        <p className="text-xs text-slate-400 leading-relaxed line-clamp-2">{review.summary}</p>
+    <button
+      onClick={onOpen}
+      className="w-full text-left bg-slate-800 rounded-xl p-4 space-y-2 hover:bg-slate-750 active:bg-slate-700 transition-colors"
+    >
+      <p className="text-xs text-slate-500">{formatDate(review.createdAt)}</p>
+      {missionTitle && (
+        <p className="text-sm font-semibold text-slate-100 leading-snug">{missionTitle}</p>
       )}
-
-      <button
-        onClick={onOpen}
-        className="w-full py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs text-slate-200 font-medium transition-colors"
-      >
-        Ver detalhes
-      </button>
-    </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`text-sm font-bold tabular-nums ${scoreColor}`}>Nota {review.score}</span>
+        <span className="text-slate-600">·</span>
+        <span className="px-1.5 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">{review.level}</span>
+        {hasV2 && (
+          <>
+            <span className="text-slate-600">·</span>
+            <span className="text-xs text-green-400">Versão 2 concluída</span>
+          </>
+        )}
+      </div>
+    </button>
   );
 }
 
@@ -117,12 +102,14 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
     review.score >= 75 ? 'text-green-400' :
     review.score >= 50 ? 'text-amber-400' : 'text-red-400';
 
+  const headerTitle = review.missionSnapshot?.missionTitle ?? review.category ?? 'Revisão';
+
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
       <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10">
         <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-100 truncate">{review.category ?? 'Revisão'}</p>
+          <p className="text-sm font-medium text-slate-100 truncate">{headerTitle}</p>
           <p className="text-xs text-slate-400">{formatDate(review.createdAt)}</p>
         </div>
         <span className="px-2 py-1 rounded bg-blue-900 text-blue-300 text-xs font-bold">{review.level}</span>
@@ -161,9 +148,7 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
         )}
 
         {/* Mission snapshot */}
-        {review.missionSnapshot && (
-          <MissionCard mission={review.missionSnapshot} />
-        )}
+        <MissionSnapshotSection mission={review.missionSnapshot} />
 
         {/* Original text */}
         <div className="bg-slate-800 rounded-xl p-4 space-y-2">
@@ -228,6 +213,219 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
   );
 }
 
+// ── Mission snapshot section ──────────────────────────────────────────────────
+
+function MissionSnapshotSection({ mission }: { mission: MissionSnapshot | null }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="bg-slate-800 rounded-xl overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-700/50 transition-colors"
+      >
+        <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Missão realizada</span>
+        <span className="text-xs text-slate-500">{open ? 'Ocultar missão realizada' : 'Ver missão realizada'}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-700 px-4 pb-4 pt-3 space-y-4">
+          {!mission ? (
+            <p className="text-xs text-slate-500 italic">A missão desta prática não foi registrada.</p>
+          ) : (
+            <MissionContent mission={mission} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MissionContent({ mission }: { mission: MissionSnapshot }) {
+  const hasSplit = !!(mission.missionSetup && mission.missionTask);
+
+  return (
+    <>
+      {/* Title + badges */}
+      <div className="space-y-2">
+        <p className="text-slate-100 font-bold text-sm leading-snug">{mission.missionTitle}</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          {mission.missionLevel && (
+            <span className="px-2 py-0.5 rounded bg-blue-900 text-blue-300 text-xs font-bold">{mission.missionLevel}</span>
+          )}
+          {mission.missionDifficulty && <DiffBadge difficulty={mission.missionDifficulty} />}
+          {mission.missionFormat && (
+            <span className="px-2 py-0.5 rounded bg-indigo-900/50 border border-indigo-700/40 text-indigo-300 text-xs font-medium capitalize">
+              {mission.missionFormat.replace(/_/g, ' ')}
+            </span>
+          )}
+          {mission.missionContext && (
+            <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-400 text-xs">
+              {mission.missionContext.replace(/_/g, ' ')}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Mission text card */}
+      <div className="rounded-xl overflow-hidden border border-slate-600/50">
+        {mission.missionConflict && (
+          <div className="bg-amber-900/30 border-b border-amber-800/30 px-4 py-2 flex items-center gap-2">
+            <span className="text-amber-400 text-xs">⚡</span>
+            <span className="text-xs text-amber-300 font-medium">{mission.missionConflict}</span>
+          </div>
+        )}
+        <div className="bg-slate-700/40 px-4 py-3 space-y-2">
+          {hasSplit ? (
+            <>
+              <p className="text-sm text-slate-100 leading-relaxed font-medium">{mission.missionSetup}</p>
+              <p className="text-sm text-slate-300 leading-relaxed">{mission.missionTask}</p>
+            </>
+          ) : (
+            mission.missionPromptPt && (
+              <p className="text-sm text-slate-200 leading-relaxed">{mission.missionPromptPt}</p>
+            )
+          )}
+          {mission.missionGoal && (
+            <div className="pt-1">
+              <span className="text-xs text-slate-500">Objetivo: </span>
+              <span className="text-xs text-slate-400">{mission.missionGoal}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* English command */}
+      {mission.missionPromptEn && (
+        <p className="text-sm text-blue-300 font-medium italic">{mission.missionPromptEn}</p>
+      )}
+
+      {/* How to */}
+      {mission.missionInstructions.length > 0 && (
+        <MissionSection title="Como fazer">
+          <ol className="space-y-1 list-decimal list-inside">
+            {mission.missionInstructions.map((item, i) => (
+              <li key={i} className="text-xs text-slate-300 leading-relaxed">{item}</li>
+            ))}
+          </ol>
+        </MissionSection>
+      )}
+
+      {/* Grammar */}
+      {mission.missionGrammarTopics.length > 0 && (
+        <MissionSection title="Gramática">
+          <div className="flex flex-wrap gap-1.5">
+            {mission.missionGrammarTopics.map((g, i) => (
+              <span key={i} className="px-2 py-0.5 bg-purple-900/40 border border-purple-800/40 rounded text-xs text-purple-300">{g}</span>
+            ))}
+          </div>
+        </MissionSection>
+      )}
+
+      {/* Useful vocabulary */}
+      {mission.missionUsefulVocabulary.length > 0 && (
+        <MissionSection title="Vocabulário útil">
+          <div className="space-y-1.5">
+            {mission.missionUsefulVocabulary.map((v, i) => (
+              <div key={i}>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-blue-400 font-semibold text-xs">{v.word}</span>
+                  <span className="text-slate-500 text-xs">{v.meaningPtBr}</span>
+                </div>
+                {v.example && <p className="text-slate-500 text-xs italic">"{v.example}"</p>}
+              </div>
+            ))}
+          </div>
+        </MissionSection>
+      )}
+
+      {/* Required words */}
+      {mission.missionRequiredWords.length > 0 && (
+        <MissionSection title="Palavras obrigatórias">
+          <div className="flex flex-wrap gap-1.5">
+            {mission.missionRequiredWords.map((w, i) => (
+              <span key={i} className="px-2 py-0.5 bg-amber-900/40 border border-amber-800/40 rounded text-xs text-amber-300 font-mono">{w}</span>
+            ))}
+          </div>
+        </MissionSection>
+      )}
+
+      {/* Example answers */}
+      {mission.missionExampleAnswers.length > 0 && (
+        <MissionSection title="Exemplos de resposta">
+          <div className="space-y-2">
+            {mission.missionExampleAnswers.map((ex, i) => (
+              <div key={i} className="rounded-lg bg-slate-700/30 border border-slate-600/30 px-3 py-2 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-1.5 py-0.5 rounded bg-blue-900/60 text-blue-300 text-xs font-bold">{ex.level}</span>
+                  {ex.note && <span className="text-xs text-slate-500 italic">{ex.note}</span>}
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{ex.text}</p>
+              </div>
+            ))}
+          </div>
+        </MissionSection>
+      )}
+
+      {/* Completion criteria */}
+      {mission.missionCompletionCriteria.length > 0 && (
+        <MissionSection title="Missão cumprida quando...">
+          <ul className="space-y-1">
+            {mission.missionCompletionCriteria.map((c, i) => (
+              <li key={i} className="flex gap-2 text-xs text-slate-300">
+                <span className="text-green-500 shrink-0">✓</span>
+                <span>{c}</span>
+              </li>
+            ))}
+          </ul>
+        </MissionSection>
+      )}
+
+      {/* Extra challenge */}
+      {mission.missionExtraChallenge && (
+        <MissionSection title="Desafio extra">
+          <p className="text-xs text-amber-400 leading-relaxed">{mission.missionExtraChallenge}</p>
+        </MissionSection>
+      )}
+    </>
+  );
+}
+
+// ── V2 comparison card ────────────────────────────────────────────────────────
+
+function V2ComparisonCard({ comparison }: { comparison: RewriteComparisonResult }) {
+  const scoreColor =
+    comparison.improvementScore >= 75 ? 'text-green-400' :
+    comparison.improvementScore >= 50 ? 'text-amber-400' : 'text-red-400';
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
+      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado da Versão 2</p>
+      <div className="flex items-center gap-4">
+        <div>
+          <span className={`text-4xl font-bold tabular-nums ${scoreColor}`}>{comparison.improvementScore}</span>
+          <span className="text-slate-500 text-lg">/100</span>
+        </div>
+        <div className="flex gap-3 ml-auto">
+          <div className="text-center">
+            <p className="text-xl font-bold text-green-400 tabular-nums">{comparison.fixedMistakesCount}</p>
+            <p className="text-xs text-slate-500">corrigidos</p>
+          </div>
+          <div className="text-center">
+            <p className="text-xl font-bold text-amber-400 tabular-nums">{comparison.remainingMistakesCount}</p>
+            <p className="text-xs text-slate-500">restantes</p>
+          </div>
+        </div>
+      </div>
+      {comparison.overallFeedback && (
+        <p className="text-sm text-slate-300 leading-relaxed border-t border-slate-700 pt-3">
+          {comparison.overallFeedback}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function ScoreBar({ label, value }: { label: string; value: number }) {
@@ -240,6 +438,29 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
       </div>
       <span className="text-xs text-slate-300 w-7 text-right tabular-nums">{value}</span>
     </div>
+  );
+}
+
+function MissionSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+function DiffBadge({ difficulty }: { difficulty: 'easy' | 'medium' | 'hard' }) {
+  const cls: Record<string, string> = {
+    easy: 'bg-green-900/40 text-green-400',
+    medium: 'bg-amber-900/40 text-amber-400',
+    hard: 'bg-red-900/40 text-red-400',
+  };
+  const labels: Record<string, string> = { easy: 'Fácil', medium: 'Médio', hard: 'Difícil' };
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls[difficulty] ?? 'bg-slate-700 text-slate-400'}`}>
+      {labels[difficulty] ?? difficulty}
+    </span>
   );
 }
 
@@ -286,65 +507,12 @@ function VocabularyCard({ items }: { items: VocabularyItem[] }) {
   );
 }
 
-// ── Mission card ──────────────────────────────────────────────────────────────
-
-function MissionCard({ mission }: { mission: EnglishDailyTheme }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-4 space-y-2">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Missão</p>
-      <p className="text-slate-200 text-sm font-semibold">{mission.title}</p>
-      {mission.mission && (
-        <p className="text-slate-400 text-xs leading-relaxed">{mission.mission}</p>
-      )}
-      {mission.objective && (
-        <p className="text-slate-500 text-xs italic">Objetivo: {mission.objective}</p>
-      )}
-    </div>
-  );
-}
-
-// ── V2 comparison card ────────────────────────────────────────────────────────
-
-function V2ComparisonCard({ comparison }: { comparison: RewriteComparisonResult }) {
-  const scoreColor =
-    comparison.improvementScore >= 75 ? 'text-green-400' :
-    comparison.improvementScore >= 50 ? 'text-amber-400' : 'text-red-400';
-
-  return (
-    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado da Versão 2</p>
-      <div className="flex items-center gap-4">
-        <div>
-          <span className={`text-4xl font-bold tabular-nums ${scoreColor}`}>{comparison.improvementScore}</span>
-          <span className="text-slate-500 text-lg">/100</span>
-        </div>
-        <div className="flex gap-3 ml-auto">
-          <div className="text-center">
-            <p className="text-xl font-bold text-green-400 tabular-nums">{comparison.fixedMistakesCount}</p>
-            <p className="text-xs text-slate-500">corrigidos</p>
-          </div>
-          <div className="text-center">
-            <p className="text-xl font-bold text-amber-400 tabular-nums">{comparison.remainingMistakesCount}</p>
-            <p className="text-xs text-slate-500">restantes</p>
-          </div>
-        </div>
-      </div>
-      {comparison.overallFeedback && (
-        <p className="text-sm text-slate-300 leading-relaxed border-t border-slate-700 pt-3">
-          {comparison.overallFeedback}
-        </p>
-      )}
-    </div>
-  );
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleDateString('pt-BR', {
       day: '2-digit', month: 'long', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
     });
   } catch {
     return iso;
