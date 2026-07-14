@@ -76,7 +76,6 @@ const MOCK_RESULT = {
 function makeStartResponse(overrides = {}) {
   return {
     assessmentId: 'aaaa-1111',
-    attemptId:    'bbbb-2222',
     token:        'azure-token-secret',
     region:       'eastus',
     referenceText: 'hello world',
@@ -87,7 +86,7 @@ function makeStartResponse(overrides = {}) {
 function makeFlowRefs() {
   return {
     mountedRef:           { current: true },
-    attemptIdRef:         { current: null as string | null },
+    idempotencyKeyRef:    { current: null as string | null },
     assessmentIdRef:      { current: null as string | null },
     cancelRecognitionRef: { current: null as (() => void) | null },
     flowLockRef:          { current: true }, // locked by handleConfirm before calling flow
@@ -339,7 +338,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'attempt-1', audioBlob: BLOB, audioDurationMs: 3000 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'attempt-1', audioBlob: BLOB, audioDurationMs: 3000 },
       refs,
       vi.fn(),
     );
@@ -358,7 +357,7 @@ describe('runAnalysisFlow', () => {
     const phases: string[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => phases.push(s.phase),
     );
@@ -370,7 +369,7 @@ describe('runAnalysisFlow', () => {
     const phases: AnalysisState[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: null, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: null, audioDurationMs: 0 },
       refs,
       (s) => phases.push(s),
     );
@@ -386,7 +385,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: null, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: null, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -401,7 +400,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: null, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: null, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -421,7 +420,7 @@ describe('runAnalysisFlow', () => {
     const phases: string[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => phases.push(s.phase),
     );
@@ -430,7 +429,7 @@ describe('runAnalysisFlow', () => {
     expect(phases.indexOf('reserving')).toBeGreaterThan(phases.indexOf('preparing_audio'));
   });
 
-  it('22. calls /start with attemptId and textVersionId', async () => {
+  it('22. calls /start with idempotencyKey and textVersionId', async () => {
     mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
     mockCreateSession.mockReturnValue(makeSession());
     const mockFetch = makeFetch([
@@ -441,7 +440,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'attempt-123', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'idem-123', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -450,7 +449,7 @@ describe('runAnalysisFlow', () => {
     expect(startCall).toBeDefined();
     const body = JSON.parse(startCall![1].body);
     expect(body.textVersionId).toBe(REVIEW_ID);
-    expect(body.attemptId).toBe('attempt-123');
+    expect(body.idempotencyKey).toBe('idem-123');
   });
 
   it('23. sets phase analyzing after /start succeeds', async () => {
@@ -464,7 +463,7 @@ describe('runAnalysisFlow', () => {
     const phases: string[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => phases.push(s.phase),
     );
@@ -482,7 +481,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -501,7 +500,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -520,7 +519,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -541,7 +540,7 @@ describe('runAnalysisFlow', () => {
     const phases: string[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => phases.push(s.phase),
     );
@@ -560,7 +559,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -583,7 +582,7 @@ describe('runAnalysisFlow', () => {
     const states: AnalysisState[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => states.push(s),
     );
@@ -607,7 +606,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -632,7 +631,7 @@ describe('runAnalysisFlow', () => {
     const states: AnalysisState[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       (s) => states.push(s),
     );
@@ -655,7 +654,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -679,7 +678,7 @@ describe('runAnalysisFlow', () => {
     refs.mountedRef.current = false; // unmounted before flow starts
 
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       onPhaseChange,
     );
@@ -699,7 +698,7 @@ describe('runAnalysisFlow', () => {
     expect(refs.flowLockRef.current).toBe(true);
 
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -714,7 +713,7 @@ describe('runAnalysisFlow', () => {
     expect(refs.flowLockRef.current).toBe(true);
 
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: null, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: null, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -735,7 +734,7 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
@@ -743,7 +742,7 @@ describe('runAnalysisFlow', () => {
     expect(refs.flowLockRef.current).toBe(false);
   });
 
-  it('37. clears assessmentIdRef and attemptIdRef on success', async () => {
+  it('37. clears assessmentIdRef and idempotencyKeyRef on success', async () => {
     mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
     mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
@@ -753,12 +752,12 @@ describe('runAnalysisFlow', () => {
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'attempt-final', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, idempotencyKey: 'idem-final', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
 
     expect(refs.assessmentIdRef.current).toBeNull();
-    expect(refs.attemptIdRef.current).toBeNull();
+    expect(refs.idempotencyKeyRef.current).toBeNull();
   });
 });

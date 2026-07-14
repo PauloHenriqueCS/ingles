@@ -24,11 +24,11 @@ export interface AnalysisState {
 }
 
 export interface FlowRefs {
-  mountedRef:            { current: boolean };
-  attemptIdRef:          { current: string | null };
-  assessmentIdRef:       { current: string | null };
-  cancelRecognitionRef:  { current: (() => void) | null };
-  flowLockRef:           { current: boolean };
+  mountedRef:           { current: boolean };
+  idempotencyKeyRef:    { current: string | null };
+  assessmentIdRef:      { current: string | null };
+  cancelRecognitionRef: { current: (() => void) | null };
+  flowLockRef:          { current: boolean };
 }
 
 const PHASE_MESSAGES: Partial<Record<AnalysisPhase, string>> = {
@@ -41,15 +41,14 @@ const PHASE_MESSAGES: Partial<Record<AnalysisPhase, string>> = {
 export { PHASE_MESSAGES };
 
 async function reportFail(refs: FlowRefs, code: PronunciationFailCode): Promise<void> {
-  const aid  = refs.assessmentIdRef.current;
-  const atid = refs.attemptIdRef.current;
-  if (!aid || !atid) return;
+  const aid = refs.assessmentIdRef.current;
+  if (!aid) return;
   try {
     const headers = await getAuthHeader();
     await fetch('/api/pronunciation/fail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify({ assessmentId: aid, attemptId: atid, code }),
+      body: JSON.stringify({ assessmentId: aid, code }),
     });
   } catch {
     // best effort
@@ -58,16 +57,16 @@ async function reportFail(refs: FlowRefs, code: PronunciationFailCode): Promise<
 
 export async function runAnalysisFlow(
   input: {
-    reviewId: string | null;
-    attemptId: string;
-    audioBlob: Blob | null;
-    audioDurationMs: number;
+    reviewId:         string | null;
+    idempotencyKey:   string;
+    audioBlob:        Blob | null;
+    audioDurationMs:  number;
   },
   refs: FlowRefs,
   onPhaseChange: (state: AnalysisState) => void,
 ): Promise<void> {
-  refs.attemptIdRef.current   = input.attemptId;
-  refs.assessmentIdRef.current = null;
+  refs.idempotencyKeyRef.current = input.idempotencyKey;
+  refs.assessmentIdRef.current   = null;
 
   const setPhase = (state: AnalysisState) => {
     if (refs.mountedRef.current) onPhaseChange(state);
@@ -96,7 +95,6 @@ export async function runAnalysisFlow(
   setPhase({ phase: 'reserving' });
   let startBody: {
     assessmentId: string;
-    attemptId: string;
     token: string;
     region: string;
     referenceText: string;
@@ -106,12 +104,12 @@ export async function runAnalysisFlow(
     const resp = await fetch('/api/pronunciation/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify({ textVersionId: input.reviewId, attemptId: input.attemptId }),
+      body: JSON.stringify({ textVersionId: input.reviewId, idempotencyKey: input.idempotencyKey }),
     });
     const json = await resp.json();
     if (!resp.ok) {
       const msg =
-        json.code === 'ASSESSMENT_IN_PROGRESS'
+        json.code === 'ASSESSMENT_IN_PROGRESS' || json.code === 'ASSESSMENT_PREPARING'
           ? 'Outra análise está em andamento. Aguarde ou tente em outra aba.'
           : (json.message as string | undefined) ?? 'Não foi possível iniciar a análise. Tente novamente.';
       setPhase({ phase: 'failed', errorMessage: msg });
@@ -171,7 +169,6 @@ export async function runAnalysisFlow(
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({
         assessmentId: startBody.assessmentId,
-        attemptId:    input.attemptId,
         result,
       }),
     });
@@ -189,9 +186,9 @@ export async function runAnalysisFlow(
   }
 
   // Clear IDs — successful completion
-  refs.assessmentIdRef.current = null;
-  refs.attemptIdRef.current    = null;
-  refs.flowLockRef.current     = false;
+  refs.assessmentIdRef.current   = null;
+  refs.idempotencyKeyRef.current = null;
+  refs.flowLockRef.current       = false;
 
   setPhase({ phase: 'completed', result });
 }
