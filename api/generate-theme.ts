@@ -340,7 +340,7 @@ function buildReviewUserMessage(
   return lines.join('\n');
 }
 
-function normalizeReviewTheme(
+export function normalizeReviewTheme(
   parsed: any,
   reviewGroupId: string,
   expectedWords: string[]
@@ -399,7 +399,7 @@ function normalizeReviewTheme(
   };
 }
 
-function validateReviewTheme(
+export function validateReviewTheme(
   theme: Record<string, unknown>,
   expectedWords: string[],
   reviewGroupId: string
@@ -561,7 +561,7 @@ function buildUserMessage(
 
 // ── Semantic deduplication ────────────────────────────────────────────────────
 
-function jaccardSimilarity(a: string, b: string): number {
+export function jaccardSimilarity(a: string, b: string): number {
   const stopwords = new Set([
     'de', 'a', 'o', 'que', 'e', 'do', 'da', 'em', 'um', 'para', 'com',
     'os', 'no', 'se', 'na', 'por', 'mais', 'as', 'dos', 'como', 'sua',
@@ -585,7 +585,7 @@ function jaccardSimilarity(a: string, b: string): number {
   return union.size === 0 ? 0 : intersection.size / union.size;
 }
 
-function isTooSimilar(
+export function isTooSimilar(
   candidate: Record<string, unknown>,
   recentThemes: RecentThemeRow[],
   threshold = 0.32
@@ -627,7 +627,7 @@ function isTooSimilar(
 const VALID_LEVELS = new Set(['A1', 'A2', 'B1', 'B2', 'C1', 'C2']);
 const VALID_DIFFS = new Set(['easy', 'medium', 'hard']);
 
-function normalizeTheme(parsed: any): Record<string, unknown> {
+export function normalizeTheme(parsed: any): Record<string, unknown> {
   const format = String(parsed.format || parsed.activityType || 'história');
   const conflict = String(parsed.conflict || '');
   const objective = String(parsed.objective || '');
@@ -682,7 +682,7 @@ function normalizeTheme(parsed: any): Record<string, unknown> {
   };
 }
 
-function parseRawContent(raw: string): any | null {
+export function parseRawContent(raw: string): any | null {
   try {
     return JSON.parse(raw);
   } catch {

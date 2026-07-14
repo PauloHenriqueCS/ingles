@@ -169,7 +169,7 @@ const VALID_EVAL_STATUSES = new Set<string>([
   'forced_usage',
 ]);
 
-function parseJsonSafely(raw: string): Record<string, unknown> {
+export function parseJsonSafely(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
@@ -179,7 +179,7 @@ function parseJsonSafely(raw: string): Record<string, unknown> {
   }
 }
 
-function validateEvaluations(
+export function validateEvaluations(
   raw: unknown,
   expectedWords: string[],
 ): RequiredWordEvaluation[] {
@@ -219,7 +219,7 @@ function validateEvaluations(
   return result;
 }
 
-function calculateOverallResult(evals: RequiredWordEvaluation[]): 'passed' | 'failed' {
+export function calculateOverallResult(evals: RequiredWordEvaluation[]): 'passed' | 'failed' {
   return evals.every((e) => e.status === 'correct') ? 'passed' : 'failed';
 }
 
