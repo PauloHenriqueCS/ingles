@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
 import { requireAuth } from './_auth';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { applyRateLimit } from './_rateLimit';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -674,14 +676,17 @@ function parseRawContent(raw: string): any | null {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.THEME)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId, supabase } = auth;
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
+  if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de geração não está configurado.');
+
+  if (!await applyRateLimit(res, userId, 'generate-theme')) return;
 
   const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
 
@@ -712,7 +717,7 @@ export default async function handler(req: any, res: any) {
     console.error('Failed to fetch recent themes:', e);
   }
 
-  const openai = new OpenAI({ apiKey });
+  const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.LONG, maxRetries: 0 });
 
   // ── REVIEW MODE ──────────────────────────────────────────────────────────────
   if (mode === 'review' && reviewGroup) {
@@ -751,13 +756,18 @@ export default async function handler(req: any, res: any) {
           ],
         });
         raw = completion.choices[0]?.message?.content ?? '';
-      } catch (err: any) {
-        console.error(`Review attempt ${attempt} OpenAI error:`, err);
+      } catch (err) {
+        const { code, status } = sanitizeProviderError(err);
+        if (code === 'AI_TIMEOUT') {
+          safeLog('generate-theme', 'timeout', status, { mode: 'review' });
+          return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+        }
+        if (code === 'AI_UNAVAILABLE') {
+          safeLog('generate-theme', 'provider_unavailable', status, { mode: 'review' });
+          return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
+        }
         if (attempt >= MAX_REVIEW_ATTEMPTS) {
-          return res.status(500).json({
-            error: 'Não foi possível gerar a atividade de revisão. Tente novamente.',
-            mode: 'review',
-          });
+          return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a atividade de revisão. Tente novamente.');
         }
         continue;
       }
@@ -781,11 +791,8 @@ export default async function handler(req: any, res: any) {
     }
 
     if (!reviewTheme) {
-      console.error(`Review falhou após ${MAX_REVIEW_ATTEMPTS} tentativas. Último erro: ${lastValidationError}`);
-      return res.status(500).json({
-        error: 'Não foi possível gerar uma atividade de revisão válida. Tente novamente.',
-        mode: 'review',
-      });
+      safeLog('generate-theme', 'review_validation_failed', 500);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma atividade de revisão válida. Tente novamente.');
     }
 
     let themeId: string | null = null;
@@ -850,10 +857,18 @@ export default async function handler(req: any, res: any) {
         ],
       });
       raw = completion.choices[0]?.message?.content ?? '';
-    } catch (err: any) {
-      console.error(`Attempt ${attempt} OpenAI error:`, err);
+    } catch (err) {
+      const { code, status } = sanitizeProviderError(err);
+      if (code === 'AI_TIMEOUT') {
+        safeLog('generate-theme', 'timeout', status);
+        return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+      }
+      if (code === 'AI_UNAVAILABLE') {
+        safeLog('generate-theme', 'provider_unavailable', status);
+        return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
+      }
       if (attempt >= MAX_ATTEMPTS) {
-        return res.status(500).json({ error: err?.message ?? 'Erro ao gerar missão.' });
+        return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão. Tente novamente.');
       }
       continue;
     }
@@ -877,9 +892,7 @@ export default async function handler(req: any, res: any) {
   }
 
   if (!theme) {
-    return res.status(500).json({
-      error: 'Não foi possível gerar uma missão diferente. Tente novamente.',
-    });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma missão diferente. Tente novamente.');
   }
 
   // Persist to database

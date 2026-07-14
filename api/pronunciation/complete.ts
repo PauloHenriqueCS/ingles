@@ -1,6 +1,7 @@
 import { requireAuth } from '../_auth';
 import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import type { PronunciationNormalizedResult } from '../../src/types';
+import { methodGuard } from '../_helpers';
 
 // Maximum request body size accepted (generous for words/phonemes JSON, still bounded)
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
@@ -25,7 +26,7 @@ function validateResult(r: unknown): r is PronunciationNormalizedResult {
 }
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;

@@ -1,6 +1,7 @@
 import { requireAuth } from '../_auth';
 import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
+import { methodGuard } from '../_helpers';
 
 type ReserveResult = {
   action?: 'created' | 'reactivated' | 'existing_processing' | 'restarted';
@@ -26,7 +27,7 @@ const AZURE_ERROR_MESSAGES: Record<string, string> = {
 };
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
 
   // ── 1. Authenticate ─────────────────────────────────────────────────────────
   const auth = await requireAuth(req, res);

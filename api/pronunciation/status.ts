@@ -1,8 +1,9 @@
 import { requireAuth } from '../_auth';
 import { isValidUuid, buildStatusResponse, rowToAssessment } from '../../src/lib/pronunciationAssessment';
+import { methodGuard, safeLog } from '../_helpers';
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'GET') return res.status(405).end();
+  if (!methodGuard(req, res, ['GET'])) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
@@ -24,11 +25,12 @@ export default async function handler(req: any, res: any) {
     .maybeSingle();
 
   if (reviewError) {
-    return res.status(500).json({ error: reviewError.message });
+    safeLog('pronunciation/status', 'db_error', 500);
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno.' });
   }
 
   if (!review) {
-    return res.status(404).json({ error: 'Revisão não encontrada.' });
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Revisão não encontrada.' });
   }
 
   const { data: row, error: assessmentError } = await supabase
@@ -39,7 +41,8 @@ export default async function handler(req: any, res: any) {
     .maybeSingle();
 
   if (assessmentError) {
-    return res.status(500).json({ error: assessmentError.message });
+    safeLog('pronunciation/status', 'db_error', 500);
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno.' });
   }
 
   const assessment = row ? rowToAssessment(row as Record<string, unknown>) : null;

@@ -1,6 +1,7 @@
 import { requireAuth } from '../_auth';
 import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import type { PronunciationFailCode } from '../../src/types';
+import { methodGuard } from '../_helpers';
 
 const ALLOWED_CODES = new Set<PronunciationFailCode>([
   'AUDIO_DECODE_FAILED',
@@ -14,7 +15,7 @@ const ALLOWED_CODES = new Set<PronunciationFailCode>([
 ]);
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;

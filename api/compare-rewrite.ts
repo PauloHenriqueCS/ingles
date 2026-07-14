@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
 import { requireAuth } from './_auth';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { applyRateLimit } from './_rateLimit';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -101,22 +103,33 @@ function buildUserMessage(
 }
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.COMPARE)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
+  const { userId } = auth;
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
+  if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de comparação não está configurado.');
 
   const { originalText, correctedText, rewriteText, mainMistakes } = req.body ?? {};
 
   if (!originalText?.trim() || !correctedText?.trim() || !rewriteText?.trim()) {
-    return res.status(400).json({ error: 'originalText, correctedText e rewriteText são obrigatórios.' });
+    return jsonError(res, 400, 'INVALID_REQUEST', 'originalText, correctedText e rewriteText são obrigatórios.');
+  }
+  if (
+    typeof originalText !== 'string' || originalText.length > 15_000 ||
+    typeof correctedText !== 'string' || correctedText.length > 15_000 ||
+    typeof rewriteText !== 'string' || rewriteText.length > 15_000
+  ) {
+    return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'O conteúdo enviado é maior que o permitido.');
   }
 
+  if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
+
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
 
     const completion = await openai.chat.completions.create({
       model: AI_MODEL,
@@ -158,8 +171,13 @@ export default async function handler(req: any, res: any) {
     };
 
     return res.json({ result });
-  } catch (err: any) {
-    console.error('compare-rewrite error:', err);
-    return res.status(500).json({ error: err?.message ?? 'Erro interno ao comparar.' });
+  } catch (err) {
+    const { code, status } = sanitizeProviderError(err);
+    if (code === 'AI_TIMEOUT') {
+      safeLog('compare-rewrite', 'timeout', status);
+      return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+    }
+    safeLog('compare-rewrite', 'provider_error', status);
+    return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
   }
 }

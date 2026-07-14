@@ -1,6 +1,8 @@
 import { requireAuth } from '../_auth';
 import { REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS } from '../../src/lib/tutorPreferences';
 import type { AIPreferences } from '../../src/types';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog } from '../_helpers';
+import { applyRateLimit } from '../_rateLimit';
 
 const TTS_URL = 'https://api.openai.com/v1/audio/speech';
 
@@ -12,10 +14,12 @@ const PREVIEW_SPEED: Record<AIPreferences['speechPace'], number> = {
 };
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.PREVIEW)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
+  const { userId } = auth;
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!openaiKey) {
@@ -25,6 +29,8 @@ export default async function handler(req: any, res: any) {
   const body = req.body ?? {};
   const voiceId  = typeof body.voice === 'string' ? body.voice.trim() : '';
   const pace     = typeof body.pace  === 'string' ? body.pace  as AIPreferences['speechPace'] : 'normal';
+
+  if (!await applyRateLimit(res, userId, 'conversation-preview')) return;
 
   // Validate voice
   const voiceEntry = REALTIME_VOICES.find((v) => v.id === voiceId);
@@ -40,6 +46,8 @@ export default async function handler(req: any, res: any) {
   const input = `${VOICE_PREVIEW_PHRASE} I'll be speaking at a ${paceLabel.toLowerCase()} pace during our practice.`;
 
   let ttsRes: Response;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
   try {
     ttsRes = await fetch(TTS_URL, {
       method: 'POST',
@@ -54,15 +62,23 @@ export default async function handler(req: any, res: any) {
         speed,
         response_format: 'mp3',
       }),
+      signal: ctrl.signal,
     });
   } catch (err) {
-    console.error('[conversation/preview] network error:', (err as Error).message);
+    clearTimeout(timer);
+    const isAbort = err instanceof Error && err.name === 'AbortError';
+    if (isAbort) {
+      safeLog('conversation/preview', 'timeout', 504);
+      return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
+    }
+    safeLog('conversation/preview', 'network_error', 502);
     return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!ttsRes.ok) {
-    const txt = await ttsRes.text().catch(() => '');
-    console.error('[conversation/preview] TTS error', ttsRes.status, txt.slice(0, 100));
+    safeLog('conversation/preview', 'tts_error', ttsRes.status);
     return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
   }
 

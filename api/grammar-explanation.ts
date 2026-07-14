@@ -1,8 +1,15 @@
 import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
 import { requireAuth } from './_auth';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { applyRateLimit } from './_rateLimit';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+// Only letters, digits, spaces, hyphens, and apostrophes — enough for any grammar name.
+// Prevents injection through the cache key.
+const GRAMMAR_NAME_RE = /^[\p{L}\p{N}\s'\-,.()]+$/u;
+const GRAMMAR_NAME_MAX = 100;
 
 function buildPrompt(grammarName: string): string {
   return `Explique o tópico gramatical "${grammarName}" para brasileiros adultos aprendendo inglês.
@@ -55,27 +62,39 @@ function parseJson(raw: string): any | null {
   }
 }
 
+function serviceRoleClient() {
+  const url = process.env.VITE_SUPABASE_URL ?? '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+}
+
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.GRAMMAR)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
+  const { userId } = auth;
 
   const { grammarName } = req.body ?? {};
   if (!grammarName || typeof grammarName !== 'string') {
-    return res.status(400).json({ error: 'grammarName is required' });
+    return jsonError(res, 400, 'INVALID_REQUEST', 'grammarName é obrigatório.');
   }
 
   const trimmed = grammarName.trim();
 
-  // Use anon client for grammar_explanations (shared public cache)
-  const supabase = createClient(
-    process.env.VITE_SUPABASE_URL ?? '',
-    process.env.VITE_SUPABASE_ANON_KEY ?? '',
-    { global: { headers: { Authorization: req.headers['authorization'] ?? '' } } }
-  );
+  if (trimmed.length === 0 || trimmed.length > GRAMMAR_NAME_MAX) {
+    return jsonError(res, 400, 'INVALID_REQUEST', `O nome do tópico deve ter entre 1 e ${GRAMMAR_NAME_MAX} caracteres.`);
+  }
+  if (!GRAMMAR_NAME_RE.test(trimmed)) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'Nome do tópico contém caracteres inválidos.');
+  }
 
-  // Check cache
+  if (!await applyRateLimit(res, userId, 'grammar-explanation')) return;
+
+  // ── Cache read (user-authed client — RLS ge_select allows authenticated reads) ──
+  const { supabase } = auth;
   try {
     const { data: cached } = await supabase
       .from('grammar_explanations')
@@ -86,16 +105,16 @@ export default async function handler(req: any, res: any) {
     if (cached?.content) {
       return res.json({ content: cached.content, cached: true });
     }
-  } catch (e) {
-    console.error('Cache lookup failed:', e);
+  } catch {
+    // Cache miss or error — proceed to generate
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY não configurada.' });
+  if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de explicação não está configurado.');
 
   let content: any;
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
     const completion = await openai.chat.completions.create({
       model: AI_MODEL,
       temperature: 0.7,
@@ -110,22 +129,28 @@ export default async function handler(req: any, res: any) {
     const raw = completion.choices[0]?.message?.content ?? '';
     content = parseJson(raw);
     if (!content) {
-      return res.status(500).json({ error: 'Resposta inválida da IA.' });
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a explicação. Tente novamente.');
     }
-  } catch (err: any) {
-    console.error('OpenAI error:', err);
-    return res.status(500).json({ error: err?.message ?? 'Erro ao gerar explicação.' });
+  } catch (err) {
+    const { code, status } = sanitizeProviderError(err);
+    if (code === 'AI_TIMEOUT') {
+      safeLog('grammar-explanation', 'timeout', status);
+      return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+    }
+    safeLog('grammar-explanation', 'provider_error', status);
+    return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
   }
 
-  // Persist to shared cache
-  try {
-    await supabase
-      .from('grammar_explanations')
-      .insert({ name: trimmed, content })
-      .select()
-      .single();
-  } catch (e) {
-    console.error('Failed to cache grammar explanation:', e);
+  // ── Cache write — service role only; users cannot write directly ──────────
+  const srClient = serviceRoleClient();
+  if (srClient) {
+    try {
+      await srClient
+        .from('grammar_explanations')
+        .insert({ name: trimmed, content });
+    } catch {
+      // Cache write failed — not fatal; response is still returned
+    }
   }
 
   return res.json({ content, cached: false });

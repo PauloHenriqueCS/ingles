@@ -1,5 +1,6 @@
 import { requireAuth } from '../_auth';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
+import { methodGuard } from '../_helpers';
 
 const ERROR_MESSAGES: Record<string, string> = {
   AZURE_SPEECH_NOT_CONFIGURED: 'O serviço de pronúncia ainda não está configurado.',
@@ -18,7 +19,7 @@ const ERROR_STATUS: Record<string, number> = {
 };
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'GET') return res.status(405).end();
+  if (!methodGuard(req, res, ['GET'])) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;

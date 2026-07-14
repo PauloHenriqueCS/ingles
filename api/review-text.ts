@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
 import { requireAuth } from './_auth';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { applyRateLimit } from './_rateLimit';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -224,7 +226,8 @@ function calculateOverallResult(evals: RequiredWordEvaluation[]): 'passed' | 'fa
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.REVIEW)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
@@ -232,9 +235,7 @@ export default async function handler(req: any, res: any) {
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({
-      error: 'OPENAI_API_KEY não configurada. Adicione a variável no Vercel → Settings → Environment Variables.',
-    });
+    return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de revisão não está configurado.');
   }
 
   const {
@@ -250,8 +251,13 @@ export default async function handler(req: any, res: any) {
   } = req.body ?? {};
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
-    return res.status(400).json({ error: 'originalText é obrigatório' });
+    return jsonError(res, 400, 'INVALID_REQUEST', 'originalText é obrigatório');
   }
+  if (originalText.length > 20_000) {
+    return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'O conteúdo enviado é maior que o permitido.');
+  }
+
+  if (!await applyRateLimit(res, userId, 'review-text')) return;
 
   const isReviewMode =
     mode === 'review' &&
@@ -336,7 +342,7 @@ export default async function handler(req: any, res: any) {
 
   // ── Call AI with retry (up to 3 attempts) ────────────────────────────────
 
-  const openai = new OpenAI({ apiKey });
+  const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.LONG, maxRetries: 0 });
   const messages = [
     { role: 'system' as const, content: systemPrompt },
     { role: 'user' as const, content: userMessage },
@@ -359,15 +365,24 @@ export default async function handler(req: any, res: any) {
       }
       break;
     } catch (err) {
-      lastError = err instanceof Error ? err.message : 'Erro de validação';
+      const { code, status } = sanitizeProviderError(err);
+      if (code === 'AI_TIMEOUT') {
+        safeLog('review-text', 'timeout', status);
+        return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+      }
+      if (code === 'AI_UNAVAILABLE') {
+        safeLog('review-text', 'provider_unavailable', status);
+        return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
+      }
+      lastError = 'Erro de validação';
       if (attempt === 2) {
-        return res.status(500).json({ error: `Validação falhou após 3 tentativas: ${lastError}` });
+        return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível processar a revisão. Tente novamente.');
       }
     }
   }
 
   if (!feedback) {
-    return res.status(500).json({ error: lastError });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível processar a revisão. Tente novamente.');
   }
 
   const reviewedAt = new Date().toISOString();

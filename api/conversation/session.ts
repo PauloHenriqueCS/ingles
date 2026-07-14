@@ -3,6 +3,8 @@ import { requireAuth } from '../_auth';
 import { buildTutorInstructions } from '../../src/lib/promptBuilder';
 import { BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import type { AIPreferences } from '../../src/types';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog } from '../_helpers';
+import { applyRateLimit } from '../_rateLimit';
 
 const REALTIME_MODEL =
   (process.env.OPENAI_REALTIME_MODEL ?? '').trim() || 'gpt-realtime-2.1-mini';
@@ -55,7 +57,8 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
 }
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== 'POST') return res.status(405).end();
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.CONVERSATION)) return;
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
@@ -87,6 +90,8 @@ export default async function handler(req: any, res: any) {
   } catch {
     // use defaults
   }
+
+  if (!await applyRateLimit(res, userId, 'conversation-session')) return;
 
   const instructions = buildTutorInstructions(prefs, cefrLevel);
   if (!instructions) {
@@ -128,6 +133,8 @@ export default async function handler(req: any, res: any) {
   let rawText: string;
   let httpStatus: number;
   let requestId: string | null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
   try {
     const openaiRes = await fetch(CLIENT_SECRETS_URL, {
       method: 'POST',
@@ -137,13 +144,21 @@ export default async function handler(req: any, res: any) {
         'OpenAI-Safety-Identifier': safetyIdentifier,
       },
       body: JSON.stringify(sessionConfig),
+      signal: ctrl.signal,
     });
     httpStatus = openaiRes.status;
     requestId  = openaiRes.headers.get('x-request-id');
     rawText    = await openaiRes.text();
   } catch (err) {
-    console.error('[conversation/session] Network error:', (err as Error).message);
+    const isAbort = err instanceof Error && err.name === 'AbortError';
+    if (isAbort) {
+      safeLog('conversation/session', 'timeout', 504);
+      return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
+    }
+    safeLog('conversation/session', 'network_error', 502);
     return res.status(502).json({ code: 'OPENAI_UNREACHABLE', message: 'Não foi possível conectar ao serviço de IA.' });
+  } finally {
+    clearTimeout(timer);
   }
 
   if (httpStatus < 200 || httpStatus >= 300) {
@@ -151,10 +166,10 @@ export default async function handler(req: any, res: any) {
     let parsed: { error?: { type?: string; code?: string; param?: string; message?: string } } = {};
     try { parsed = JSON.parse(rawText); } catch { /* ok */ }
     const e = parsed.error ?? {};
-    console.error('[conversation/session] OpenAI error', {
-      status: httpStatus, requestId,
-      type: e.type ?? null, code: e.code ?? null,
-      param: e.param ?? null, message: e.message ? e.message.slice(0, 120) : null,
+    safeLog('conversation/session', 'openai_error', ERROR_STATUS[errorCode] ?? 502, {
+      httpStatus, requestId,
+      type: typeof e.type === 'string' ? e.type : null,
+      code: typeof e.code === 'string' ? e.code : null,
     });
     return res.status(ERROR_STATUS[errorCode] ?? 502)
       .json({ code: errorCode, message: ERROR_MESSAGE[errorCode] });
