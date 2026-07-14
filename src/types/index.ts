@@ -3,10 +3,25 @@ export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
 export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation';
 
 export interface AIPreferences {
+  // Identity
   teacherName: string;
-  personality: 'friendly' | 'professional' | 'strict';
-  correctionStyle: 'gentle' | 'direct';
+  // Voice
   voice: string;
+  accent: 'american' | 'british' | 'neutral';
+  speechPace: 'slow' | 'normal' | 'natural';
+  // Personality
+  personalityPreset: 'patient' | 'friend' | 'teacher' | 'unfiltered_friend' | 'custom';
+  formality: 'very_low' | 'low' | 'medium' | 'high';
+  humorLevel: 'low' | 'medium' | 'high';
+  roastIntensity: 'off' | 'light' | 'high';
+  profanityEnabled: boolean;
+  topicInitiative: 'low' | 'medium' | 'high';
+  // Corrections
+  correctionTiming: 'after_each' | 'end_of_block' | 'session_summary';
+  correctionScope: 'important_only' | 'all_relevant' | 'communication_impact';
+  correctionLanguage: 'portuguese' | 'english';
+  correctionDetail: 'brief' | 'detailed';
+  // Extra
   focusAreas: string[];
 }
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';

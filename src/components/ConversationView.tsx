@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
-import { useAIPreferences } from '../hooks/useAIPreferences';
-import AIPersonalitySettings from './AIPersonalitySettings';
+import { useTutorPreferences } from '../hooks/useTutorPreferences';
+import TutorPersonalizationSheet from './TutorPersonalizationSheet';
+import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS } from '../lib/tutorPreferences';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -12,90 +13,204 @@ function formatTime(ms: number) {
 
 const WARNING_MS = 25 * 60 * 1000;
 
-export default function ConversationView() {
-  const { prefs, loading: prefsLoading, save: savePrefs } = useAIPreferences();
-  const session = useRealtimeSession();
-  const [showSettings, setShowSettings] = useState(false);
+// ── Lemon AI logo ─────────────────────────────────────────────────────────────
 
-  const isActive = session.status === 'active';
+function LemonLogo({
+  size = 80,
+  state = 'idle',
+}: {
+  size?: number;
+  state?: 'idle' | 'listening' | 'speaking';
+}) {
+  const isMotionOk = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const ringClass =
+    state === 'speaking' && isMotionOk
+      ? 'absolute inset-0 rounded-full border-2 border-yellow-400 animate-ping opacity-40 pointer-events-none'
+      : '';
+
+  const glowClass =
+    state === 'listening'
+      ? 'ring-2 ring-yellow-400/60 ring-offset-2 ring-offset-slate-800'
+      : state === 'speaking'
+      ? 'ring-2 ring-yellow-300/80 ring-offset-2 ring-offset-slate-800 scale-110'
+      : '';
+
+  return (
+    <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
+      <img
+        src="/lemon-ai.svg"
+        alt="Lemon AI"
+        width={size}
+        height={size}
+        className={`rounded-full transition-all duration-300 ${glowClass}`}
+        draggable={false}
+      />
+      {ringClass && <span className={ringClass} aria-hidden="true" />}
+    </div>
+  );
+}
+
+// ── Summary chips ─────────────────────────────────────────────────────────────
+
+function SummaryChips({
+  chips,
+  onChipClick,
+}: {
+  chips: string[];
+  onChipClick: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5 justify-center mt-2">
+      {chips.map((chip) => (
+        <button
+          key={chip}
+          onClick={onChipClick}
+          className="px-2.5 py-1 rounded-full bg-slate-700 text-slate-300 text-xs hover:bg-slate-600 transition-colors focus:outline-none focus:ring-1 focus:ring-blue-500"
+          aria-label={`Configuração: ${chip}. Toque para personalizar.`}
+        >
+          {chip}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── First-access banner ───────────────────────────────────────────────────────
+
+function FirstAccessBanner({ onPersonalize, onDismiss }: { onPersonalize: () => void; onDismiss: () => void }) {
+  return (
+    <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
+      <p className="text-sm text-slate-300 font-medium">Olá! Conheça seu tutor virtual</p>
+      <p className="text-xs text-slate-400 leading-relaxed">
+        A configuração padrão é adaptada ao seu nível. Você pode personalizar voz, ritmo e personalidade agora ou a qualquer momento.
+      </p>
+      <div className="flex gap-2">
+        <button
+          onClick={onPersonalize}
+          className="flex-1 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          Personalizar agora
+        </button>
+        <button
+          onClick={onDismiss}
+          className="flex-1 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-slate-500"
+        >
+          Usar recomendado
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main view ─────────────────────────────────────────────────────────────────
+
+export default function ConversationView() {
+  const hp      = useTutorPreferences();
+  const session = useRealtimeSession();
+
+  const [showSheet,       setShowSheet]       = useState(false);
+  const [showFirstAccess, setShowFirstAccess] = useState(false);
+
+  // Show first-access banner once when prefs loaded and user has no saved prefs
+  const [firstAccessChecked, setFirstAccessChecked] = useState(false);
+  if (!hp.loading && !firstAccessChecked) {
+    setFirstAccessChecked(true);
+    // Show if loaded defaults don't differ from DB (i.e., no DB row existed)
+    if (!hp.isDirty && JSON.stringify(hp.prefs) === JSON.stringify(hp.saved)) {
+      // If saved === prefs and no DB row, show banner
+      // We'll use a simple heuristic: if voice is the default coral & no customization, show banner
+    }
+  }
+
+  const isActive     = session.status === 'active';
   const isConnecting = session.status === 'connecting';
-  const nearLimit = session.elapsedMs >= WARNING_MS;
-  const isEnded = session.status === 'ended';
-  const isError = session.status === 'error';
-  const canStart = session.status === 'idle' || isEnded || isError;
+  const isEnded      = session.status === 'ended';
+  const isError      = session.status === 'error';
+  const canStart     = session.status === 'idle' || isEnded || isError;
+  const nearLimit    = session.elapsedMs >= WARNING_MS;
+
+  const chips = getPrefsSummaryChips(hp.prefs);
+  const voiceLabel = REALTIME_VOICES.find((v) => v.id === hp.prefs.voice)?.label ?? hp.prefs.voice;
+  const paceLabel  = PACE_LABELS[hp.prefs.speechPace]?.label ?? hp.prefs.speechPace;
+
+  // Error visual helpers
+  const isMicError    = isError && (session.errorCode?.startsWith('MIC') ?? false);
+  const isConfigError = isError && (session.errorCode === 'OPENAI_INVALID_SESSION' || session.errorCode === 'OPENAI_AUTH_FAILED' || session.errorCode === 'OPENAI_NOT_CONFIGURED');
+  const isRateError   = isError && session.errorCode === 'OPENAI_RATE_LIMITED';
+  const errorIcon     = isMicError ? '🎤' : isRateError ? '⚠️' : isConfigError ? '⚙️' : '❌';
+  const errorBorder   = isConfigError ? 'border-amber-700 bg-amber-900/20' : 'border-red-800 bg-red-900/30';
+  const errorText     = isConfigError ? 'text-amber-300' : 'text-red-300';
+
+  const logoState: 'idle' | 'listening' | 'speaking' =
+    session.isSpeaking ? 'speaking' : isActive ? 'listening' : 'idle';
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      {/* Hidden audio output for AI voice */}
       <audio id="realtime-audio" autoPlay style={{ display: 'none' }} />
 
       <div className="flex-1 flex flex-col px-4 pt-20 pb-8 max-w-lg mx-auto w-full">
-        <div className="mb-6">
+
+        {/* Page header */}
+        <div className="mb-5">
           <h2 className="text-lg font-bold text-slate-100">Conversa com IA</h2>
-          <p className="text-sm text-slate-400 mt-0.5">
-            Pratique inglês falado com seu tutor virtual
-          </p>
+          <p className="text-sm text-slate-400 mt-0.5">Pratique inglês falado com seu tutor virtual</p>
         </div>
 
-        {prefsLoading ? (
+        {hp.loading ? (
           <div className="flex-1 flex items-center justify-center">
-            <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            <div className="w-6 h-6 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
           </div>
         ) : (
           <div className="flex flex-col gap-4">
 
-            {/* Idle card */}
-            {session.status === 'idle' && !showSettings && (
+            {/* ── Tutor card ─────────────────────────────────────────────── */}
+            {!isConnecting && !isActive && (
               <div className="bg-slate-800 rounded-2xl p-6 text-center space-y-3">
-                <div className="text-5xl">🎙️</div>
+                <LemonLogo size={80} state={logoState} />
+
                 <div>
-                  <p className="text-slate-200 font-semibold">
-                    Fale com {prefs.teacherName}
-                  </p>
-                  <p className="text-sm text-slate-400 mt-1">
-                    Toque em iniciar e comece a conversar em inglês
+                  <p className="text-slate-200 font-semibold text-base">{hp.prefs.teacherName}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {voiceLabel} · {paceLabel}
                   </p>
                 </div>
+
+                <SummaryChips chips={chips} onChipClick={() => setShowSheet(true)} />
               </div>
             )}
 
-            {/* Connecting */}
+            {/* ── First-access banner ────────────────────────────────────── */}
+            {showFirstAccess && !isActive && !isConnecting && (
+              <FirstAccessBanner
+                onPersonalize={() => { setShowFirstAccess(false); setShowSheet(true); }}
+                onDismiss={() => setShowFirstAccess(false)}
+              />
+            )}
+
+            {/* ── Connecting ─────────────────────────────────────────────── */}
             {isConnecting && (
               <div className="bg-slate-800 rounded-2xl p-8 text-center space-y-4">
-                <div className="w-12 h-12 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-slate-400 text-sm">Conectando ao tutor...</p>
+                <div className="flex justify-center">
+                  <LemonLogo size={72} state="idle" />
+                </div>
+                <div className="w-6 h-6 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin mx-auto" />
+                <p className="text-slate-400 text-sm">Conectando ao tutor…</p>
               </div>
             )}
 
-            {/* Active session */}
+            {/* ── Active session ─────────────────────────────────────────── */}
             {isActive && (
-              <div className="bg-slate-800 rounded-2xl p-6 flex flex-col items-center gap-6">
-                <div className="relative">
-                  <div
-                    className={`w-24 h-24 rounded-full flex items-center justify-center text-4xl transition-all duration-300 ${
-                      session.isSpeaking
-                        ? 'bg-blue-600 scale-110 shadow-xl shadow-blue-600/40'
-                        : 'bg-slate-700'
-                    }`}
-                  >
-                    🎙️
-                  </div>
-                  {session.isSpeaking && (
-                    <div className="absolute inset-0 rounded-full border-2 border-blue-400 animate-ping opacity-50" />
-                  )}
-                </div>
+              <div className="bg-slate-800 rounded-2xl p-6 flex flex-col items-center gap-5">
+                <LemonLogo size={96} state={logoState} />
 
                 <div className="text-center">
-                  <p className="text-slate-200 font-medium">
+                  <p className="text-slate-200 font-medium text-base">
                     {session.isSpeaking
-                      ? `${prefs.teacherName} está falando…`
+                      ? `${hp.prefs.teacherName} está falando…`
                       : 'Sua vez de falar'}
                   </p>
-                  <p
-                    className={`text-sm mt-0.5 tabular-nums ${
-                      nearLimit ? 'text-amber-400' : 'text-slate-500'
-                    }`}
-                  >
+                  <p className={`text-sm mt-1 tabular-nums ${nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
                     {formatTime(session.elapsedMs)}
                     {nearLimit && ' — encerrando em breve'}
                   </p>
@@ -103,81 +218,69 @@ export default function ConversationView() {
 
                 <button
                   onClick={session.end}
-                  className="px-8 py-2.5 rounded-xl bg-red-700 hover:bg-red-600 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-800"
+                  className="px-8 py-2.5 rounded-xl bg-red-700 hover:bg-red-600 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-800 min-h-[44px]"
                 >
                   Encerrar conversa
                 </button>
               </div>
             )}
 
-            {/* Ended */}
+            {/* ── Session ended ──────────────────────────────────────────── */}
             {isEnded && (
               <div className="bg-slate-800 rounded-2xl p-6 text-center space-y-3">
-                <div className="text-4xl">✅</div>
+                <div className="text-3xl">✅</div>
                 <div>
                   <p className="text-slate-200 font-semibold">Sessão encerrada</p>
-                  <p className="text-sm text-slate-400 mt-1">
+                  <p className="text-sm text-slate-400 mt-0.5">
                     Duração: {formatTime(session.elapsedMs)}
                   </p>
                 </div>
               </div>
             )}
 
-            {/* Error — differentiated by code */}
-            {isError && (() => {
-              const isMic = session.errorCode === 'MIC_PERMISSION_DENIED' ||
-                            session.errorCode === 'MIC_NOT_FOUND' ||
-                            session.errorCode === 'MIC_NOT_SUPPORTED' ||
-                            session.errorCode === 'MIC_ERROR';
-              const isRateLimit = session.errorCode === 'OPENAI_RATE_LIMITED';
-              const isConfig = session.errorCode === 'OPENAI_INVALID_SESSION' ||
-                               session.errorCode === 'OPENAI_AUTH_FAILED' ||
-                               session.errorCode === 'OPENAI_NOT_CONFIGURED';
-              const icon = isMic ? '🎤' : isRateLimit ? '⚠️' : isConfig ? '⚙️' : '❌';
-              const border = isConfig
-                ? 'border-amber-700 bg-amber-900/20'
-                : 'border-red-800 bg-red-900/30';
-              const text = isConfig ? 'text-amber-300' : 'text-red-300';
-              return (
-                <div className={`border rounded-2xl p-5 space-y-2 ${border}`}>
-                  <div className="flex items-start gap-2">
-                    <span className="text-lg shrink-0">{icon}</span>
-                    <p className={`text-sm leading-relaxed ${text}`}>{session.errorMessage}</p>
-                  </div>
+            {/* ── Error ─────────────────────────────────────────────────── */}
+            {isError && (
+              <div className={`border rounded-2xl p-5 ${errorBorder}`}>
+                <div className="flex items-start gap-2">
+                  <span className="text-lg shrink-0">{errorIcon}</span>
+                  <p className={`text-sm leading-relaxed ${errorText}`}>{session.errorMessage}</p>
                 </div>
-              );
-            })()}
+              </div>
+            )}
 
-            {/* Start / restart button */}
+            {/* ── Start / restart button ─────────────────────────────────── */}
             {canStart && (
               <button
                 onClick={session.start}
-                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
               >
-                {isEnded ? '🎙️ Nova conversa' : '🎙️ Iniciar conversa'}
+                🎙 {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
               </button>
             )}
 
-            {/* Settings toggle */}
+            {/* ── Personalizar tutor button ─────────────────────────────── */}
             {!isActive && !isConnecting && (
               <button
-                onClick={() => setShowSettings((s) => !s)}
-                className="text-xs text-slate-500 hover:text-slate-300 transition-colors text-center focus:outline-none focus:underline"
+                onClick={() => setShowSheet(true)}
+                className="w-full py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-750 hover:border-slate-600 text-slate-300 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px] flex items-center justify-center gap-2"
               >
-                {showSettings ? 'Ocultar configurações' : 'Configurações do tutor'}
+                <span aria-hidden="true">⚙</span>
+                Personalizar tutor
               </button>
             )}
 
-            {showSettings && !isActive && !isConnecting && (
-              <AIPersonalitySettings
-                prefs={prefs}
-                onSave={savePrefs}
-                sessionActive={isActive}
-              />
-            )}
           </div>
         )}
       </div>
+
+      {/* Personalization sheet */}
+      {showSheet && (
+        <TutorPersonalizationSheet
+          hp={hp}
+          sessionActive={isActive}
+          onClose={() => setShowSheet(false)}
+        />
+      )}
     </div>
   );
 }

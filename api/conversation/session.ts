@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { requireAuth } from '../_auth';
-import { buildSystemPrompt, DEFAULT_PREFERENCES } from '../../src/lib/promptBuilder';
+import { buildTutorInstructions } from '../../src/lib/promptBuilder';
+import { BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import type { AIPreferences } from '../../src/types';
 
 const REALTIME_MODEL =
@@ -32,6 +33,26 @@ function mapOpenAIStatus(status: number): string {
   return 'OPENAI_SESSION_FAILED';
 }
 
+function rowToPrefs(row: Record<string, unknown>): AIPreferences {
+  return {
+    teacherName:        String(row.teacher_name        ?? BASE_DEFAULTS.teacherName),
+    voice:              String(row.voice               ?? BASE_DEFAULTS.voice),
+    accent:             (row.accent              as AIPreferences['accent'])           ?? BASE_DEFAULTS.accent,
+    speechPace:         (row.speech_pace         as AIPreferences['speechPace'])       ?? BASE_DEFAULTS.speechPace,
+    personalityPreset:  (row.personality_preset  as AIPreferences['personalityPreset']) ?? BASE_DEFAULTS.personalityPreset,
+    formality:          (row.formality           as AIPreferences['formality'])         ?? BASE_DEFAULTS.formality,
+    humorLevel:         (row.humor_level         as AIPreferences['humorLevel'])        ?? BASE_DEFAULTS.humorLevel,
+    roastIntensity:     (row.roast_intensity     as AIPreferences['roastIntensity'])    ?? BASE_DEFAULTS.roastIntensity,
+    profanityEnabled:   typeof row.profanity_enabled === 'boolean' ? row.profanity_enabled : BASE_DEFAULTS.profanityEnabled,
+    topicInitiative:    (row.topic_initiative    as AIPreferences['topicInitiative'])   ?? BASE_DEFAULTS.topicInitiative,
+    correctionTiming:   (row.correction_timing   as AIPreferences['correctionTiming'])  ?? BASE_DEFAULTS.correctionTiming,
+    correctionScope:    (row.correction_scope    as AIPreferences['correctionScope'])   ?? BASE_DEFAULTS.correctionScope,
+    correctionLanguage: (row.correction_language as AIPreferences['correctionLanguage']) ?? BASE_DEFAULTS.correctionLanguage,
+    correctionDetail:   (row.correction_detail   as AIPreferences['correctionDetail'])  ?? BASE_DEFAULTS.correctionDetail,
+    focusAreas:         Array.isArray(row.focus_areas) ? (row.focus_areas as string[]) : BASE_DEFAULTS.focusAreas,
+  };
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).end();
 
@@ -47,35 +68,28 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  // Safety identifier: SHA-256 of userId — no raw UUID or PII to OpenAI
   const safetyIdentifier = createHash('sha256').update(userId).digest('hex');
 
-  // Load user preferences
-  let prefs: AIPreferences = { ...DEFAULT_PREFERENCES };
+  // Load user prefs + CEFR level in parallel
+  let prefs: AIPreferences = { ...BASE_DEFAULTS };
+  let cefrLevel = 'A1';
   try {
-    const { data: row } = await supabase
-      .from('ai_conversation_preferences')
-      .select('*')
-      .maybeSingle();
-    if (row) {
-      prefs = {
-        teacherName:    row.teacher_name    ?? DEFAULT_PREFERENCES.teacherName,
-        personality:    row.personality     ?? DEFAULT_PREFERENCES.personality,
-        correctionStyle: row.correction_style ?? DEFAULT_PREFERENCES.correctionStyle,
-        voice:          row.voice           ?? DEFAULT_PREFERENCES.voice,
-        focusAreas:     row.focus_areas     ?? DEFAULT_PREFERENCES.focusAreas,
-      };
+    const [prefsResult, memoryResult] = await Promise.all([
+      supabase.from('ai_conversation_preferences').select('*').maybeSingle(),
+      supabase.from('english_learning_memory').select('current_level').order('updated_at', { ascending: false }).limit(1),
+    ]);
+    if (prefsResult.data) {
+      prefs = rowToPrefs(prefsResult.data as Record<string, unknown>);
     }
+    const memRow = memoryResult.data?.[0] as { current_level?: string } | undefined;
+    if (memRow?.current_level) cefrLevel = memRow.current_level;
   } catch {
-    // use defaults — non-fatal
+    // use defaults
   }
 
-  const instructions = buildSystemPrompt(prefs);
+  const instructions = buildTutorInstructions(prefs, cefrLevel);
   if (!instructions) {
-    return res.status(500).json({
-      code: 'INTERNAL_ERROR',
-      message: 'Erro interno ao preparar a sessão.',
-    });
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
 
   const sessionConfig = {
@@ -110,7 +124,6 @@ export default async function handler(req: any, res: any) {
     },
   };
 
-  // Create ephemeral credential via GA endpoint
   let rawText: string;
   let httpStatus: number;
   let requestId: string | null;
@@ -125,69 +138,49 @@ export default async function handler(req: any, res: any) {
       body: JSON.stringify(sessionConfig),
     });
     httpStatus = openaiRes.status;
-    requestId = openaiRes.headers.get('x-request-id');
-    rawText = await openaiRes.text();
+    requestId  = openaiRes.headers.get('x-request-id');
+    rawText    = await openaiRes.text();
   } catch (err) {
-    console.error('[conversation/session] Network error reaching OpenAI:', (err as Error).message);
-    return res.status(502).json({
-      code: 'OPENAI_UNREACHABLE',
-      message: 'Não foi possível conectar ao serviço de IA.',
-    });
+    console.error('[conversation/session] Network error:', (err as Error).message);
+    return res.status(502).json({ code: 'OPENAI_UNREACHABLE', message: 'Não foi possível conectar ao serviço de IA.' });
   }
 
   if (httpStatus < 200 || httpStatus >= 300) {
     const errorCode = mapOpenAIStatus(httpStatus);
-    // Log sanitized info only — no key, no token, no prompt
     let parsed: { error?: { type?: string; code?: string; param?: string; message?: string } } = {};
     try { parsed = JSON.parse(rawText); } catch { /* ok */ }
     const e = parsed.error ?? {};
     console.error('[conversation/session] OpenAI error', {
-      status: httpStatus,
-      requestId,
-      type: e.type ?? null,
-      code: e.code ?? null,
-      param: e.param ?? null,
-      message: e.message ? e.message.slice(0, 120) : null,
+      status: httpStatus, requestId,
+      type: e.type ?? null, code: e.code ?? null,
+      param: e.param ?? null, message: e.message ? e.message.slice(0, 120) : null,
     });
-    return res
-      .status(ERROR_STATUS[errorCode] ?? 502)
+    return res.status(ERROR_STATUS[errorCode] ?? 502)
       .json({ code: errorCode, message: ERROR_MESSAGE[errorCode] });
   }
 
-  // Parse GA response: { value, expires_at, session: { id?, model? } }
   let data: { value?: unknown; expires_at?: unknown; session?: { id?: string; model?: string } };
-  try {
-    data = JSON.parse(rawText);
-  } catch {
+  try { data = JSON.parse(rawText); }
+  catch {
     console.error('[conversation/session] Failed to parse OpenAI response');
-    return res.status(502).json({
-      code: 'OPENAI_SESSION_FAILED',
-      message: ERROR_MESSAGE.OPENAI_SESSION_FAILED,
-    });
+    return res.status(502).json({ code: 'OPENAI_SESSION_FAILED', message: ERROR_MESSAGE.OPENAI_SESSION_FAILED });
   }
 
   if (typeof data.value !== 'string' || !data.value) {
     console.error('[conversation/session] GA response missing value field');
-    return res.status(502).json({
-      code: 'OPENAI_SESSION_FAILED',
-      message: ERROR_MESSAGE.OPENAI_SESSION_FAILED,
-    });
+    return res.status(502).json({ code: 'OPENAI_SESSION_FAILED', message: ERROR_MESSAGE.OPENAI_SESSION_FAILED });
   }
-
   if (typeof data.expires_at !== 'number') {
     console.error('[conversation/session] GA response missing expires_at');
-    return res.status(502).json({
-      code: 'OPENAI_SESSION_FAILED',
-      message: ERROR_MESSAGE.OPENAI_SESSION_FAILED,
-    });
+    return res.status(502).json({ code: 'OPENAI_SESSION_FAILED', message: ERROR_MESSAGE.OPENAI_SESSION_FAILED });
   }
 
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
-    token: data.value,
+    token:     data.value,
     sessionId: data.session?.id ?? null,
-    model: data.session?.model ?? REALTIME_MODEL,
-    voice: prefs.voice,
+    model:     data.session?.model ?? REALTIME_MODEL,
+    voice:     prefs.voice,
     expiresAt: data.expires_at,
   });
 }
