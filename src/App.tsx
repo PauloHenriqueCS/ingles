@@ -111,7 +111,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-      <AppHeader onMenuOpen={() => setMenuOpen(true)} />
+      <AppHeader onMenuOpen={() => setMenuOpen(true)} onLogoClick={() => setView('dashboard')} />
 
       {menuOpen && (
         <HamburgerMenu
