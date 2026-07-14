@@ -145,9 +145,21 @@ $$;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- getDayTotalSeconds() filtra por user_id e session_date simultaneamente.
 -- O índice composto (user_id, session_date) evita full table scan por usuário.
+--
+-- Condicional: a tabela pode não existir se migration_conversation_goal.sql
+-- ainda não foi aplicada. Nesse caso, o índice será criado por essa migration.
 
-CREATE INDEX IF NOT EXISTS idx_conversation_sessions_user_date
-  ON public.conversation_sessions (user_id, session_date);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'conversation_sessions'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_conversation_sessions_user_date
+      ON public.conversation_sessions (user_id, session_date);
+  END IF;
+END;
+$$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BLOCO 6: Hardening de funções de trigger

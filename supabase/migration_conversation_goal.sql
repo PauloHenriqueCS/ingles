@@ -50,3 +50,8 @@ DROP TRIGGER IF EXISTS trg_conv_session_user_id ON conversation_sessions;
 CREATE TRIGGER trg_conv_session_user_id
   BEFORE INSERT ON conversation_sessions
   FOR EACH ROW EXECUTE FUNCTION set_conversation_session_user_id();
+
+-- ── 3. Índice composto para getDayTotalSeconds ────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_conversation_sessions_user_date
+  ON public.conversation_sessions (user_id, session_date);
