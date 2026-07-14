@@ -27,7 +27,13 @@ export default function MonthView({
   entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
   activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = (() => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+    } catch {
+      return new Date().toISOString().split('T')[0];
+    }
+  })();
   const dates = getAllDatesInMonth(currentYear, currentMonth);
   const firstDow = new Date(dates[0] + 'T12:00:00').getDay();
   const blanks = Array(firstDow).fill(null);
@@ -170,39 +176,37 @@ export default function MonthView({
         </div>
 
         {/* Month summary */}
-        {currentYear === 2026 && (
-          <div className="mt-4 bg-slate-800 rounded-lg p-3">
-            {(() => {
-              const activeDates = dates.filter((d) => {
-                const dow = new Date(d + 'T12:00:00').getDay();
-                return activeWeekdays.includes(dow) || overrideDates.includes(d);
-              });
-              const total = activeDates.length;
-              const writingDone = activeDates.filter(
-                (d) => dailyProgressMap[d]?.writing === 'completed',
-              ).length;
-              const convDone = activeDates.filter(
-                (d) => dailyProgressMap[d]?.conversation === 'completed',
-              ).length;
-              const pronDone = activeDates.filter(
-                (d) => dailyProgressMap[d]?.pronunciation === 'completed',
-              ).length;
-              return (
-                <div className="flex gap-4 text-sm flex-wrap">
-                  <span className="text-slate-400">
-                    Escrita: <span className="text-slate-200 font-medium">{writingDone}/{total}</span>
-                  </span>
-                  <span className="text-slate-400">
-                    Conversa: <span className="text-teal-400 font-medium">{convDone}/{total}</span>
-                  </span>
-                  <span className="text-slate-400">
-                    Pronúncia: <span className="text-blue-400 font-medium">{pronDone}/{total}</span>
-                  </span>
-                </div>
-              );
-            })()}
-          </div>
-        )}
+        <div className="mt-4 bg-slate-800 rounded-lg p-3">
+          {(() => {
+            const activeDates = dates.filter((d) => {
+              const dow = new Date(d + 'T12:00:00').getDay();
+              return activeWeekdays.includes(dow) || overrideDates.includes(d);
+            });
+            const total = activeDates.length;
+            const writingDone = activeDates.filter(
+              (d) => dailyProgressMap[d]?.writing === 'completed',
+            ).length;
+            const convDone = activeDates.filter(
+              (d) => dailyProgressMap[d]?.conversation === 'completed',
+            ).length;
+            const pronDone = activeDates.filter(
+              (d) => dailyProgressMap[d]?.pronunciation === 'completed',
+            ).length;
+            return (
+              <div className="flex gap-4 text-sm flex-wrap">
+                <span className="text-slate-400">
+                  Escrita: <span className="text-slate-200 font-medium">{writingDone}/{total}</span>
+                </span>
+                <span className="text-slate-400">
+                  Conversa: <span className="text-teal-400 font-medium">{convDone}/{total}</span>
+                </span>
+                <span className="text-slate-400">
+                  Pronúncia: <span className="text-blue-400 font-medium">{pronDone}/{total}</span>
+                </span>
+              </div>
+            );
+          })()}
+        </div>
 
         {/* Practice days config */}
         <div className="mt-4">

@@ -1,11 +1,6 @@
 import { supabase } from './supabase';
 import { DailyActivityStatus, DailyProgress, DayEntry } from '../types';
-
-function toSpDate(utcTimestamp: string): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(
-    new Date(utcTimestamp),
-  );
-}
+import { toSpDate } from './timezone';
 
 export async function getPronunciationDatesForMonth(
   year: number,

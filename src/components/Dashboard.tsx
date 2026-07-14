@@ -1,44 +1,173 @@
 import { useState, useEffect } from 'react';
-import { Target } from 'lucide-react';
+import { Target, TrendingUp, PenLine, Mic, MessagesSquare } from 'lucide-react';
 import { EntriesStore, EnglishLearningMemory } from '../types';
 import { computeStats } from '../utils/stats';
 import { MONTH_NAMES_PT } from '../data/calendar2026';
 import { fetchLearningMemory } from '../lib/learningMemory';
 import { getDayTotalSeconds, getConversationGoalMinutes } from '../lib/conversationSessions';
+import { fetchSkillsOverview, SkillOverview, SkillProgressStatus } from '../lib/dashboardSkillsService';
+import { getTodaySP } from '../lib/timezone';
 
 interface Props {
   entries: EntriesStore;
   today: string;
   onOpenDay: (date: string) => void;
+  activeWeekdays?: number[];
 }
 
-export default function Dashboard({ entries, today, onOpenDay }: Props) {
-  const stats = computeStats(entries);
+function skillLabel(skill: string): string {
+  if (skill === 'writing') return 'Escrita';
+  if (skill === 'pronunciation') return 'Pronúncia';
+  if (skill === 'conversation') return 'Conversação';
+  return skill;
+}
+
+function skillIcon(skill: string) {
+  if (skill === 'writing') return PenLine;
+  if (skill === 'pronunciation') return Mic;
+  return MessagesSquare;
+}
+
+function statusMessage(status: SkillProgressStatus, skill: string): string {
+  const label = skillLabel(skill);
+  switch (status) {
+    case 'insufficient_data':
+      return `Ainda não há atividades suficientes para calcular seu progresso em ${label.toLowerCase()}.`;
+    case 'evaluation_pending':
+      return 'Estamos atualizando seu progresso com base nas atividades mais recentes.';
+    case 'pending_recalibration':
+      return 'Seu nível está sendo recalculado com as novas regras.';
+    case 'ready_for_promotion':
+      return 'Você cumpriu os requisitos deste nível!';
+    case 'maximum_supported_level':
+      return 'Você alcançou o nível mais alto disponível no Lemon.';
+    case 'configuration_error':
+      return 'Não foi possível calcular seu progresso neste momento.';
+    case 'legacy_data':
+      return 'Dados sendo migrados para o novo sistema.';
+    default:
+      return '';
+  }
+}
+
+function SkillCard({ skill }: { skill: SkillOverview }) {
+  const Icon = skillIcon(skill.skill);
+  const label = skillLabel(skill.skill);
+  const pct = skill.progressPercent != null ? Math.round(skill.progressPercent) : null;
+  const conf = skill.confidence != null ? Math.round(skill.confidence * 100) : null;
+  const msg = skill.status !== 'active' ? statusMessage(skill.status, skill.skill) : null;
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-2.5">
+      <div className="flex items-center gap-2">
+        <Icon className="w-4 h-4 text-slate-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+        <span className="text-sm font-medium text-slate-200">{label}</span>
+        {skill.currentLevel && (
+          <span className="ml-auto px-2 py-0.5 bg-blue-900 text-blue-300 text-xs font-bold rounded">
+            {skill.currentLevel}
+          </span>
+        )}
+      </div>
+
+      {skill.currentLevel && skill.targetLevel && (
+        <p className="text-xs text-slate-400">
+          {skill.currentLevel} → {skill.targetLevel}
+        </p>
+      )}
+
+      {pct !== null && (
+        <div>
+          <div className="flex justify-between text-xs text-slate-400 mb-1">
+            <span>Progresso</span>
+            <span>{pct}%</span>
+          </div>
+          <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                pct >= 80 ? 'bg-green-500' : pct >= 50 ? 'bg-blue-500' : 'bg-amber-500'
+              }`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {skill.status === 'ready_for_promotion' && (
+        <p className="text-xs text-green-400 font-medium">✓ Pronto para avançar</p>
+      )}
+
+      {msg && skill.status !== 'active' && skill.status !== 'ready_for_promotion' && (
+        <p className="text-xs text-slate-400 leading-relaxed">{msg}</p>
+      )}
+
+      {skill.blockingReasons.length > 0 && (
+        <div className="space-y-0.5">
+          <p className="text-xs text-slate-500">Falta:</p>
+          {skill.blockingReasons.slice(0, 3).map((r, i) => (
+            <p key={i} className="text-xs text-slate-400 leading-snug">· {r}</p>
+          ))}
+        </div>
+      )}
+
+      {conf !== null && (
+        <p className="text-xs text-slate-500">Confiança: {conf}%</p>
+      )}
+    </div>
+  );
+}
+
+function SkillCardSkeleton() {
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 space-y-2.5 animate-pulse">
+      <div className="flex items-center gap-2">
+        <div className="w-4 h-4 bg-slate-700 rounded" />
+        <div className="h-3 bg-slate-700 rounded w-20" />
+        <div className="ml-auto h-5 w-8 bg-slate-700 rounded" />
+      </div>
+      <div className="h-2 bg-slate-700 rounded-full" />
+      <div className="h-3 bg-slate-700 rounded w-32" />
+    </div>
+  );
+}
+
+export default function Dashboard({ entries, today, onOpenDay, activeWeekdays = [1, 2, 3, 4, 5] }: Props) {
+  const stats = computeStats(entries, undefined, activeWeekdays);
   const [memory, setMemory] = useState<EnglishLearningMemory | null>(null);
   const [convTotalSec, setConvTotalSec] = useState<number | null>(null);
-  const [convGoalMin, setConvGoalMin]   = useState<number>(15);
+  const [convGoalMin, setConvGoalMin] = useState<number>(15);
+  const [skills, setSkills] = useState<SkillOverview[] | null>(null);
+  const [skillsError, setSkillsError] = useState(false);
+
+  // Ensure today is always in São Paulo timezone
+  const todaySP = getTodaySP();
+  const effectiveToday = today || todaySP;
 
   useEffect(() => {
     fetchLearningMemory().then(setMemory).catch(() => {});
-    getDayTotalSeconds(today).then(setConvTotalSec).catch(() => {});
+    getDayTotalSeconds(effectiveToday).then(setConvTotalSec).catch(() => {});
     getConversationGoalMinutes().then(setConvGoalMin).catch(() => {});
-  }, [today]);
+    fetchSkillsOverview()
+      .then(setSkills)
+      .catch(() => setSkillsError(true));
+  }, [effectiveToday]);
 
   const recentWritten = Object.values(entries)
     .filter((e) => e.originalText.trim().length > 0)
     .sort((a, b) => b.date.localeCompare(a.date))
     .slice(0, 5);
 
-  const todayEntry = entries[today];
+  const todayEntry = entries[effectiveToday];
   const todayWritten = todayEntry && todayEntry.originalText.trim().length > 0;
   const { aiStats } = stats;
+
+  const hasAnySkillData = skills !== null && skills.some((s) => s.currentLevel !== null);
 
   return (
     <div className="p-4 max-w-lg mx-auto">
       <div className="mb-6">
         <h1 className="text-xl font-bold text-slate-100">Meu dashboard</h1>
         <p className="text-slate-400 text-sm mt-1">
-          {new Date(today + 'T12:00:00').toLocaleDateString('pt-BR', {
+          {new Date(effectiveToday + 'T12:00:00').toLocaleDateString('pt-BR', {
             weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
           })}
         </p>
@@ -46,7 +175,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
 
       {/* Today's entry */}
       <button
-        onClick={() => onOpenDay(today)}
+        onClick={() => onOpenDay(effectiveToday)}
         className={`w-full text-left rounded-lg p-4 mb-6 border transition-colors ${
           todayWritten
             ? 'bg-green-900/30 border-green-700'
@@ -78,7 +207,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
               style={{ width: `${Math.min(100, Math.round((convTotalSec / (convGoalMin * 60)) * 100))}%` }}
             />
           </div>
-          {convTotalSec < convGoalMin * 60 && convTotalSec === 0 && (
+          {convTotalSec === 0 && (
             <p className="text-xs text-slate-500 mt-1.5">Nenhuma sessão hoje</p>
           )}
           {convTotalSec > 0 && convTotalSec < convGoalMin * 60 && (
@@ -88,6 +217,50 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
           )}
         </div>
       )}
+
+      {/* Skill levels */}
+      <div className="mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <TrendingUp className="w-4 h-4 text-slate-400" strokeWidth={2} aria-hidden="true" />
+          <h2 className="text-sm font-medium text-slate-300">Nível por habilidade</h2>
+        </div>
+
+        {!skills && !skillsError && (
+          <div className="space-y-3">
+            <SkillCardSkeleton />
+            <SkillCardSkeleton />
+            <SkillCardSkeleton />
+          </div>
+        )}
+
+        {skillsError && (
+          <div className="bg-slate-800 rounded-xl p-4 text-center">
+            <p className="text-xs text-slate-500">Não foi possível carregar os níveis agora.</p>
+            <button
+              onClick={() => {
+                setSkillsError(false);
+                fetchSkillsOverview().then(setSkills).catch(() => setSkillsError(true));
+              }}
+              className="text-xs text-blue-400 hover:text-blue-300 mt-1"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        )}
+
+        {skills && !hasAnySkillData && (
+          <div className="bg-slate-800 rounded-xl p-4 text-center space-y-1">
+            <p className="text-sm text-slate-300">Nenhum nível avaliado ainda</p>
+            <p className="text-xs text-slate-500">Conclua missões e atividades para calcular seu nível.</p>
+          </div>
+        )}
+
+        {skills && hasAnySkillData && (
+          <div className="space-y-3">
+            {skills.map((s) => <SkillCard key={s.skill} skill={s} />)}
+          </div>
+        )}
+      </div>
 
       {/* Writing stats */}
       <div className="grid grid-cols-2 gap-3 mb-6">
@@ -165,28 +338,38 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
       )}
 
       {/* Monthly writing consistency */}
-      <div className="bg-slate-800 rounded-lg p-4 mb-6">
-        <h2 className="text-sm font-medium text-slate-300 mb-3">Consistência mensal</h2>
-        <div className="space-y-2">
-          {stats.monthlyStats.map((ms) => {
-            const pct = ms.total > 0 ? Math.round((ms.written / ms.total) * 100) : 0;
-            return (
-              <div key={ms.month} className="flex items-center gap-2">
-                <span className="text-xs text-slate-400 w-8">{MONTH_NAMES_PT[ms.month - 1].slice(0, 3)}</span>
-                <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full transition-all"
-                    style={{ width: `${pct}%` }}
-                  />
+      {stats.monthlyStats.some((ms) => ms.total > 0) && (
+        <div className="bg-slate-800 rounded-lg p-4 mb-6">
+          <h2 className="text-sm font-medium text-slate-300 mb-3">Consistência mensal</h2>
+          <div className="space-y-2">
+            {stats.monthlyStats.map((ms) => {
+              const pct = ms.total > 0 ? Math.round((ms.written / ms.total) * 100) : 0;
+              return (
+                <div key={ms.month} className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400 w-8">{MONTH_NAMES_PT[ms.month - 1].slice(0, 3)}</span>
+                  <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-400 w-16 text-right">
+                    {ms.written}/{ms.total}
+                  </span>
                 </div>
-                <span className="text-xs text-slate-400 w-16 text-right">
-                  {ms.written}/{ms.total}
-                </span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Empty state — no writing yet */}
+      {recentWritten.length === 0 && (
+        <div className="bg-slate-800 rounded-lg p-6 text-center mb-6">
+          <p className="text-slate-300 text-sm mb-1">Nenhum texto ainda</p>
+          <p className="text-slate-500 text-xs">Conclua sua primeira missão para começar a acompanhar sua evolução.</p>
+        </div>
+      )}
 
       {/* Recent entries */}
       {recentWritten.length > 0 && (

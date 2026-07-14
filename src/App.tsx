@@ -10,6 +10,7 @@ import {
   DEFAULT_SETTINGS,
   LearningSettings,
 } from './lib/learningSettings';
+import { getTodaySP, getSpMonth, getSpYear } from './lib/timezone';
 import HomePage from './components/HomePage';
 import Dashboard from './components/Dashboard';
 import MonthView from './components/MonthView';
@@ -26,12 +27,12 @@ import AuthCallback from './components/AuthCallback';
 import LoginPage from './components/LoginPage';
 
 export default function App() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = getTodaySP();
   const [view, setView] = useState<View>('home');
   const [prevView, setPrevView] = useState<View>('home');
   const [selectedDate, setSelectedDate] = useState<string>(today);
-  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
-  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(getSpMonth());
+  const [currentYear, setCurrentYear] = useState(getSpYear());
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(DEFAULT_SETTINGS);
   const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -137,7 +138,12 @@ export default function App() {
           />
         )}
         {view === 'dashboard' && (
-          <Dashboard entries={entries} today={today} onOpenDay={openDay} />
+          <Dashboard
+            entries={entries}
+            today={today}
+            onOpenDay={openDay}
+            activeWeekdays={learningSettings.activeWeekdays}
+          />
         )}
         {view === 'month' && (
           <MonthView

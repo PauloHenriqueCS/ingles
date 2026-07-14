@@ -9,11 +9,13 @@ interface Props {
 
 export default function YearView({ entries, onOpenMonth }: Props) {
   const stats = computeStats(entries);
-  const currentMonth = new Date().getMonth() + 1;
+  const todaySP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+  const currentYear = parseInt(todaySP.slice(0, 4), 10);
+  const currentMonth = parseInt(todaySP.slice(5, 7), 10);
 
   return (
     <div className="p-4 max-w-lg mx-auto">
-      <h2 className="font-semibold text-slate-100 mb-2">Progresso 2026</h2>
+      <h2 className="font-semibold text-slate-100 mb-2">Progresso {currentYear}</h2>
       <p className="text-sm text-slate-400 mb-6">
         {stats.textsThisYear} textos escritos · {stats.totalWords.toLocaleString('pt-BR')} palavras
       </p>

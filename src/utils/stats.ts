@@ -1,5 +1,6 @@
 import { EntriesStore, DashboardStats, MonthStats, AIStats } from '../types';
 import { getWeekdaysInMonth } from '../data/calendar2026';
+import { getTodaySP } from '../lib/timezone';
 
 function isWritten(entry: { status: string; originalText: string } | undefined): boolean {
   if (!entry) return false;
@@ -10,10 +11,27 @@ function avg(nums: number[]): number {
   return nums.length > 0 ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : 0;
 }
 
-export function computeStats(entries: EntriesStore, today: Date = new Date()): DashboardStats {
-  const todayStr = today.toISOString().split('T')[0];
-  const currentMonth = today.getMonth() + 1;
-  const currentYear = today.getFullYear();
+/**
+ * @param todayOverride - YYYY-MM-DD date string for tests; defaults to São Paulo timezone today
+ * @param activeWeekdays - day-of-week numbers (0=Sun..6=Sat) that count as practice days
+ */
+export function computeStats(
+  entries: EntriesStore,
+  todayOverride?: string | Date,
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+): DashboardStats {
+  let todayStr: string;
+  if (typeof todayOverride === 'string') {
+    todayStr = todayOverride;
+  } else if (todayOverride instanceof Date) {
+    // Legacy: accept Date objects from existing tests — use ISO slice
+    todayStr = todayOverride.toISOString().split('T')[0];
+  } else {
+    todayStr = getTodaySP();
+  }
+
+  const currentMonth = parseInt(todayStr.slice(5, 7), 10);
+  const currentYear = parseInt(todayStr.slice(0, 4), 10);
 
   const writtenEntries = Object.values(entries).filter((e) => isWritten(e));
 
@@ -28,7 +46,7 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
 
   const allWeekdays: string[] = [];
   for (let m = 1; m <= 12; m++) {
-    allWeekdays.push(...getWeekdaysInMonth(2026, m));
+    allWeekdays.push(...getWeekdaysInMonth(currentYear, m, activeWeekdays));
   }
   const weekdaysUpToToday = allWeekdays.filter((d) => d <= todayStr).sort();
 
@@ -58,10 +76,10 @@ export function computeStats(entries: EntriesStore, today: Date = new Date()): D
 
   const monthlyStats: MonthStats[] = [];
   for (let m = 1; m <= 12; m++) {
-    const weekdays = getWeekdaysInMonth(2026, m);
+    const weekdays = getWeekdaysInMonth(currentYear, m, activeWeekdays);
     const writtenDays = weekdays.filter((d) => isWritten(entries[d]));
     const monthWords = writtenDays.reduce((sum, d) => sum + (entries[d]?.wordCount || 0), 0);
-    monthlyStats.push({ month: m, year: 2026, written: writtenDays.length, total: weekdays.length, totalWords: monthWords });
+    monthlyStats.push({ month: m, year: currentYear, written: writtenDays.length, total: weekdays.length, totalWords: monthWords });
   }
 
   const reviewedEntries = writtenEntries.filter((e) => e.aiReview != null);

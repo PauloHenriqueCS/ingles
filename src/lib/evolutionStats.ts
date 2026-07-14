@@ -1,4 +1,5 @@
 import { EnglishReviewSaved, MainMistake, VocabularyItem } from '../types';
+import { getTodaySP, getYesterdaySP } from './timezone';
 
 export function calculateAverage(nums: number[]): number {
   if (nums.length === 0) return 0;
@@ -14,8 +15,8 @@ export function calculateCurrentStreak(reviews: EnglishReviewSaved[]): number {
   const days = getUniquePracticeDays(reviews);
   if (days.length === 0) return 0;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const today = getTodaySP();
+  const yesterday = getYesterdaySP();
   const latest = days[days.length - 1];
 
   if (latest !== today && latest !== yesterday) return 0;
@@ -38,12 +39,18 @@ export function getRecentReviews(reviews: EnglishReviewSaved[], n: number): Engl
 }
 
 export function countLast7Days(reviews: EnglishReviewSaved[]): number {
-  const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const today = getTodaySP();
+  const d = new Date(today + 'T03:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 7);
+  const cutoff = d.toISOString();
   return reviews.filter((r) => r.createdAt >= cutoff).length;
 }
 
 export function countLast30Days(reviews: EnglishReviewSaved[]): number {
-  const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const today = getTodaySP();
+  const d = new Date(today + 'T03:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 30);
+  const cutoff = d.toISOString();
   return reviews.filter((r) => r.createdAt >= cutoff).length;
 }
 

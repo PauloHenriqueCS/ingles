@@ -123,7 +123,6 @@ export function getScheduleForDate(
   overrideDates: string[] = []
 ): DaySchedule | null {
   const date = new Date(dateStr + 'T12:00:00');
-  if (date.getFullYear() !== 2026) return null;
 
   const dow = date.getDay();
   const isWeekend = dow === 0 || dow === 6;
