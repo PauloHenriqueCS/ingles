@@ -50,6 +50,7 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
     correctionLanguage: (row.correction_language as AIPreferences['correctionLanguage']) ?? BASE_DEFAULTS.correctionLanguage,
     correctionDetail:   (row.correction_detail   as AIPreferences['correctionDetail'])  ?? BASE_DEFAULTS.correctionDetail,
     focusAreas:         Array.isArray(row.focus_areas) ? (row.focus_areas as string[]) : BASE_DEFAULTS.focusAreas,
+    dailyConversationGoalMinutes: (row.daily_conversation_goal_minutes as number | null) ?? BASE_DEFAULTS.dailyConversationGoalMinutes,
   };
 }
 

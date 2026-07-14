@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { BASE_DEFAULTS, getDefaultsForLevel, resolvePreset } from '../lib/tutorPreferences';
+import { DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import type { AIPreferences } from '../types';
 
 export interface UseTutorPreferences {
@@ -37,6 +38,7 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
     correctionLanguage: (row.correction_language  as AIPreferences['correctionLanguage']) ?? BASE_DEFAULTS.correctionLanguage,
     correctionDetail:   (row.correction_detail    as AIPreferences['correctionDetail'])   ?? BASE_DEFAULTS.correctionDetail,
     focusAreas:         Array.isArray(row.focus_areas) ? (row.focus_areas as string[]) : BASE_DEFAULTS.focusAreas,
+    dailyConversationGoalMinutes: (row.daily_conversation_goal_minutes as number | null) ?? DEFAULT_CONVERSATION_GOAL_MINUTES,
   };
   // Auto-resolve preset from manual controls in case DB preset tag is stale
   prefs.personalityPreset = resolvePreset(prefs);
@@ -60,6 +62,7 @@ function prefsToRow(p: AIPreferences): Record<string, unknown> {
     correction_language: p.correctionLanguage,
     correction_detail:   p.correctionDetail,
     focus_areas:         p.focusAreas,
+    daily_conversation_goal_minutes: p.dailyConversationGoalMinutes,
   };
 }
 

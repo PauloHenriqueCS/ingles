@@ -3,6 +3,7 @@ import { EntriesStore, EnglishLearningMemory } from '../types';
 import { computeStats } from '../utils/stats';
 import { MONTH_NAMES_PT } from '../data/calendar2026';
 import { fetchLearningMemory } from '../lib/learningMemory';
+import { getDayTotalSeconds, getConversationGoalMinutes } from '../lib/conversationSessions';
 
 interface Props {
   entries: EntriesStore;
@@ -13,10 +14,14 @@ interface Props {
 export default function Dashboard({ entries, today, onOpenDay }: Props) {
   const stats = computeStats(entries);
   const [memory, setMemory] = useState<EnglishLearningMemory | null>(null);
+  const [convTotalSec, setConvTotalSec] = useState<number | null>(null);
+  const [convGoalMin, setConvGoalMin]   = useState<number>(15);
 
   useEffect(() => {
     fetchLearningMemory().then(setMemory).catch(() => {});
-  }, []);
+    getDayTotalSeconds(today).then(setConvTotalSec).catch(() => {});
+    getConversationGoalMinutes().then(setConvGoalMin).catch(() => {});
+  }, [today]);
 
   const recentWritten = Object.values(entries)
     .filter((e) => e.originalText.trim().length > 0)
@@ -55,6 +60,33 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
           <p className="text-slate-400 text-sm mt-1 line-clamp-2">{todayEntry.originalText}</p>
         )}
       </button>
+
+      {/* Conversation goal */}
+      {convTotalSec !== null && (
+        <div className="bg-slate-800 rounded-lg p-4 mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-medium text-slate-300">Conversa hoje</p>
+            {convTotalSec >= convGoalMin * 60
+              ? <span className="text-xs text-green-400 font-semibold">✓ Meta concluída</span>
+              : <span className="text-xs text-slate-400">{Math.floor(convTotalSec / 60)}/{convGoalMin} min</span>
+            }
+          </div>
+          <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${convTotalSec >= convGoalMin * 60 ? 'bg-green-500' : 'bg-blue-500'}`}
+              style={{ width: `${Math.min(100, Math.round((convTotalSec / (convGoalMin * 60)) * 100))}%` }}
+            />
+          </div>
+          {convTotalSec < convGoalMin * 60 && convTotalSec === 0 && (
+            <p className="text-xs text-slate-500 mt-1.5">Nenhuma sessão hoje</p>
+          )}
+          {convTotalSec > 0 && convTotalSec < convGoalMin * 60 && (
+            <p className="text-xs text-slate-500 mt-1.5">
+              Faltam {Math.ceil(convGoalMin - convTotalSec / 60)} minuto{Math.ceil(convGoalMin - convTotalSec / 60) !== 1 ? 's' : ''}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Writing stats */}
       <div className="grid grid-cols-2 gap-3 mb-6">

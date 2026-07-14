@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { EntriesStore, Status } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
 import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
+import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
 
 interface Props {
   entries: EntriesStore;
@@ -37,8 +38,18 @@ export default function MonthView({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedDays, setSelectedDays] = useState<number[]>(activeWeekdays);
   const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [convTotals, setConvTotals] = useState<Record<string, number>>({});
+  const [convGoalSec, setConvGoalSec] = useState<number>(15 * 60);
 
   useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
+
+  useEffect(() => {
+    getMonthSessionTotals(currentYear, currentMonth).then(setConvTotals).catch(() => {});
+  }, [currentYear, currentMonth]);
+
+  useEffect(() => {
+    getConversationGoalMinutes().then((min) => setConvGoalSec(min * 60)).catch(() => {});
+  }, []);
 
   function toggleDay(dow: number) {
     setSelectedDays((prev) => {
@@ -93,6 +104,10 @@ export default function MonthView({
             </span>
           </div>
         ))}
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full bg-teal-400" />
+          <span className="text-xs text-slate-400">Conversa</span>
+        </div>
       </div>
 
       {/* Day of week headers */}
@@ -113,6 +128,7 @@ export default function MonthView({
           const status: Status = entry?.status ?? 'nao-iniciado';
           const isToday = dateStr === today;
           const hasText = entry?.originalText?.trim().length > 0;
+          const convGoalMet = (convTotals[dateStr] ?? 0) >= convGoalSec;
 
           return (
             <button
@@ -129,7 +145,10 @@ export default function MonthView({
               <span className={isToday ? 'text-white font-bold' : 'text-slate-300'}>
                 {date.getDate()}
               </span>
-              {hasText && <div className="w-1 h-1 rounded-full bg-white/60 mt-0.5" />}
+              <div className="flex items-center gap-0.5 mt-0.5">
+                {hasText && <div className="w-1 h-1 rounded-full bg-white/60" />}
+                {convGoalMet && <div className="w-1 h-1 rounded-full bg-teal-400" title="Meta de conversa atingida" />}
+              </div>
             </button>
           );
         })}

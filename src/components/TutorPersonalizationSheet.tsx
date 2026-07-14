@@ -15,12 +15,13 @@ import {
   LANGUAGE_LABELS,
   DETAIL_LABELS,
 } from '../lib/tutorPreferences';
+import { AVAILABLE_CONVERSATION_GOALS, DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import { getAuthHeader } from '../lib/apiAuth';
 
 // Re-export hook type for convenience
 export type { UseTutorPreferences };
 
-type Tab = 'voz' | 'personalidade' | 'correcoes';
+type Tab = 'voz' | 'personalidade' | 'correcoes' | 'meta';
 
 interface Props {
   hp: ReturnType<typeof import('../hooks/useTutorPreferences').useTutorPreferences>;
@@ -379,6 +380,36 @@ function CorrecoesSection({
   );
 }
 
+// ── Meta section ──────────────────────────────────────────────────────────────
+
+function MetaSection({
+  prefs, update,
+}: {
+  prefs: AIPreferences;
+  update: (u: Partial<AIPreferences>) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <SectionTitle>Meta diária de conversação</SectionTitle>
+        <p className="text-xs text-slate-500 mb-3">Quanto tempo você deseja conversar com a IA por dia?</p>
+        <OptionGroup
+          value={String(prefs.dailyConversationGoalMinutes)}
+          options={AVAILABLE_CONVERSATION_GOALS.map((g) => ({
+            id: String(g),
+            label: `${g} minutos`,
+            description: g === DEFAULT_CONVERSATION_GOAL_MINUTES ? 'Padrão recomendado' : undefined,
+          }))}
+          onChange={(v) => update({ dailyConversationGoalMinutes: Number(v) })}
+        />
+        <p className="text-xs text-slate-600 mt-3">
+          Máximo de 30 minutos. A meta é acumulada entre sessões do mesmo dia.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ── Main sheet ────────────────────────────────────────────────────────────────
 
 export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }: Props) {
@@ -387,6 +418,7 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
     { id: 'voz',          label: 'Voz' },
     { id: 'personalidade', label: 'Personalidade' },
     { id: 'correcoes',    label: 'Correções' },
+    { id: 'meta',         label: 'Meta' },
   ];
 
   async function handleSave() {
@@ -439,9 +471,10 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-4 py-4">
-          {tab === 'voz'          && <VozSection         prefs={hp.prefs} update={hp.updateDraft} sessionActive={sessionActive} />}
+          {tab === 'voz'          && <VozSection          prefs={hp.prefs} update={hp.updateDraft} sessionActive={sessionActive} />}
           {tab === 'personalidade' && <PersonalidadeSection prefs={hp.prefs} update={hp.updateDraft} />}
-          {tab === 'correcoes'    && <CorrecoesSection    prefs={hp.prefs} update={hp.updateDraft} />}
+          {tab === 'correcoes'    && <CorrecoesSection     prefs={hp.prefs} update={hp.updateDraft} />}
+          {tab === 'meta'         && <MetaSection          prefs={hp.prefs} update={hp.updateDraft} />}
         </div>
 
         {/* Footer */}

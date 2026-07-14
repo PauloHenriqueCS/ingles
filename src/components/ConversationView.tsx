@@ -4,6 +4,8 @@ import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS } from '../lib/tutorPreferences';
+import { recordConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
+import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -13,6 +15,38 @@ function formatTime(ms: number) {
 }
 
 const WARNING_MS = 25 * 60 * 1000;
+
+// ── Goal progress bar ─────────────────────────────────────────────────────────
+
+function GoalProgress({ todayTotalSec, goalMinutes }: { todayTotalSec: number; goalMinutes: number }) {
+  const totalMin = todayTotalSec / 60;
+  const pct = Math.min(100, Math.round((totalMin / goalMinutes) * 100));
+  const met = totalMin >= goalMinutes;
+  const displayedMin = Math.floor(totalMin);
+  const remaining = Math.ceil(goalMinutes - totalMin);
+
+  return (
+    <div className="mt-2 space-y-2 text-left">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-400">Meta diária</span>
+        <span className={met ? 'text-green-400 font-semibold' : 'text-slate-300'}>
+          {met ? '✓ Meta concluída' : `${displayedMin}/${goalMinutes} min`}
+        </span>
+      </div>
+      <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${met ? 'bg-green-500' : 'bg-blue-500'}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {!met && (
+        <p className="text-xs text-slate-500">
+          Faltam {remaining} minuto{remaining !== 1 ? 's' : ''}
+        </p>
+      )}
+    </div>
+  );
+}
 
 // ── Summary chips ─────────────────────────────────────────────────────────────
 
@@ -74,15 +108,47 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 export default function ConversationView() {
   const hp      = useTutorPreferences();
   const session = useRealtimeSession();
+  const today   = new Date().toISOString().split('T')[0];
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
   const [firstAccessChecked, setFirstAccessChecked] = useState(false);
+  const [todayTotalSec, setTodayTotalSec]     = useState<number | null>(null);
+  const [previousDayTotalSec, setPreviousDayTotalSec] = useState<number>(0);
+  const sessionSavedRef = useRef(false);
 
   // Thinking state: brief window after AI finishes speaking
   const [isThinking, setIsThinking] = useState(false);
   const prevSpeakingRef = useRef(false);
   const thinkTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load previous sessions total on mount
+  useEffect(() => {
+    getDayTotalSeconds(today).then(setPreviousDayTotalSec).catch(() => {});
+  }, [today]);
+
+  // Refresh previous total when a new session starts connecting
+  useEffect(() => {
+    if (session.status === 'connecting') {
+      getDayTotalSeconds(today).then(setPreviousDayTotalSec).catch(() => {});
+    }
+  }, [session.status, today]);
+
+  // Save session when it ends and fetch updated daily total
+  useEffect(() => {
+    if (session.status === 'ended' && !sessionSavedRef.current && session.elapsedMs > 0) {
+      sessionSavedRef.current = true;
+      const durationSec = Math.floor(session.elapsedMs / 1000);
+      recordConversationSession(today, durationSec)
+        .then(() => getDayTotalSeconds(today))
+        .then(setTodayTotalSec)
+        .catch(() => setTodayTotalSec(durationSec));
+    }
+    if (session.status === 'connecting') {
+      sessionSavedRef.current = false;
+      setTodayTotalSec(null);
+    }
+  }, [session.status, session.elapsedMs, today]);
 
   const isActive     = session.status === 'active';
   const isConnecting = session.status === 'connecting';
@@ -90,6 +156,10 @@ export default function ConversationView() {
   const isError      = session.status === 'error';
   const canStart     = session.status === 'idle' || isEnded || isError;
   const nearLimit    = session.elapsedMs >= WARNING_MS;
+
+  const accumulatedSec = isEnded && todayTotalSec !== null
+    ? todayTotalSec
+    : previousDayTotalSec + Math.floor(session.elapsedMs / 1000);
 
   useEffect(() => {
     const wasSpeaking = prevSpeakingRef.current;
@@ -144,6 +214,12 @@ export default function ConversationView() {
           </div>
         ) : (
           <div className="flex flex-col gap-4">
+
+            {/* ── Daily goal card ────────────────────────────────────────── */}
+            <ConversationDailyGoalCard
+              accumulatedSec={accumulatedSec}
+              goalMinutes={hp.prefs.dailyConversationGoalMinutes}
+            />
 
             {/* ── Tutor card (idle / ended / error) ─────────────────────── */}
             {!isConnecting && !isActive && (
@@ -208,14 +284,20 @@ export default function ConversationView() {
 
             {/* ── Session ended ──────────────────────────────────────────── */}
             {isEnded && (
-              <div className="bg-slate-800 rounded-2xl p-6 text-center space-y-3">
-                <div className="text-3xl">✅</div>
-                <div>
-                  <p className="text-slate-200 font-semibold">Sessão encerrada</p>
+              <div className="bg-slate-800 rounded-2xl p-6 space-y-3">
+                <div className="text-center">
+                  <div className="text-3xl">✅</div>
+                  <p className="text-slate-200 font-semibold mt-2">Sessão encerrada</p>
                   <p className="text-sm text-slate-400 mt-0.5">
                     Duração: {formatTime(session.elapsedMs)}
                   </p>
                 </div>
+                {todayTotalSec !== null && (
+                  <GoalProgress
+                    todayTotalSec={todayTotalSec}
+                    goalMinutes={hp.prefs.dailyConversationGoalMinutes}
+                  />
+                )}
               </div>
             )}
 

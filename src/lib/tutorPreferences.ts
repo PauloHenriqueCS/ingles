@@ -1,4 +1,5 @@
 import type { AIPreferences } from '../types';
+import { DEFAULT_CONVERSATION_GOAL_MINUTES } from './conversationGoal';
 
 // ── Voice catalog (OpenAI Realtime API) ──────────────────────────────────────
 
@@ -157,6 +158,7 @@ export const BASE_DEFAULTS: AIPreferences = {
   correctionLanguage: 'portuguese',
   correctionDetail: 'brief',
   focusAreas: [],
+  dailyConversationGoalMinutes: DEFAULT_CONVERSATION_GOAL_MINUTES,
 };
 
 /** Returns defaults tuned to the user's CEFR level. */
