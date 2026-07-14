@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
+import AIAvatar, { type AvatarState } from './AIAvatar';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS } from '../lib/tutorPreferences';
 
 function formatTime(ms: number) {
@@ -13,53 +14,9 @@ function formatTime(ms: number) {
 
 const WARNING_MS = 25 * 60 * 1000;
 
-// ── Lemon AI logo ─────────────────────────────────────────────────────────────
-
-function LemonLogo({
-  size = 80,
-  state = 'idle',
-}: {
-  size?: number;
-  state?: 'idle' | 'listening' | 'speaking';
-}) {
-  const isMotionOk = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  const ringClass =
-    state === 'speaking' && isMotionOk
-      ? 'absolute inset-0 rounded-full border-2 border-yellow-400 animate-ping opacity-40 pointer-events-none'
-      : '';
-
-  const glowClass =
-    state === 'listening'
-      ? 'ring-2 ring-yellow-400/60 ring-offset-2 ring-offset-slate-800'
-      : state === 'speaking'
-      ? 'ring-2 ring-yellow-300/80 ring-offset-2 ring-offset-slate-800 scale-110'
-      : '';
-
-  return (
-    <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
-      <img
-        src="/lemon-ai.svg"
-        alt="Lemon AI"
-        width={size}
-        height={size}
-        className={`rounded-full transition-all duration-300 ${glowClass}`}
-        draggable={false}
-      />
-      {ringClass && <span className={ringClass} aria-hidden="true" />}
-    </div>
-  );
-}
-
 // ── Summary chips ─────────────────────────────────────────────────────────────
 
-function SummaryChips({
-  chips,
-  onChipClick,
-}: {
-  chips: string[];
-  onChipClick: () => void;
-}) {
+function SummaryChips({ chips, onChipClick }: { chips: string[]; onChipClick: () => void }) {
   return (
     <div className="flex flex-wrap gap-1.5 justify-center mt-2">
       {chips.map((chip) => (
@@ -103,6 +60,15 @@ function FirstAccessBanner({ onPersonalize, onDismiss }: { onPersonalize: () => 
   );
 }
 
+// ── Active status label ───────────────────────────────────────────────────────
+
+function statusLabel(state: AvatarState, teacherName: string): string {
+  if (state === 'speaking')  return `${teacherName} está falando…`;
+  if (state === 'thinking')  return 'Processando…';
+  if (state === 'listening') return 'Sua vez de falar';
+  return '';
+}
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function ConversationView() {
@@ -111,17 +77,12 @@ export default function ConversationView() {
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
-
-  // Show first-access banner once when prefs loaded and user has no saved prefs
   const [firstAccessChecked, setFirstAccessChecked] = useState(false);
-  if (!hp.loading && !firstAccessChecked) {
-    setFirstAccessChecked(true);
-    // Show if loaded defaults don't differ from DB (i.e., no DB row existed)
-    if (!hp.isDirty && JSON.stringify(hp.prefs) === JSON.stringify(hp.saved)) {
-      // If saved === prefs and no DB row, show banner
-      // We'll use a simple heuristic: if voice is the default coral & no customization, show banner
-    }
-  }
+
+  // Thinking state: brief window after AI finishes speaking
+  const [isThinking, setIsThinking] = useState(false);
+  const prevSpeakingRef = useRef(false);
+  const thinkTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isActive     = session.status === 'active';
   const isConnecting = session.status === 'connecting';
@@ -130,7 +91,23 @@ export default function ConversationView() {
   const canStart     = session.status === 'idle' || isEnded || isError;
   const nearLimit    = session.elapsedMs >= WARNING_MS;
 
-  const chips = getPrefsSummaryChips(hp.prefs);
+  useEffect(() => {
+    const wasSpeaking = prevSpeakingRef.current;
+    prevSpeakingRef.current = session.isSpeaking;
+
+    if (wasSpeaking && !session.isSpeaking && isActive) {
+      setIsThinking(true);
+      thinkTimerRef.current = setTimeout(() => setIsThinking(false), 1300);
+      return () => { if (thinkTimerRef.current) clearTimeout(thinkTimerRef.current); };
+    }
+    if (!isActive) setIsThinking(false);
+  }, [session.isSpeaking, isActive]);
+
+  if (!hp.loading && !firstAccessChecked) {
+    setFirstAccessChecked(true);
+  }
+
+  const chips      = getPrefsSummaryChips(hp.prefs);
   const voiceLabel = REALTIME_VOICES.find((v) => v.id === hp.prefs.voice)?.label ?? hp.prefs.voice;
   const paceLabel  = PACE_LABELS[hp.prefs.speechPace]?.label ?? hp.prefs.speechPace;
 
@@ -142,8 +119,12 @@ export default function ConversationView() {
   const errorBorder   = isConfigError ? 'border-amber-700 bg-amber-900/20' : 'border-red-800 bg-red-900/30';
   const errorText     = isConfigError ? 'text-amber-300' : 'text-red-300';
 
-  const logoState: 'idle' | 'listening' | 'speaking' =
-    session.isSpeaking ? 'speaking' : isActive ? 'listening' : 'idle';
+  const avatarState: AvatarState =
+    isError      ? 'error'      :
+    isConnecting ? 'connecting' :
+    !isActive    ? 'idle'       :
+    session.isSpeaking ? 'speaking' :
+    isThinking   ? 'thinking'  : 'listening';
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
@@ -159,15 +140,17 @@ export default function ConversationView() {
 
         {hp.loading ? (
           <div className="flex-1 flex items-center justify-center">
-            <div className="w-6 h-6 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+            <div className="w-6 h-6 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
           </div>
         ) : (
           <div className="flex flex-col gap-4">
 
-            {/* ── Tutor card ─────────────────────────────────────────────── */}
+            {/* ── Tutor card (idle / ended / error) ─────────────────────── */}
             {!isConnecting && !isActive && (
               <div className="bg-slate-800 rounded-2xl p-6 text-center space-y-3">
-                <LemonLogo size={80} state={logoState} />
+                <div className="flex justify-center">
+                  <AIAvatar state={avatarState} size={100} />
+                </div>
 
                 <div>
                   <p className="text-slate-200 font-semibold text-base">{hp.prefs.teacherName}</p>
@@ -192,9 +175,8 @@ export default function ConversationView() {
             {isConnecting && (
               <div className="bg-slate-800 rounded-2xl p-8 text-center space-y-4">
                 <div className="flex justify-center">
-                  <LemonLogo size={72} state="idle" />
+                  <AIAvatar state="connecting" size={88} />
                 </div>
-                <div className="w-6 h-6 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin mx-auto" />
                 <p className="text-slate-400 text-sm">Conectando ao tutor…</p>
               </div>
             )}
@@ -202,13 +184,11 @@ export default function ConversationView() {
             {/* ── Active session ─────────────────────────────────────────── */}
             {isActive && (
               <div className="bg-slate-800 rounded-2xl p-6 flex flex-col items-center gap-5">
-                <LemonLogo size={96} state={logoState} />
+                <AIAvatar state={avatarState} size={112} />
 
                 <div className="text-center">
-                  <p className="text-slate-200 font-medium text-base">
-                    {session.isSpeaking
-                      ? `${hp.prefs.teacherName} está falando…`
-                      : 'Sua vez de falar'}
+                  <p className="text-slate-200 font-medium text-base min-h-[1.5rem]">
+                    {statusLabel(avatarState, hp.prefs.teacherName)}
                   </p>
                   <p className={`text-sm mt-1 tabular-nums ${nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
                     {formatTime(session.elapsedMs)}
@@ -242,7 +222,7 @@ export default function ConversationView() {
             {isError && (
               <div className={`border rounded-2xl p-5 ${errorBorder}`}>
                 <div className="flex items-start gap-2">
-                  <span className="text-lg shrink-0">{errorIcon}</span>
+                  <span className="text-lg shrink-0" aria-hidden="true">{errorIcon}</span>
                   <p className={`text-sm leading-relaxed ${errorText}`}>{session.errorMessage}</p>
                 </div>
               </div>
