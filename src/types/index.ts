@@ -306,6 +306,16 @@ export interface ValidationResult {
 
 export type PronunciationAssessmentStatus = 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
 
+export type PronunciationFailCode =
+  | 'AUDIO_DECODE_FAILED'
+  | 'AUDIO_EMPTY'
+  | 'AZURE_NO_MATCH'
+  | 'AZURE_CANCELED'
+  | 'AZURE_TIMEOUT'
+  | 'AZURE_NETWORK_ERROR'
+  | 'RESULT_INVALID'
+  | 'CLIENT_INTERRUPTED';
+
 export interface PronunciationAssessment {
   id: string;
   userId: string;
@@ -314,6 +324,8 @@ export interface PronunciationAssessment {
   referenceText: string;
   languageCode: string;
   azureRegion: string;
+  activeAttemptId: string | null;
+  attemptStartedAt: string | null;
   pronunciationScore: number | null;
   accuracyScore: number | null;
   fluencyScore: number | null;
@@ -332,8 +344,21 @@ export interface PronunciationAssessment {
   updatedAt: string;
 }
 
+export interface PronunciationNormalizedResult {
+  pronunciationScore: number;
+  accuracyScore: number;
+  fluencyScore: number;
+  completenessScore: number;
+  prosodyScore: number | null;
+  recognizedText: string;
+  wordsJson: unknown[];
+  rawSegments: unknown[];
+  audioDurationSeconds: number;
+}
+
 export interface PronunciationStatusResponse {
   status: PronunciationAssessmentStatus | 'available';
   canAnalyze: boolean;
   assessmentId: string | null;
+  result?: PronunciationNormalizedResult;
 }

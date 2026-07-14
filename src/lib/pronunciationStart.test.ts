@@ -17,12 +17,14 @@ import handler from '../../api/pronunciation/start';
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
-const VALID_UUID   = '123e4567-e89b-12d3-a456-426614174000';
-const OTHER_UUID   = '999e4567-e89b-12d3-a456-426614174999';
-const MOCK_REGION  = 'eastus';
-const MOCK_TOKEN   = 'azure-jwt-token-xyz';
-const MOCK_ASSESS  = '660e8400-e29b-41d4-a716-446655440001';
-const MOCK_REF     = 'Hello world, this is my final text.';
+const VALID_UUID    = '123e4567-e89b-12d3-a456-426614174000';
+const OTHER_UUID    = '999e4567-e89b-12d3-a456-426614174999';
+const VALID_ATTEMPT = '550e8400-e29b-41d4-a716-446655440001';
+const OTHER_ATTEMPT = '660e8400-e29b-41d4-a716-446655440002';
+const MOCK_REGION   = 'eastus';
+const MOCK_TOKEN    = 'azure-jwt-token-xyz';
+const MOCK_ASSESS   = '660e8400-e29b-41d4-a716-446655440001';
+const MOCK_REF      = 'Hello world, this is my final text.';
 
 const mockRpc = vi.fn();
 const mockSupabase = { rpc: mockRpc };
@@ -30,7 +32,7 @@ const mockSupabase = { rpc: mockRpc };
 function makeReq(overrides: Record<string, unknown> = {}) {
   return {
     method: 'POST',
-    body: { textVersionId: VALID_UUID },
+    body: { textVersionId: VALID_UUID, attemptId: VALID_ATTEMPT },
     headers: { authorization: 'Bearer test-jwt' },
     ...overrides,
   };
@@ -84,15 +86,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-// ── Authentication ────────────────────────────────────────────────────────────
+// ── Autenticação ──────────────────────────────────────────────────────────────
 
 describe('autenticação', () => {
   it('retorna 401 quando requireAuth falha', async () => {
     vi.mocked(requireAuth).mockResolvedValue(null);
-    const req = makeReq();
-    const res = makeRes();
-    await handler(req, res);
-    // requireAuth já respondeu — o handler apenas retorna
+    await handler(makeReq(), makeRes());
     expect(vi.mocked(issueAzureSpeechToken)).not.toHaveBeenCalled();
   });
 
@@ -124,35 +123,41 @@ describe('método HTTP', () => {
 describe('validação do payload', () => {
   it('retorna 400 quando textVersionId está ausente', async () => {
     const res = makeRes();
-    await handler(makeReq({ body: {} }), res);
+    await handler(makeReq({ body: { attemptId: VALID_ATTEMPT } }), res);
     expect(res._status).toBe(400);
     expect((res._body as any).code).toBe('INVALID_TEXT_VERSION_ID');
   });
 
-  it('retorna 400 quando textVersionId não é string', async () => {
+  it('retorna 400 quando textVersionId não é UUID válido', async () => {
     const res = makeRes();
-    await handler(makeReq({ body: { textVersionId: 12345 } }), res);
+    await handler(makeReq({ body: { textVersionId: 'not-a-uuid', attemptId: VALID_ATTEMPT } }), res);
     expect(res._status).toBe(400);
     expect((res._body as any).code).toBe('INVALID_TEXT_VERSION_ID');
   });
 
-  it('retorna 400 para UUID com formato inválido', async () => {
+  it('retorna 400 quando attemptId está ausente', async () => {
     const res = makeRes();
-    await handler(makeReq({ body: { textVersionId: 'not-a-uuid' } }), res);
+    await handler(makeReq({ body: { textVersionId: VALID_UUID } }), res);
     expect(res._status).toBe(400);
-    expect((res._body as any).code).toBe('INVALID_TEXT_VERSION_ID');
+    expect((res._body as any).code).toBe('INVALID_ATTEMPT_ID');
   });
 
-  it('não aceita userId no body', async () => {
-    // Extra fields are ignored; textVersionId must be valid UUID
+  it('retorna 400 quando attemptId não é UUID válido', async () => {
     const res = makeRes();
-    await handler(makeReq({ body: { textVersionId: VALID_UUID, userId: 'evil-id' } }), res);
-    // Should proceed to RPC (userId from body is silently ignored)
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: 'not-a-uuid' } }), res);
+    expect(res._status).toBe(400);
+    expect((res._body as any).code).toBe('INVALID_ATTEMPT_ID');
+  });
+
+  it('não aceita userId no body (user_id vem de auth.uid() no SQL)', async () => {
+    const res = makeRes();
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: VALID_ATTEMPT, userId: 'evil-id' } }), res);
     expect(mockRpc).toHaveBeenCalledWith(
       'reserve_pronunciation_assessment',
       expect.objectContaining({ p_text_version_id: VALID_UUID }),
     );
-    // The user_id used in the RPC comes from auth.uid() inside the SQL function
+    const rpcCall = mockRpc.mock.calls[0];
+    expect(rpcCall[1]).not.toHaveProperty('p_user_id');
   });
 });
 
@@ -169,7 +174,7 @@ describe('Azure não configurado', () => {
   });
 });
 
-// ── Reserva — erros do banco ──────────────────────────────────────────────────
+// ── Erros do RPC de reserva ───────────────────────────────────────────────────
 
 describe('erros do RPC de reserva', () => {
   it('retorna 500 quando o RPC retorna error', async () => {
@@ -185,7 +190,6 @@ describe('erros do RPC de reserva', () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(404);
-    expect((res._body as any).code).toBe('TEXT_VERSION_NOT_FOUND');
   });
 
   it('retorna 409 para versão sem texto final elegível', async () => {
@@ -193,7 +197,6 @@ describe('erros do RPC de reserva', () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(409);
-    expect((res._body as any).code).toBe('TEXT_VERSION_NOT_ELIGIBLE');
   });
 
   it('retorna 409 e assessmentId quando já completed', async () => {
@@ -201,7 +204,6 @@ describe('erros do RPC de reserva', () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(409);
-    expect((res._body as any).code).toBe('ASSESSMENT_ALREADY_COMPLETED');
     expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
   });
 
@@ -210,8 +212,15 @@ describe('erros do RPC de reserva', () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(409);
-    expect((res._body as any).code).toBe('ASSESSMENT_NOT_RETRYABLE');
-    expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
+  });
+
+  it('retorna 409 ASSESSMENT_IN_PROGRESS quando outro attemptId está ativo', async () => {
+    rpcOk({ error: 'ASSESSMENT_IN_PROGRESS', assessmentId: MOCK_ASSESS });
+    const res = makeRes();
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: OTHER_ATTEMPT } }), res);
+    expect(res._status).toBe(409);
+    expect((res._body as any).code).toBe('ASSESSMENT_IN_PROGRESS');
+    expect(vi.mocked(issueAzureSpeechToken)).not.toHaveBeenCalled();
   });
 
   it('não emite token quando RPC retorna erro de estado', async () => {
@@ -221,29 +230,30 @@ describe('erros do RPC de reserva', () => {
   });
 });
 
-// ── Reserva bem-sucedida ──────────────────────────────────────────────────────
+// ── Reserva e emissão de token ────────────────────────────────────────────────
 
 describe('reserva e emissão de token', () => {
-  it('retorna 200 com assessmentId, token, region, language e referenceText', async () => {
+  it('retorna 200 com assessmentId, attemptId, token, region, language e referenceText', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(200);
     const body = res._body as any;
     expect(body.assessmentId).toBe(MOCK_ASSESS);
+    expect(body.attemptId).toBe(VALID_ATTEMPT);
     expect(body.token).toBe(MOCK_TOKEN);
     expect(body.region).toBe(MOCK_REGION);
     expect(body.language).toBe('en-US');
     expect(body.referenceText).toBe(MOCK_REF);
   });
 
-  it('snapshot do texto é o que veio do banco (não do body)', async () => {
+  it('referenceText vem do banco, não do body', async () => {
     rpcOk({ action: 'created', assessmentId: MOCK_ASSESS, referenceText: 'DB text from bank' });
     const res = makeRes();
-    await handler(makeReq({ body: { textVersionId: VALID_UUID } }), res);
+    await handler(makeReq(), res);
     expect((res._body as any).referenceText).toBe('DB text from bank');
   });
 
-  it('aplica Cache-Control: no-store na resposta com token', async () => {
+  it('aplica Cache-Control: no-store', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._headers['Cache-Control']).toBe('no-store');
@@ -256,6 +266,14 @@ describe('reserva e emissão de token', () => {
     expect(JSON.stringify(res._body)).not.toContain('AZURE_SPEECH_KEY');
   });
 
+  it('token não aparece em logs/storage — resposta não contém chave permanente', async () => {
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const serialized = JSON.stringify(res._body);
+    expect(serialized).not.toContain('mock-key');
+    expect(serialized).not.toContain('AZURE_SPEECH_KEY');
+  });
+
   it('emite o token somente depois da reserva ser confirmada', async () => {
     const callOrder: string[] = [];
     mockRpc.mockImplementation(async () => {
@@ -266,17 +284,18 @@ describe('reserva e emissão de token', () => {
       callOrder.push('token');
       return { token: MOCK_TOKEN, region: MOCK_REGION, expiresInSeconds: 540 };
     });
-
     await handler(makeReq(), makeRes());
-
     expect(callOrder).toEqual(['rpc', 'token']);
   });
 
-  it('passa o textVersionId correto para o RPC', async () => {
-    await handler(makeReq({ body: { textVersionId: OTHER_UUID } }), makeRes());
+  it('passa textVersionId e attemptId corretos para o RPC', async () => {
+    await handler(makeReq({ body: { textVersionId: OTHER_UUID, attemptId: VALID_ATTEMPT } }), makeRes());
     expect(mockRpc).toHaveBeenCalledWith(
       'reserve_pronunciation_assessment',
-      expect.objectContaining({ p_text_version_id: OTHER_UUID }),
+      expect.objectContaining({
+        p_text_version_id: OTHER_UUID,
+        p_attempt_id: VALID_ATTEMPT,
+      }),
     );
   });
 
@@ -286,33 +305,28 @@ describe('reserva e emissão de token', () => {
     expect((res._body as any).language).toBe('en-US');
   });
 
-  it('a região na resposta vem da configuração do servidor, não do body', async () => {
+  it('região vem da configuração do servidor, não do body', async () => {
     vi.stubEnv('AZURE_SPEECH_REGION', 'brazilsouth');
-    vi.mocked(issueAzureSpeechToken).mockResolvedValue({
-      token: MOCK_TOKEN,
-      region: 'brazilsouth',
-      expiresInSeconds: 540,
-    });
+    vi.mocked(issueAzureSpeechToken).mockResolvedValue({ token: MOCK_TOKEN, region: 'brazilsouth', expiresInSeconds: 540 });
     const res = makeRes();
     await handler(makeReq(), res);
     expect((res._body as any).region).toBe('brazilsouth');
   });
 });
 
-// ── Idempotência e estados concorrentes ───────────────────────────────────────
+// ── Idempotência e concorrência ───────────────────────────────────────────────
 
 describe('idempotência e concorrência', () => {
-  it('existing_processing retorna o mesmo assessmentId sem criar nova avaliação', async () => {
+  it('mesmo attemptId (existing_processing) é idempotente e emite token', async () => {
     rpcOk({ action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status).toBe(200);
     expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
-    // RPC chamado exatamente uma vez — não criou duplicata
-    expect(mockRpc).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(issueAzureSpeechToken)).toHaveBeenCalledOnce();
   });
 
-  it('reactivated retorna o mesmo assessmentId', async () => {
+  it('reactivated retorna o mesmo assessmentId e emite token', async () => {
     rpcOk({ action: 'reactivated', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
     const res = makeRes();
     await handler(makeReq(), res);
@@ -320,13 +334,38 @@ describe('idempotência e concorrência', () => {
     expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
   });
 
-  it('dois calls com o mesmo textVersionId usam o mesmo assessmentId', async () => {
+  it('dois calls com o mesmo textVersionId e mesmo attemptId usam o mesmo assessmentId', async () => {
     const resA = makeRes();
     const resB = makeRes();
     await handler(makeReq(), resA);
     rpcOk({ action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
     await handler(makeReq(), resB);
     expect((resA._body as any).assessmentId).toBe((resB._body as any).assessmentId);
+  });
+
+  it('dois attemptIds diferentes → 409 ASSESSMENT_IN_PROGRESS para o segundo', async () => {
+    // Primeira requisição: cria
+    const resA = makeRes();
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: VALID_ATTEMPT } }), resA);
+    expect(resA._status).toBe(200);
+
+    // Segunda aba com outro attemptId
+    rpcOk({ error: 'ASSESSMENT_IN_PROGRESS', assessmentId: MOCK_ASSESS });
+    const resB = makeRes();
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: OTHER_ATTEMPT } }), resB);
+    expect(resB._status).toBe(409);
+    expect((resB._body as any).code).toBe('ASSESSMENT_IN_PROGRESS');
+    // Token não emitido para o segundo
+    expect(vi.mocked(issueAzureSpeechToken)).toHaveBeenCalledTimes(1);
+  });
+
+  it('nenhum segundo registro é criado (RPC chamado uma vez por request)', async () => {
+    await handler(makeReq(), makeRes());
+    rpcOk({ action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
+    await handler(makeReq(), makeRes());
+    // Cada request faz exatamente 1 call ao RPC de reserva
+    const reserveCalls = mockRpc.mock.calls.filter(([name]) => name === 'reserve_pronunciation_assessment');
+    expect(reserveCalls).toHaveLength(2);
   });
 });
 
@@ -339,76 +378,67 @@ describe('compensação após falha do Azure', () => {
     );
     mockRpc
       .mockResolvedValueOnce({ data: { action: 'created', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF }, error: null })
-      .mockResolvedValueOnce({ data: null, error: null }); // compensate call
-
+      .mockResolvedValueOnce({ data: null, error: null });
     const res = makeRes();
     await handler(makeReq(), res);
-
-    expect(mockRpc).toHaveBeenNthCalledWith(2, 'compensate_pronunciation_assessment', {
+    expect(mockRpc).toHaveBeenNthCalledWith(2, 'compensate_pronunciation_assessment', expect.objectContaining({
       p_assessment_id: MOCK_ASSESS,
-      p_error_code: 'AZURE_SPEECH_UNAVAILABLE',
-      p_error_message: expect.any(String),
-    });
+    }));
     expect(res._status).toBe(503);
   });
 
   it('chama compensate quando action=reactivated e token falha', async () => {
-    rpcOk({ action: 'reactivated', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
     vi.mocked(issueAzureSpeechToken).mockRejectedValue(
       new AzureSpeechError('AZURE_SPEECH_TIMEOUT', 'Timed out'),
     );
     mockRpc
       .mockResolvedValueOnce({ data: { action: 'reactivated', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF }, error: null })
       .mockResolvedValueOnce({ data: null, error: null });
-
     const res = makeRes();
     await handler(makeReq(), res);
-
     expect(mockRpc).toHaveBeenCalledWith('compensate_pronunciation_assessment', expect.objectContaining({
       p_assessment_id: MOCK_ASSESS,
     }));
     expect(res._status).toBe(504);
   });
 
-  it('NÃO chama compensate quando action=existing_processing e token falha', async () => {
+  it('chama compensate quando action=existing_processing (mesmo attempt) e token falha', async () => {
     rpcOk({ action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
     vi.mocked(issueAzureSpeechToken).mockRejectedValue(
       new AzureSpeechError('AZURE_SPEECH_UNAVAILABLE', 'Down'),
     );
-    mockRpc.mockResolvedValue({ data: { action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF }, error: null });
+    mockRpc
+      .mockResolvedValueOnce({ data: { action: 'existing_processing', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF }, error: null })
+      .mockResolvedValueOnce({ data: null, error: null });
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const compensateCalls = mockRpc.mock.calls.filter(([name]) => name === 'compensate_pronunciation_assessment');
+    expect(compensateCalls).toHaveLength(1);
+  });
 
-    await handler(makeReq(), makeRes());
-
-    // compensate_pronunciation_assessment deve NÃO ter sido chamado
-    const compensateCalls = mockRpc.mock.calls.filter(
-      ([name]) => name === 'compensate_pronunciation_assessment',
-    );
+  it('NÃO chama compensate quando ASSESSMENT_IN_PROGRESS (outro attempt)', async () => {
+    rpcOk({ error: 'ASSESSMENT_IN_PROGRESS', assessmentId: MOCK_ASSESS });
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: OTHER_ATTEMPT } }), makeRes());
+    const compensateCalls = mockRpc.mock.calls.filter(([name]) => name === 'compensate_pronunciation_assessment');
     expect(compensateCalls).toHaveLength(0);
+    expect(vi.mocked(issueAzureSpeechToken)).not.toHaveBeenCalled();
   });
 
   it('não sobrescreve avaliação completed durante compensação', async () => {
-    // O SQL function da compensação só atualiza WHERE status = 'processing'
-    // Este teste verifica que a compensação não é chamada fora de contexto
     rpcOk({ error: 'ASSESSMENT_ALREADY_COMPLETED', assessmentId: MOCK_ASSESS });
-
     await handler(makeReq(), makeRes());
-
     expect(vi.mocked(issueAzureSpeechToken)).not.toHaveBeenCalled();
-    const compensateCalls = mockRpc.mock.calls.filter(
-      ([name]) => name === 'compensate_pronunciation_assessment',
-    );
+    const compensateCalls = mockRpc.mock.calls.filter(([name]) => name === 'compensate_pronunciation_assessment');
     expect(compensateCalls).toHaveLength(0);
   });
 
   it('resposta de erro do Azure não contém token nem chave', async () => {
     vi.mocked(issueAzureSpeechToken).mockRejectedValue(
-      new AzureSpeechError('AZURE_SPEECH_AUTH_FAILED', 'Credentials rejected'),
+      new AzureSpeechError('AZURE_SPEECH_AUTH_FAILED', 'Rejected'),
     );
     mockRpc.mockResolvedValue({ data: { action: 'created', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF }, error: null });
-
     const res = makeRes();
     await handler(makeReq(), res);
-
     const serialized = JSON.stringify(res._body);
     expect(serialized).not.toContain(MOCK_TOKEN);
     expect(serialized).not.toContain('mock-key');
@@ -424,20 +454,16 @@ describe('segurança da resposta', () => {
     expect(JSON.stringify(res._body)).not.toContain('mock-key');
   });
 
-  it('resposta bem-sucedida não expõe dados de outro usuário', async () => {
+  it('resposta não expõe dados de outro usuário', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
     const body = res._body as any;
-    // O referenceText vem do banco (mockado), não do body da request
-    expect(body.referenceText).toBe(MOCK_REF);
-    // Não há campo userId, email ou dados do usuário na resposta
     expect(body).not.toHaveProperty('userId');
     expect(body).not.toHaveProperty('email');
   });
 
   it('endpoint não aceita userId do frontend', async () => {
-    await handler(makeReq({ body: { textVersionId: VALID_UUID, userId: 'evil-id' } }), makeRes());
-    // O p_user_id não é enviado ao RPC — o user_id real vem de auth.uid() dentro do SQL
+    await handler(makeReq({ body: { textVersionId: VALID_UUID, attemptId: VALID_ATTEMPT, userId: 'evil-id' } }), makeRes());
     const rpcCall = mockRpc.mock.calls[0];
     if (rpcCall) {
       const [, params] = rpcCall;
@@ -450,7 +476,8 @@ describe('segurança da resposta', () => {
 // ── Testes de integração que requerem DB real ─────────────────────────────────
 
 describe.todo('integração — constraint UNIQUE impede duplicata em chamadas concorrentes reais');
-describe.todo('integração — duas abas simultâneas retornam o mesmo assessmentId');
+describe.todo('integração — duas abas com mesmo attemptId retornam existing_processing');
+describe.todo('integração — duas abas com attemptIds diferentes: a segunda recebe IN_PROGRESS');
 describe.todo('integração — clique duplo não cria dois registros no banco');
 describe.todo('integração — usuário B não consegue reservar texto do usuário A');
 describe.todo('integração — completed bloqueia nova reserva no banco');

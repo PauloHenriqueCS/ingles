@@ -35,7 +35,7 @@ export default async function handler(req: any, res: any) {
 
   // ── 2. Validate payload ─────────────────────────────────────────────────────
   const body = req.body ?? {};
-  const { textVersionId } = body;
+  const { textVersionId, attemptId } = body;
 
   if (!textVersionId || typeof textVersionId !== 'string' || !isValidUuid(textVersionId)) {
     return res.status(400).json({
@@ -44,9 +44,14 @@ export default async function handler(req: any, res: any) {
     });
   }
 
+  if (!attemptId || typeof attemptId !== 'string' || !isValidUuid(attemptId)) {
+    return res.status(400).json({
+      code: 'INVALID_ATTEMPT_ID',
+      message: 'O identificador de tentativa é inválido.',
+    });
+  }
+
   // ── 3. Fail fast if Azure is not configured ──────────────────────────────────
-  // We read the region here to store it in the DB during the reservation.
-  // The full credentials are validated later by issueAzureSpeechToken().
   const azureRegion = (process.env.AZURE_SPEECH_REGION ?? '').trim();
   if (!azureRegion) {
     return res.status(503).json({
@@ -56,11 +61,13 @@ export default async function handler(req: any, res: any) {
   }
 
   // ── 4. Reserve atomically via SECURITY DEFINER RPC ──────────────────────────
-  // The function validates ownership, resolves the reference text, and handles
-  // all race conditions (double-click, multiple tabs, concurrent requests).
   const { data: reserveData, error: rpcError } = await supabase.rpc(
     'reserve_pronunciation_assessment',
-    { p_text_version_id: textVersionId, p_azure_region: azureRegion },
+    {
+      p_text_version_id: textVersionId,
+      p_azure_region: azureRegion,
+      p_attempt_id: attemptId,
+    },
   );
 
   if (rpcError) {
@@ -111,6 +118,14 @@ export default async function handler(req: any, res: any) {
     });
   }
 
+  if (result.error === 'ASSESSMENT_IN_PROGRESS') {
+    return res.status(409).json({
+      code: 'ASSESSMENT_IN_PROGRESS',
+      message: 'Já existe uma análise em andamento para este texto.',
+      assessmentId: result.assessmentId,
+    });
+  }
+
   if (result.error) {
     console.error('[pronunciation/start] Unexpected reservation result:', result.error);
     return res.status(500).json({
@@ -122,19 +137,21 @@ export default async function handler(req: any, res: any) {
   const assessmentId = result.assessmentId as string;
   const referenceText = result.referenceText as string;
 
-  // 'created' and 'reactivated' mean we are the owner of this processing slot.
-  // 'existing_processing' means another request already holds it — we can still
-  // issue a token (it's just a new credential for the same assessment), but we
-  // must NOT compensate that slot if our token issuance fails.
-  const isOurSlot = result.action === 'created' || result.action === 'reactivated';
+  // All three success actions mean we can (and should) issue a token:
+  // - 'created': we just created the slot with our attempt
+  // - 'reactivated': we reactivated a failed slot with our attempt
+  // - 'existing_processing': same attemptId called /start again (e.g. token expired)
+  // Only a DIFFERENT attemptId would have returned ASSESSMENT_IN_PROGRESS above.
+  const isOurSlot =
+    result.action === 'created' ||
+    result.action === 'reactivated' ||
+    result.action === 'existing_processing';
 
   // ── 6. Issue token (only after reservation is confirmed) ────────────────────
   let tokenResult: Awaited<ReturnType<typeof issueAzureSpeechToken>>;
   try {
     tokenResult = await issueAzureSpeechToken();
   } catch (err) {
-    // Compensate only if we created/reactivated this slot — not if it belonged
-    // to a concurrent request, to avoid invalidating someone else's in-progress analysis.
     if (isOurSlot && assessmentId) {
       const errorCode = err instanceof AzureSpeechError ? err.code : 'TOKEN_ISSUE_FAILED';
       const errorMessage = 'Falha ao emitir credencial temporária de pronúncia.';
@@ -145,7 +162,10 @@ export default async function handler(req: any, res: any) {
           p_error_message: errorMessage,
         });
       } catch (compensateErr) {
-        console.error('[pronunciation/start] Compensation RPC failed:', compensateErr instanceof Error ? compensateErr.message : 'unknown');
+        console.error(
+          '[pronunciation/start] Compensation RPC failed:',
+          compensateErr instanceof Error ? compensateErr.message : 'unknown',
+        );
       }
     }
 
@@ -157,7 +177,10 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    console.error('[pronunciation/start] Unexpected token error:', err instanceof Error ? err.message : 'unknown');
+    console.error(
+      '[pronunciation/start] Unexpected token error:',
+      err instanceof Error ? err.message : 'unknown',
+    );
     return res.status(500).json({
       code: 'INTERNAL_ERROR',
       message: 'Erro interno ao preparar a análise.',
@@ -168,6 +191,7 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     assessmentId,
+    attemptId,
     token: tokenResult.token,
     region: tokenResult.region,
     language: 'en-US',

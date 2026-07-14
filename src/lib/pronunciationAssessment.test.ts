@@ -12,6 +12,8 @@ const baseAssessment: PronunciationAssessment = {
   referenceText: 'Hello world',
   languageCode: 'en-US',
   azureRegion: 'eastus',
+  activeAttemptId: null,
+  attemptStartedAt: null,
   pronunciationScore: 85,
   accuracyScore: 88,
   fluencyScore: 82,

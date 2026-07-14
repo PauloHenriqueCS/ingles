@@ -1,4 +1,4 @@
-import { PronunciationAssessment, PronunciationAssessmentStatus, PronunciationStatusResponse } from '../types';
+import { PronunciationAssessment, PronunciationAssessmentStatus, PronunciationNormalizedResult, PronunciationStatusResponse } from '../types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -17,6 +17,21 @@ export function buildStatusResponse(
 
   const canAnalyze: boolean = status === 'failed_retryable' || status === 'failed_final';
 
+  if (status === 'completed' && assessment.pronunciationScore !== null) {
+    const result: PronunciationNormalizedResult = {
+      pronunciationScore:   assessment.pronunciationScore!,
+      accuracyScore:        assessment.accuracyScore ?? 0,
+      fluencyScore:         assessment.fluencyScore ?? 0,
+      completenessScore:    assessment.completenessScore ?? 0,
+      prosodyScore:         assessment.prosodyScore ?? null,
+      recognizedText:       assessment.recognizedText ?? '',
+      wordsJson:            Array.isArray(assessment.wordsJson) ? assessment.wordsJson : [],
+      rawSegments:          Array.isArray(assessment.rawResultJson) ? assessment.rawResultJson : [],
+      audioDurationSeconds: assessment.audioDurationSeconds ?? 0,
+    };
+    return { status, canAnalyze, assessmentId: id, result };
+  }
+
   return { status, canAnalyze, assessmentId: id };
 }
 
@@ -29,6 +44,8 @@ export function rowToAssessment(row: Record<string, unknown>): PronunciationAsse
     referenceText: String(row.reference_text ?? ''),
     languageCode: String(row.language_code ?? 'en-US'),
     azureRegion: String(row.azure_region ?? ''),
+    activeAttemptId: row.active_attempt_id != null ? String(row.active_attempt_id) : null,
+    attemptStartedAt: row.attempt_started_at != null ? String(row.attempt_started_at) : null,
     pronunciationScore: row.pronunciation_score != null ? Number(row.pronunciation_score) : null,
     accuracyScore: row.accuracy_score != null ? Number(row.accuracy_score) : null,
     fluencyScore: row.fluency_score != null ? Number(row.fluency_score) : null,
