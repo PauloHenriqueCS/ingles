@@ -1,3 +1,4 @@
+import { PenSquare, MessagesSquare } from 'lucide-react';
 import type { View } from '../types';
 
 interface Props {
@@ -25,8 +26,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           onClick={onStartPractice}
           className="group text-left bg-slate-800 border border-slate-700 hover:border-blue-600 hover:bg-slate-700/60 rounded-2xl p-6 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
         >
-          <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-blue-900/50 mb-5 text-3xl select-none" aria-hidden="true">
-            ✍️
+          <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 mb-5 shadow-lg shadow-blue-900/40">
+            <PenSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />
           </div>
 
           <h2 className="text-base font-semibold text-slate-100 mb-2">
@@ -47,8 +48,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           onClick={() => onNavigate('conversation')}
           className="group text-left bg-slate-800 border border-slate-700 hover:border-teal-600 hover:bg-slate-700/60 rounded-2xl p-6 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 focus:ring-offset-slate-900"
         >
-          <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-teal-900/50 mb-5 text-3xl select-none" aria-hidden="true">
-            🎙️
+          <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-gradient-to-br from-teal-500 to-teal-700 mb-5 shadow-lg shadow-teal-900/40">
+            <MessagesSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />
           </div>
 
           <h2 className="text-base font-semibold text-slate-100 mb-2">

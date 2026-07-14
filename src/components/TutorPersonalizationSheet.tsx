@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { Loader2, Square, Play, X } from 'lucide-react';
 import type { AIPreferences } from '../types';
 import type { UseTutorPreferences } from '../hooks/useTutorPreferences';
 import {
@@ -171,7 +172,12 @@ function VozSection({
                   className="shrink-0 px-2 py-1 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors focus:outline-none focus:ring-1 focus:ring-blue-500 min-w-[44px] min-h-[32px]"
                   aria-label={isPlaying ? `Parar amostra de ${v.label}` : `Ouvir ${v.label}`}
                 >
-                  {isLoading ? '⏳' : isPlaying ? '⏹' : '▶'}
+                  {isLoading
+                    ? <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" strokeWidth={2} aria-hidden="true" />
+                    : isPlaying
+                      ? <Square className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+                      : <Play className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+                  }
                 </button>
               </div>
             );
@@ -451,7 +457,7 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
             onClick={onClose}
             className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
             aria-label="Fechar"
-          >✕</button>
+          ><X className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" /></button>
         </div>
 
         {/* Tabs */}

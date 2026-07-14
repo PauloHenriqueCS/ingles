@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { Settings } from 'lucide-react';
 import { EntriesStore, DailyProgress } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
 import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
@@ -209,7 +210,10 @@ export default function MonthView({
             onClick={() => setSettingsOpen((o) => !o)}
             className="w-full flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl text-xs text-slate-400 hover:text-slate-200 transition-colors"
           >
-            <span>⚙ Dias de prática</span>
+            <span className="flex items-center gap-1.5">
+              <Settings className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+              Dias de prática
+            </span>
             <span>{settingsOpen ? '▲' : '▼'}</span>
           </button>
 

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { PenLine, Loader2, Target } from 'lucide-react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
 import { getAuthHeader } from '../lib/apiAuth';
 
@@ -58,7 +59,10 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
         onClick={() => setIsOpen(true)}
         className="w-full py-3 rounded-xl border border-dashed border-slate-600 text-slate-400 hover:border-blue-500 hover:text-blue-400 text-sm font-medium transition-colors"
       >
-        ✍ Criar versão 2
+        <span className="flex items-center justify-center gap-2">
+          <PenLine className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+          Criar versão 2
+        </span>
       </button>
     );
   }
@@ -124,7 +128,12 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
         disabled={isComparing}
         className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
-        {isComparing ? '⏳ Comparando sua versão 2...' : 'Comparar versão 2'}
+        {isComparing ? (
+          <span className="flex items-center justify-center gap-2">
+            <Loader2 className="w-4 h-4 shrink-0 animate-spin" strokeWidth={2} />
+            Comparando sua versão 2...
+          </span>
+        ) : 'Comparar versão 2'}
       </button>
 
       {/* Error state */}
@@ -254,7 +263,7 @@ function ComparisonResult({ result }: { result: RewriteComparisonResult }) {
       {result.nextAction && (
         <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-4 space-y-1.5">
           <div className="flex items-center gap-2">
-            <span>🎯</span>
+            <Target className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
             <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima ação</p>
           </div>
           <p className="text-sm text-slate-200 leading-relaxed">{result.nextAction}</p>

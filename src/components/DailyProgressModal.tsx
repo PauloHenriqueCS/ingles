@@ -1,4 +1,7 @@
 import { useEffect, useRef } from 'react';
+import { PenLine, Mic, MessagesSquare, Headphones, X } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { AppIcon } from './AppIcon';
 import { DailyActivityStatus, DailyProgress } from '../types';
 
 interface Props {
@@ -46,7 +49,7 @@ export default function DailyProgressModal({
   const goalMin = Math.round(convGoalSec / 60);
 
   type Row = {
-    icon: string;
+    icon: LucideIcon;
     label: string;
     status: DailyActivityStatus;
     detail?: string;
@@ -56,25 +59,25 @@ export default function DailyProgressModal({
 
   const rows: Row[] = [
     {
-      icon: '✏️',
+      icon: PenLine,
       label: 'Escrita',
       status: progress.writing,
       action: () => { onOpenDay(date); onClose(); },
       actionLabel: 'Abrir',
     },
     {
-      icon: '🎤',
+      icon: Mic,
       label: 'Pronúncia',
       status: progress.pronunciation,
     },
     {
-      icon: '💬',
+      icon: MessagesSquare,
       label: 'Conversação com IA',
       status: progress.conversation,
       detail: `${convMin} / ${goalMin} min`,
     },
     {
-      icon: '🎧',
+      icon: Headphones,
       label: 'Listening',
       status: progress.listening,
     },
@@ -101,10 +104,10 @@ export default function DailyProgressModal({
             <h2 className="text-base font-semibold text-slate-100">{formatDatePtBr(date)}</h2>
             <button
               onClick={onClose}
-              className="text-slate-400 hover:text-slate-200 text-2xl leading-none w-8 h-8 flex items-center justify-center"
+              className="text-slate-400 hover:text-slate-200 w-8 h-8 flex items-center justify-center transition-all duration-150"
               aria-label="Fechar"
             >
-              ×
+              <AppIcon icon={X} className="w-5 h-5 shrink-0" />
             </button>
           </div>
 
@@ -116,7 +119,7 @@ export default function DailyProgressModal({
                   key={row.label}
                   className="flex items-center gap-3 bg-slate-700/50 rounded-xl px-4 py-3"
                 >
-                  <span className="text-xl w-6 text-center flex-shrink-0">{row.icon}</span>
+                  <AppIcon icon={row.icon} className="w-5 h-5 shrink-0 text-slate-400" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-slate-200">{row.label}</span>

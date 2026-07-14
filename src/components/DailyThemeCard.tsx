@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Target, Clock, Zap, Check, Info } from 'lucide-react';
 import { EnglishDailyTheme, ResponseExample } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
@@ -126,7 +127,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
     <div className="bg-slate-800 rounded-xl overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-2">
-        <span className="text-base">🎯</span>
+        <Target className="w-4 h-4 shrink-0 text-slate-300" strokeWidth={2} aria-hidden="true" />
         <p className="text-sm font-semibold text-slate-100">Missão do dia</p>
       </div>
 
@@ -178,7 +179,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             )}
             <LevelBadge level={theme.level} />
             <DiffBadge difficulty={theme.difficulty} />
-            <span className="text-xs text-slate-500">⏱ {theme.estimatedTimeMinutes} min</span>
+            <span className="flex items-center gap-1 text-xs text-slate-500">
+              <Clock className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+              {theme.estimatedTimeMinutes} min
+            </span>
           </div>
 
           {/* Title */}
@@ -221,11 +225,11 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
                     </span>
                     <button
                       onClick={() => setGrammarModal(g)}
-                      className="w-5 h-5 flex items-center justify-center rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700 transition-colors text-xs leading-none"
+                      className="w-5 h-5 flex items-center justify-center rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700 transition-colors"
                       aria-label={`Explicação de ${g}`}
                       title={`Ver explicação de ${g}`}
                     >
-                      ⓘ
+                      <Info className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
                     </button>
                   </div>
                 ))}
@@ -297,7 +301,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
               <ul className="space-y-1">
                 {theme.successCriteria.map((c, i) => (
                   <li key={i} className="flex gap-2 text-xs text-slate-300">
-                    <span className="text-green-500 shrink-0">✓</span>
+                    <Check className="w-3.5 h-3.5 shrink-0 text-green-500 mt-0.5" strokeWidth={2} aria-hidden="true" />
                     <span>{c}</span>
                   </li>
                 ))}
@@ -352,7 +356,7 @@ function MissionCard({ theme }: { theme: EnglishDailyTheme }) {
       {/* Conflict badge */}
       {hasConflict && (
         <div className="bg-amber-900/30 border-b border-amber-800/30 px-4 py-2 flex items-center gap-2">
-          <span className="text-amber-400 text-xs">⚡</span>
+          <Zap className="w-3.5 h-3.5 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
           <span className="text-xs text-amber-300 font-medium">{theme.conflict}</span>
         </div>
       )}

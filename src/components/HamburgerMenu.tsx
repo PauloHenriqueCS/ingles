@@ -1,21 +1,27 @@
+import {
+  House, LayoutDashboard, CalendarDays, ChartSpline, Search,
+  History, TrendingUp, BrainCircuit, BotMessageSquare, LogOut, X,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { AppIcon } from './AppIcon';
 import type { View } from '../types';
 
 interface MenuItem {
   view: View;
   label: string;
-  icon: string;
+  icon: LucideIcon;
 }
 
 const MENU_ITEMS: MenuItem[] = [
-  { view: 'home',         label: 'Página inicial',   icon: '🏠' },
-  { view: 'dashboard',    label: 'Meu dashboard',    icon: '📊' },
-  { view: 'month',        label: 'Calendário',       icon: '📅' },
-  { view: 'year',         label: 'Anual',            icon: '📈' },
-  { view: 'filters',      label: 'Filtros',          icon: '🔍' },
-  { view: 'history',      label: 'Histórico',        icon: '📋' },
-  { view: 'evolution',    label: 'Evolução',         icon: '🚀' },
-  { view: 'memory',       label: 'Memória',          icon: '🧠' },
-  { view: 'conversation', label: 'Conversar com IA', icon: '🎙️' },
+  { view: 'home',         label: 'Página inicial',   icon: House },
+  { view: 'dashboard',    label: 'Meu dashboard',    icon: LayoutDashboard },
+  { view: 'month',        label: 'Calendário',       icon: CalendarDays },
+  { view: 'year',         label: 'Anual',            icon: ChartSpline },
+  { view: 'filters',      label: 'Filtros',          icon: Search },
+  { view: 'history',      label: 'Histórico',        icon: History },
+  { view: 'evolution',    label: 'Evolução',         icon: TrendingUp },
+  { view: 'memory',       label: 'Memória',          icon: BrainCircuit },
+  { view: 'conversation', label: 'Conversar com IA', icon: BotMessageSquare },
 ];
 
 interface Props {
@@ -45,10 +51,10 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
           <span className="text-sm font-semibold text-slate-200">Menu</span>
           <button
             onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-blue-500"
             aria-label="Fechar menu"
           >
-            ✕
+            <AppIcon icon={X} className="w-4 h-4 shrink-0" />
           </button>
         </div>
 
@@ -57,13 +63,13 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
             <button
               key={item.view}
               onClick={() => { onNavigate(item.view); onClose(); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 text-sm transition-colors text-left ${
+              className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left transition-all duration-150 ${
                 current === item.view
-                  ? 'bg-blue-600/20 text-blue-400'
-                  : 'text-slate-300 hover:bg-slate-700'
+                  ? 'bg-blue-600/20 text-white'
+                  : 'text-slate-400 hover:bg-slate-700 hover:text-slate-200'
               }`}
             >
-              <span className="text-xl leading-none shrink-0" aria-hidden="true">{item.icon}</span>
+              <AppIcon icon={item.icon} />
               <span>{item.label}</span>
             </button>
           ))}
@@ -72,9 +78,10 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
         <div className="border-t border-slate-700 p-4 shrink-0">
           <button
             onClick={onLogout}
-            className="w-full text-left text-sm text-slate-500 hover:text-slate-300 transition-colors py-2 focus:outline-none focus:underline"
+            className="w-full text-left flex items-center gap-3 text-sm text-slate-500 hover:text-slate-300 transition-all duration-150 py-2 focus:outline-none focus:underline"
           >
-            Sair da conta
+            <AppIcon icon={LogOut} />
+            <span>Sair da conta</span>
           </button>
         </div>
       </nav>

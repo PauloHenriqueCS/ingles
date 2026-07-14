@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { FileText, AlertTriangle, Target, ArrowLeft, Zap, Check } from 'lucide-react';
 import { EnglishReviewSaved, MissionSnapshot, RewriteComparisonResult, MainMistake, VocabularyItem } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 
@@ -47,7 +48,7 @@ export default function HistoryView() {
 
         {loadState === 'done' && reviews.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 text-center space-y-2">
-            <p className="text-4xl">📝</p>
+            <FileText className="w-10 h-10 text-slate-600 shrink-0" strokeWidth={1.5} aria-hidden="true" />
             <p className="text-slate-300 text-sm font-medium">Nenhuma revisão ainda.</p>
             <p className="text-slate-500 text-xs">Faça sua primeira revisão com IA para ela aparecer aqui.</p>
           </div>
@@ -107,7 +108,9 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
       <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10">
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
+        <button onClick={onBack} className="text-slate-400 hover:text-slate-100 transition-colors">
+          <ArrowLeft className="w-5 h-5 shrink-0" strokeWidth={2} aria-hidden="true" />
+        </button>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-slate-100 truncate">{headerTitle}</p>
           <p className="text-xs text-slate-400">{formatDate(review.createdAt)}</p>
@@ -178,7 +181,7 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
         {review.objectiveFeedback && (
           <div className="bg-amber-900/20 border border-amber-800/30 rounded-xl p-4 space-y-2">
             <div className="flex items-center gap-2">
-              <span>⚠️</span>
+              <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
               <p className="text-xs text-amber-400 font-medium uppercase tracking-wider">Feedback do Objetivo</p>
             </div>
             {review.objective && <p className="text-xs text-slate-500 italic">{review.objective}</p>}
@@ -190,7 +193,7 @@ function ReviewDetail({ review, onBack }: { review: EnglishReviewSaved; onBack: 
         {review.nextPractice && (
           <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-4 space-y-2">
             <div className="flex items-center gap-2">
-              <span>🎯</span>
+              <Target className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
               <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
             </div>
             <p className="text-slate-300 text-sm leading-relaxed">{review.nextPractice}</p>
@@ -271,7 +274,7 @@ function MissionContent({ mission }: { mission: MissionSnapshot }) {
       <div className="rounded-xl overflow-hidden border border-slate-600/50">
         {mission.missionConflict && (
           <div className="bg-amber-900/30 border-b border-amber-800/30 px-4 py-2 flex items-center gap-2">
-            <span className="text-amber-400 text-xs">⚡</span>
+            <Zap className="w-3.5 h-3.5 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
             <span className="text-xs text-amber-300 font-medium">{mission.missionConflict}</span>
           </div>
         )}
@@ -373,7 +376,7 @@ function MissionContent({ mission }: { mission: MissionSnapshot }) {
           <ul className="space-y-1">
             {mission.missionCompletionCriteria.map((c, i) => (
               <li key={i} className="flex gap-2 text-xs text-slate-300">
-                <span className="text-green-500 shrink-0">✓</span>
+                <Check className="w-3.5 h-3.5 shrink-0 text-green-500 mt-0.5" strokeWidth={2} aria-hidden="true" />
                 <span>{c}</span>
               </li>
             ))}

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Mail, BookOpen } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 type Mode = 'login' | 'signup';
@@ -54,7 +55,9 @@ export default function LoginPage() {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
         <div className="max-w-sm w-full text-center space-y-4">
-          <div className="text-4xl">📬</div>
+          <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-900/40 mx-auto">
+            <Mail className="w-7 h-7 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+          </div>
           <h1 className="text-xl font-bold text-slate-100">Confirme seu email</h1>
           <p className="text-slate-400 text-sm leading-relaxed">
             Enviamos um link de confirmação para{' '}
@@ -76,7 +79,9 @@ export default function LoginPage() {
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="max-w-sm w-full space-y-6">
         <div className="text-center space-y-1">
-          <p className="text-3xl mb-2">📝</p>
+          <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2">
+            <BookOpen className="w-6 h-6 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+          </div>
           <h1 className="text-2xl font-bold text-slate-100">English Writing</h1>
           <p className="text-slate-400 text-sm">
             {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}

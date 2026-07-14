@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Target } from 'lucide-react';
 import { EntriesStore, EnglishLearningMemory } from '../types';
 import { computeStats } from '../utils/stats';
 import { MONTH_NAMES_PT } from '../data/calendar2026';
@@ -153,7 +154,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
       {memory?.recommendedNextFocus && (
         <div className="bg-amber-900/20 border border-amber-800/30 rounded-lg p-4 mb-6">
           <div className="flex items-center gap-2 mb-2">
-            <span>🎯</span>
+            <Target className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
             <h2 className="text-sm font-medium text-amber-400">Foco recomendado</h2>
           </div>
           <p className="text-slate-200 text-sm leading-relaxed">{memory.recommendedNextFocus}</p>

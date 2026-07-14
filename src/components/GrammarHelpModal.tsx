@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { X, XCircle, CheckCircle2, Lightbulb, AlertTriangle } from 'lucide-react';
 import { findGrammarContent, GrammarContent } from '../lib/grammarContent';
 
 interface Props {
@@ -78,10 +79,10 @@ export default function GrammarHelpModal({ grammarName, missionTip, onClose }: P
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-800 text-slate-400 hover:text-slate-200 text-lg leading-none"
+            className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
             aria-label="Fechar"
           >
-            ×
+            <X className="w-4 h-4 shrink-0" strokeWidth={2} />
           </button>
         </div>
 
@@ -181,8 +182,14 @@ function GrammarBody({ content, missionTip }: { content: GrammarContent; mission
           <div className="space-y-3">
             {content.commonMistakes.map((m, i) => (
               <div key={i} className="rounded-lg bg-slate-800/60 px-3 py-3 space-y-1.5">
-                <p className="text-xs text-red-400 leading-relaxed">❌ {m.wrong}</p>
-                <p className="text-xs text-green-400 leading-relaxed">✅ {m.correct}</p>
+                <p className="text-xs text-red-400 leading-relaxed flex items-start gap-1.5">
+                  <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" strokeWidth={2} aria-hidden="true" />
+                  {m.wrong}
+                </p>
+                <p className="text-xs text-green-400 leading-relaxed flex items-start gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" strokeWidth={2} aria-hidden="true" />
+                  {m.correct}
+                </p>
                 <p className="text-xs text-slate-500 leading-relaxed">{m.explanationPt}</p>
               </div>
             ))}
@@ -196,7 +203,7 @@ function GrammarBody({ content, missionTip }: { content: GrammarContent; mission
           <ul className="space-y-1.5">
             {content.tips.map((tip, i) => (
               <li key={i} className="flex gap-2 text-sm text-amber-300 leading-relaxed">
-                <span className="shrink-0">💡</span>
+                <Lightbulb className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={2} aria-hidden="true" />
                 <span>{tip}</span>
               </li>
             ))}
@@ -210,7 +217,7 @@ function GrammarBody({ content, missionTip }: { content: GrammarContent; mission
           <ul className="space-y-1.5">
             {content.traps.map((trap, i) => (
               <li key={i} className="flex gap-2 text-sm text-orange-300 leading-relaxed">
-                <span className="shrink-0">⚠️</span>
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={2} aria-hidden="true" />
                 <span>{trap}</span>
               </li>
             ))}

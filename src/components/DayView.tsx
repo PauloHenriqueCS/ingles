@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult, RewriteComparisonResult } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
 import { getScheduleForDate } from '../data/calendar2026';
@@ -373,7 +374,12 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
             disabled={!originalText.trim() || isReviewing || !canSubmit}
             className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {isReviewing ? '⏳ Analisando...' : '🤖 Revisar com IA'}
+            {isReviewing ? (
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 shrink-0 animate-spin" strokeWidth={2} />
+                Analisando...
+              </span>
+            ) : 'Revisar com IA'}
           </button>
         </div>
 
@@ -389,7 +395,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
 
         {reviewState === 'loading' && (
           <div className="bg-slate-800 rounded-xl p-8 text-center space-y-3">
-            <p className="text-3xl">🧠</p>
+            <BrainCircuit className="w-10 h-10 text-blue-400/60 shrink-0" strokeWidth={1.5} aria-hidden="true" />
             <p className="text-slate-200 font-medium">Seu professor está analisando seu texto...</p>
             <p className="text-slate-500 text-sm">Isso pode levar alguns segundos</p>
           </div>
@@ -631,7 +637,10 @@ function ObjectiveFeedbackCard({ text, objective }: { text: string; objective: s
         : 'bg-amber-900/20 border border-amber-800/30'
     }`}>
       <div className="flex items-center gap-2">
-        <span className="text-lg">{achieved ? '✅' : '⚠️'}</span>
+        {achieved
+          ? <CheckCircle2 className="w-4 h-4 shrink-0 text-green-400" strokeWidth={2} aria-hidden="true" />
+          : <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
+        }
         <p className={`text-xs font-medium uppercase tracking-wider ${achieved ? 'text-green-400' : 'text-amber-400'}`}>
           Feedback do Objetivo
         </p>
@@ -648,7 +657,7 @@ function NextPracticeCard({ text }: { text: string }) {
   return (
     <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-lg">🎯</span>
+        <Target className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
@@ -666,7 +675,7 @@ function ScheduleResultCard({ schedule }: { schedule: ReviewScheduleResult }) {
     ? {
         bg: 'bg-green-900/20 border border-green-800/30',
         text: 'text-green-300',
-        message: '🏆 Muito bem! Você dominou este grupo de palavras.',
+        message: 'Muito bem! Você dominou este grupo de palavras.',
       }
     : isPassed
     ? {
@@ -761,7 +770,15 @@ function InactiveDayCard({ schedule, onActivate }: { schedule: DaySchedule | nul
 
   return (
     <div className="bg-slate-800 rounded-xl p-6 text-center space-y-4">
-      <p className="text-3xl">{isWeekend ? (isDescanso ? '😴' : '📖') : '📅'}</p>
+      <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-slate-700 mx-auto">
+        {isWeekend ? (
+          isDescanso
+            ? <Moon className="w-6 h-6 text-slate-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+            : <BookOpen className="w-6 h-6 text-slate-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+        ) : (
+          <CalendarDays className="w-6 h-6 text-slate-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+        )}
+      </div>
       <div>
         <p className="font-medium text-slate-300">
           {isWeekend ? schedule?.theme : 'Dia inativo'}

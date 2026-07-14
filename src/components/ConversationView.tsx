@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2 } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
@@ -185,7 +186,7 @@ export default function ConversationView() {
   const isMicError    = isError && (session.errorCode?.startsWith('MIC') ?? false);
   const isConfigError = isError && (session.errorCode === 'OPENAI_INVALID_SESSION' || session.errorCode === 'OPENAI_AUTH_FAILED' || session.errorCode === 'OPENAI_NOT_CONFIGURED');
   const isRateError   = isError && session.errorCode === 'OPENAI_RATE_LIMITED';
-  const errorIcon     = isMicError ? '🎤' : isRateError ? '⚠️' : isConfigError ? '⚙️' : '❌';
+  const ErrorIcon     = isMicError ? Mic : isRateError ? AlertTriangle : isConfigError ? Settings : XCircle;
   const errorBorder   = isConfigError ? 'border-amber-700 bg-amber-900/20' : 'border-red-800 bg-red-900/30';
   const errorText     = isConfigError ? 'text-amber-300' : 'text-red-300';
 
@@ -286,7 +287,7 @@ export default function ConversationView() {
             {isEnded && (
               <div className="bg-slate-800 rounded-2xl p-6 space-y-3">
                 <div className="text-center">
-                  <div className="text-3xl">✅</div>
+                  <CheckCircle2 className="w-10 h-10 text-green-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
                   <p className="text-slate-200 font-semibold mt-2">Sessão encerrada</p>
                   <p className="text-sm text-slate-400 mt-0.5">
                     Duração: {formatTime(session.elapsedMs)}
@@ -305,7 +306,7 @@ export default function ConversationView() {
             {isError && (
               <div className={`border rounded-2xl p-5 ${errorBorder}`}>
                 <div className="flex items-start gap-2">
-                  <span className="text-lg shrink-0" aria-hidden="true">{errorIcon}</span>
+                  <ErrorIcon className="w-5 h-5 shrink-0" strokeWidth={2} aria-hidden="true" />
                   <p className={`text-sm leading-relaxed ${errorText}`}>{session.errorMessage}</p>
                 </div>
               </div>
@@ -317,7 +318,10 @@ export default function ConversationView() {
                 onClick={session.start}
                 className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
               >
-                🎙 {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
+                <span className="flex items-center justify-center gap-2">
+                  <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+                  {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
+                </span>
               </button>
             )}
 
@@ -327,7 +331,7 @@ export default function ConversationView() {
                 onClick={() => setShowSheet(true)}
                 className="w-full py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-750 hover:border-slate-600 text-slate-300 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px] flex items-center justify-center gap-2"
               >
-                <span aria-hidden="true">⚙</span>
+                <Settings className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
                 Personalizar tutor
               </button>
             )}

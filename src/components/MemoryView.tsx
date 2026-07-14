@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { BrainCircuit, RefreshCw, Loader2, Target, Rocket } from 'lucide-react';
 import { EnglishLearningMemory, RecurringMistake, VocabularyItem, View } from '../types';
 import { fetchLearningMemory, updateLearningMemory } from '../lib/learningMemory';
 import { LearningSettings } from '../lib/learningSettings';
@@ -69,7 +70,7 @@ export default function MemoryView({ onNavigate }: Props) {
 
         {loadState === 'empty' && (
           <div className="flex flex-col items-center justify-center py-16 text-center space-y-4">
-            <p className="text-5xl">🧠</p>
+            <BrainCircuit className="w-12 h-12 text-slate-500 shrink-0" strokeWidth={1.5} aria-hidden="true" />
             <p className="text-slate-300 font-medium">Sua memória ainda está vazia.</p>
             <p className="text-slate-500 text-sm">Ela será criada automaticamente após suas primeiras revisões, ou clique abaixo para calcular agora.</p>
             <button
@@ -90,7 +91,17 @@ export default function MemoryView({ onNavigate }: Props) {
               disabled={isRecalculating}
               className="w-full py-2 rounded-xl text-xs text-slate-500 hover:text-slate-300 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 transition-colors"
             >
-              {isRecalculating ? '⏳ Recalculando...' : '🔄 Recalcular memória'}
+              {isRecalculating ? (
+                <span className="flex items-center justify-center gap-1.5">
+                  <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" strokeWidth={2} />
+                  Recalculando...
+                </span>
+              ) : (
+                <span className="flex items-center justify-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+                  Recalcular memória
+                </span>
+              )}
             </button>
 
             {/* Card 1 — Resumo */}
@@ -130,7 +141,7 @@ export default function MemoryView({ onNavigate }: Props) {
               {memory.recommendedNextFocus && (
                 <div className="bg-amber-900/20 border border-amber-800/30 rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-1.5">
-                    <span>🎯</span>
+                    <Target className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
                     <p className="text-xs text-amber-400 font-medium uppercase tracking-wider">Foco recomendado</p>
                   </div>
                   <p className="text-sm text-slate-200 leading-relaxed">{memory.recommendedNextFocus}</p>
@@ -182,7 +193,7 @@ export default function MemoryView({ onNavigate }: Props) {
             {memory.recommendedNextTheme && (
               <section className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-3">
                 <div className="flex items-center gap-2">
-                  <span>🚀</span>
+                  <Rocket className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
                   <SectionTitle className="text-purple-400">Próximo treino recomendado</SectionTitle>
                 </div>
                 <p className="text-slate-200 text-sm leading-relaxed">{memory.recommendedNextTheme}</p>

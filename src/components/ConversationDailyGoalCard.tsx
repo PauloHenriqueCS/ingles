@@ -1,3 +1,5 @@
+import { Target, CheckCircle2 } from 'lucide-react';
+
 export interface ConversationDailyGoalCardProps {
   accumulatedSec: number;
   goalMinutes: number;
@@ -17,7 +19,10 @@ export default function ConversationDailyGoalCard({ accumulatedSec, goalMinutes 
       aria-label={`Meta diária de conversação. ${displayedMin} de ${goalMinutes} minutos concluídos.`}
     >
       <div className="flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-200">🎯 Meta diária</span>
+        <span className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+          <Target className="w-4 h-4 shrink-0 text-blue-400" strokeWidth={2} aria-hidden="true" />
+          Meta diária
+        </span>
         <span className={`text-sm font-semibold tabular-nums ${met ? 'text-green-400' : 'text-slate-300'}`}>
           {displayedMin} / {goalMinutes} min
         </span>
@@ -35,8 +40,15 @@ export default function ConversationDailyGoalCard({ accumulatedSec, goalMinutes 
           style={{ width: `${pct}%` }}
         />
       </div>
-      <p className={`text-xs ${met ? 'text-green-400 font-medium' : 'text-slate-400'}`}>
-        {met ? '✅ Meta concluída' : `Faltam ${remaining} minuto${remaining !== 1 ? 's' : ''}`}
+      <p className={`text-xs flex items-center gap-1 ${met ? 'text-green-400 font-medium' : 'text-slate-400'}`}>
+        {met ? (
+          <>
+            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+            Meta concluída
+          </>
+        ) : (
+          `Faltam ${remaining} minuto${remaining !== 1 ? 's' : ''}`
+        )}
       </p>
     </div>
   );

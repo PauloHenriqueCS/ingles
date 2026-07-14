@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { Sprout, Target } from 'lucide-react';
 import { EnglishReviewSaved, MainMistake, VocabularyItem, View } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import {
@@ -83,7 +84,7 @@ export default function EvolutionView({ onNavigate }: Props) {
 
         {loadState === 'done' && reviews.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 text-center space-y-3">
-            <p className="text-5xl">🌱</p>
+            <Sprout className="w-12 h-12 text-slate-500 shrink-0" strokeWidth={1.5} aria-hidden="true" />
             <p className="text-slate-300 font-medium">Você ainda não tem revisões suficientes.</p>
             <p className="text-slate-500 text-sm">Faça sua primeira revisão com IA para ver sua evolução aqui.</p>
             <button
@@ -154,7 +155,7 @@ export default function EvolutionView({ onNavigate }: Props) {
             {/* ── Recommended focus ── */}
             <section className="bg-amber-900/20 border border-amber-800/30 rounded-xl p-5 space-y-2">
               <div className="flex items-center gap-2">
-                <span className="text-lg">🎯</span>
+                <Target className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
                 <p className="text-xs text-amber-400 font-medium uppercase tracking-wider">Foco recomendado</p>
               </div>
               <p className="text-slate-200 text-sm leading-relaxed">{stats.focus}</p>
