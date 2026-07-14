@@ -329,6 +329,17 @@ export interface ValidationResult {
   missingWords: string[];
 }
 
+export type DailyActivityStatus = 'not_started' | 'in_progress' | 'completed' | 'coming_soon';
+
+export interface DailyProgress {
+  date: string;
+  writing: DailyActivityStatus;
+  pronunciation: DailyActivityStatus;
+  conversation: DailyActivityStatus;
+  listening: DailyActivityStatus;
+  allActiveCompleted: boolean;
+}
+
 export type PronunciationAssessmentStatus = 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
 
 export type PronunciationFailCode =
