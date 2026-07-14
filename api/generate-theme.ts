@@ -2,8 +2,31 @@ import OpenAI from 'openai';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
+import {
+  getDiagnosticGenerationContext,
+  saveDiagnosticMission,
+  logDiagnosticEvent,
+  validateGeneratedDiagnosticMission,
+} from './_diagnostic-service';
+import { toPublicMissionDTO } from './_diagnostic-dto';
+import { DIAGNOSTIC_SYSTEM_PROMPT_EXTENSION, buildDiagnosticUserMessageSection } from './_diagnostic-prompt';
+import type { DiagnosticRejectionLogEntry } from '../src/domain/diagnostic/writing-diagnostic-types';
+import { generatePedagogicalPlan } from './_mission-plan-service';
+import {
+  isGeneratorIntegrationEnabled,
+  isGeneratorIntegrationFullyActive,
+  isMissionValidatorActive,
+  isMissionValidatorEnforcing,
+} from './_mission-generator-feature-flags';
+import { buildPlanConstraintsSection, buildRepairSection } from './_mission-prompt-builder';
+import { validateMissionAgainstPedagogicalPlan } from '../src/domain/missions/mission-validator';
+import { selectFallbackTemplate, buildFallbackCandidate } from '../src/domain/missions/mission-fallback';
+import type { MissionPedagogicalPlan } from '../src/domain/pedagogy/planner/planner-types';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+/** Máximo de tentativas para geração diagnóstica. Baixo e controlado. */
+const MAX_DIAGNOSTIC_GENERATION_ATTEMPTS = 2;
 
 // ── Catalogs ──────────────────────────────────────────────────────────────────
 
@@ -719,6 +742,243 @@ export default async function handler(req: any, res: any) {
 
   const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.LONG, maxRetries: 0 });
 
+  // ── DIAGNOSTIC MODE (auto-detection, invisible to user) ──────────────────────
+  // Ativado automaticamente quando mode='normal', feature flag habilitada e
+  // usuário elegível (writing status = unknown). Transparente para o frontend.
+
+  if (mode !== 'review') {
+    let diagnosticCtx: Awaited<ReturnType<typeof getDiagnosticGenerationContext>> | null = null;
+    try {
+      diagnosticCtx = await getDiagnosticGenerationContext(supabase, userId, previousThemeId ?? null);
+    } catch (e) {
+      console.error('Diagnostic context check failed, falling back to normal mode:', e);
+    }
+
+    if (diagnosticCtx?.shouldUseDiagnostic) {
+      const diagnosticSequence = diagnosticCtx.diagnosticSequence!;
+
+      // Idempotência: retornar missão existente se já foi gerada (double-click, refresh)
+      if (diagnosticCtx.existingActiveMission) {
+        const existing = diagnosticCtx.existingActiveMission;
+        if (existing.theme_id) {
+          try {
+            const { data: themeData } = await supabase
+              .from('generated_themes')
+              .select('*')
+              .eq('id', existing.theme_id)
+              .eq('user_id', userId)
+              .maybeSingle();
+
+            if (themeData) {
+              const existingThemeObj: Record<string, unknown> = {
+                title: themeData.title,
+                mission: themeData.description,
+                missionSetup: themeData.description,
+                missionTask: '',
+                themePtBr: themeData.description,
+                format: themeData.activity_type,
+                activityType: themeData.activity_type,
+                context: themeData.context,
+                semanticSummary: themeData.semantic_summary,
+                difficulty: themeData.difficulty,
+                useTheseWords: themeData.vocabulary ?? [],
+                requiredGrammar: themeData.grammar_focus ?? [],
+                level: 'A1',
+                estimatedTimeMinutes: 15,
+                instructions: [],
+                suggestedVocabulary: [],
+                successCriteria: [],
+                extraChallenge: '',
+                category: 'daily-life',
+                grammarTips: {},
+                responseExamples: [],
+              };
+
+              logDiagnosticEvent('diagnostic_mission_returned_existing', userId, {
+                diagnostic_sequence: diagnosticSequence,
+                theme_id: existing.theme_id,
+              });
+
+              return res.json({
+                theme: toPublicMissionDTO(existingThemeObj),
+                themeId: existing.theme_id,
+                mode: 'normal',
+              });
+            }
+          } catch (e) {
+            console.error('Failed to fetch existing diagnostic theme:', e);
+          }
+        }
+      }
+
+      // Gerar nova missão diagnóstica
+      const diagnosticPlan = diagnosticCtx.diagnosticPlan!;
+      const diagnosticSystemPrompt = SYSTEM_PROMPT + DIAGNOSTIC_SYSTEM_PROMPT_EXTENSION;
+      const recentDiagnosticTitles = recentThemes.slice(0, 5)
+        .map(t => t.title)
+        .filter(Boolean) as string[];
+      const diagnosticSection = buildDiagnosticUserMessageSection(diagnosticPlan, recentDiagnosticTitles);
+
+      let diagnosticTheme: Record<string, unknown> | null = null;
+      const diagnosticRejectionLog: DiagnosticRejectionLogEntry[] = [];
+
+      logDiagnosticEvent('diagnostic_generation_started', userId, {
+        diagnostic_sequence: diagnosticSequence,
+      });
+
+      for (let attempt = 1; attempt <= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS; attempt++) {
+        let raw: string;
+        try {
+          const completion = await openai.chat.completions.create({
+            model: AI_MODEL,
+            temperature: 0.88 + (attempt - 1) * 0.07,
+            messages: [
+              { role: 'system', content: diagnosticSystemPrompt },
+              {
+                role: 'user',
+                content: buildUserMessage(
+                  learningContext ?? {},
+                  recentThemes,
+                  excludedTheme ?? null,
+                  attempt,
+                ) + diagnosticSection,
+              },
+            ],
+          });
+          raw = completion.choices[0]?.message?.content ?? '';
+        } catch (err) {
+          const { code, status } = sanitizeProviderError(err);
+          if (code === 'AI_TIMEOUT' || code === 'AI_UNAVAILABLE') {
+            safeLog('generate-theme', 'diagnostic_provider_error', status, { mode: 'diagnostic' });
+            break; // Fall through to normal mode
+          }
+          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) break;
+          continue;
+        }
+
+        const parsed = parseRawContent(raw);
+        if (!parsed) {
+          diagnosticRejectionLog.push({
+            attempt,
+            rejectionCode: 'INVALID_RESPONSE_SCHEMA',
+            rejectionDetail: 'JSON inválido ou ausente',
+            timestamp: new Date().toISOString(),
+          });
+          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) break;
+          continue;
+        }
+
+        const candidate = normalizeTheme(parsed);
+        candidate.internalCoverage = Array.isArray(parsed.internalCoverage)
+          ? parsed.internalCoverage
+          : [];
+
+        const { valid, updatedLog } = validateGeneratedDiagnosticMission(
+          diagnosticPlan,
+          candidate,
+          recentThemes.map(t => ({ title: t.title, semantic_summary: t.semantic_summary })),
+          attempt,
+          diagnosticRejectionLog,
+        );
+
+        // Sync rejection log
+        if (updatedLog.length > diagnosticRejectionLog.length) {
+          const newEntries = updatedLog.slice(diagnosticRejectionLog.length);
+          diagnosticRejectionLog.push(...newEntries);
+        }
+
+        if (!valid) {
+          const lastRej = diagnosticRejectionLog[diagnosticRejectionLog.length - 1];
+          logDiagnosticEvent('diagnostic_generation_rejected', userId, {
+            diagnostic_sequence: diagnosticSequence,
+            attempt,
+            rejection_code: lastRej?.rejectionCode ?? 'UNKNOWN',
+          });
+
+          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) {
+            // Último fallback: usar candidato mesmo com validação falha
+            diagnosticTheme = candidate;
+            logDiagnosticEvent('diagnostic_generation_fallback', userId, {
+              diagnostic_sequence: diagnosticSequence,
+            });
+          }
+          continue;
+        }
+
+        diagnosticTheme = candidate;
+        logDiagnosticEvent('diagnostic_generation_succeeded', userId, {
+          diagnostic_sequence: diagnosticSequence,
+          attempt,
+        });
+        break;
+      }
+
+      if (diagnosticTheme) {
+        // Salvar em generated_themes
+        let diagnosticThemeId: string | null = null;
+        try {
+          const { data: themeData, error: themeError } = await supabase
+            .from('generated_themes')
+            .insert({
+              user_id: userId,
+              title: diagnosticTheme.title,
+              description: diagnosticTheme.mission,
+              grammar_focus: diagnosticTheme.requiredGrammar,
+              activity_type: diagnosticTheme.format,
+              context: diagnosticTheme.context,
+              semantic_summary: diagnosticTheme.semanticSummary,
+              difficulty: diagnosticTheme.difficulty,
+              vocabulary: diagnosticTheme.useTheseWords,
+              status: 'generated',
+            })
+            .select('id')
+            .single();
+
+          if (!themeError && themeData) {
+            diagnosticThemeId = (themeData as { id: string }).id;
+          }
+        } catch (e) {
+          console.error('Failed to save diagnostic theme:', e);
+        }
+
+        // Salvar em writing_diagnostic_missions (apenas se theme foi salvo)
+        if (diagnosticThemeId) {
+          try {
+            await saveDiagnosticMission(
+              {
+                userId,
+                themeId: diagnosticThemeId,
+                diagnosticSequence,
+                plan: diagnosticPlan,
+                rejectionLog: diagnosticRejectionLog,
+                objectiveIds: diagnosticPlan.objectives.map(o => o.id),
+              },
+              previousThemeId ?? null,
+            );
+
+            logDiagnosticEvent('diagnostic_mission_saved', userId, {
+              diagnostic_sequence: diagnosticSequence,
+              theme_id: diagnosticThemeId,
+            });
+          } catch (e) {
+            console.error('Failed to save diagnostic mission record:', e);
+          }
+        }
+
+        return res.json({
+          theme: toPublicMissionDTO(diagnosticTheme),
+          themeId: diagnosticThemeId,
+          mode: 'normal',
+        });
+      }
+
+      // Geração diagnóstica falhou completamente — continuar para modo normal
+      logDiagnosticEvent('diagnostic_generation_failed_fallback_to_normal', userId, {
+        diagnostic_sequence: diagnosticSequence,
+      });
+    }
+  }
+
   // ── REVIEW MODE ──────────────────────────────────────────────────────────────
   if (mode === 'review' && reviewGroup) {
     const rg = reviewGroup as ReviewGroupPayload;
@@ -839,21 +1099,65 @@ export default async function handler(req: any, res: any) {
     }
   }
 
+  // ── PEDAGOGICAL PLANNER INTEGRATION ─────────────────────────────────────────
+  // Activated when PEDAGOGICAL_GENERATOR_INTEGRATION_V1=shadow|enabled.
+  // shadow  → plan built + persisted; prompt unchanged; validator skipped.
+  // enabled → plan constraints injected into prompt; output validated.
+  // Graceful degradation: any failure here falls through to the normal generation.
+
+  let activePlan: MissionPedagogicalPlan | null = null;
+  let planConstraintsSection = '';
+  let lastValidationRejection: string | null = null;
+
+  if (isGeneratorIntegrationEnabled()) {
+    try {
+      const planSeed = `${userId.slice(0, 12)}-${Date.now()}`;
+      const planResult = await generatePedagogicalPlan(supabase, {
+        userId,
+        mode: 'normal',
+        seed: planSeed,
+      });
+      // Only set activePlan when generator integration is fully active (not shadow).
+      // isGeneratorIntegrationFullyActive reads PEDAGOGICAL_GENERATOR_INTEGRATION_V1,
+      // distinct from planResult.shadowMode which tracks PEDAGOGICAL_PLANNER_V1.
+      if (planResult.plan && isGeneratorIntegrationFullyActive()) {
+        activePlan = planResult.plan;
+        planConstraintsSection = buildPlanConstraintsSection(planResult.plan);
+      }
+      safeLog('generate-theme', 'planner_integration_run', 200, {
+        has_plan: !!planResult.plan,
+        planner_shadow: planResult.shadowMode,
+        integration_shadow: !isGeneratorIntegrationFullyActive(),
+        skipped: planResult.skipped,
+      });
+    } catch (e) {
+      safeLog('generate-theme', 'planner_integration_error', 500, {
+        error: String(e).slice(0, 150),
+      });
+    }
+  }
+
   const MAX_ATTEMPTS = 3;
   let theme: Record<string, unknown> | null = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     let raw: string;
+
+    // Build user message — append plan constraints when integration is fully active
+    let userContent = buildUserMessage(learningContext ?? {}, recentThemes, excludedTheme ?? null, attempt);
+    if (activePlan) {
+      userContent += lastValidationRejection
+        ? buildRepairSection(activePlan, lastValidationRejection)
+        : planConstraintsSection;
+    }
+
     try {
       const completion = await openai.chat.completions.create({
         model: AI_MODEL,
         temperature: 0.88 + (attempt - 1) * 0.06,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: buildUserMessage(learningContext ?? {}, recentThemes, excludedTheme ?? null, attempt),
-          },
+          { role: 'user', content: userContent },
         ],
       });
       raw = completion.choices[0]?.message?.content ?? '';
@@ -881,6 +1185,23 @@ export default async function handler(req: any, res: any) {
 
     const candidate = normalizeTheme(parsed);
 
+    // Pedagogical validation — only when plan is active and validator is configured
+    if (activePlan && isMissionValidatorActive()) {
+      const validation = validateMissionAgainstPedagogicalPlan(
+        candidate as unknown as Parameters<typeof validateMissionAgainstPedagogicalPlan>[0],
+        activePlan,
+      );
+      if (!validation.valid && isMissionValidatorEnforcing() && attempt < MAX_ATTEMPTS) {
+        lastValidationRejection = validation.rejectionDetail ?? validation.rejectionCode ?? 'UNKNOWN';
+        safeLog('generate-theme', 'mission_validation_rejected', 200, {
+          attempt,
+          rejection_code: validation.rejectionCode ?? 'UNKNOWN',
+        });
+        continue;
+      }
+      lastValidationRejection = null;
+    }
+
     // Skip similarity check on last attempt to guarantee a response
     if (attempt < MAX_ATTEMPTS && isTooSimilar(candidate, recentThemes)) {
       console.log(`Attempt ${attempt}: too similar to history, retrying…`);
@@ -889,6 +1210,17 @@ export default async function handler(req: any, res: any) {
 
     theme = candidate;
     break;
+  }
+
+  // Deterministic fallback: if all AI attempts failed and we have a plan, use a template
+  if (!theme && activePlan) {
+    try {
+      const template = selectFallbackTemplate(activePlan.effectiveLevel, activePlan.difficulty);
+      theme = buildFallbackCandidate(template, activePlan.effectiveLevel);
+      safeLog('generate-theme', 'fallback_template_used', 200, { template_id: template.id });
+    } catch (e) {
+      safeLog('generate-theme', 'fallback_template_error', 500, {});
+    }
   }
 
   if (!theme) {
