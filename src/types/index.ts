@@ -1,6 +1,14 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory';
+export type View = 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation';
+
+export interface AIPreferences {
+  teacherName: string;
+  personality: 'friendly' | 'professional' | 'strict';
+  correctionStyle: 'gentle' | 'direct';
+  voice: string;
+  focusAreas: string[];
+}
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
 export interface MainMistake {

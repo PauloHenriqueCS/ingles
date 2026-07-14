@@ -18,7 +18,9 @@ import DayView from './components/DayView';
 import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
-import BottomNav from './components/BottomNav';
+import ConversationView from './components/ConversationView';
+import AppHeader from './components/AppHeader';
+import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
 import LoginPage from './components/LoginPage';
 
@@ -31,6 +33,7 @@ export default function App() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(DEFAULT_SETTINGS);
   const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
@@ -67,6 +70,13 @@ export default function App() {
     setView(prevView);
   }
 
+  function handleLogout() {
+    if (user?.id) {
+      localStorage.removeItem(`english-calendar-entries-v2-${user.id}`);
+    }
+    supabase.auth.signOut();
+  }
+
   if (window.location.pathname === '/auth/callback') {
     return <AuthCallback />;
   }
@@ -101,12 +111,24 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
+      <AppHeader onMenuOpen={() => setMenuOpen(true)} />
+
+      {menuOpen && (
+        <HamburgerMenu
+          current={view}
+          onNavigate={setView}
+          onClose={() => setMenuOpen(false)}
+          onLogout={handleLogout}
+        />
+      )}
+
       {syncError && (
-        <div className="bg-amber-900/60 border-b border-amber-700 px-4 py-2 text-xs text-amber-200 text-center">
+        <div className="bg-amber-900/60 border-b border-amber-700 px-4 py-2 text-xs text-amber-200 text-center mt-14">
           {syncError}
         </div>
       )}
-      <main className="flex-1 overflow-auto pb-16">
+
+      <main className="flex-1 overflow-auto pt-14">
         {view === 'dashboard' && (
           <Dashboard entries={entries} today={today} onOpenDay={openDay} />
         )}
@@ -140,19 +162,10 @@ export default function App() {
         {view === 'memory' && (
           <MemoryView onNavigate={setView} onSettingsChange={setLearningSettings} />
         )}
+        {view === 'conversation' && (
+          <ConversationView />
+        )}
       </main>
-      <BottomNav current={view} onChange={setView} />
-      <button
-        onClick={() => {
-          if (user?.id) {
-            localStorage.removeItem(`english-calendar-entries-v2-${user.id}`);
-          }
-          supabase.auth.signOut();
-        }}
-        className="fixed top-3 right-4 text-xs text-slate-600 hover:text-slate-400 transition-colors z-50"
-      >
-        Sair
-      </button>
     </div>
   );
 }
