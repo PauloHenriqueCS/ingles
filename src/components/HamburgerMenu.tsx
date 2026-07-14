@@ -7,14 +7,15 @@ interface MenuItem {
 }
 
 const MENU_ITEMS: MenuItem[] = [
-  { view: 'dashboard',    label: 'Painel',         icon: '📊' },
-  { view: 'month',        label: 'Calendário',      icon: '📅' },
-  { view: 'year',         label: 'Anual',           icon: '📈' },
-  { view: 'filters',      label: 'Filtros',         icon: '🔍' },
-  { view: 'history',      label: 'Histórico',       icon: '📋' },
-  { view: 'evolution',    label: 'Evolução',        icon: '🚀' },
-  { view: 'memory',       label: 'Memória',         icon: '🧠' },
-  { view: 'conversation', label: 'Conversa com IA', icon: '🎙️' },
+  { view: 'home',         label: 'Página inicial',   icon: '🏠' },
+  { view: 'dashboard',    label: 'Meu dashboard',    icon: '📊' },
+  { view: 'month',        label: 'Calendário',       icon: '📅' },
+  { view: 'year',         label: 'Anual',            icon: '📈' },
+  { view: 'filters',      label: 'Filtros',          icon: '🔍' },
+  { view: 'history',      label: 'Histórico',        icon: '📋' },
+  { view: 'evolution',    label: 'Evolução',         icon: '🚀' },
+  { view: 'memory',       label: 'Memória',          icon: '🧠' },
+  { view: 'conversation', label: 'Conversar com IA', icon: '🎙️' },
 ];
 
 interface Props {
@@ -62,7 +63,7 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
                   : 'text-slate-300 hover:bg-slate-700'
               }`}
             >
-              <span className="text-xl leading-none shrink-0">{item.icon}</span>
+              <span className="text-xl leading-none shrink-0" aria-hidden="true">{item.icon}</span>
               <span>{item.label}</span>
             </button>
           ))}

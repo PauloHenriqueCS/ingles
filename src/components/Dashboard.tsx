@@ -30,7 +30,7 @@ export default function Dashboard({ entries, today, onOpenDay }: Props) {
   return (
     <div className="p-4 max-w-lg mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-bold text-slate-100">English Writing Calendar</h1>
+        <h1 className="text-xl font-bold text-slate-100">Meu dashboard</h1>
         <p className="text-slate-400 text-sm mt-1">
           {new Date(today + 'T12:00:00').toLocaleDateString('pt-BR', {
             weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',

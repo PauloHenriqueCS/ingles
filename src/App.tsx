@@ -10,6 +10,7 @@ import {
   DEFAULT_SETTINGS,
   LearningSettings,
 } from './lib/learningSettings';
+import HomePage from './components/HomePage';
 import Dashboard from './components/Dashboard';
 import MonthView from './components/MonthView';
 import YearView from './components/YearView';
@@ -26,8 +27,8 @@ import LoginPage from './components/LoginPage';
 
 export default function App() {
   const today = new Date().toISOString().split('T')[0];
-  const [view, setView] = useState<View>('dashboard');
-  const [prevView, setPrevView] = useState<View>('dashboard');
+  const [view, setView] = useState<View>('home');
+  const [prevView, setPrevView] = useState<View>('home');
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -111,7 +112,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-      <AppHeader onMenuOpen={() => setMenuOpen(true)} onLogoClick={() => setView('dashboard')} />
+      <AppHeader onMenuOpen={() => setMenuOpen(true)} onLogoClick={() => setView('home')} />
 
       {menuOpen && (
         <HamburgerMenu
@@ -129,6 +130,12 @@ export default function App() {
       )}
 
       <main className="flex-1 overflow-auto pt-14">
+        {view === 'home' && (
+          <HomePage
+            onNavigate={setView}
+            onStartPractice={() => openDay(today)}
+          />
+        )}
         {view === 'dashboard' && (
           <Dashboard entries={entries} today={today} onOpenDay={openDay} />
         )}
