@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { Mic } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
 import ConfirmPronunciationModal from './ConfirmPronunciationModal';
@@ -221,7 +222,10 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
               onClick={handleNewAttempt}
               className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
             >
-              🎙 Fazer nova tentativa
+              <span className="flex items-center justify-center gap-2">
+                <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+                Fazer nova tentativa
+              </span>
             </button>
             <p className="text-xs text-slate-500 text-center">
               A nova análise substituirá o resultado atual.
@@ -281,7 +285,10 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
                   className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
                   aria-label="Iniciar gravação de áudio"
                 >
-                  🎙 Gravar áudio
+                  <span className="flex items-center justify-center gap-2">
+                    <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+                    Gravar áudio
+                  </span>
                 </button>
               )}
 
