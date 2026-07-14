@@ -16,7 +16,7 @@ export interface UseAudioRecorderReturn {
 
 function detectMimeType(): string {
   if (typeof MediaRecorder === 'undefined') return '';
-  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  const candidates = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
   for (const type of candidates) {
     if (MediaRecorder.isTypeSupported(type)) return type;
   }
@@ -26,7 +26,7 @@ function detectMimeType(): string {
 function classifyError(err: unknown): string {
   const name = err instanceof Error ? err.name : '';
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-    return 'Não foi possível acessar o microfone. Autorize o acesso nas configurações do navegador e tente novamente.';
+    return 'O acesso ao microfone foi negado. No iPhone, abra Ajustes > Chrome > Microfone, autorize o acesso e tente novamente.';
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'NotReadableError' || name === 'TrackStartError') {
     return 'Não foi possível encontrar ou acessar um microfone disponível.';
@@ -78,7 +78,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   const startRecording = useCallback(async () => {
     if (!isMountedRef.current) return;
 
-    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    if (!navigator.mediaDevices?.getUserMedia) {
       setErrorMessage('Este navegador não oferece suporte à gravação de áudio. Tente usar uma versão atualizada do Chrome ou Safari.');
       setPhase('error');
       return;
@@ -104,9 +104,16 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     setErrorMessage(null);
     setPhase('requesting');
 
+    // Request microphone immediately — must happen directly in the user gesture on iOS
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
     } catch (err) {
       if (!isMountedRef.current) return;
       setErrorMessage(classifyError(err));
@@ -116,6 +123,14 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
     if (!isMountedRef.current) {
       stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    // After receiving the stream, verify MediaRecorder is available
+    if (typeof MediaRecorder === 'undefined') {
+      stream.getTracks().forEach((t) => t.stop());
+      setErrorMessage('Este navegador não oferece suporte à gravação de áudio. Tente usar uma versão atualizada do Chrome ou Safari.');
+      setPhase('error');
       return;
     }
 
@@ -152,7 +167,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         return;
       }
 
-      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+      const blob = new Blob(chunks, { type: mimeType || recorder.mimeType || 'audio/mp4' });
       const url = URL.createObjectURL(blob);
       currentUrlRef.current = url;
 
