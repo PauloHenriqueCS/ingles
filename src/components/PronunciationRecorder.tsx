@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
 import ConfirmPronunciationModal from './ConfirmPronunciationModal';
@@ -33,11 +32,11 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
   });
 
   // Prevents double-click from launching two concurrent executions.
-  const flowLockRef           = useRef(false);
-  const idempotencyKeyRef     = useRef<string | null>(null);
-  const assessmentIdRef       = useRef<string | null>(null);
-  const cancelRecognitionRef  = useRef<(() => void) | null>(null);
-  const mountedRef            = useRef(true);
+  const flowLockRef            = useRef(false);
+  const attemptIdRef           = useRef<string | null>(null);
+  const assessmentIdRef        = useRef<string | null>(null);
+  const cancelRecognitionRef   = useRef<(() => void) | null>(null);
+  const mountedRef             = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -60,7 +59,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       if (d.status === 'completed' && d.result) {
         return { phase: 'completed', result: d.result };
       }
-      if (d.status === 'processing' || d.status === 'preparing') {
+      if (d.status === 'processing') {
         return { phase: 'processing' };
       }
       if (d.status === 'failed_retryable') {
@@ -85,13 +84,14 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       if (cancelRecognitionRef.current) {
         cancelRecognitionRef.current();
       }
-      const aid = assessmentIdRef.current;
-      if (aid) {
+      const aid  = assessmentIdRef.current;
+      const atid = attemptIdRef.current;
+      if (aid && atid) {
         getAuthHeader().then((headers) => {
           fetch('/api/pronunciation/fail', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...headers },
-            body: JSON.stringify({ assessmentId: aid, code: 'CLIENT_INTERRUPTED' }),
+            body: JSON.stringify({ assessmentId: aid, attemptId: atid, code: 'CLIENT_INTERRUPTED' }),
           }).catch(() => undefined);
         }).catch(() => undefined);
       }
@@ -113,33 +113,31 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
     if (flowLockRef.current) return;
     flowLockRef.current = true;
 
-    // Each intentional submission gets a fresh idempotency key.
-    // The key stays the same if the browser retries the HTTP request.
-    const idempotencyKey = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
     setAnalysis({ phase: 'preparing_audio' });
 
     void runAnalysisFlow(
       {
         reviewId,
-        idempotencyKey,
+        attemptId,
         audioBlob:      recorder.audioBlob,
         audioDurationMs: recorder.durationMs,
       },
-      { mountedRef, idempotencyKeyRef, assessmentIdRef, cancelRecognitionRef, flowLockRef },
+      { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef },
       (state) => { if (mountedRef.current) setAnalysis(state); },
     );
   }, [reviewId, recorder.audioBlob, recorder.durationMs]);
 
   const handleRetry = useCallback(() => {
-    assessmentIdRef.current    = null;
-    idempotencyKeyRef.current  = null;
+    assessmentIdRef.current = null;
+    attemptIdRef.current    = null;
     setAnalysis({ phase: 'idle' });
   }, []);
 
   const handleNewAttempt = useCallback(() => {
     recorder.deleteRecording();
-    assessmentIdRef.current    = null;
-    idempotencyKeyRef.current  = null;
+    assessmentIdRef.current = null;
+    attemptIdRef.current    = null;
     setAnalysis({ phase: 'idle' });
   }, [recorder.deleteRecording]);
 
@@ -223,10 +221,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
               onClick={handleNewAttempt}
               className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
             >
-              <span className="flex items-center justify-center gap-2">
-                <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                Fazer nova tentativa
-              </span>
+              🎙 Fazer nova tentativa
             </button>
             <p className="text-xs text-slate-500 text-center">
               A nova análise substituirá o resultado atual.
@@ -286,10 +281,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
                   className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
                   aria-label="Iniciar gravação de áudio"
                 >
-                  <span className="flex items-center justify-center gap-2">
-                    <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                    Gravar áudio
-                  </span>
+                  🎙 Gravar áudio
                 </button>
               )}
 

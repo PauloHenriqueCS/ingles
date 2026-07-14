@@ -4,12 +4,10 @@ import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import { methodGuard } from '../_helpers';
 
 type ReserveResult = {
-  action?: 'created' | 'existing_preparing' | 'existing_processing';
+  action?: 'created' | 'reactivated' | 'existing_processing' | 'restarted';
   error?: string;
   assessmentId?: string;
   referenceText?: string;
-  reservationOwner?: string;
-  reservationVersion?: number;
 };
 
 const AZURE_ERROR_STATUS: Record<string, number> = {
@@ -38,7 +36,7 @@ export default async function handler(req: any, res: any) {
 
   // ── 2. Validate payload ─────────────────────────────────────────────────────
   const body = req.body ?? {};
-  const { textVersionId, idempotencyKey } = body;
+  const { textVersionId, attemptId } = body;
 
   if (!textVersionId || typeof textVersionId !== 'string' || !isValidUuid(textVersionId)) {
     return res.status(400).json({
@@ -47,10 +45,10 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  if (!idempotencyKey || typeof idempotencyKey !== 'string' || !isValidUuid(idempotencyKey)) {
+  if (!attemptId || typeof attemptId !== 'string' || !isValidUuid(attemptId)) {
     return res.status(400).json({
-      code: 'INVALID_IDEMPOTENCY_KEY',
-      message: 'A chave de idempotência é inválida.',
+      code: 'INVALID_ATTEMPT_ID',
+      message: 'O identificador de tentativa é inválido.',
     });
   }
 
@@ -65,11 +63,11 @@ export default async function handler(req: any, res: any) {
 
   // ── 4. Reserve atomically via SECURITY DEFINER RPC ──────────────────────────
   const { data: reserveData, error: rpcError } = await supabase.rpc(
-    'reserve_pronunciation_attempt',
+    'reserve_pronunciation_assessment',
     {
       p_text_version_id: textVersionId,
-      p_azure_region:    azureRegion,
-      p_idempotency_key: idempotencyKey,
+      p_azure_region: azureRegion,
+      p_attempt_id: attemptId,
     },
   );
 
@@ -85,81 +83,93 @@ export default async function handler(req: any, res: any) {
 
   // ── 5. Interpret reservation result ─────────────────────────────────────────
   if (result.error === 'UNAUTHORIZED') {
-    return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Faça login para continuar.' });
-  }
-  if (result.error === 'INVALID_IDEMPOTENCY_KEY') {
-    return res.status(400).json({ code: 'INVALID_IDEMPOTENCY_KEY', message: 'A chave de idempotência é inválida.' });
-  }
-  if (result.error === 'TEXT_VERSION_NOT_FOUND') {
-    return res.status(404).json({ code: 'TEXT_VERSION_NOT_FOUND', message: 'A versão final do texto não foi encontrada.' });
-  }
-  if (result.error === 'TEXT_VERSION_NOT_ELIGIBLE') {
-    return res.status(409).json({ code: 'TEXT_VERSION_NOT_ELIGIBLE', message: 'Finalize e salve o texto antes de solicitar a análise.' });
-  }
-  if (result.error === 'ATTEMPT_ALREADY_COMPLETED') {
-    return res.status(409).json({
-      code: 'ATTEMPT_ALREADY_COMPLETED',
-      message: 'Esta tentativa já foi concluída. Inicie uma nova gravação para nova análise.',
-      assessmentId: result.assessmentId,
+    return res.status(401).json({
+      code: 'UNAUTHORIZED',
+      message: 'Faça login para continuar.',
     });
   }
-  if (result.error === 'ATTEMPT_ALREADY_FAILED') {
+
+  if (result.error === 'TEXT_VERSION_NOT_FOUND') {
+    return res.status(404).json({
+      code: 'TEXT_VERSION_NOT_FOUND',
+      message: 'A versão final do texto não foi encontrada.',
+    });
+  }
+
+  if (result.error === 'TEXT_VERSION_NOT_ELIGIBLE') {
     return res.status(409).json({
-      code: 'ATTEMPT_ALREADY_FAILED',
-      message: 'Esta tentativa já foi encerrada. Inicie uma nova gravação para nova análise.',
+      code: 'TEXT_VERSION_NOT_ELIGIBLE',
+      message: 'Finalize e salve o texto antes de solicitar a análise.',
+    });
+  }
+
+  if (result.error === 'ASSESSMENT_ALREADY_COMPLETED') {
+    return res.status(409).json({
+      code: 'ASSESSMENT_ALREADY_COMPLETED',
+      message: 'Este texto já possui uma análise de pronúncia.',
       assessmentId: result.assessmentId,
     });
   }
 
-  // Same idempotency_key, first request still preparing the slot
-  if (result.action === 'existing_preparing') {
-    res.setHeader('Cache-Control', 'no-store');
+  if (result.error === 'ASSESSMENT_NOT_RETRYABLE') {
     return res.status(409).json({
-      code: 'ASSESSMENT_PREPARING',
-      message: 'A análise está sendo preparada. Tente novamente em instantes.',
+      code: 'ASSESSMENT_NOT_RETRYABLE',
+      message: 'Esta avaliação não pode ser reiniciada.',
+      assessmentId: result.assessmentId,
+    });
+  }
+
+  if (result.error === 'ASSESSMENT_IN_PROGRESS') {
+    return res.status(409).json({
+      code: 'ASSESSMENT_IN_PROGRESS',
+      message: 'Já existe uma análise em andamento para este texto.',
       assessmentId: result.assessmentId,
     });
   }
 
   if (result.error) {
     console.error('[pronunciation/start] Unexpected reservation result:', result.error);
-    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao reservar a avaliação.' });
+    return res.status(500).json({
+      code: 'INTERNAL_ERROR',
+      message: 'Erro interno ao reservar a avaliação.',
+    });
   }
 
-  const assessmentId  = result.assessmentId as string;
+  const assessmentId = result.assessmentId as string;
   const referenceText = result.referenceText as string;
-  const isCreator     = result.action === 'created';
 
-  // ── 6. Issue Azure token ────────────────────────────────────────────────────
-  // For 'created': confirm preparation after success; compensate on failure.
-  // For 'existing_processing': re-issue for lost response; never compensate.
+  // All three success actions mean we can (and should) issue a token:
+  // - 'created': we just created the slot with our attempt
+  // - 'reactivated': we reactivated a failed slot with our attempt
+  // - 'existing_processing': same attemptId called /start again (e.g. token expired)
+  // Only a DIFFERENT attemptId would have returned ASSESSMENT_IN_PROGRESS above.
+  const isOurSlot =
+    result.action === 'created' ||
+    result.action === 'reactivated' ||
+    result.action === 'existing_processing' ||
+    result.action === 'restarted';
+
+  // ── 6. Issue token (only after reservation is confirmed) ────────────────────
   let tokenResult: Awaited<ReturnType<typeof issueAzureSpeechToken>>;
   try {
     tokenResult = await issueAzureSpeechToken();
   } catch (err) {
-    if (isCreator && assessmentId) {
-      // Compensation: only the creator can roll back the preparing slot
+    if (isOurSlot && assessmentId) {
       const errorCode = err instanceof AzureSpeechError ? err.code : 'TOKEN_ISSUE_FAILED';
-      const reservationOwner   = result.reservationOwner;
-      const reservationVersion = result.reservationVersion;
-      if (reservationOwner && reservationVersion != null) {
-        try {
-          await supabase.rpc('compensate_pronunciation_attempt', {
-            p_assessment_id:       assessmentId,
-            p_reservation_owner:   reservationOwner,
-            p_reservation_version: reservationVersion,
-            p_error_code:          errorCode,
-          });
-        } catch (compensateErr) {
-          console.error(
-            '[pronunciation/start] Compensation RPC failed:',
-            compensateErr instanceof Error ? compensateErr.message : 'unknown',
-          );
-        }
+      const errorMessage = 'Falha ao emitir credencial temporária de pronúncia.';
+      try {
+        await supabase.rpc('compensate_pronunciation_assessment', {
+          p_assessment_id: assessmentId,
+          p_error_code: errorCode,
+          p_error_message: errorMessage,
+        });
+      } catch (compensateErr) {
+        console.error(
+          '[pronunciation/start] Compensation RPC failed:',
+          compensateErr instanceof Error ? compensateErr.message : 'unknown',
+        );
       }
     }
-    // For 'existing_processing': token failure is a transient error only — the
-    // assessment remains processing so the browser can retry later.
 
     if (err instanceof AzureSpeechError) {
       return res.status(AZURE_ERROR_STATUS[err.code] ?? 503).json({
@@ -168,31 +178,25 @@ export default async function handler(req: any, res: any) {
         message: AZURE_ERROR_MESSAGES[err.code] ?? AZURE_ERROR_MESSAGES.AZURE_SPEECH_UNAVAILABLE,
       });
     }
-    console.error('[pronunciation/start] Unexpected token error:', err instanceof Error ? err.message : 'unknown');
-    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a análise.' });
+
+    console.error(
+      '[pronunciation/start] Unexpected token error:',
+      err instanceof Error ? err.message : 'unknown',
+    );
+    return res.status(500).json({
+      code: 'INTERNAL_ERROR',
+      message: 'Erro interno ao preparar a análise.',
+    });
   }
 
-  // ── 7. Confirm preparation (only for newly created slots) ───────────────────
-  if (isCreator) {
-    try {
-      await supabase.rpc('confirm_pronunciation_preparation', {
-        p_assessment_id:       assessmentId,
-        p_reservation_owner:   result.reservationOwner,
-        p_reservation_version: result.reservationVersion,
-      });
-    } catch (confirmErr) {
-      // Best effort: assessment stays in 'preparing'; browser retry will resolve it
-      console.error('[pronunciation/start] Confirm RPC failed:', confirmErr instanceof Error ? confirmErr.message : 'unknown');
-    }
-  }
-
-  // ── 8. Respond — Cache-Control: no-store protects the temporary token ────────
+  // ── 7. Respond — Cache-Control: no-store protects the temporary token ────────
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     assessmentId,
-    token:         tokenResult.token,
-    region:        tokenResult.region,
-    language:      'en-US',
+    attemptId,
+    token: tokenResult.token,
+    region: tokenResult.region,
+    language: 'en-US',
     referenceText,
   });
 }

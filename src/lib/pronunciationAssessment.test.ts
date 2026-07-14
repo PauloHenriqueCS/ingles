@@ -12,7 +12,8 @@ const baseAssessment: PronunciationAssessment = {
   referenceText: 'Hello world',
   languageCode: 'en-US',
   azureRegion: 'eastus',
-  idempotencyKey: VALID_UUID,
+  activeAttemptId: null,
+  attemptStartedAt: null,
   pronunciationScore: 85,
   accuracyScore: 88,
   fluencyScore: 82,
@@ -72,12 +73,6 @@ describe('buildStatusResponse', () => {
     expect(r.canAnalyze).toBe(false);
   });
 
-  it('returns preparing status, canAnalyze false', () => {
-    const r = buildStatusResponse({ ...baseAssessment, status: 'preparing' });
-    expect(r.status).toBe('preparing');
-    expect(r.canAnalyze).toBe(false);
-  });
-
   it('returns failed_retryable status, canAnalyze true', () => {
     const r = buildStatusResponse({ ...baseAssessment, status: 'failed_retryable' });
     expect(r.status).toBe('failed_retryable');
@@ -101,7 +96,6 @@ describe('rowToAssessment', () => {
       reference_text: 'Hello',
       language_code: 'en-US',
       azure_region: 'eastus',
-      idempotency_key: VALID_UUID,
       pronunciation_score: '85.50',
       accuracy_score: '88.00',
       fluency_score: null,
@@ -122,7 +116,6 @@ describe('rowToAssessment', () => {
 
     const a = rowToAssessment(row);
     expect(a.id).toBe(VALID_UUID);
-    expect(a.idempotencyKey).toBe(VALID_UUID);
     expect(a.pronunciationScore).toBe(85.5);
     expect(a.accuracyScore).toBe(88);
     expect(a.fluencyScore).toBeNull();
@@ -151,7 +144,6 @@ describe('rowToAssessment', () => {
 
 // Integration stubs — require live Supabase + Azure
 describe.todo('GET /api/pronunciation/status — integration');
-describe.todo('UNIQUE(user_id, idempotency_key) — blocks duplicate attempt for same intent');
-describe.todo('Multiple rows allowed for same text_version_id');
+describe.todo('UNIQUE constraint — blocks duplicate assessment for same text_version_id');
 describe.todo('RLS — user cannot read another user\'s assessment');
 describe.todo('RLS — browser INSERT is rejected (no INSERT policy)');
