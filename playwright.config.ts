@@ -56,6 +56,9 @@ export default defineConfig({
         '**/03-recorder-mocked.spec.ts',
         '**/04-api-integration.spec.ts',
         '**/08-accessibility.spec.ts',
+        '**/09-dashboard.spec.ts',
+        '**/10-calendar.spec.ts',
+        '**/11-smoke.spec.ts',
       ],
     },
 
