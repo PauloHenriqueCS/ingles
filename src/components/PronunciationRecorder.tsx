@@ -32,11 +32,11 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
   });
 
   // Prevents double-click from launching two concurrent executions.
-  const flowLockRef           = useRef(false);
-  const idempotencyKeyRef     = useRef<string | null>(null);
-  const assessmentIdRef       = useRef<string | null>(null);
-  const cancelRecognitionRef  = useRef<(() => void) | null>(null);
-  const mountedRef            = useRef(true);
+  const flowLockRef            = useRef(false);
+  const attemptIdRef           = useRef<string | null>(null);
+  const assessmentIdRef        = useRef<string | null>(null);
+  const cancelRecognitionRef   = useRef<(() => void) | null>(null);
+  const mountedRef             = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -59,7 +59,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       if (d.status === 'completed' && d.result) {
         return { phase: 'completed', result: d.result };
       }
-      if (d.status === 'processing' || d.status === 'preparing') {
+      if (d.status === 'processing') {
         return { phase: 'processing' };
       }
       if (d.status === 'failed_retryable') {
@@ -84,13 +84,14 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       if (cancelRecognitionRef.current) {
         cancelRecognitionRef.current();
       }
-      const aid = assessmentIdRef.current;
-      if (aid) {
+      const aid  = assessmentIdRef.current;
+      const atid = attemptIdRef.current;
+      if (aid && atid) {
         getAuthHeader().then((headers) => {
           fetch('/api/pronunciation/fail', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...headers },
-            body: JSON.stringify({ assessmentId: aid, code: 'CLIENT_INTERRUPTED' }),
+            body: JSON.stringify({ assessmentId: aid, attemptId: atid, code: 'CLIENT_INTERRUPTED' }),
           }).catch(() => undefined);
         }).catch(() => undefined);
       }
@@ -112,33 +113,31 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
     if (flowLockRef.current) return;
     flowLockRef.current = true;
 
-    // Each intentional submission gets a fresh idempotency key.
-    // The key stays the same if the browser retries the HTTP request.
-    const idempotencyKey = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
     setAnalysis({ phase: 'preparing_audio' });
 
     void runAnalysisFlow(
       {
         reviewId,
-        idempotencyKey,
+        attemptId,
         audioBlob:      recorder.audioBlob,
         audioDurationMs: recorder.durationMs,
       },
-      { mountedRef, idempotencyKeyRef, assessmentIdRef, cancelRecognitionRef, flowLockRef },
+      { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef },
       (state) => { if (mountedRef.current) setAnalysis(state); },
     );
   }, [reviewId, recorder.audioBlob, recorder.durationMs]);
 
   const handleRetry = useCallback(() => {
-    assessmentIdRef.current    = null;
-    idempotencyKeyRef.current  = null;
+    assessmentIdRef.current = null;
+    attemptIdRef.current    = null;
     setAnalysis({ phase: 'idle' });
   }, []);
 
   const handleNewAttempt = useCallback(() => {
     recorder.deleteRecording();
-    assessmentIdRef.current    = null;
-    idempotencyKeyRef.current  = null;
+    assessmentIdRef.current = null;
+    attemptIdRef.current    = null;
     setAnalysis({ phase: 'idle' });
   }, [recorder.deleteRecording]);
 

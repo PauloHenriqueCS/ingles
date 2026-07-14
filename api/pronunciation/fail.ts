@@ -22,10 +22,13 @@ export default async function handler(req: any, res: any) {
   const { supabase } = auth;
 
   const body = req.body ?? {};
-  const { assessmentId, code } = body;
+  const { assessmentId, attemptId, code } = body;
 
   if (!isValidUuid(assessmentId)) {
     return res.status(400).json({ code: 'INVALID_ASSESSMENT_ID', message: 'assessmentId inválido.' });
+  }
+  if (!isValidUuid(attemptId)) {
+    return res.status(400).json({ code: 'INVALID_ATTEMPT_ID', message: 'attemptId inválido.' });
   }
   if (typeof code !== 'string' || !ALLOWED_CODES.has(code as PronunciationFailCode)) {
     return res.status(400).json({ code: 'INVALID_ERROR_CODE', message: 'Código de erro não permitido.' });
@@ -35,6 +38,7 @@ export default async function handler(req: any, res: any) {
     'fail_pronunciation_assessment',
     {
       p_assessment_id: assessmentId,
+      p_attempt_id:    attemptId,
       p_error_code:    code,
     },
   );
@@ -57,6 +61,6 @@ export default async function handler(req: any, res: any) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno.' });
   }
 
-  // 'no_op' covers completed, failed, or preparing states — all safe outcomes
+  // 'no_op' means completed or stale attempt — both are safe outcomes
   return res.status(200).json({ status: rpc.action ?? 'no_op' });
 }

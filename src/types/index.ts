@@ -340,7 +340,7 @@ export interface DailyProgress {
   allActiveCompleted: boolean;
 }
 
-export type PronunciationAssessmentStatus = 'preparing' | 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
+export type PronunciationAssessmentStatus = 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
 
 export type PronunciationFailCode =
   | 'AUDIO_DECODE_FAILED'
@@ -360,7 +360,8 @@ export interface PronunciationAssessment {
   referenceText: string;
   languageCode: string;
   azureRegion: string;
-  idempotencyKey: string;
+  activeAttemptId: string | null;
+  attemptStartedAt: string | null;
   pronunciationScore: number | null;
   accuracyScore: number | null;
   fluencyScore: number | null;

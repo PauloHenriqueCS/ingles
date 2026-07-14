@@ -34,16 +34,19 @@ export default async function handler(req: any, res: any) {
 
   const raw = req.body ?? {};
 
-  // Guard against oversized payloads
+  // Guard against oversized payloads (Vercel parses JSON, check string size via header)
   const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
   if (contentLength > MAX_BODY_BYTES) {
     return res.status(413).json({ code: 'PAYLOAD_TOO_LARGE', message: 'Payload muito grande.' });
   }
 
-  const { assessmentId, result } = raw;
+  const { assessmentId, attemptId, result } = raw;
 
   if (!isValidUuid(assessmentId)) {
     return res.status(400).json({ code: 'INVALID_ASSESSMENT_ID', message: 'assessmentId inválido.' });
+  }
+  if (!isValidUuid(attemptId)) {
+    return res.status(400).json({ code: 'INVALID_ATTEMPT_ID', message: 'attemptId inválido.' });
   }
   if (!validateResult(result)) {
     return res.status(400).json({ code: 'INVALID_RESULT', message: 'Resultado inválido ou fora do intervalo permitido.' });
@@ -53,6 +56,7 @@ export default async function handler(req: any, res: any) {
     'complete_pronunciation_assessment',
     {
       p_assessment_id:       assessmentId,
+      p_attempt_id:          attemptId,
       p_pronunciation_score: result.pronunciationScore,
       p_accuracy_score:      result.accuracyScore,
       p_fluency_score:       result.fluencyScore,
@@ -78,8 +82,11 @@ export default async function handler(req: any, res: any) {
   if (rpc.error === 'NOT_FOUND') {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Avaliação não encontrada.' });
   }
-  if (rpc.error === 'ASSESSMENT_NOT_PROCESSING') {
-    return res.status(409).json({ code: 'ASSESSMENT_NOT_PROCESSING', message: 'Esta avaliação não está em processamento.' });
+  if (rpc.error === 'ASSESSMENT_ALREADY_COMPLETED') {
+    return res.status(409).json({ code: 'ASSESSMENT_ALREADY_COMPLETED', message: 'Este texto já possui uma análise concluída.' });
+  }
+  if (rpc.error === 'ATTEMPT_MISMATCH') {
+    return res.status(409).json({ code: 'ATTEMPT_MISMATCH', message: 'Esta tentativa não corresponde à tentativa ativa.' });
   }
   if (rpc.error) {
     console.error('[pronunciation/complete] Unexpected RPC result:', rpc.error);
@@ -88,7 +95,7 @@ export default async function handler(req: any, res: any) {
 
   res.setHeader('Cache-Control', 'no-store');
 
-  // 'already_completed' is idempotent — return the submitted result
+  // 'already_completed' means idempotent: return the saved result
   return res.status(200).json({
     assessmentId,
     status: 'completed',

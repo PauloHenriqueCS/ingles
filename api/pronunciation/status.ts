@@ -33,21 +33,18 @@ export default async function handler(req: any, res: any) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Revisão não encontrada.' });
   }
 
-  // Multiple assessments may exist per text; return the most recent one
-  const { data: rows, error: assessmentError } = await supabase
+  const { data: row, error: assessmentError } = await supabase
     .from('pronunciation_assessments')
     .select('*')
     .eq('text_version_id', textVersionId)
     .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .maybeSingle();
 
   if (assessmentError) {
     safeLog('pronunciation/status', 'db_error', 500);
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno.' });
   }
 
-  const row = (rows as Record<string, unknown>[] | null)?.[0] ?? null;
-  const assessment = row ? rowToAssessment(row) : null;
+  const assessment = row ? rowToAssessment(row as Record<string, unknown>) : null;
   return res.json(buildStatusResponse(assessment));
 }
