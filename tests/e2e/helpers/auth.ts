@@ -27,7 +27,7 @@ export const TEST_ASSESSMENT_ID = 'dddddddd-0000-0000-0000-000000000001';
 export const TEST_ATTEMPT_ID    = 'ffffffff-0000-0000-0000-000000000001';
 
 export const TEST_REFERENCE_TEXT =
-  "Hello, my name is Alex and I'm a software engineer. " +
+  "Hello, my name is Lemon and I'm a software engineer. " +
   "I've been working with computers for over ten years, " +
   "and I absolutely love what I do every single day. " +
   "Programming is not just my profession — it's my passion. " +
@@ -56,7 +56,7 @@ export const FAKE_RESULT = {
   fluencyScore:         75,
   completenessScore:    82,
   prosodyScore:         72,
-  recognizedText:       'hello my name is Alex',
+  recognizedText:       'hello my name is Lemon',
   wordsJson:            [],
   rawSegments:          [],
   audioDurationSeconds: 3,

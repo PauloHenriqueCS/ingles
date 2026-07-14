@@ -154,6 +154,7 @@ export default function ConversationView() {
 
                 <div>
                   <p className="text-slate-200 font-semibold text-base">{hp.prefs.teacherName}</p>
+                  <p className="text-xs text-slate-400">Seu tutor de inglês</p>
                   <p className="text-xs text-slate-500 mt-0.5">
                     {voiceLabel} · {paceLabel}
                   </p>

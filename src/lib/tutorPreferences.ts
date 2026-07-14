@@ -23,7 +23,7 @@ export const REALTIME_VOICES: VoiceEntry[] = [
 ];
 
 export const VOICE_PREVIEW_PHRASE =
-  "Hi! I'm Alex. Let's practice English together. How was your day?";
+  "Hi! I'm Lemon, your English tutor. Let's practice together. How was your day?";
 
 // ── Personality presets ───────────────────────────────────────────────────────
 
@@ -142,7 +142,7 @@ export const DETAIL_LABELS: Record<AIPreferences['correctionDetail'], { label: s
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
 export const BASE_DEFAULTS: AIPreferences = {
-  teacherName: 'Alex',
+  teacherName: 'Lemon AI',
   voice: 'coral',
   accent: 'american',
   speechPace: 'slow',
