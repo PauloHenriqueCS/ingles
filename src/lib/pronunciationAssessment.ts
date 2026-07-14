@@ -15,7 +15,8 @@ export function buildStatusResponse(
 
   const { status, id } = assessment;
 
-  const canAnalyze: boolean = status !== 'processing';
+  // 'preparing' and 'processing' both mean an analysis is active
+  const canAnalyze: boolean = status !== 'preparing' && status !== 'processing';
 
   if (status === 'completed' && assessment.pronunciationScore !== null) {
     const result: PronunciationNormalizedResult = {
@@ -37,30 +38,29 @@ export function buildStatusResponse(
 
 export function rowToAssessment(row: Record<string, unknown>): PronunciationAssessment {
   return {
-    id: String(row.id ?? ''),
-    userId: String(row.user_id ?? ''),
-    textVersionId: String(row.text_version_id ?? ''),
-    status: (row.status as PronunciationAssessmentStatus) ?? 'processing',
-    referenceText: String(row.reference_text ?? ''),
-    languageCode: String(row.language_code ?? 'en-US'),
-    azureRegion: String(row.azure_region ?? ''),
-    activeAttemptId: row.active_attempt_id != null ? String(row.active_attempt_id) : null,
-    attemptStartedAt: row.attempt_started_at != null ? String(row.attempt_started_at) : null,
-    pronunciationScore: row.pronunciation_score != null ? Number(row.pronunciation_score) : null,
-    accuracyScore: row.accuracy_score != null ? Number(row.accuracy_score) : null,
-    fluencyScore: row.fluency_score != null ? Number(row.fluency_score) : null,
-    completenessScore: row.completeness_score != null ? Number(row.completeness_score) : null,
-    prosodyScore: row.prosody_score != null ? Number(row.prosody_score) : null,
-    recognizedText: row.recognized_text != null ? String(row.recognized_text) : null,
-    wordsJson: row.words_json ?? null,
-    rawResultJson: row.raw_result_json ?? null,
-    audioPath: row.audio_path != null ? String(row.audio_path) : null,
+    id:              String(row.id ?? ''),
+    userId:          String(row.user_id ?? ''),
+    textVersionId:   String(row.text_version_id ?? ''),
+    status:          (row.status as PronunciationAssessmentStatus) ?? 'processing',
+    referenceText:   String(row.reference_text ?? ''),
+    languageCode:    String(row.language_code ?? 'en-US'),
+    azureRegion:     String(row.azure_region ?? ''),
+    idempotencyKey:  String(row.idempotency_key ?? ''),
+    pronunciationScore:   row.pronunciation_score != null ? Number(row.pronunciation_score) : null,
+    accuracyScore:        row.accuracy_score != null ? Number(row.accuracy_score) : null,
+    fluencyScore:         row.fluency_score != null ? Number(row.fluency_score) : null,
+    completenessScore:    row.completeness_score != null ? Number(row.completeness_score) : null,
+    prosodyScore:         row.prosody_score != null ? Number(row.prosody_score) : null,
+    recognizedText:       row.recognized_text != null ? String(row.recognized_text) : null,
+    wordsJson:            row.words_json ?? null,
+    rawResultJson:        row.raw_result_json ?? null,
+    audioPath:            row.audio_path != null ? String(row.audio_path) : null,
     audioDurationSeconds: row.audio_duration_seconds != null ? Number(row.audio_duration_seconds) : null,
-    errorCode: row.error_code != null ? String(row.error_code) : null,
-    errorMessage: row.error_message != null ? String(row.error_message) : null,
-    startedAt: row.started_at != null ? String(row.started_at) : null,
-    completedAt: row.completed_at != null ? String(row.completed_at) : null,
-    createdAt: String(row.created_at ?? ''),
-    updatedAt: String(row.updated_at ?? ''),
+    errorCode:            row.error_code != null ? String(row.error_code) : null,
+    errorMessage:         row.error_message != null ? String(row.error_message) : null,
+    startedAt:            row.started_at != null ? String(row.started_at) : null,
+    completedAt:          row.completed_at != null ? String(row.completed_at) : null,
+    createdAt:            String(row.created_at ?? ''),
+    updatedAt:            String(row.updated_at ?? ''),
   };
 }
