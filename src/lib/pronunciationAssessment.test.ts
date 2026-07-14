@@ -60,10 +60,10 @@ describe('buildStatusResponse', () => {
     expect(r.assessmentId).toBeNull();
   });
 
-  it('returns completed status, canAnalyze false', () => {
+  it('returns completed status, canAnalyze true', () => {
     const r = buildStatusResponse(baseAssessment);
     expect(r.status).toBe('completed');
-    expect(r.canAnalyze).toBe(false);
+    expect(r.canAnalyze).toBe(true);
     expect(r.assessmentId).toBe(VALID_UUID);
   });
 

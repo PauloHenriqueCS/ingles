@@ -15,7 +15,7 @@ export function buildStatusResponse(
 
   const { status, id } = assessment;
 
-  const canAnalyze: boolean = status === 'failed_retryable' || status === 'failed_final';
+  const canAnalyze: boolean = status !== 'processing';
 
   if (status === 'completed' && assessment.pronunciationScore !== null) {
     const result: PronunciationNormalizedResult = {

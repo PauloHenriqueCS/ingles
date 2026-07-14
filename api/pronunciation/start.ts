@@ -3,7 +3,7 @@ import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 
 type ReserveResult = {
-  action?: 'created' | 'reactivated' | 'existing_processing';
+  action?: 'created' | 'reactivated' | 'existing_processing' | 'restarted';
   error?: string;
   assessmentId?: string;
   referenceText?: string;
@@ -145,7 +145,8 @@ export default async function handler(req: any, res: any) {
   const isOurSlot =
     result.action === 'created' ||
     result.action === 'reactivated' ||
-    result.action === 'existing_processing';
+    result.action === 'existing_processing' ||
+    result.action === 'restarted';
 
   // ── 6. Issue token (only after reservation is confirmed) ────────────────────
   let tokenResult: Awaited<ReturnType<typeof issueAzureSpeechToken>>;

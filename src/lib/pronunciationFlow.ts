@@ -113,9 +113,7 @@ export async function runAnalysisFlow(
       const msg =
         json.code === 'ASSESSMENT_IN_PROGRESS'
           ? 'Outra análise está em andamento. Aguarde ou tente em outra aba.'
-          : json.code === 'ASSESSMENT_ALREADY_COMPLETED'
-          ? 'Este texto já possui uma análise concluída.'
-          : 'Não foi possível iniciar a análise. Tente novamente.';
+          : (json.message as string | undefined) ?? 'Não foi possível iniciar a análise. Tente novamente.';
       setPhase({ phase: 'failed', errorMessage: msg });
       refs.flowLockRef.current = false;
       return;

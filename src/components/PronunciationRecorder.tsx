@@ -134,6 +134,13 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
     setAnalysis({ phase: 'idle' });
   }, []);
 
+  const handleNewAttempt = useCallback(() => {
+    recorder.deleteRecording();
+    assessmentIdRef.current = null;
+    attemptIdRef.current    = null;
+    setAnalysis({ phase: 'idle' });
+  }, [recorder.deleteRecording]);
+
   // ── Derived flags ──────────────────────────────────────────────────────────
   const isProcessing =
     analysis.phase === 'preparing_audio' ||
@@ -142,6 +149,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
     analysis.phase === 'saving_result';
 
   const canSubmit =
+    reviewId !== null            &&
     recorder.phase === 'done'    &&
     recorder.audioBlob !== null  &&
     !isProcessing                &&
@@ -204,13 +212,21 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
         </div>
       )}
 
-      {/* ── Completed: show result only ───────────────────────────────────── */}
+      {/* ── Completed: show result + allow new attempt ───────────────────── */}
       {analysis.phase === 'completed' && analysis.result && (
         <>
           <PronunciationResult result={analysis.result} referenceText={referenceText} />
-          <p className="text-xs text-slate-600 text-center">
-            Esta versão do texto já foi analisada. Edite o texto para fazer uma nova avaliação.
-          </p>
+          <div className="space-y-2">
+            <button
+              onClick={handleNewAttempt}
+              className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
+            >
+              🎙 Fazer nova tentativa
+            </button>
+            <p className="text-xs text-slate-500 text-center">
+              A nova análise substituirá o resultado atual.
+            </p>
+          </div>
         </>
       )}
 

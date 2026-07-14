@@ -334,6 +334,16 @@ describe('idempotência e concorrência', () => {
     expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
   });
 
+  it('restarted retorna o mesmo assessmentId e emite token (nova tentativa após completed)', async () => {
+    rpcOk({ action: 'restarted', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status).toBe(200);
+    expect((res._body as any).assessmentId).toBe(MOCK_ASSESS);
+    expect((res._body as any).token).toBe(MOCK_TOKEN);
+    expect(vi.mocked(issueAzureSpeechToken)).toHaveBeenCalledOnce();
+  });
+
   it('dois calls com o mesmo textVersionId e mesmo attemptId usam o mesmo assessmentId', async () => {
     const resA = makeRes();
     const resB = makeRes();
