@@ -4,13 +4,15 @@ import { getAuthHeader } from '../lib/apiAuth';
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
 
 interface SessionInfo {
-  sessionId: string;
+  sessionId: string | null;
   voice: string;
+  model: string;
 }
 
 export interface UseRealtimeSession {
   status: SessionStatus;
   errorMessage: string | null;
+  errorCode: string | null;
   elapsedMs: number;
   sessionInfo: SessionInfo | null;
   isSpeaking: boolean;
@@ -20,17 +22,35 @@ export interface UseRealtimeSession {
 }
 
 const MAX_SESSION_MS = 30 * 60 * 1000;
-const REALTIME_MODEL = 'gpt-realtime-2.1-mini';
+const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+
+function stopStream(stream: MediaStream | null) {
+  if (!stream) return;
+  stream.getTracks().forEach((t) => { try { t.stop(); } catch { /* ignore */ } });
+}
+
+function getMicErrorMessage(err: unknown): { message: string; code: string } {
+  if (err instanceof DOMException) {
+    if (err.name === 'NotAllowedError') {
+      return { message: 'Permissão do microfone negada.', code: 'MIC_PERMISSION_DENIED' };
+    }
+    if (err.name === 'NotFoundError') {
+      return { message: 'Nenhum microfone foi encontrado.', code: 'MIC_NOT_FOUND' };
+    }
+  }
+  return { message: 'Não foi possível acessar o microfone.', code: 'MIC_ERROR' };
+}
 
 export function useRealtimeSession(): UseRealtimeSession {
   const [status, setStatus] = useState<SessionStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  const pcRef    = useRef<RTCPeerConnection | null>(null);
-  const dcRef    = useRef<RTCDataChannel | null>(null);
+  const pcRef        = useRef<RTCPeerConnection | null>(null);
+  const dcRef        = useRef<RTCDataChannel | null>(null);
   const streamRef    = useRef<MediaStream | null>(null);
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number | null>(null);
@@ -40,13 +60,10 @@ export function useRealtimeSession(): UseRealtimeSession {
     endCalledRef.current = true;
 
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-
     if (dcRef.current) { try { dcRef.current.close(); } catch { /* ignore */ } dcRef.current = null; }
     if (pcRef.current) { try { pcRef.current.close(); } catch { /* ignore */ } pcRef.current = null; }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => { try { t.stop(); } catch { /* ignore */ } });
-      streamRef.current = null;
-    }
+    stopStream(streamRef.current);
+    streamRef.current = null;
 
     startTimeRef.current = null;
     setIsSpeaking(false);
@@ -56,16 +73,46 @@ export function useRealtimeSession(): UseRealtimeSession {
 
   useEffect(() => () => { cleanup(); }, [cleanup]);
 
+  const fail = useCallback((code: string, message: string) => {
+    cleanup();
+    setStatus('error');
+    setErrorCode(code);
+    setErrorMessage(message);
+  }, [cleanup]);
+
   const start = useCallback(async () => {
     if (status === 'connecting' || status === 'active') return;
 
     endCalledRef.current = false;
     setStatus('connecting');
     setErrorMessage(null);
+    setErrorCode(null);
     setElapsedMs(0);
 
+    // ── Step 1: Mic first (must be in user gesture context, especially on Safari/iPhone) ─
+    if (!navigator.mediaDevices?.getUserMedia) {
+      fail('MIC_NOT_SUPPORTED', 'Este navegador não oferece suporte ao microfone.');
+      return;
+    }
+
+    let stream: MediaStream;
     try {
-      // 1. Get ephemeral token from our backend
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      const { message, code } = getMicErrorMessage(err);
+      fail(code, message);
+      return;
+    }
+
+    if (endCalledRef.current) { stopStream(stream); return; }
+    streamRef.current = stream;
+
+    // ── Step 2: Get ephemeral token from our backend ─────────────────────────
+    let token: string;
+    let sessionId: string | null;
+    let voice: string;
+    let model: string;
+    try {
       const headers = await getAuthHeader();
       const resp = await fetch('/api/conversation/session', {
         method: 'POST',
@@ -73,105 +120,154 @@ export function useRealtimeSession(): UseRealtimeSession {
       });
 
       if (!resp.ok) {
-        const json = await resp.json().catch(() => ({}));
-        throw new Error(json.message ?? 'Falha ao iniciar sessão');
+        const json = await resp.json().catch(() => ({})) as { code?: string; message?: string };
+        fail(json.code ?? 'SESSION_ERROR', json.message ?? 'Falha ao iniciar sessão.');
+        stopStream(stream);
+        streamRef.current = null;
+        return;
       }
 
-      const { token, sessionId, voice } = await resp.json() as {
-        token: string; sessionId: string; voice: string;
+      const body = await resp.json() as {
+        token: string; sessionId: string | null; voice: string; model: string;
       };
-
-      if (endCalledRef.current) return;
-
-      setSessionInfo({ sessionId, voice });
-
-      // 2. Get mic stream
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (endCalledRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
-      streamRef.current = stream;
-
-      // 3. Create RTCPeerConnection
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-
-      // 4. Add mic audio track
-      stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
-
-      // 5. Route remote audio to hidden <audio> element
-      pc.ontrack = (e) => {
-        const audioEl = document.getElementById('realtime-audio') as HTMLAudioElement | null;
-        if (audioEl) {
-          audioEl.srcObject = e.streams[0];
-          audioEl.play().catch(() => undefined);
-        }
-      };
-
-      // 6. Create data channel for events
-      const dc = pc.createDataChannel('oai-events');
-      dcRef.current = dc;
-
-      dc.onopen = () => {
-        if (endCalledRef.current) return;
-        setStatus('active');
-        startTimeRef.current = Date.now();
-        timerRef.current = setInterval(() => {
-          const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
-          setElapsedMs(elapsed);
-          if (elapsed >= MAX_SESSION_MS) cleanup('ended');
-        }, 1000);
-      };
-
-      dc.onmessage = (e) => {
-        try {
-          const ev = JSON.parse(e.data as string) as { type: string };
-          if (ev.type === 'output_audio_buffer.started') setIsSpeaking(true);
-          if (
-            ev.type === 'output_audio_buffer.stopped' ||
-            ev.type === 'output_audio_buffer.committed'
-          ) setIsSpeaking(false);
-        } catch { /* ignore */ }
-      };
-
-      dc.onclose = () => {
-        if (!endCalledRef.current) cleanup('ended');
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-          cleanup('error');
-          setErrorMessage('Conexão perdida. Tente novamente.');
-        }
-      };
-
-      // 7. Create SDP offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      if (endCalledRef.current) return;
-
-      // 8. Send offer to OpenAI Realtime
-      const sdpResp = await fetch(
-        `https://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/sdp' },
-          body: offer.sdp,
-        },
-      );
-
-      if (!sdpResp.ok) throw new Error('Falha ao conectar ao serviço de IA');
-
-      const answerSdp = await sdpResp.text();
-      if (endCalledRef.current) return;
-
-      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-
-    } catch (err) {
-      cleanup();
-      setStatus('error');
-      setErrorMessage(err instanceof Error ? err.message : 'Erro ao iniciar conversa');
+      token     = body.token;
+      sessionId = body.sessionId;
+      voice     = body.voice;
+      model     = body.model;
+    } catch {
+      fail('NETWORK_ERROR', 'Erro de rede ao iniciar a sessão.');
+      stopStream(stream);
+      streamRef.current = null;
+      return;
     }
-  }, [status, cleanup]);
+
+    if (endCalledRef.current) { stopStream(stream); streamRef.current = null; return; }
+
+    setSessionInfo({ sessionId, voice, model });
+
+    // ── Step 3: RTCPeerConnection ─────────────────────────────────────────────
+    const pc = new RTCPeerConnection();
+    pcRef.current = pc;
+
+    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+
+    pc.ontrack = (e) => {
+      const audioEl = document.getElementById('realtime-audio') as HTMLAudioElement | null;
+      if (audioEl) {
+        audioEl.srcObject = e.streams[0];
+        audioEl.play().catch(() => undefined);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (
+        pc.iceConnectionState === 'failed' ||
+        pc.iceConnectionState === 'disconnected'
+      ) {
+        if (!endCalledRef.current) {
+          fail('CONNECTION_LOST', 'Conexão perdida. Tente novamente.');
+        }
+      }
+    };
+
+    // ── Step 4: Data channel ─────────────────────────────────────────────────
+    const dc = pc.createDataChannel('oai-events');
+    dcRef.current = dc;
+
+    dc.onopen = () => {
+      if (endCalledRef.current) return;
+      setStatus('active');
+      startTimeRef.current = Date.now();
+      timerRef.current = setInterval(() => {
+        const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
+        setElapsedMs(elapsed);
+        if (elapsed >= MAX_SESSION_MS) cleanup('ended');
+      }, 1000);
+    };
+
+    dc.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data as string) as { type: string; error?: { type?: string; code?: string; param?: string } };
+
+        // GA speaking events
+        if (ev.type === 'response.output_audio.delta') setIsSpeaking(true);
+        if (ev.type === 'response.output_audio.done' || ev.type === 'response.done') {
+          setIsSpeaking(false);
+        }
+
+        // Error events from the server
+        if (ev.type === 'error') {
+          const err = ev.error ?? {};
+          console.error('[realtime] server error event', {
+            type: err.type ?? null,
+            code: err.code ?? null,
+            param: err.param ?? null,
+          });
+          if (!endCalledRef.current) {
+            fail('SESSION_ERROR', 'Ocorreu um erro na sessão. Tente novamente.');
+          }
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    dc.onclose = () => {
+      if (!endCalledRef.current) cleanup('ended');
+    };
+
+    // ── Step 5: SDP offer → /v1/realtime/calls ───────────────────────────────
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch {
+      fail('WEBRTC_FAILED', 'Não foi possível iniciar a negociação WebRTC.');
+      return;
+    }
+
+    if (!offer.sdp) {
+      fail('WEBRTC_FAILED', 'O SDP da oferta está vazio.');
+      return;
+    }
+
+    if (endCalledRef.current) return;
+
+    let answerSdp: string;
+    try {
+      const sdpResp = await fetch(REALTIME_CALLS_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/sdp',
+        },
+        body: offer.sdp,
+      });
+
+      if (!sdpResp.ok) {
+        const errText = await sdpResp.text().catch(() => '');
+        console.error('[realtime] /calls failed', { status: sdpResp.status, body: errText.slice(0, 200) });
+        fail('WEBRTC_FAILED', 'Falha na conexão com o serviço de IA. Tente novamente.');
+        return;
+      }
+
+      answerSdp = await sdpResp.text();
+    } catch {
+      fail('WEBRTC_NETWORK', 'Erro de rede ao conectar ao serviço de IA.');
+      return;
+    }
+
+    if (!answerSdp) {
+      fail('WEBRTC_FAILED', 'Resposta SDP vazia recebida do serviço de IA.');
+      return;
+    }
+
+    if (endCalledRef.current) return;
+
+    try {
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    } catch {
+      fail('WEBRTC_FAILED', 'Não foi possível estabelecer a conexão WebRTC.');
+    }
+  }, [status, cleanup, fail]);
 
   const end = useCallback(() => {
     cleanup('ended');
@@ -179,8 +275,14 @@ export function useRealtimeSession(): UseRealtimeSession {
 
   const updateInstructions = useCallback((instructions: string) => {
     if (!dcRef.current || dcRef.current.readyState !== 'open') return;
-    dcRef.current.send(JSON.stringify({ type: 'session.update', session: { instructions } }));
+    dcRef.current.send(JSON.stringify({
+      type: 'session.update',
+      session: { type: 'realtime', instructions },
+    }));
   }, []);
 
-  return { status, errorMessage, elapsedMs, sessionInfo, isSpeaking, start, end, updateInstructions };
+  return {
+    status, errorMessage, errorCode, elapsedMs, sessionInfo, isSpeaking,
+    start, end, updateInstructions,
+  };
 }

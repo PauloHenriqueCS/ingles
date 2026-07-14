@@ -123,12 +123,30 @@ export default function ConversationView() {
               </div>
             )}
 
-            {/* Error */}
-            {isError && (
-              <div className="bg-red-900/30 border border-red-800 rounded-2xl p-5 space-y-3">
-                <p className="text-sm text-red-300">{session.errorMessage}</p>
-              </div>
-            )}
+            {/* Error — differentiated by code */}
+            {isError && (() => {
+              const isMic = session.errorCode === 'MIC_PERMISSION_DENIED' ||
+                            session.errorCode === 'MIC_NOT_FOUND' ||
+                            session.errorCode === 'MIC_NOT_SUPPORTED' ||
+                            session.errorCode === 'MIC_ERROR';
+              const isRateLimit = session.errorCode === 'OPENAI_RATE_LIMITED';
+              const isConfig = session.errorCode === 'OPENAI_INVALID_SESSION' ||
+                               session.errorCode === 'OPENAI_AUTH_FAILED' ||
+                               session.errorCode === 'OPENAI_NOT_CONFIGURED';
+              const icon = isMic ? '🎤' : isRateLimit ? '⚠️' : isConfig ? '⚙️' : '❌';
+              const border = isConfig
+                ? 'border-amber-700 bg-amber-900/20'
+                : 'border-red-800 bg-red-900/30';
+              const text = isConfig ? 'text-amber-300' : 'text-red-300';
+              return (
+                <div className={`border rounded-2xl p-5 space-y-2 ${border}`}>
+                  <div className="flex items-start gap-2">
+                    <span className="text-lg shrink-0">{icon}</span>
+                    <p className={`text-sm leading-relaxed ${text}`}>{session.errorMessage}</p>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Start / restart button */}
             {canStart && (
