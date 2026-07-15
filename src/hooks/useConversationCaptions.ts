@@ -36,23 +36,25 @@ export function useConversationCaptions(): UseConversationCaptions {
 
   useEffect(() => {
     let cancelled = false;
-    supabase.auth.getUser().then(({ data }) => {
-      if (cancelled) return;
-      const id = data.user?.id ?? null;
-      setUserId(id);
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (cancelled) return;
 
-      // Apply localStorage immediately for fast UX
-      const lsValue = readLs(id);
-      setCaptionsEnabled(lsValue);
+        const id = data.user?.id ?? null;
+        setUserId(id);
 
-      if (!id) return;
+        // Apply localStorage immediately for fast UX
+        setCaptionsEnabled(readLs(id));
 
-      // Load from DB to get the authoritative value
-      supabase
-        .from('ai_conversation_preferences')
-        .select('captions_enabled')
-        .maybeSingle()
-        .then(({ data: row }) => {
+        if (!id) return;
+
+        // Load from DB to get the authoritative value
+        try {
+          const { data: row } = await supabase
+            .from('ai_conversation_preferences')
+            .select('captions_enabled')
+            .maybeSingle();
           if (cancelled) return;
           const r = row as Record<string, unknown> | null;
           if (r && typeof r['captions_enabled'] === 'boolean') {
@@ -60,10 +62,9 @@ export function useConversationCaptions(): UseConversationCaptions {
             setCaptionsEnabled(dbValue);
             writeLs(id, dbValue);
           }
-        })
-        .catch(() => { /* keep localStorage value */ });
-    }).catch(() => { /* keep default */ });
-
+        } catch { /* keep localStorage value */ }
+      } catch { /* keep default */ }
+    })();
     return () => { cancelled = true; };
   }, []);
 
@@ -72,10 +73,13 @@ export function useConversationCaptions(): UseConversationCaptions {
       const next = !prev;
       writeLs(userId, next);
       if (userId) {
-        supabase
-          .from('ai_conversation_preferences')
-          .upsert({ user_id: userId, captions_enabled: next }, { onConflict: 'user_id' })
-          .catch(() => { /* non-critical — preference already saved to localStorage */ });
+        void (async () => {
+          try {
+            await supabase
+              .from('ai_conversation_preferences')
+              .upsert({ user_id: userId, captions_enabled: next }, { onConflict: 'user_id' });
+          } catch { /* non-critical — preference already saved to localStorage */ }
+        })();
       }
       return next;
     });
