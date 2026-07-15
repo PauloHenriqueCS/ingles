@@ -26,7 +26,6 @@ export default function RewriteSection({
   initialV2Text,
   initialV2Comparison,
   initialV2FinalText,
-  studentLevel,
   onSaveV2,
   onV2FinalText,
 }: Props) {
@@ -38,32 +37,29 @@ export default function RewriteSection({
   const [finalCorrectState, setFinalCorrectState] = useState<FinalCorrectState>(initialV2FinalText ? 'done' : 'idle');
   const isComparing = compareState === 'loading';
 
-  async function fetchFinalText(v2Text: string) {
-    if (!v2Text || !aiReview.correctedText) {
-      setFinalCorrectState('error');
-      return;
-    }
+  async function generateFinalText(v2Text: string) {
+    if (!v2Text || !aiReview.correctedText) { setFinalCorrectState('error'); return; }
     setFinalCorrectState('loading');
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/correct-rewrite', {
+      const res = await fetch('/api/compare-rewrite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
+          generateFinalTextOnly: true,
+          correctedText: aiReview.correctedText,
           rewriteText: v2Text,
-          originalCorrectedText: aiReview.correctedText,
-          studentLevel: studentLevel ?? undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
-      const final = String(data.finalCorrectedText ?? '');
+      const final = String(data.finalCorrectedText ?? '').trim();
       if (!final) throw new Error('Resposta vazia');
       setFinalCorrectedText(final);
       setFinalCorrectState('done');
       onV2FinalText?.(final);
     } catch (err) {
-      console.error('[correct-rewrite]', err);
+      console.error('[generate-final-text]', err);
       setFinalCorrectState('error');
     }
   }
@@ -89,22 +85,27 @@ export default function RewriteSection({
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Erro ao comparar');
+      if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
       const comparison = data.result as RewriteComparisonResult;
       setResult(comparison);
       setCompareState('done');
       onSaveV2?.(rewriteText.trim(), comparison);
-    } catch {
+      // Server also returns finalCorrectedText in the same response
+      const serverFinal = typeof data.finalCorrectedText === 'string' ? data.finalCorrectedText.trim() : '';
+      if (serverFinal) {
+        setFinalCorrectedText(serverFinal);
+        setFinalCorrectState('done');
+        onV2FinalText?.(serverFinal);
+      }
+    } catch (err) {
+      console.error('[compare-rewrite]', err);
       setCompareState('error');
-      return;
-    }
-    if (!finalCorrectedText) {
-      fetchFinalText(rewriteText.trim());
     }
   }
 
+  const hasCompared = compareState === 'done' || !!(initialV2Comparison);
   const showGenerateFinalButton =
-    !!(initialV2Text && !initialV2FinalText && finalCorrectState === 'idle');
+    !finalCorrectedText && finalCorrectState === 'idle' && !!(rewriteText.trim()) && hasCompared;
 
   return (
     <div className="space-y-4">
@@ -194,7 +195,7 @@ export default function RewriteSection({
       {/* Generate final text button (old records without final text) */}
       {showGenerateFinalButton && (
         <button
-          onClick={() => fetchFinalText(rewriteText.trim())}
+          onClick={() => generateFinalText(rewriteText.trim())}
           className="w-full py-2.5 rounded-xl text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors"
         >
           Gerar versão final corrigida
@@ -219,7 +220,7 @@ export default function RewriteSection({
         <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center space-y-2">
           <p className="text-sm text-red-300">Não foi possível gerar a versão final corrigida.</p>
           <button
-            onClick={() => fetchFinalText(rewriteText.trim())}
+            onClick={() => generateFinalText(rewriteText.trim())}
             className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
           >
             Tentar novamente

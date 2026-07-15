@@ -23,7 +23,6 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'generate-theme':       { windowSeconds: 3600, maxRequests: 25  },
   'review-text':          { windowSeconds: 3600, maxRequests: 30  },
   'compare-rewrite':      { windowSeconds: 3600, maxRequests: 25  },
-  'correct-rewrite':      { windowSeconds: 3600, maxRequests: 25  },
   'grammar-explanation':  { windowSeconds: 3600, maxRequests: 50  },
   'conversation-session': { windowSeconds: 3600, maxRequests: 60  },
   'conversation-preview': { windowSeconds: 3600, maxRequests: 30  },
