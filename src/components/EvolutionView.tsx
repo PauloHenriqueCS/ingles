@@ -154,12 +154,13 @@ export default function EvolutionView({ onNavigate }: Props) {
   useEffect(() => { load(); }, []);
 
   useEffect(() => {
-    supabase
-      .from('user_listening_results')
-      .select('performance_score, calculated_at, user_listening_assignments!inner(activity_date)')
-      .order('calculated_at', { ascending: false })
-      .limit(50)
-      .then(({ data }) => {
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('user_listening_results')
+          .select('performance_score, calculated_at, user_listening_assignments!inner(activity_date)')
+          .order('calculated_at', { ascending: false })
+          .limit(50);
         if (!data || data.length === 0) {
           setListeningStats({ totalSessions: 0, avgScore: null, recentSessions: [] });
           return;
@@ -171,8 +172,10 @@ export default function EvolutionView({ onNavigate }: Props) {
           score: Math.round(Number(r.performance_score)),
         }));
         setListeningStats({ totalSessions, avgScore, recentSessions });
-      })
-      .catch(() => setListeningStats(null));
+      } catch {
+        setListeningStats(null);
+      }
+    })();
   }, []);
 
   const filteredReviews = useMemo(() => filterByPeriod(reviews, period), [reviews, period]);

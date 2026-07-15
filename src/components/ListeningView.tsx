@@ -137,7 +137,7 @@ interface Props {
 export default function ListeningView({ onBack, episodeId: propEpisodeId }: Props) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [episodeId, setEpisodeId] = useState<string | null>(propEpisodeId ?? null);
-  const [assignmentId, setAssignmentId] = useState<string | null>(null);
+  const [, setAssignmentId] = useState<string | null>(null);
   const [episodeData, setEpisodeData] = useState<EpisodeSessionResponse | null>(null);
   const [blockIdx, setBlockIdx] = useState<0 | 1>(0);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
@@ -291,10 +291,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         return;
       }
       setBlockIdx(idx as 0 | 1);
+      const sess = activeBlock.session;
       player.load(activeBlock.audio.url, activeBlock.audio.durationMs);
-      scheduleUrlRefresh(activeBlock.session.sessionId, activeBlock.audio.expiresAt);
-      player.setOnEnded(() => handleAudioEnded(activeBlock.session.sessionId));
-      if (activeBlock.session.status === 'awaiting_answer') {
+      scheduleUrlRefresh(sess.sessionId, activeBlock.audio.expiresAt);
+      player.setOnEnded(() => handleAudioEnded(sess.sessionId));
+      if (sess.status === 'awaiting_answer') {
         setPhase('question');
       } else {
         setPhase('intro');
