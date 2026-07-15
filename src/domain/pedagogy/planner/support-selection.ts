@@ -22,11 +22,6 @@ const LEVEL_DEFAULT_SUPPORT: Record<CEFRLevel, MissionSupportLevel> = {
   C2: 'minimal',
 };
 
-const DIFFICULTY_SUPPORT_OVERRIDE: Record<MissionDifficulty, MissionSupportLevel | null> = {
-  easy: 'high',
-  medium: null, // use level default
-  hard: null,   // may reduce
-};
 
 export function resolveMissionSupportLevel(input: SupportInput): MissionSupportLevel {
   let level: MissionSupportLevel = LEVEL_DEFAULT_SUPPORT[input.level];

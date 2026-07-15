@@ -28,7 +28,6 @@ import {
   updateRewriteAttemptStatus,
 } from './writingRewriteRepository';
 import {
-  getEvaluationForAttempt,
   updateEvaluationStatus,
 } from './writingRewriteEvaluationRepository';
 import { checkRewriteEvaluationIdempotency } from './writingRewriteIdempotency';
@@ -36,7 +35,6 @@ import { persistRewriteEvaluation } from './writingRewritePersistence';
 import { runDeterministicComparison } from './writingRewriteDeterministicComparison';
 import { callModelEvaluator } from './writingRewriteModelEvaluator';
 import { logRewriteEvent } from './writingRewriteObservability';
-import { hashText } from '../domain/writing-rewrite/rewrite-normalization';
 
 export interface EvaluateWritingRewriteInput {
   authenticatedUserId: string;

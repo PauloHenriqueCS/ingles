@@ -29,7 +29,7 @@ export function toPublicWritingMissionDTO(
       result[key] = value;
     }
   }
-  return result as PublicWritingMissionDTO;
+  return result as unknown as PublicWritingMissionDTO;
 }
 
 export function containsWritingMissionInternalFields(

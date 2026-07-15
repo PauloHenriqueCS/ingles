@@ -6,15 +6,11 @@
 import {
   normalizeTextForExactComparison,
   normalizeTextForStructuralComparison,
-  normalizeTextForCopyDetection,
 } from './rewrite-normalization';
 import { splitIntoSentences, tokenizeIntoWords } from './rewrite-diff';
 import type { RewriteIndependenceAssessment } from './rewrite-types';
 
 // ── Signal thresholds ───────────────────────────────────────────────────────
-
-/** After exact normalization, texts are identical. */
-const EXACT_MATCH_THRESHOLD = true; // boolean signal
 
 /** Structural similarity (word overlap after expansion) threshold for 'copied'. */
 const STRUCTURAL_SIMILARITY_COPIED = 0.95;

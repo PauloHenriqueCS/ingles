@@ -231,7 +231,6 @@ export async function processGrammarEvidenceCandidates(
       });
 
       // g. createGrammarEvidence() — ON CONFLICT idempotency_key: skip (duplicate)
-      const existingBeforeCreate = idempotencyKey;
       const evidence = await createGrammarEvidence(supabase, {
         userId: input.userId,
         grammarTopicId,
@@ -261,14 +260,8 @@ export async function processGrammarEvidenceCandidates(
         rulesVersion,
       });
 
-      // Detect if this was a duplicate (same idempotency key was already in DB)
-      const isDuplicate = evidence.idempotencyKey === existingBeforeCreate &&
-        evidence.createdAt !== new Date().toISOString().slice(0, 20); // rough check
-
-      // Actually: if idempotency key matched existing row, it's a duplicate
-      // We detect it by comparing createdAt to now — but a simpler approach:
-      // createGrammarEvidence returns the existing row on conflict,
-      // so we check if the creation was very recent (within 2s)
+      // createGrammarEvidence returns the existing row on conflict;
+      // idempotency is handled by the unique constraint on idempotency_key.
       const createdRecently = Date.now() - new Date(evidence.createdAt).getTime() < 2000;
 
       if (!createdRecently) {

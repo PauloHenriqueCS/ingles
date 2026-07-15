@@ -8,7 +8,6 @@ import type {
   WritingRewriteAttempt,
   WritingRewriteEvaluation,
   RewriteCorrectionOutcome,
-  NewIssue,
   RewriteIndependenceAssessment,
 } from './rewrite-types';
 import type { RewriteStatus } from './rewrite-status';
@@ -61,9 +60,8 @@ function mapStatus(status: RewriteStatus): PublicWritingRewriteDTO['status'] {
     case 'cancelled':
       return 'draft';
     default: {
-      // Exhaustive check
-      const _: never = status;
-      return 'draft';
+      const exhaustiveCheck: never = status;
+      return exhaustiveCheck;
     }
   }
 }

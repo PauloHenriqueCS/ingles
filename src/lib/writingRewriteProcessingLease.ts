@@ -5,7 +5,7 @@ export interface LeaseResult {
   leaseKey: string;
 }
 
-const LEASE_DURATION_MS = 120_000; // 2 minutes
+// Lease duration: 2 minutes (used by the caller to set evaluation timeout)
 
 /**
  * Attempt to acquire an evaluation lease by inserting a 'pending' row

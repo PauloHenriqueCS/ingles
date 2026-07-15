@@ -3,7 +3,7 @@
  */
 
 import type { RewriteCorrectionOutcomeStatus } from '../domain/writing-rewrite/rewrite-types';
-import { computeWordDiff, wordOverlapSimilarity, splitIntoSentences } from '../domain/writing-rewrite/rewrite-diff';
+import { wordOverlapSimilarity, splitIntoSentences } from '../domain/writing-rewrite/rewrite-diff';
 import {
   normalizeTextForStructuralComparison,
   normalizeTextForExactComparison,
