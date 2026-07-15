@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, MutableRefObject } from 'reac
 import {
   ArrowLeft, Volume2, Mic, Square, Play, Pause,
   RefreshCw, Send, Loader2, CheckCircle, AlertCircle,
-  ChevronDown, ChevronUp, RotateCcw,
+  RotateCcw,
 } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { getAuthHeader } from '../lib/apiAuth';
@@ -27,7 +27,7 @@ function formatTime(ms: number): string {
 }
 
 function cleanWordForTts(displayWord: string): string {
-  return displayWord.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim();
+  return displayWord.replace(/^[^a-zA-Z0-9''-]+|[^a-zA-Z0-9''-]+$/g, '').trim();
 }
 
 async function fetchTtsUrl(text: string, voice: string): Promise<string> {
@@ -55,57 +55,70 @@ async function fetchAzureToken(): Promise<{ token: string; region: string }> {
   return resp.json();
 }
 
-// ── WordTrainer ───────────────────────────────────────────────────────────────
+// ── WordRow ───────────────────────────────────────────────────────────────────
 
-interface WordTrainerProps {
+interface WordRowProps {
   word: PronunciationWordDetail;
   currentCategory: TrainingCategory;
   wordTtsCacheRef: MutableRefObject<Map<string, string>>;
   sharedAudioRef: MutableRefObject<HTMLAudioElement | null>;
-  onAudioStart: () => void;
-  onCategoryUpdate: (wordId: string, category: TrainingCategory) => void;
   voice: string;
   speed: AudioSettings['playbackRate'];
+  activeRecordingWordId: string | null;
+  onRecordingChange: (wordId: string | null) => void;
+  onCategoryUpdate: (wordId: string, category: TrainingCategory) => void;
+  onAudioStart: () => void;
 }
 
-function WordTrainer({
+function WordRow({
   word,
   currentCategory,
   wordTtsCacheRef,
   sharedAudioRef,
-  onAudioStart,
-  onCategoryUpdate,
   voice,
   speed,
-}: WordTrainerProps) {
-  const recorder = useAudioRecorder();
-  const [ttsPhase, setTtsPhase] = useState<'idle' | 'loading' | 'playing' | 'error'>('idle');
-  const [analysisPhase, setAnalysisPhase] = useState<'idle' | 'analyzing' | 'done' | 'error'>('idle');
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  activeRecordingWordId,
+  onRecordingChange,
+  onCategoryUpdate,
+  onAudioStart,
+}: WordRowProps) {
+  const [ttsPhase, setTtsPhase]           = useState<'idle' | 'loading' | 'playing'>('idle');
+  const [analysisState, setAnalysisState] = useState<'idle' | 'analyzing' | 'done' | 'error'>('idle');
   const [displayCategory, setDisplayCategory] = useState<TrainingCategory>(currentCategory);
-  const [justReachedGood, setJustReachedGood] = useState(false);
-  const [playbackPlaying, setPlaybackPlaying] = useState(false);
+  const [errorMsg, setErrorMsg]           = useState<string | null>(null);
+  const [justGood, setJustGood]           = useState(false);
 
-  const mountedRef = useRef(true);
-  const cancelAnalysisRef = useRef<(() => void) | null>(null);
-  const myAudioRef = useRef<HTMLAudioElement | null>(null);
-  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const recorder     = useAudioRecorder();
+  const mountedRef   = useRef(true);
+  const myAudioRef   = useRef<HTMLAudioElement | null>(null);
+  const cancelRef    = useRef<(() => void) | null>(null);
+  const submittedRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      cancelAnalysisRef.current?.();
+      cancelRef.current?.();
       myAudioRef.current?.pause();
-      playbackAudioRef.current?.pause();
     };
   }, []);
 
-  // Keep display category in sync when parent updates it (e.g. full-text re-analysis)
+  // Keep category in sync when parent re-analyses full text
   useEffect(() => { setDisplayCategory(currentCategory); }, [currentCategory]);
 
+  // Auto-submit as soon as recording blob is ready
+  useEffect(() => {
+    if (recorder.phase === 'done' && recorder.audioBlob && !submittedRef.current) {
+      submittedRef.current = true;
+      runAnalysis(recorder.audioBlob, recorder.durationMs);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recorder.phase, recorder.audioBlob]);
+
   const cleanWord = cleanWordForTts(word.displayWord);
-  const ttsKey = cleanWord.toLowerCase();
+  const ttsKey    = cleanWord.toLowerCase();
+
+  // ── TTS ───────────────────────────────────────────────────────────────────
 
   async function handlePlayWord() {
     if (ttsPhase === 'playing') {
@@ -113,8 +126,6 @@ function WordTrainer({
       setTtsPhase('idle');
       return;
     }
-
-    // Stop any other audio
     if (sharedAudioRef.current && !sharedAudioRef.current.paused) {
       sharedAudioRef.current.pause();
     }
@@ -128,7 +139,7 @@ function WordTrainer({
         if (!mountedRef.current) { URL.revokeObjectURL(url); return; }
         wordTtsCacheRef.current.set(ttsKey, url);
       } catch {
-        if (mountedRef.current) setTtsPhase('error');
+        if (mountedRef.current) setTtsPhase('idle');
         return;
       }
     }
@@ -137,191 +148,173 @@ function WordTrainer({
     audio.playbackRate = speed;
     myAudioRef.current = audio;
     sharedAudioRef.current = audio;
-    audio.onended  = () => { if (mountedRef.current) setTtsPhase('idle'); };
-    audio.onerror  = () => { if (mountedRef.current) setTtsPhase('error'); };
+    audio.onended = () => { if (mountedRef.current) setTtsPhase('idle'); };
+    audio.onerror = () => { if (mountedRef.current) setTtsPhase('idle'); };
     setTtsPhase('playing');
     audio.play().catch(() => { if (mountedRef.current) setTtsPhase('idle'); });
   }
 
-  function handlePlayRecording() {
-    if (!recorder.audioUrl) return;
-    if (playbackPlaying) {
-      playbackAudioRef.current?.pause();
-      setPlaybackPlaying(false);
+  // ── Recording ─────────────────────────────────────────────────────────────
+
+  function handleMicClick() {
+    if (analysisState === 'analyzing') return;
+
+    if (recorder.phase === 'recording') {
+      recorder.stopRecording();
       return;
     }
-    const audio = new Audio(recorder.audioUrl);
-    playbackAudioRef.current = audio;
-    audio.onended  = () => { if (mountedRef.current) setPlaybackPlaying(false); };
-    audio.onerror  = () => { if (mountedRef.current) setPlaybackPlaying(false); };
-    setPlaybackPlaying(true);
-    audio.play().catch(() => { if (mountedRef.current) setPlaybackPlaying(false); });
+
+    if (activeRecordingWordId !== null && activeRecordingWordId !== word.id) return;
+
+    myAudioRef.current?.pause();
+    setTtsPhase('idle');
+    if (sharedAudioRef.current && !sharedAudioRef.current.paused) {
+      sharedAudioRef.current.pause();
+    }
+
+    setErrorMsg(null);
+    setJustGood(false);
+    submittedRef.current = false;
+    setAnalysisState('idle');
+    recorder.deleteRecording();
+    onRecordingChange(word.id);
+    recorder.startRecording();
   }
 
-  async function handleAnalyze() {
-    const audioBlob = recorder.audioBlob;
-    const audioDurationMs = recorder.durationMs;
-    if (!audioBlob || recorder.phase !== 'done') return;
-    if (analysisPhase === 'analyzing') return;
+  // ── Analysis ──────────────────────────────────────────────────────────────
 
-    setAnalysisPhase('analyzing');
-    setAnalysisError(null);
-    setJustReachedGood(false);
+  async function runAnalysis(audioBlob: Blob, audioDurationMs: number) {
+    if (!mountedRef.current) return;
+    setAnalysisState('analyzing');
+    onRecordingChange(null);
 
     try {
       const { token, region } = await fetchAzureToken();
       const wavFile = await convertToWavPcm(audioBlob);
-
-      const session = createRecognitionSession({
-        token,
-        region,
-        referenceText: cleanWord,
-        wavFile,
-        audioDurationMs,
-      });
-      cancelAnalysisRef.current = session.cancel;
+      const session = createRecognitionSession({ token, region, referenceText: cleanWord, wavFile, audioDurationMs });
+      cancelRef.current = session.cancel;
       const result: PronunciationNormalizedResult = await session.run();
-      cancelAnalysisRef.current = null;
+      cancelRef.current = null;
       if (!mountedRef.current) return;
 
       const { aligned } = buildWordAlignment(cleanWord, result.rawSegments);
-      const newCat: TrainingCategory =
-        aligned.length > 0 ? getWordTrainingCategory(aligned[0]) : 'pratique';
-
+      const newCat: TrainingCategory = aligned.length > 0 ? getWordTrainingCategory(aligned[0]) : 'pratique';
       setDisplayCategory(newCat);
       onCategoryUpdate(word.id, newCat);
-      if (newCat === 'boa') setJustReachedGood(true);
-      setAnalysisPhase('done');
+
+      if (newCat === 'boa') {
+        setJustGood(true);
+        setTimeout(() => { if (mountedRef.current) setJustGood(false); }, 2500);
+      }
+      setAnalysisState('done');
+      setTimeout(() => {
+        if (mountedRef.current) { setAnalysisState('idle'); submittedRef.current = false; }
+      }, 1500);
     } catch (err) {
-      cancelAnalysisRef.current = null;
+      cancelRef.current = null;
+      submittedRef.current = false;
       if (!mountedRef.current) return;
 
-      let msg = 'Erro na análise. Tente novamente.';
+      let msg = 'Erro. Tente novamente.';
       if (err instanceof PronunciationServiceError) {
-        if (err.code === 'AZURE_NO_MATCH')
-          msg = 'Nenhuma fala detectada. Grave novamente e tente outra vez.';
-        else if (err.code === 'AZURE_TIMEOUT')
-          msg = 'A análise demorou demais. Tente novamente.';
+        if (err.code === 'AZURE_NO_MATCH') msg = 'Nenhuma fala detectada.';
+        else if (err.code === 'AZURE_TIMEOUT') msg = 'Análise demorou.';
       } else if (err instanceof AudioConversionError) {
-        msg = 'Não foi possível preparar o áudio. Grave novamente.';
+        msg = 'Áudio inválido.';
       }
-      setAnalysisError(msg);
-      setAnalysisPhase('error');
+      setErrorMsg(msg);
+      setAnalysisState('error');
     }
   }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  const isRecording  = recorder.phase === 'recording' || recorder.phase === 'requesting';
+  const isAnalyzing  = analysisState === 'analyzing';
+  const otherActive  = activeRecordingWordId !== null && activeRecordingWordId !== word.id;
+  const micDisabled  = isAnalyzing || otherActive;
 
   const colors = TRAINING_CATEGORY_COLORS[displayCategory];
   const label  = TRAINING_CATEGORY_LABELS[displayCategory];
 
   return (
-    <div className="space-y-3">
-      {/* Category badge */}
-      <div className="flex items-center gap-2">
-        <span
-          className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${colors.text} ${colors.bg} ${colors.border}`}
-          aria-label={`Classificação atual: ${label}`}
-        >
-          {label}
-        </span>
-        {justReachedGood && (
-          <span className="flex items-center gap-1 text-xs text-green-400">
-            <CheckCircle className="w-3.5 h-3.5" /> Pronúncia aprovada!
-          </span>
-        )}
-      </div>
+    <div className="flex items-center gap-2 px-3 py-1.5 min-h-[52px]">
+      {/* Word */}
+      <span
+        className="flex-1 min-w-0 text-sm font-medium text-slate-100 truncate"
+        title={word.displayWord}
+      >
+        {word.displayWord}
+      </span>
 
-      {/* Listen word button */}
-      <div className="flex flex-wrap gap-2">
+      {/* Badge */}
+      <span
+        className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-full border whitespace-nowrap transition-all ${colors.text} ${colors.bg} ${colors.border} ${justGood ? 'ring-1 ring-offset-1 ring-offset-slate-800 ring-green-500' : ''}`}
+        aria-label={`Classificação: ${label}`}
+      >
+        {label}
+      </span>
+
+      {/* Speaker */}
+      <button
+        onClick={handlePlayWord}
+        disabled={ttsPhase === 'loading' || isAnalyzing}
+        className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-40 disabled:cursor-not-allowed ${
+          ttsPhase === 'playing'
+            ? 'bg-blue-600 text-white'
+            : 'bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-slate-100'
+        }`}
+        aria-label={ttsPhase === 'playing' ? `Parar áudio de ${word.displayWord}` : `Ouvir pronúncia de ${word.displayWord}`}
+        title={`Ouvir pronúncia de ${word.displayWord}`}
+      >
+        {ttsPhase === 'loading'
+          ? <Loader2 className="w-4 h-4 animate-spin" />
+          : ttsPhase === 'playing'
+            ? <Pause className="w-4 h-4" />
+            : <Volume2 className="w-4 h-4" />
+        }
+      </button>
+
+      {/* Mic */}
+      <div className="shrink-0 flex flex-col items-center gap-0.5">
         <button
-          onClick={handlePlayWord}
-          disabled={ttsPhase === 'loading'}
-          className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          aria-label={ttsPhase === 'playing' ? 'Parar áudio da palavra' : 'Ouvir pronúncia da palavra'}
+          onClick={handleMicClick}
+          disabled={micDisabled}
+          className={`w-11 h-11 flex items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-40 disabled:cursor-not-allowed ${
+            isRecording
+              ? 'bg-rose-700 text-white animate-pulse'
+              : analysisState === 'done'
+                ? 'bg-green-700 text-white'
+                : 'bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-slate-100'
+          }`}
+          aria-label={
+            isRecording
+              ? `Parar gravação de ${word.displayWord}`
+              : `Gravar pronúncia de ${word.displayWord}`
+          }
+          title={
+            otherActive
+              ? 'Aguarde a gravação anterior terminar'
+              : isRecording
+                ? `Parar gravação de ${word.displayWord}`
+                : `Gravar pronúncia de ${word.displayWord}`
+          }
         >
-          {ttsPhase === 'loading' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          {ttsPhase === 'playing' && <Pause className="w-3.5 h-3.5" />}
-          {(ttsPhase === 'idle' || ttsPhase === 'error') && <Volume2 className="w-3.5 h-3.5" />}
-          {ttsPhase === 'loading' ? 'Carregando…' : ttsPhase === 'playing' ? 'Parar' : 'Ouvir palavra'}
+          {isAnalyzing
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : isRecording
+              ? <Square className="w-4 h-4" />
+              : analysisState === 'done'
+                ? <CheckCircle className="w-4 h-4" />
+                : <Mic className="w-4 h-4" />
+          }
         </button>
-        {ttsPhase === 'error' && (
-          <span className="text-xs text-red-400 self-center">Erro ao reproduzir.</span>
-        )}
-      </div>
-
-      {/* Recording controls */}
-      <div className="flex flex-wrap gap-2">
-        {(recorder.phase === 'idle' || recorder.phase === 'error') && (
-          <button
-            onClick={recorder.startRecording}
-            className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg transition-colors"
-            aria-label="Gravar pronúncia desta palavra"
-          >
-            <Mic className="w-3.5 h-3.5" /> Gravar palavra
-          </button>
-        )}
-
-        {recorder.phase === 'requesting' && (
-          <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-700 text-slate-400 rounded-lg cursor-wait">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Aguardando microfone…
+        {errorMsg && (
+          <span className="text-[9px] text-red-400 leading-tight text-center max-w-[80px]">
+            {errorMsg}
           </span>
         )}
-
-        {recorder.phase === 'recording' && (
-          <>
-            <span className="flex items-center gap-1.5 px-2.5 py-1.5 bg-rose-900/40 border border-rose-700 rounded-lg text-rose-300 text-xs font-mono" aria-live="polite">
-              <span className="w-2 h-2 bg-rose-400 rounded-full animate-pulse" aria-hidden="true" />
-              {formatTime(recorder.elapsedMs)}
-            </span>
-            <button
-              onClick={recorder.stopRecording}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg transition-colors"
-              aria-label="Parar gravação"
-            >
-              <Square className="w-3.5 h-3.5" /> Parar gravação
-            </button>
-          </>
-        )}
-
-        {recorder.phase === 'done' && (
-          <>
-            <button
-              onClick={handlePlayRecording}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg transition-colors"
-              aria-label={playbackPlaying ? 'Parar reprodução' : 'Ouvir sua gravação'}
-            >
-              {playbackPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-              {playbackPlaying ? 'Parar' : 'Ouvir gravação'}
-            </button>
-
-            <button
-              onClick={() => { setPlaybackPlaying(false); recorder.deleteRecording(); setAnalysisPhase('idle'); setAnalysisError(null); }}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg transition-colors"
-              aria-label="Gravar palavra novamente"
-            >
-              <RotateCcw className="w-3.5 h-3.5" /> Gravar novamente
-            </button>
-
-            <button
-              onClick={handleAnalyze}
-              disabled={analysisPhase === 'analyzing'}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Analisar pronúncia desta palavra"
-            >
-              {analysisPhase === 'analyzing'
-                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                : <Send className="w-3.5 h-3.5" />}
-              {analysisPhase === 'analyzing' ? 'Analisando…' : 'Analisar palavra'}
-            </button>
-          </>
-        )}
       </div>
-
-      {recorder.errorMessage && (
-        <p className="text-xs text-red-400">{recorder.errorMessage}</p>
-      )}
-      {analysisError && (
-        <p className="text-xs text-red-400">{analysisError}</p>
-      )}
     </div>
   );
 }
@@ -332,32 +325,32 @@ interface Props {
   onBack: () => void;
 }
 
-type MainPhase = 'generating' | 'ready' | 'results' | 'gen-error';
-type TtsPhase  = 'idle' | 'loading' | 'playing' | 'error';
+type MainPhase    = 'generating' | 'ready' | 'results' | 'gen-error';
+type TtsPhase     = 'idle' | 'loading' | 'playing' | 'error';
 type AnalysisPhase = 'idle' | 'preparing' | 'analyzing' | 'error';
 
 export default function PronunciationTrainingView({ onBack }: Props) {
-  const [mainPhase, setMainPhase]         = useState<MainPhase>('generating');
-  const [generatedText, setGeneratedText] = useState<string | null>(null);
-  const [userLevel, setUserLevel]         = useState<string | null>(null);
-  const [genError, setGenError]           = useState<string | null>(null);
-  const [ttsPhase, setTtsPhase]           = useState<TtsPhase>('idle');
-  const [analysisPhase, setAnalysisPhase] = useState<AnalysisPhase>('idle');
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [wordResults, setWordResults]     = useState<PronunciationWordDetail[] | null>(null);
+  const [mainPhase, setMainPhase]           = useState<MainPhase>('generating');
+  const [generatedText, setGeneratedText]   = useState<string | null>(null);
+  const [userLevel, setUserLevel]           = useState<string | null>(null);
+  const [genError, setGenError]             = useState<string | null>(null);
+  const [ttsPhase, setTtsPhase]             = useState<TtsPhase>('idle');
+  const [analysisPhase, setAnalysisPhase]   = useState<AnalysisPhase>('idle');
+  const [analysisError, setAnalysisError]   = useState<string | null>(null);
+  const [wordResults, setWordResults]       = useState<PronunciationWordDetail[] | null>(null);
   const [wordCategories, setWordCategories] = useState<Map<string, TrainingCategory>>(new Map());
-  const [selectedWordId, setSelectedWordId] = useState<string | null>(null);
-  const [audioVoice, setAudioVoice] = useState<string>(DEFAULT_AUDIO_SETTINGS.voice);
-  const [speed, setSpeed] = useState<AudioSettings['playbackRate']>(DEFAULT_AUDIO_SETTINGS.playbackRate);
-
-  const mountedRef       = useRef(true);
-  const ttsUrlRef        = useRef<string | null>(null);
-  const sharedAudioRef   = useRef<HTMLAudioElement | null>(null);
-  const wordTtsCacheRef  = useRef<Map<string, string>>(new Map());
-  const cancelAnalysisRef = useRef<(() => void) | null>(null);
-  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
-  const prevVoiceRef     = useRef<string>(DEFAULT_AUDIO_SETTINGS.voice);
+  const [activeRecordingWordId, setActiveRecordingWordId] = useState<string | null>(null);
+  const [audioVoice, setAudioVoice]         = useState<string>(DEFAULT_AUDIO_SETTINGS.voice);
+  const [speed, setSpeed]                   = useState<AudioSettings['playbackRate']>(DEFAULT_AUDIO_SETTINGS.playbackRate);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
+
+  const mountedRef        = useRef(true);
+  const ttsUrlRef         = useRef<string | null>(null);
+  const sharedAudioRef    = useRef<HTMLAudioElement | null>(null);
+  const wordTtsCacheRef   = useRef<Map<string, string>>(new Map());
+  const cancelAnalysisRef = useRef<(() => void) | null>(null);
+  const playbackAudioRef  = useRef<HTMLAudioElement | null>(null);
+  const prevVoiceRef      = useRef<string>(DEFAULT_AUDIO_SETTINGS.voice);
 
   const recorder = useAudioRecorder();
 
@@ -371,7 +364,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     }).catch(() => { /* use defaults */ });
   }, []);
 
-  // Invalidate TTS cache whenever the user's chosen voice changes
+  // Invalidate TTS cache when voice changes
   useEffect(() => {
     if (audioVoice === prevVoiceRef.current) return;
     prevVoiceRef.current = audioVoice;
@@ -380,7 +373,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     wordTtsCacheRef.current.clear();
   }, [audioVoice]);
 
-  // Generate text on mount; cleanup all resources on unmount
+  // Generate text on mount; cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
     doGenerateText();
@@ -400,7 +393,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     setGenError(null);
     setWordResults(null);
     setWordCategories(new Map());
-    setSelectedWordId(null);
+    setActiveRecordingWordId(null);
     setAnalysisPhase('idle');
     setAnalysisError(null);
     setTtsPhase('idle');
@@ -440,12 +433,9 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     recorder.deleteRecording();
     playbackAudioRef.current?.pause();
     setPlaybackPlaying(false);
-
     sharedAudioRef.current?.pause();
     setTtsPhase('idle');
-
     if (ttsUrlRef.current) { URL.revokeObjectURL(ttsUrlRef.current); ttsUrlRef.current = null; }
-
     doGenerateText();
   }
 
@@ -515,18 +505,10 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
     try {
       const { token, region } = await fetchAzureToken();
-
       setAnalysisPhase('analyzing');
 
       const wavFile = await convertToWavPcm(audioBlob);
-
-      const session = createRecognitionSession({
-        token,
-        region,
-        referenceText: refText,
-        wavFile,
-        audioDurationMs,
-      });
+      const session = createRecognitionSession({ token, region, referenceText: refText, wavFile, audioDurationMs });
       cancelAnalysisRef.current = session.cancel;
       const result: PronunciationNormalizedResult = await session.run();
       cancelAnalysisRef.current = null;
@@ -535,7 +517,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       const { aligned } = buildWordAlignment(refText, result.rawSegments);
       setWordResults(aligned);
       setWordCategories(new Map());
-      setSelectedWordId(null);
+      setActiveRecordingWordId(null);
       setMainPhase('results');
       setAnalysisPhase('idle');
     } catch (err) {
@@ -562,7 +544,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     recorder.deleteRecording();
     setWordResults(null);
     setWordCategories(new Map());
-    setSelectedWordId(null);
+    setActiveRecordingWordId(null);
     setAnalysisPhase('idle');
     setAnalysisError(null);
     setMainPhase('ready');
@@ -575,6 +557,10 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const handleWordAudioStart = useCallback(() => {
     sharedAudioRef.current?.pause();
     setTtsPhase('idle');
+  }, []);
+
+  const handleWordRecordingChange = useCallback((wordId: string | null) => {
+    setActiveRecordingWordId(wordId);
   }, []);
 
   // ── Derived state ─────────────────────────────────────────────────────────
@@ -723,7 +709,6 @@ export default function PronunciationTrainingView({ onBack }: Props) {
               </div>
             ) : (
               <div className="space-y-3">
-                {/* Recorder state */}
                 {(recorder.phase === 'idle' || recorder.phase === 'error') && (
                   <button
                     onClick={recorder.startRecording}
@@ -840,50 +825,23 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                     Palavras para praticar
                     <span className="ml-2 text-sm font-normal text-slate-400">({practiceWords.length})</span>
                   </h2>
-                  <div className="space-y-2">
+                  <div className="bg-slate-800 border border-slate-700 rounded-xl divide-y divide-slate-700/50 overflow-hidden">
                     {practiceWords.map(w => {
-                      const cat    = wordCategories.get(w.id) ?? getWordTrainingCategory(w);
-                      const colors = TRAINING_CATEGORY_COLORS[cat];
-                      const lbl    = TRAINING_CATEGORY_LABELS[cat];
-                      const isOpen = selectedWordId === w.id;
-
+                      const cat = wordCategories.get(w.id) ?? getWordTrainingCategory(w);
                       return (
-                        <div key={w.id} className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
-                          <button
-                            onClick={() => setSelectedWordId(isOpen ? null : w.id)}
-                            className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-700/50 transition-colors text-left"
-                            aria-expanded={isOpen}
-                            aria-label={`${isOpen ? 'Fechar' : 'Abrir'} treino da palavra ${w.displayWord}`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span className="text-sm font-medium text-slate-100">{w.displayWord}</span>
-                              <span
-                                className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${colors.text} ${colors.bg} ${colors.border}`}
-                              >
-                                {lbl}
-                              </span>
-                            </div>
-                            {isOpen
-                              ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-                              : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
-                            }
-                          </button>
-
-                          {isOpen && (
-                            <div className="border-t border-slate-700 p-4">
-                              <WordTrainer
-                                word={w}
-                                currentCategory={cat}
-                                wordTtsCacheRef={wordTtsCacheRef}
-                                sharedAudioRef={sharedAudioRef}
-                                onAudioStart={handleWordAudioStart}
-                                onCategoryUpdate={handleWordCategoryUpdate}
-                                voice={audioVoice}
-                                speed={speed}
-                              />
-                            </div>
-                          )}
-                        </div>
+                        <WordRow
+                          key={w.id}
+                          word={w}
+                          currentCategory={cat}
+                          wordTtsCacheRef={wordTtsCacheRef}
+                          sharedAudioRef={sharedAudioRef}
+                          voice={audioVoice}
+                          speed={speed}
+                          activeRecordingWordId={activeRecordingWordId}
+                          onRecordingChange={handleWordRecordingChange}
+                          onCategoryUpdate={handleWordCategoryUpdate}
+                          onAudioStart={handleWordAudioStart}
+                        />
                       );
                     })}
                   </div>
