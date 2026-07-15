@@ -50,13 +50,15 @@ export async function submitListeningAnswer(
     const attempt = existing.attempt_number as 1 | 2 | 3;
     const correct = existing.is_correct === true;
     const nextAttempt = correct ? null : attempt < 3 ? ((attempt + 1) as 2 | 3) : null;
+    const sessionStatus = correct ? 'completed' : attempt < 3 ? 'replay_required' : 'abandoned';
     return {
       correct,
       attemptNumber: attempt,
-      sessionStatus: correct ? 'completed' : attempt < 3 ? 'replay_required' : 'abandoned',
+      sessionStatus,
       nextAttempt,
       nextSubtitleMode: nextAttempt ? SUBTITLE_MODE_BY_ATTEMPT[nextAttempt] : null,
       explanationPt: null,
+      correctOption: null,
       blockCompleted: correct,
       episodeCompleted: false,
     };
@@ -185,6 +187,7 @@ export async function submitListeningAnswer(
       nextAttempt: null,
       nextSubtitleMode: null,
       explanationPt: question.explanation_pt,
+      correctOption: null,
       blockCompleted: true,
       episodeCompleted,
     };
@@ -206,6 +209,7 @@ export async function submitListeningAnswer(
       nextAttempt: null,
       nextSubtitleMode: null,
       explanationPt: null,
+      correctOption: question.correct_option,
       blockCompleted: false,
       episodeCompleted: false,
     };
@@ -228,6 +232,7 @@ export async function submitListeningAnswer(
     nextAttempt,
     nextSubtitleMode: SUBTITLE_MODE_BY_ATTEMPT[nextAttempt],
     explanationPt: null,
+    correctOption: null,
     blockCompleted: false,
     episodeCompleted: false,
   };
