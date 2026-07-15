@@ -16,14 +16,15 @@ export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps)
       aria-live="polite"
       aria-atomic="false"
       aria-label="Legenda da conversa"
-      className="w-full max-w-sm mx-auto"
+      className="w-full"
     >
       <p
         className="
-          text-sm text-slate-200 text-center leading-relaxed
+          text-base text-slate-100 text-center leading-loose
           bg-slate-900/80 backdrop-blur-sm
           border border-slate-700/60
-          rounded-xl px-4 py-2.5
+          rounded-xl px-5 py-4
+          min-h-[5rem]
           transition-opacity duration-300
           [@media(prefers-reduced-motion:reduce)]:transition-none
         "

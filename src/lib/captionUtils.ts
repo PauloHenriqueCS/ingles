@@ -18,8 +18,8 @@ export function getDisplayCaption(fullText: string): string {
     return fullText.trim();
   }
 
-  // Start from the second-to-last boundary (one complete sentence back)
-  // so the user always sees context: the last completed sentence + in-progress text
-  const startIdx = boundaries.length >= 2 ? boundaries[boundaries.length - 2] : 0;
+  // Start from three sentences back so the user sees meaningful context
+  const lookback = 3;
+  const startIdx = boundaries.length >= lookback ? boundaries[boundaries.length - lookback] : 0;
   return fullText.slice(startIdx).trim();
 }

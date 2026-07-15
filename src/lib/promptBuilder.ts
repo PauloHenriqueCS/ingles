@@ -8,12 +8,13 @@ export { BASE_DEFAULTS as DEFAULT_PREFERENCES, REALTIME_VOICES as AVAILABLE_VOIC
 // ── Validated enum maps → prompt text ────────────────────────────────────────
 
 const PACE_INSTRUCTIONS: Record<AIPreferences['speechPace'], string> = {
-  slow: `RITMO DE FALA — DEVAGAR:
-- Limite cada resposta a 1–3 frases muito curtas (máximo 20 palavras por frase).
-- Fale como se estivesse ditando com clareza para alguém que escreve devagar.
-- Faça pausas naturais entre as ideias.
-- Nunca encadeie mais de duas ideias em uma única resposta.
-- Se tiver mais de uma coisa para dizer, diga uma, pare e espere o aprendiz responder.`,
+  slow: `RITMO DE FALA — MUITO DEVAGAR (modo aprendiz iniciante):
+- Fale no ritmo mais lento possível, como se estivesse ditando palavra por palavra para alguém escrever.
+- Máximo de 1 frase por resposta. Uma única frase curta. Depois pare e aguarde.
+- Cada frase deve ter no máximo 10 palavras.
+- Pronuncie cada palavra com clareza total. Separe as palavras com pausas perceptíveis.
+- Nunca, em hipótese alguma, encadeie duas frases seguidas.
+- Se tiver mais de uma coisa a dizer: diga só a primeira. Espere o aprendiz responder. Então diga a segunda.`,
 
   normal: `RITMO DE FALA — NORMAL:
 - Limite cada resposta a 2–4 frases em ritmo conversacional confortável.

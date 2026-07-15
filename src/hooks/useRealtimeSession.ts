@@ -218,13 +218,13 @@ export function useRealtimeSession(): UseRealtimeSession {
           displayCountRef.current = 0;
           setTranscriptText('');
           if (revealTimerRef.current) clearInterval(revealTimerRef.current);
-          // Reveal ~10 chars/sec (~120 WPM) so captions pace with spoken audio
+          // Reveal ~7 chars/sec (~85 WPM) to pace with slow speech setting
           revealTimerRef.current = setInterval(() => {
             const full = transcriptAccumRef.current;
             if (displayCountRef.current >= full.length) return;
             displayCountRef.current++;
             setTranscriptText(full.slice(0, displayCountRef.current));
-          }, 100);
+          }, 140);
         }
 
         if (ev.type === 'response.output_audio.delta') {
