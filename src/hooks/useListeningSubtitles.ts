@@ -23,7 +23,7 @@ function findActiveCue(
 
 export function useListeningSubtitles(
   cues: PublicSubtitleCue[],
-  audioRef: React.RefObject<HTMLAudioElement | null>,
+  audioRef: { readonly current: HTMLAudioElement | null },
   enabled: boolean,
 ) {
   const [activeCue, setActiveCue] = useState<PublicSubtitleCue | null>(null);

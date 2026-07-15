@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Headphones, Play, Pause, RotateCcw, ChevronRight, ArrowLeft,
   Check, X, Clock, AlertCircle, Trophy, RefreshCw, Volume2,
@@ -111,12 +111,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const activeCue = useListeningSubtitles(cues, player.audioRef, subtitlesEnabled);
 
   // ── Apply speed to audio when it changes ──────────────────────────────────
+  // player.setRate is stable (defined with useCallback + empty deps inside the hook)
+  const { setRate: playerSetRate } = player;
   useEffect(() => {
-    player.setRate(speed);
-  }, [speed, player.setRate]);
+    playerSetRate(speed);
+  }, [speed, playerSetRate]);
 
   // ── Load episode session ───────────────────────────────────────────────────
-  const loadSession = useCallback(async (epId: string) => {
+  async function loadSession(epId: string) {
     setPhase('loading');
     setSelectedOption(null);
     setLastResult(null);
@@ -124,7 +126,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       const data = await getEpisodeSession(epId);
       setEpisodeData(data);
 
-      // Determine which block is active
       if (data.progress?.completedAt) {
         setPhase('done');
         return;
@@ -136,9 +137,13 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         return;
       }
 
-      const activeBlock = data.blocks[idx];
-      const bIdx = idx as 0 | 1;
-      setBlockIdx(bIdx);
+      const activeBlock = data.blocks[idx as 0 | 1];
+      if (!activeBlock) {
+        setErrorMsg('Dados do episódio incompletos.');
+        setPhase('error');
+        return;
+      }
+      setBlockIdx(idx as 0 | 1);
 
       const sess = activeBlock.session;
       if (!sess || !activeBlock.audio) {
@@ -147,14 +152,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         return;
       }
 
-      // Load audio
       player.load(activeBlock.audio.url, activeBlock.audio.durationMs);
       scheduleUrlRefresh(sess.sessionId, activeBlock.audio.expiresAt);
-
-      // Register ended callback
       player.setOnEnded(() => handleAudioEnded(sess.sessionId));
 
-      // If session is already awaiting_answer (e.g. page refresh), skip to question
       if (sess.status === 'awaiting_answer') {
         setPhase('question');
       } else {
@@ -165,7 +166,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       setErrorMsg(msg);
       setPhase('error');
     }
-  }, [player]);
+  }
 
   // ── Handle audio ended ─────────────────────────────────────────────────────
   async function handleAudioEnded(sessionId: string) {
@@ -180,11 +181,12 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   }
 
   // ── Register ended callback whenever session changes ───────────────────────
+  const { setOnEnded: playerSetOnEnded } = player;
   useEffect(() => {
     if (!session?.sessionId) return;
     const sid = session.sessionId;
-    player.setOnEnded(() => handleAudioEnded(sid));
-  }, [session?.sessionId]);
+    playerSetOnEnded(() => handleAudioEnded(sid));
+  }, [session?.sessionId, playerSetOnEnded]);
 
   // ── Initial load ───────────────────────────────────────────────────────────
   useEffect(() => {

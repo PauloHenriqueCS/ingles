@@ -364,6 +364,8 @@ describe('submitListeningAnswer', () => {
     expect(result.sessionStatus).toBe('abandoned');
     expect(result.nextAttempt).toBeNull();
     expect(result.blockCompleted).toBe(false);
+    expect(result.correctOption).toBe(1);
+    expect(result.explanationPt).toBe('O texto diz que Sarah lê um livro.');
   });
 
   it('returns reconstructed result for duplicate submissionId', async () => {
@@ -414,10 +416,10 @@ describe('submitListeningAnswer', () => {
     ).rejects.toThrow(expect.objectContaining({ code: LISTENING_EXECUTION_ERRORS.DUPLICATE_SUBMISSION }));
   });
 
-  it('does not expose correct_option in result', async () => {
+  it('returns correctOption=null for correct answer (only set on cycle failure)', async () => {
     const client = buildAnswerClient();
     const result = await submitListeningAnswer(client as any, baseInput);
-    expect(result).not.toHaveProperty('correctOption');
+    expect(result.correctOption).toBeNull();
     expect(result).not.toHaveProperty('correct_option');
   });
 });
