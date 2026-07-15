@@ -77,7 +77,7 @@ export function toPublicMissionDTO(internalMission: Record<string, unknown>): Pu
     }
   }
 
-  return result as PublicMissionDTO;
+  return result as unknown as PublicMissionDTO;
 }
 
 /**

@@ -172,7 +172,7 @@ export async function getDiagnosticGenerationContext(
         shouldUseDiagnostic: true,
         diagnosticSequence: 1,
         existingActiveMission: existingMission,
-        diagnosticPlan: existingMission.diagnostic_plan as WritingDiagnosticMissionPlan,
+        diagnosticPlan: existingMission.diagnostic_plan as unknown as WritingDiagnosticMissionPlan,
         status: currentStatus,
       };
     }
@@ -186,7 +186,7 @@ export async function getDiagnosticGenerationContext(
         shouldUseDiagnostic: true,
         diagnosticSequence: 2,
         existingActiveMission: existingMission,
-        diagnosticPlan: existingMission.diagnostic_plan as WritingDiagnosticMissionPlan,
+        diagnosticPlan: existingMission.diagnostic_plan as unknown as WritingDiagnosticMissionPlan,
         status: currentStatus,
       };
     }

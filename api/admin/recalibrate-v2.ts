@@ -19,7 +19,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import { methodGuard, jsonError, safeLog } from '../_helpers';
+import { methodGuard, jsonError } from '../_helpers';
 import { evaluateSkillPromotion } from '../../src/lib/promotionService';
 import { getLearnerSkillProfiles } from '../../src/lib/learnerProfileRepository';
 import { getActiveLearningEngineVersion } from '../../src/lib/engineVersion';
@@ -184,7 +184,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         v2RawLevel: calibratedLevel,
         downgradeBlocked,
         decision: evaluation.decision,
-        confidence: evaluation.confidence,
+        confidence: evaluation.promotionConfidence,
         progressPercent: evaluation.progressPercent,
         blockingReasons: evaluation.blockingReasons ?? [],
         note: downgradeBlocked
@@ -193,7 +193,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       };
 
     } catch (err) {
-      safeLog('warn', 'recalibrate-v2: skill evaluation failed', { skill, userId, error: String(err) });
+      console.error(JSON.stringify({ route: 'recalibrate-v2', event: 'skill_eval_failed', skill, userId, error: String(err) }));
       skillResults[skill] = {
         status: 'error',
         legacyLevel,
@@ -223,7 +223,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     })
     .eq('idempotency_key', idempotencyKey);
 
-  safeLog('info', 'recalibrate-v2: completed', { userId, durationMs: Date.now() - startedAt, skillResults });
+  console.error(JSON.stringify({ route: 'recalibrate-v2', event: 'completed', userId, durationMs: Date.now() - startedAt }));
 
   return res.status(200).json({
     skipped: false,
