@@ -17,21 +17,27 @@ const SUBTITLE_MODE_BY_ATTEMPT: Record<1 | 2 | 3, 'none' | 'en' | 'pt-BR'> = {
   3: 'pt-BR',
 };
 
-function toPublicCue(row: {
-  id: string;
-  cue_order: number;
-  start_ms: number | null;
-  end_ms: number | null;
-  text: string;
-  sentence_key: string | null;
-}): PublicSubtitleCue | null {
+function toPublicCue(
+  row: {
+    id: string;
+    block_id: string;
+    cue_order: number;
+    start_ms: number | null;
+    end_ms: number | null;
+    text: string;
+    sentence_key: string | null;
+  },
+  speakerMap: Map<string, string | null>,
+): PublicSubtitleCue | null {
   if (row.start_ms == null || row.end_ms == null) return null;
+  const lookupKey = row.sentence_key ? `${row.block_id}:${row.sentence_key}` : null;
   return {
     cueKey: row.sentence_key ?? row.id,
     cueOrder: row.cue_order,
     startMs: row.start_ms,
     endMs: row.end_ms,
     text: row.text,
+    speaker: lookupKey ? (speakerMap.get(lookupKey) ?? null) : null,
   };
 }
 
@@ -54,7 +60,7 @@ export async function buildListeningEpisodeSession(
   // ── Verify episode is published ────────────────────────────────────────────
   const { data: episode, error: epError } = await authedSupabase
     .from('listening_episodes')
-    .select('id, title, cefr_level, estimated_duration_seconds, actual_duration_seconds, status')
+    .select('id, title, synopsis, cefr_level, estimated_duration_seconds, actual_duration_seconds, status')
     .eq('id', episodeId)
     .eq('status', 'published')
     .maybeSingle();
@@ -97,6 +103,16 @@ export async function buildListeningEpisodeSession(
     .in('block_id', blockIds)
     .order('cue_order');
 
+  // ── Load speaker info from sentences ──────────────────────────────────────
+  const { data: sentences } = await authedSupabase
+    .from('listening_sentences')
+    .select('block_id, sentence_key, speaker')
+    .in('block_id', blockIds);
+
+  const speakerMap = new Map<string, string | null>(
+    (sentences ?? []).map((s) => [`${s.block_id}:${s.sentence_key}`, s.speaker as string | null]),
+  );
+
   // ── Assemble blocks ────────────────────────────────────────────────────────
   const sessionBlocks: SessionBlockInfo[] = [];
 
@@ -105,10 +121,10 @@ export async function buildListeningEpisodeSession(
     const blockQ = questions?.find((q) => q.block_id === block.id) ?? null;
     const blockCues = cues?.filter((c) => c.block_id === block.id) ?? [];
     const enCues = blockCues.filter((c) => c.language === 'en').flatMap((c) => {
-      const p = toPublicCue(c); return p ? [p] : [];
+      const p = toPublicCue(c, speakerMap); return p ? [p] : [];
     });
     const ptCues = blockCues.filter((c) => c.language === 'pt-BR').flatMap((c) => {
-      const p = toPublicCue(c); return p ? [p] : [];
+      const p = toPublicCue(c, speakerMap); return p ? [p] : [];
     });
 
     const subtitles = enCues.length > 0 || ptCues.length > 0
@@ -202,6 +218,7 @@ export async function buildListeningEpisodeSession(
   return {
     episodeId: episode.id,
     title: episode.title,
+    synopsis: (episode as { synopsis?: string | null }).synopsis ?? null,
     cefrLevel: episode.cefr_level,
     estimatedDurationSeconds: episode.estimated_duration_seconds ?? 0,
     actualDurationSeconds: episode.actual_duration_seconds ?? null,

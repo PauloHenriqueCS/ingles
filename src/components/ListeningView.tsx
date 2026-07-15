@@ -51,11 +51,6 @@ function fmtMs(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-function fmtSec(s: number): string {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${sec.toString().padStart(2, '0')}`;
-}
 
 // Deterministic color from speaker name
 const SPEAKER_PALETTE = ['#c084fc', '#4ade80', '#f59e0b', '#60a5fa', '#f87171', '#34d399', '#fb923c', '#a78bfa'];

@@ -10,6 +10,7 @@ export type { EpisodeSessionResponse, SubmitAnswerResult, SessionAudioInfo };
 export type PublishedEpisode = {
   id: string;
   title: string;
+  synopsis: string | null;
   cefrLevel: string;
   estimatedDurationSeconds: number;
 };

@@ -85,6 +85,12 @@ export function useListeningAudioPlayer() {
     }
   }, []);
 
+  const seekBack = useCallback((seconds: number) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - seconds);
+    }
+  }, []);
+
   const setRate = useCallback((rate: number) => {
     if (audioRef.current) {
       audioRef.current.playbackRate = rate;
@@ -117,5 +123,5 @@ export function useListeningAudioPlayer() {
     };
   }, []);
 
-  return { audioRef, state, load, play, pause, restart, setRate, updateUrl, setOnEnded };
+  return { audioRef, state, load, play, pause, restart, seekBack, setRate, updateUrl, setOnEnded };
 }

@@ -28,6 +28,7 @@ export type PublicSubtitleCue = {
   startMs: number;
   endMs: number;
   text: string;
+  speaker: string | null;
 };
 
 export type SessionAudioInfo = {
@@ -67,6 +68,7 @@ export type SessionBlockInfo = {
 export type EpisodeSessionResponse = {
   episodeId: string;
   title: string;
+  synopsis: string | null;
   cefrLevel: string;
   estimatedDurationSeconds: number;
   actualDurationSeconds: number | null;
