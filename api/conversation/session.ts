@@ -210,7 +210,10 @@ export default async function handler(req: any, res: any) {
             type: 'server_vad',
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 800,
+            // 2500 ms gives the user ~2.5 s of natural silence tolerance before
+            // the server concludes speech has ended — prevents premature cut-off
+            // during thinking pauses or slow/hesitant speech patterns.
+            silence_duration_ms: 2500,
             create_response: true,
             interrupt_response: true,
           },

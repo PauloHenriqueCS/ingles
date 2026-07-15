@@ -7,7 +7,7 @@ import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
-import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS } from '../lib/tutorPreferences';
+import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
 import { recordConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 
@@ -110,8 +110,9 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function ConversationView() {
-  const hp      = useTutorPreferences();
-  const session = useRealtimeSession();
+  const hp           = useTutorPreferences();
+  const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
+  const session      = useRealtimeSession(playbackRate);
   const { captionsEnabled, toggleCaptions } = useConversationCaptions();
   const today   = new Date().toISOString().split('T')[0];
 

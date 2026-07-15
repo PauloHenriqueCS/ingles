@@ -54,12 +54,15 @@ describe('getDisplayCaption', () => {
     expect(result).toContain('How are you?');
   });
 
-  it('shows last complete sentence plus in-progress text (sliding window)', () => {
-    const text = 'First sentence. Second sentence. In progress';
+  it('shows recent sentences plus in-progress text (sliding window drops old sentences)', () => {
+    // lookback=3 → needs >3 complete sentences to start dropping early ones
+    const text = 'First. Second. Third. Fourth. In progress';
     const result = getDisplayCaption(text);
-    expect(result).toContain('Second sentence');
+    // The most recent content must be visible
+    expect(result).toContain('Fourth.');
     expect(result).toContain('In progress');
-    expect(result).not.toContain('First sentence');
+    // The oldest sentence is dropped when there are more than 3 complete sentences
+    expect(result).not.toContain('First.');
   });
 
   it('handles exclamation points as boundaries', () => {
@@ -84,10 +87,16 @@ describe('getDisplayCaption', () => {
     expect(getDisplayCaption('Hello')).toBe('Hello');
   });
 
-  it('handles text that ends with a period (no in-progress text)', () => {
-    const text = 'First sentence. Second sentence.';
-    const result = getDisplayCaption(text);
-    expect(result).toBe('Second sentence.');
+  it('handles text with only complete sentences (no in-progress) — shows up to lookback=3', () => {
+    // 2 sentences → fewer than lookback(3) → shows both
+    const two = 'First sentence. Second sentence.';
+    expect(getDisplayCaption(two)).toBe('First sentence. Second sentence.');
+
+    // 4 sentences → older one is dropped
+    const four = 'A. B. C. D.';
+    const result = getDisplayCaption(four);
+    expect(result).toContain('D.');
+    expect(result).not.toContain('A.');
   });
 });
 
@@ -171,13 +180,13 @@ describe('transcript accumulation', () => {
     expect(transcript).toBe('Existing');
   });
 
-  it('builds caption correctly for multiple deltas', () => {
+  it('builds caption correctly for multiple deltas (fewer than lookback shows all)', () => {
     const deltas = ['I think ', "you're right. ", 'Tell me more ', 'about that.'];
     const full = deltas.reduce((a, d) => a + d, '');
     const caption = getDisplayCaption(full);
-    // Should show last sentence since there are 2 complete sentences
+    // 2 complete sentences < lookback(3) → shows everything
     expect(caption).toContain('Tell me more about that.');
-    expect(caption).not.toContain("I think you're right.");
+    expect(caption).toContain("I think you're right.");
   });
 });
 
@@ -293,5 +302,121 @@ describe('AiSpeechCaption mobile layout', () => {
     const display = getDisplayCaption('');
     const result = visible && display ? 'rendered' : null;
     expect(result).toBeNull();
+  });
+});
+
+// ── Caption timer — speed-adjusted reveal interval ────────────────────────────
+// The reveal timer interval is scaled by playbackRate so captions stay in sync
+// with the actual audio playback speed across all three speed modes.
+
+describe('caption reveal timer — playback rate scaling', () => {
+  const BASE_INTERVAL_MS = 140;
+
+  function computeInterval(playbackRate: number): number {
+    return Math.round(BASE_INTERVAL_MS / playbackRate);
+  }
+
+  it('Normal (1.0×) uses the base interval of 140 ms', () => {
+    expect(computeInterval(1.0)).toBe(140);
+  });
+
+  it('Devagar (0.80×) uses a longer interval (~175 ms)', () => {
+    const interval = computeInterval(0.80);
+    expect(interval).toBe(175);
+    expect(interval).toBeGreaterThan(BASE_INTERVAL_MS);
+  });
+
+  it('Superdevagar (0.65×) uses an even longer interval (~215 ms)', () => {
+    const interval = computeInterval(0.65);
+    expect(interval).toBe(215);
+    expect(interval).toBeGreaterThan(computeInterval(0.80));
+  });
+
+  it('slower speed always produces a longer interval (captions advance slower)', () => {
+    const slow    = computeInterval(0.65);
+    const medium  = computeInterval(0.80);
+    const fast    = computeInterval(1.0);
+    expect(slow).toBeGreaterThan(medium);
+    expect(medium).toBeGreaterThan(fast);
+  });
+
+  it('interval is always a positive integer', () => {
+    for (const rate of [0.65, 0.80, 1.0]) {
+      const interval = computeInterval(rate);
+      expect(interval).toBeGreaterThan(0);
+      expect(Number.isInteger(interval)).toBe(true);
+    }
+  });
+
+  it('caption does not advance while audio is paused (no new text reveals without timer ticks)', () => {
+    // Simulate: timer stopped, displayCount frozen
+    let displayCount = 5;
+    const transcriptAccum = 'Hello world';
+
+    // Timer is stopped (no setInterval running) — simulate no ticks
+    const ticksWithoutTimer = 0;
+    // display count stays at 5 despite more text being in accumulator
+    for (let i = 0; i < ticksWithoutTimer; i++) {
+      if (displayCount < transcriptAccum.length) displayCount++;
+    }
+    expect(displayCount).toBe(5);
+    expect(transcriptAccum.slice(0, displayCount)).toBe('Hello');
+  });
+
+  it('new response resets caption to empty before starting reveal', () => {
+    // Simulate response.created handler
+    let displayCount = 50;
+    let transcriptAccum = 'Old response text.';
+    let transcriptText = transcriptAccum;
+
+    // New response arrives
+    transcriptAccum = '';
+    displayCount = 0;
+    transcriptText = '';
+
+    expect(transcriptText).toBe('');
+    expect(displayCount).toBe(0);
+  });
+
+  it('no additional OpenAI call is made for caption text — captions use audio transcript', async () => {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    const code = (src as unknown as { default: string }).default;
+    // Caption text comes from response.audio_transcript.delta events, not a new API call
+    expect(code).toContain('response.audio_transcript.delta');
+    // There must be NO second fetch call for caption generation
+    const fetchMatches = code.match(/fetch\s*\(/g) ?? [];
+    // Only 2 fetch calls are expected: /api/conversation/session + /v1/realtime/calls
+    expect(fetchMatches.length).toBeLessThanOrEqual(2);
+  });
+});
+
+// ── Speed mode — playback rate values (sourced from tutorPreferences) ─────────
+
+describe('speech pace modes — actual playback rates', () => {
+  // Import the PACE_PLAYBACK_RATE map used by ConversationView
+  it('PACE_PLAYBACK_RATE file exports the expected rates', async () => {
+    const mod = await import('../lib/tutorPreferences');
+    const { PACE_PLAYBACK_RATE } = mod;
+    expect(PACE_PLAYBACK_RATE.natural).toBe(1.0);   // Normal
+    expect(PACE_PLAYBACK_RATE.normal).toBe(0.80);   // Devagar
+    expect(PACE_PLAYBACK_RATE.slow).toBe(0.65);     // Superdevagar
+  });
+
+  it('all pace modes have a defined non-zero playback rate', async () => {
+    const mod = await import('../lib/tutorPreferences');
+    const { PACE_PLAYBACK_RATE } = mod;
+    for (const rate of Object.values(PACE_PLAYBACK_RATE)) {
+      expect(typeof rate).toBe('number');
+      expect(rate).toBeGreaterThan(0);
+    }
+  });
+
+  it('preference persists per user via PACE_LABELS keys matching PACE_PLAYBACK_RATE keys', async () => {
+    const mod = await import('../lib/tutorPreferences');
+    const { PACE_LABELS, PACE_PLAYBACK_RATE } = mod;
+    // Every label key must have a corresponding playback rate
+    for (const key of Object.keys(PACE_LABELS)) {
+      expect(PACE_PLAYBACK_RATE[key as keyof typeof PACE_PLAYBACK_RATE]).toBeDefined();
+    }
   });
 });

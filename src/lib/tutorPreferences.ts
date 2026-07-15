@@ -82,9 +82,17 @@ export const PERSONALITY_PRESETS: Record<Exclude<PersonalityPreset, 'custom'>, P
 // ── Labels for UI ─────────────────────────────────────────────────────────────
 
 export const PACE_LABELS: Record<AIPreferences['speechPace'], { label: string; description: string }> = {
-  slow:    { label: 'Devagar',  description: '~85–105 palavras/min — frases curtas e claras' },
-  normal:  { label: 'Normal',   description: '~115–135 palavras/min — ritmo conversacional' },
-  natural: { label: 'Natural',  description: '~145–165 palavras/min — próximo a falante nativo' },
+  slow:    { label: 'Superdevagar (0.65×)', description: 'Velocidade muito reduzida — máxima clareza para iniciantes' },
+  normal:  { label: 'Devagar (0.80×)',      description: 'Velocidade reduzida — confortável para praticar' },
+  natural: { label: 'Normal (1×)',           description: 'Velocidade natural de conversa' },
+};
+
+/** Audio playback rate for each speech pace mode.
+ *  Applied to the WebRTC audio element so speed changes are perceptible. */
+export const PACE_PLAYBACK_RATE: Record<AIPreferences['speechPace'], number> = {
+  slow:    0.65,
+  normal:  0.80,
+  natural: 1.0,
 };
 
 export const ACCENT_LABELS: Record<AIPreferences['accent'], string> = {

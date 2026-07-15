@@ -26,6 +26,10 @@ export interface UseRealtimeSession {
 const MAX_SESSION_MS = 30 * 60 * 1000;
 const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 
+/** Base interval (ms per character) for the paced caption reveal at 1× speed.
+ *  Scaled by playbackRate: slower speed → more ms per char → captions stay in sync. */
+const BASE_REVEAL_INTERVAL_MS = 140;
+
 function stopStream(stream: MediaStream | null) {
   if (!stream) return;
   stream.getTracks().forEach((t) => { try { t.stop(); } catch { /* ignore */ } });
@@ -43,7 +47,11 @@ function getMicErrorMessage(err: unknown): { message: string; code: string } {
   return { message: 'Não foi possível acessar o microfone.', code: 'MIC_ERROR' };
 }
 
-export function useRealtimeSession(): UseRealtimeSession {
+/**
+ * @param playbackRate - Audio playback rate (0.65 / 0.80 / 1.0).
+ *   Applied to the WebRTC audio element and used to pace the caption reveal timer.
+ */
+export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSession {
   const [status, setStatus] = useState<SessionStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -62,6 +70,38 @@ export function useRealtimeSession(): UseRealtimeSession {
   const responseActiveRef  = useRef(false);
   const displayCountRef    = useRef(0);
   const revealTimerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playbackRateRef    = useRef<number>(playbackRate);
+
+  // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
+  const startRevealTimer = useCallback(() => {
+    if (revealTimerRef.current) clearInterval(revealTimerRef.current);
+    const intervalMs = Math.round(BASE_REVEAL_INTERVAL_MS / playbackRateRef.current);
+    revealTimerRef.current = setInterval(() => {
+      const full = transcriptAccumRef.current;
+      if (displayCountRef.current >= full.length) return;
+      displayCountRef.current++;
+      setTranscriptText(full.slice(0, displayCountRef.current));
+    }, intervalMs);
+  }, []);
+
+  // ── Sync playback rate: update ref, audio element, and caption timer ─────────
+  useEffect(() => {
+    playbackRateRef.current = playbackRate;
+
+    // Update the WebRTC audio element if it is actively streaming.
+    // playbackRate on a MediaStream source is supported in modern Chromium/Firefox;
+    // on unsupported browsers it silently no-ops (falls back to 1× speed).
+    const audioEl = document.getElementById('realtime-audio') as HTMLAudioElement | null;
+    if (audioEl && audioEl.srcObject) {
+      audioEl.playbackRate = playbackRate;
+    }
+
+    // If a response is in progress, restart the reveal timer at the new rate
+    // so captions stay in sync with the updated playback speed.
+    if (responseActiveRef.current) {
+      startRevealTimer();
+    }
+  }, [playbackRate, startRevealTimer]);
 
   const cleanup = useCallback((nextStatus?: SessionStatus) => {
     endCalledRef.current = true;
@@ -166,6 +206,8 @@ export function useRealtimeSession(): UseRealtimeSession {
       const audioEl = document.getElementById('realtime-audio') as HTMLAudioElement | null;
       if (audioEl) {
         audioEl.srcObject = e.streams[0];
+        // Apply the current playback rate immediately when the track arrives.
+        audioEl.playbackRate = playbackRateRef.current;
         audioEl.play().catch(() => undefined);
       }
     };
@@ -217,14 +259,9 @@ export function useRealtimeSession(): UseRealtimeSession {
           transcriptAccumRef.current = '';
           displayCountRef.current = 0;
           setTranscriptText('');
-          if (revealTimerRef.current) clearInterval(revealTimerRef.current);
-          // Reveal ~7 chars/sec (~85 WPM) to pace with slow speech setting
-          revealTimerRef.current = setInterval(() => {
-            const full = transcriptAccumRef.current;
-            if (displayCountRef.current >= full.length) return;
-            displayCountRef.current++;
-            setTranscriptText(full.slice(0, displayCountRef.current));
-          }, 140);
+          // Start reveal timer scaled to current playback rate.
+          // Slower speed → larger interval → captions advance in sync with audio.
+          startRevealTimer();
         }
 
         if (ev.type === 'response.output_audio.delta') {
@@ -319,7 +356,7 @@ export function useRealtimeSession(): UseRealtimeSession {
     } catch {
       fail('WEBRTC_FAILED', 'Não foi possível estabelecer a conexão WebRTC.');
     }
-  }, [status, cleanup, fail]);
+  }, [status, cleanup, fail, startRevealTimer]);
 
   const end = useCallback(() => {
     cleanup('ended');

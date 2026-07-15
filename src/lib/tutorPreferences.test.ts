@@ -7,6 +7,7 @@ import {
   PERSONALITY_PRESETS,
   REALTIME_VOICES,
   PACE_LABELS,
+  PACE_PLAYBACK_RATE,
 } from './tutorPreferences';
 import { buildTutorInstructions } from './promptBuilder';
 import type { AIPreferences } from '../types';
@@ -86,9 +87,10 @@ describe('PERSONALITY_PRESETS', () => {
 describe('buildTutorInstructions — pace', () => {
   const basePrefs = getDefaultsForLevel('B1');
 
-  it('slow pace includes "1–3 frases"', () => {
+  it('slow pace includes max-1-sentence instruction', () => {
     const p = buildTutorInstructions({ ...basePrefs, speechPace: 'slow' }, 'B1');
-    expect(p).toContain('1–3 frases');
+    // Superdevagar mode: single short sentence at a time
+    expect(p).toContain('1 frase');
   });
 
   it('normal pace includes "2–4 frases"', () => {
@@ -197,10 +199,12 @@ describe('getPrefsSummaryChips', () => {
     expect(chips.some((c) => c.includes('Coral'))).toBe(true);
   });
 
-  it('chip includes pace label', () => {
+  it('chip includes pace label for natural pace (Normal 1×)', () => {
     const prefs = { ...BASE_DEFAULTS, speechPace: 'natural' as const };
     const chips = getPrefsSummaryChips(prefs);
-    expect(chips.some((c) => c.toLowerCase().includes('natural'))).toBe(true);
+    // natural maps to "Normal (1×)" — verify chip text includes the known label
+    const paceLabel = PACE_LABELS['natural'].label;
+    expect(chips.some((c) => c.includes(paceLabel))).toBe(true);
   });
 
   it('custom preset shows "Personalizado"', () => {
@@ -283,5 +287,51 @@ describe('buildTutorInstructions — safety', () => {
   it('always includes teacher name', () => {
     const p = buildTutorInstructions({ ...BASE_DEFAULTS, teacherName: 'Lemon' }, 'A2');
     expect(p).toContain('Lemon');
+  });
+});
+
+// ── 12. PACE_PLAYBACK_RATE — audio speed values ───────────────────────────────
+
+describe('PACE_PLAYBACK_RATE', () => {
+  it('natural pace is exactly 1.0× (reference speed)', () => {
+    expect(PACE_PLAYBACK_RATE.natural).toBe(1.0);
+  });
+
+  it('normal (Devagar) pace is exactly 0.80×', () => {
+    expect(PACE_PLAYBACK_RATE.normal).toBe(0.80);
+  });
+
+  it('slow (Superdevagar) pace is exactly 0.65×', () => {
+    expect(PACE_PLAYBACK_RATE.slow).toBe(0.65);
+  });
+
+  it('all three speeds are distinct', () => {
+    const rates = [PACE_PLAYBACK_RATE.slow, PACE_PLAYBACK_RATE.normal, PACE_PLAYBACK_RATE.natural];
+    const unique = new Set(rates);
+    expect(unique.size).toBe(3);
+  });
+
+  it('speed ordering is superdevagar < devagar < normal', () => {
+    expect(PACE_PLAYBACK_RATE.slow).toBeLessThan(PACE_PLAYBACK_RATE.normal);
+    expect(PACE_PLAYBACK_RATE.normal).toBeLessThan(PACE_PLAYBACK_RATE.natural);
+  });
+
+  it('all rates are between 0 (exclusive) and 2 (inclusive)', () => {
+    for (const rate of Object.values(PACE_PLAYBACK_RATE)) {
+      expect(rate).toBeGreaterThan(0);
+      expect(rate).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('covers all speechPace keys defined in PACE_LABELS', () => {
+    const labelKeys = Object.keys(PACE_LABELS) as AIPreferences['speechPace'][];
+    for (const key of labelKeys) {
+      expect(PACE_PLAYBACK_RATE[key]).toBeDefined();
+    }
+  });
+
+  it('superdevagar is perceptibly different from normal (>0.20 difference)', () => {
+    const diff = PACE_PLAYBACK_RATE.natural - PACE_PLAYBACK_RATE.slow;
+    expect(diff).toBeGreaterThan(0.20);
   });
 });

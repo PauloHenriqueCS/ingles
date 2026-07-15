@@ -19,6 +19,35 @@ describe('conversationSession — source code must use GA endpoints', () => {
   });
 });
 
+// ── VAD pause-tolerance smoke test ────────────────────────────────────────────
+// Verifies the server-side VAD configuration gives the user enough silence
+// tolerance (~2.5 s) before treating a pause as end-of-speech.
+
+describe('conversationSession — VAD silence tolerance', () => {
+  it('session config uses silence_duration_ms of at least 2000ms to allow natural pauses', async () => {
+    const src = await import('../../api/conversation/session?raw');
+    const code = (src as unknown as { default: string }).default;
+    // Extract the numeric value after "silence_duration_ms:"
+    const match = code.match(/silence_duration_ms\s*:\s*(\d+)/);
+    expect(match).not.toBeNull();
+    const value = match ? parseInt(match[1], 10) : 0;
+    expect(value).toBeGreaterThanOrEqual(2000);
+  });
+
+  it('session config does NOT use the old 800ms silence_duration_ms', async () => {
+    const src = await import('../../api/conversation/session?raw');
+    const code = (src as unknown as { default: string }).default;
+    // Ensure the old too-short value is gone
+    expect(code).not.toMatch(/silence_duration_ms\s*:\s*800\b/);
+  });
+
+  it('session config uses server_vad turn detection', async () => {
+    const src = await import('../../api/conversation/session?raw');
+    const code = (src as unknown as { default: string }).default;
+    expect(code).toContain("'server_vad'");
+  });
+});
+
 // ── Backend handler tests ────────────────────────────────────────────────────
 
 vi.mock('../../api/_auth', () => ({ requireAuth: vi.fn() }));
