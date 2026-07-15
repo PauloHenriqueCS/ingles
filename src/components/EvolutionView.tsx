@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Sprout, Target, ChevronDown, X } from 'lucide-react';
+import { Sprout, Target, ChevronDown, X, Headphones } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend,
@@ -137,6 +138,11 @@ export default function EvolutionView({ onNavigate }: Props) {
   const [period, setPeriod] = useState<Period>('30d');
   const [hiddenSkills, setHiddenSkills] = useState<Set<string>>(new Set());
   const [showAllMistakes, setShowAllMistakes] = useState(false);
+  const [listeningStats, setListeningStats] = useState<{
+    totalSessions: number;
+    avgScore: number | null;
+    recentSessions: Array<{ date: string; score: number }>;
+  } | null>(null);
 
   function load() {
     setLoadState('loading');
@@ -146,6 +152,28 @@ export default function EvolutionView({ onNavigate }: Props) {
   }
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    supabase
+      .from('user_listening_results')
+      .select('performance_score, calculated_at, user_listening_assignments!inner(activity_date)')
+      .order('calculated_at', { ascending: false })
+      .limit(50)
+      .then(({ data }) => {
+        if (!data || data.length === 0) {
+          setListeningStats({ totalSessions: 0, avgScore: null, recentSessions: [] });
+          return;
+        }
+        const totalSessions = data.length;
+        const avgScore = Math.round(data.reduce((s: number, r: any) => s + Number(r.performance_score), 0) / totalSessions);
+        const recentSessions = data.slice(0, 5).map((r: any) => ({
+          date: (r.user_listening_assignments as any)?.activity_date ?? r.calculated_at?.slice(0, 10) ?? '',
+          score: Math.round(Number(r.performance_score)),
+        }));
+        setListeningStats({ totalSessions, avgScore, recentSessions });
+      })
+      .catch(() => setListeningStats(null));
+  }, []);
 
   const filteredReviews = useMemo(() => filterByPeriod(reviews, period), [reviews, period]);
   const previousReviews = useMemo(() => getPreviousPeriodReviews(reviews, period), [reviews, period]);
@@ -509,6 +537,39 @@ export default function EvolutionView({ onNavigate }: Props) {
                     Treinar esta habilidade
                   </button>
                 </section>
+
+                {/* ── Listening ── */}
+                {listeningStats && listeningStats.totalSessions > 0 && (
+                  <section className="bg-slate-800 rounded-xl p-5 space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Headphones className="w-4 h-4 text-amber-400 shrink-0" strokeWidth={2} />
+                      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Listening</p>
+                    </div>
+                    <div className="flex gap-3">
+                      <div className="flex-1 text-center bg-slate-700/50 rounded-lg p-3">
+                        <p className="text-xl font-bold tabular-nums text-amber-400">{listeningStats.totalSessions}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">episódios</p>
+                      </div>
+                      {listeningStats.avgScore !== null && (
+                        <div className="flex-1 text-center bg-slate-700/50 rounded-lg p-3">
+                          <p className={`text-xl font-bold tabular-nums ${scoreColor(listeningStats.avgScore)}`}>{listeningStats.avgScore}</p>
+                          <p className="text-xs text-slate-500 mt-0.5">média</p>
+                        </div>
+                      )}
+                    </div>
+                    {listeningStats.recentSessions.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-slate-500 font-medium">Recentes</p>
+                        {listeningStats.recentSessions.map((s, i) => (
+                          <div key={i} className="flex items-center justify-between">
+                            <span className="text-xs text-slate-400">{s.date}</span>
+                            <span className={`text-sm font-bold tabular-nums ${scoreColor(s.score)}`}>{s.score}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                )}
 
                 {/* ── Erros para revisar ── */}
                 <section className="bg-slate-800 rounded-xl p-5 space-y-4">

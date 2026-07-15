@@ -5,6 +5,7 @@ import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
 import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
 import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
 import { getPronunciationDatesForMonth, computeDailyProgress } from '../lib/dailyProgress';
+import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
 import DailyProgressIcons from './DailyProgressIcons';
 import DailyProgressModal from './DailyProgressModal';
 
@@ -44,6 +45,7 @@ export default function MonthView({
   const [convTotals, setConvTotals] = useState<Record<string, number>>({});
   const [convGoalSec, setConvGoalSec] = useState<number>(15 * 60);
   const [pronunciationDates, setPronunciationDates] = useState<Set<string>>(new Set());
+  const [listeningProgress, setListeningProgress] = useState<Record<string, 'not_started' | 'in_progress' | 'completed'>>({});
   const [modalDate, setModalDate] = useState<string | null>(null);
 
   useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
@@ -53,6 +55,7 @@ export default function MonthView({
     getPronunciationDatesForMonth(currentYear, currentMonth)
       .then(setPronunciationDates)
       .catch(() => {});
+    getListeningDatesForMonth(currentYear, currentMonth).then(setListeningProgress).catch(() => {});
   }, [currentYear, currentMonth]);
 
   useEffect(() => {
@@ -69,10 +72,11 @@ export default function MonthView({
         convTotals[d] ?? 0,
         convGoalSec,
         pronunciationDates,
+        listeningProgress[d],
       );
     }
     return map;
-  }, [currentYear, currentMonth, entries, convTotals, convGoalSec, pronunciationDates]);
+  }, [currentYear, currentMonth, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress]);
 
   function toggleDay(dow: number) {
     setSelectedDays((prev) => {
@@ -135,6 +139,10 @@ export default function MonthView({
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 rounded-full bg-teal-400" />
             <span className="text-xs text-slate-400">Conversa</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span className="text-xs text-slate-400">Listening</span>
           </div>
         </div>
 

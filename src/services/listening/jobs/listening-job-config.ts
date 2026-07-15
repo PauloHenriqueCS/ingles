@@ -18,6 +18,7 @@ export const LOCK_TIMEOUT_MS: Record<ListeningJobType, number> = {
   AUDIT_LISTENING_INVENTORY:        300_000,  // 5 min
   AUDIT_LISTENING_STORAGE:        1_800_000,  // 30 min
   CLEANUP_LISTENING_STAGING:        900_000,  // 15 min
+  CALCULATE_LISTENING_PERFORMANCE:   60_000,  // 1 min
 };
 
 // ── Max attempts per job type ─────────────────────────────────────────────────
@@ -36,6 +37,7 @@ export const MAX_ATTEMPTS: Record<ListeningJobType, number> = {
   AUDIT_LISTENING_INVENTORY:        2,
   AUDIT_LISTENING_STORAGE:          2,
   CLEANUP_LISTENING_STAGING:        2,
+  CALCULATE_LISTENING_PERFORMANCE:  3,
 };
 
 // ── Priorities ────────────────────────────────────────────────────────────────
@@ -59,8 +61,9 @@ export const DEFAULT_PRIORITY: Record<ListeningJobType, number> = {
   PUBLISH_LISTENING_EPISODE:        JOB_PRIORITY.HIGH,
   REPAIR_LISTENING_EPISODE:         JOB_PRIORITY.URGENT,
   AUDIT_LISTENING_INVENTORY:        JOB_PRIORITY.LOW,
-  AUDIT_LISTENING_STORAGE:          JOB_PRIORITY.LOW,
-  CLEANUP_LISTENING_STAGING:        JOB_PRIORITY.LOW,
+  AUDIT_LISTENING_STORAGE:              JOB_PRIORITY.LOW,
+  CLEANUP_LISTENING_STAGING:            JOB_PRIORITY.LOW,
+  CALCULATE_LISTENING_PERFORMANCE:      JOB_PRIORITY.NORMAL,
 };
 
 // ── Retry backoff ─────────────────────────────────────────────────────────────

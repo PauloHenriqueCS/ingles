@@ -94,3 +94,42 @@ export function abandonSession(sessionId: string): Promise<void> {
     body: JSON.stringify({ sessionId }),
   });
 }
+
+export type TodayListeningResult = {
+  status: 'assigned' | 'in_progress' | 'completed';
+  assignmentId: string;
+  episodeId: string;
+  activityDate: string;
+  session: EpisodeSessionResponse;
+} | { status: 'empty_inventory' };
+
+export type ByDateListeningResult = {
+  status: 'assigned' | 'in_progress' | 'completed';
+  assignmentId: string;
+  episodeId: string;
+  activityDate: string;
+} | { status: 'no_assignment' };
+
+export type ListeningResultData = {
+  assignmentId: string;
+  episodeId: string;
+  performanceScore: number;
+  q1AttemptCycle: number;
+  q2AttemptCycle: number;
+  q1Weight: number;
+  q2Weight: number;
+  calculationVersion: string;
+  calculatedAt: string;
+};
+
+export function getTodayListening(): Promise<TodayListeningResult> {
+  return apiFetch<TodayListeningResult>('/api/listening/today');
+}
+
+export function getListeningByDate(date: string): Promise<ByDateListeningResult> {
+  return apiFetch<ByDateListeningResult>(`/api/listening/by-date?date=${encodeURIComponent(date)}`);
+}
+
+export function getListeningResult(assignmentId: string): Promise<ListeningResultData> {
+  return apiFetch<ListeningResultData>(`/api/listening/assignment-result?assignmentId=${encodeURIComponent(assignmentId)}`);
+}

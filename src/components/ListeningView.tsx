@@ -12,6 +12,7 @@ import {
   markPlaybackCompleted,
   submitAnswer,
   refreshAudioUrl,
+  getTodayListening,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
@@ -134,8 +135,9 @@ interface Props {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function ListeningView({ onBack, episodeId: propEpisodeId }: Props) {
-  const [phase, setPhase] = useState<Phase>(propEpisodeId ? 'loading' : 'selecting');
+  const [phase, setPhase] = useState<Phase>('loading');
   const [episodeId, setEpisodeId] = useState<string | null>(propEpisodeId ?? null);
+  const [assignmentId, setAssignmentId] = useState<string | null>(null);
   const [episodeData, setEpisodeData] = useState<EpisodeSessionResponse | null>(null);
   const [blockIdx, setBlockIdx] = useState<0 | 1>(0);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
@@ -249,9 +251,60 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   }, [session?.sessionId, playerSetOnEnded]);
 
   useEffect(() => {
-    if (episodeId) loadSession(episodeId);
-    else loadEpisodeList();
-  }, [episodeId]);
+    if (propEpisodeId) {
+      loadSession(propEpisodeId);
+    } else {
+      loadTodaySession();
+    }
+  }, []); // only on mount
+
+  async function loadTodaySession() {
+    setPhase('loading');
+    try {
+      const result = await getTodayListening();
+      if (result.status === 'empty_inventory') {
+        setEpisodes([]);
+        setLoadingEpisodes(false);
+        setPhase('selecting');
+        return;
+      }
+      setAssignmentId(result.assignmentId);
+      setEpisodeId(result.episodeId);
+      setEpisodeData(result.session);
+
+      const data = result.session;
+      if (data.progress?.completedAt) {
+        setTranscriptUnlocked(true);
+        setPhase('done');
+        return;
+      }
+      const idx = data.blocks.findIndex((b: any) => !b.completed && !b.locked);
+      if (idx === -1) {
+        setTranscriptUnlocked(true);
+        setPhase('done');
+        return;
+      }
+      const activeBlock = data.blocks[idx as 0 | 1];
+      if (!activeBlock || !activeBlock.session || !activeBlock.audio) {
+        setErrorMsg('Dados do episódio incompletos.');
+        setPhase('error');
+        return;
+      }
+      setBlockIdx(idx as 0 | 1);
+      player.load(activeBlock.audio.url, activeBlock.audio.durationMs);
+      scheduleUrlRefresh(activeBlock.session.sessionId, activeBlock.audio.expiresAt);
+      player.setOnEnded(() => handleAudioEnded(activeBlock.session.sessionId));
+      if (activeBlock.session.status === 'awaiting_answer') {
+        setPhase('question');
+      } else {
+        setPhase('intro');
+      }
+    } catch (err) {
+      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao carregar listening do dia.';
+      setErrorMsg(msg);
+      setPhase('error');
+    }
+  }
 
   async function loadEpisodeList() {
     setLoadingEpisodes(true);
@@ -390,13 +443,18 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: error ────────────────────────────────────────────────────────────
   function renderError() {
+    const retryFn = episodeId
+      ? () => loadSession(episodeId)
+      : propEpisodeId
+      ? undefined
+      : loadTodaySession;
     return (
       <div className="p-6 max-w-lg mx-auto text-center pt-10">
         <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
         <p className="text-sm text-slate-400 mb-6">{errorMsg || 'Erro ao carregar.'}</p>
-        {episodeId && (
+        {retryFn && (
           <button
-            onClick={() => loadSession(episodeId)}
+            onClick={retryFn}
             className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors"
           >
             Tentar novamente
@@ -470,7 +528,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
               </p>
             </div>
             <button
-              onClick={loadEpisodeList}
+              onClick={propEpisodeId ? loadEpisodeList : loadTodaySession}
               className="w-full py-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium transition-colors"
             >
               Tentar novamente

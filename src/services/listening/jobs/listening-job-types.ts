@@ -15,7 +15,8 @@ export const LISTENING_JOB_TYPES = {
   REPAIR_LISTENING_EPISODE:         'REPAIR_LISTENING_EPISODE',
   AUDIT_LISTENING_INVENTORY:        'AUDIT_LISTENING_INVENTORY',
   AUDIT_LISTENING_STORAGE:          'AUDIT_LISTENING_STORAGE',
-  CLEANUP_LISTENING_STAGING:        'CLEANUP_LISTENING_STAGING',
+  CLEANUP_LISTENING_STAGING:          'CLEANUP_LISTENING_STAGING',
+  CALCULATE_LISTENING_PERFORMANCE:    'CALCULATE_LISTENING_PERFORMANCE',
 } as const;
 
 export type ListeningJobType = typeof LISTENING_JOB_TYPES[keyof typeof LISTENING_JOB_TYPES];
@@ -114,6 +115,13 @@ export type CleanupStagingJobPayload = {
   episodeId?: string;
 };
 
+export type CalculateListeningPerformancePayload = {
+  jobType: 'CALCULATE_LISTENING_PERFORMANCE';
+  userId: string;
+  assignmentId: string;
+  episodeId: string;
+};
+
 export type ListeningJobPayload =
   | EnsureInventoryJobPayload
   | GenerateStoryJobPayload
@@ -127,7 +135,8 @@ export type ListeningJobPayload =
   | RepairEpisodeJobPayload
   | AuditInventoryJobPayload
   | AuditStorageJobPayload
-  | CleanupStagingJobPayload;
+  | CleanupStagingJobPayload
+  | CalculateListeningPerformancePayload;
 
 // ── Result ────────────────────────────────────────────────────────────────────
 

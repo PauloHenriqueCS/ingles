@@ -36,7 +36,11 @@ import type {
   PublishEpisodeJobPayload,
   AuditStorageJobPayload,
   CleanupStagingJobPayload,
+  CalculateListeningPerformancePayload,
 } from './listening-job-types';
+import { calculateListeningPerformance } from '../performance/calculate-listening-performance';
+import { persistListeningResult } from '../performance/persist-listening-result';
+import { submitListeningLevelEvidence } from '../performance/submit-listening-level-evidence';
 import { ensureListeningInventory } from '../inventory/ensure-listening-inventory';
 
 // ── Helper: get service client ────────────────────────────────────────────────
@@ -303,6 +307,66 @@ const handleAuditInventory: ListeningJobHandlerFn = async () => {
   return { alertsCreated: result.alertsCreated, issues: result.issues };
 };
 
+// ── Handler: CALCULATE_LISTENING_PERFORMANCE ─────────────────────────────────
+
+const handleCalculateListeningPerformance: ListeningJobHandlerFn = async ({ job }) => {
+  const payload = job.payload as CalculateListeningPerformancePayload;
+  const { userId, assignmentId, episodeId } = payload;
+  const supabase = client();
+
+  // Get completed sessions for each block
+  const { data: sessions } = await supabase
+    .from('user_listening_block_sessions')
+    .select('block_id, attempt_cycle, status')
+    .eq('user_id', userId)
+    .eq('episode_id', episodeId)
+    .eq('status', 'completed');
+
+  // Get block order for each block
+  const { data: blocks } = await supabase
+    .from('listening_blocks')
+    .select('id, block_order')
+    .eq('episode_id', episodeId);
+
+  const blockOrderMap = new Map<string, number>();
+  for (const b of blocks ?? []) blockOrderMap.set(b.id, b.block_order);
+
+  let block1Cycles = 1;
+  let block2Cycles = 1;
+  for (const s of sessions ?? []) {
+    const order = blockOrderMap.get(s.block_id);
+    if (order === 1) block1Cycles = s.attempt_cycle;
+    if (order === 2) block2Cycles = s.attempt_cycle;
+  }
+
+  const calc = calculateListeningPerformance(block1Cycles, block2Cycles);
+
+  await persistListeningResult(supabase, { userId, assignmentId, episodeId, calc });
+  await submitListeningLevelEvidence(supabase, { userId, assignmentId, performanceScore: calc.performanceScore });
+
+  // Update assignment status to completed if not already
+  const { data: assignment } = await supabase
+    .from('user_listening_assignments')
+    .select('status')
+    .eq('id', assignmentId)
+    .maybeSingle();
+
+  if (assignment && assignment.status !== 'completed') {
+    await supabase
+      .from('user_listening_assignments')
+      .update({ status: 'completed', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', assignmentId);
+  }
+
+  return {
+    assignmentId,
+    episodeId,
+    performanceScore: calc.performanceScore,
+    block1Cycles,
+    block2Cycles,
+  };
+};
+
 // ── Handler: REPAIR_LISTENING_EPISODE ────────────────────────────────────────
 
 const handleRepairEpisode: ListeningJobHandlerFn = async ({ job }) => {
@@ -327,6 +391,7 @@ export const listeningJobHandlers: Record<ListeningJobType, ListeningJobHandlerF
   [LISTENING_JOB_TYPES.ENSURE_LISTENING_INVENTORY]:       handleEnsureInventory,
   [LISTENING_JOB_TYPES.AUDIT_LISTENING_INVENTORY]:        handleAuditInventory,
   [LISTENING_JOB_TYPES.AUDIT_LISTENING_STORAGE]:          handleAuditStorage,
-  [LISTENING_JOB_TYPES.CLEANUP_LISTENING_STAGING]:        handleCleanupStaging,
-  [LISTENING_JOB_TYPES.REPAIR_LISTENING_EPISODE]:         handleRepairEpisode,
+  [LISTENING_JOB_TYPES.CLEANUP_LISTENING_STAGING]:           handleCleanupStaging,
+  [LISTENING_JOB_TYPES.REPAIR_LISTENING_EPISODE]:            handleRepairEpisode,
+  [LISTENING_JOB_TYPES.CALCULATE_LISTENING_PERFORMANCE]:     handleCalculateListeningPerformance,
 };

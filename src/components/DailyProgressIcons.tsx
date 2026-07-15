@@ -25,6 +25,10 @@ export default function DailyProgressIcons({ progress }: Props) {
         className={`w-1 h-1 rounded-full ${dotCls(progress.conversation, 'bg-teal-400')}`}
         title="Conversação"
       />
+      <div
+        className={`w-1 h-1 rounded-full ${dotCls(progress.listening, 'bg-amber-400')}`}
+        title="Listening"
+      />
     </div>
   );
 }

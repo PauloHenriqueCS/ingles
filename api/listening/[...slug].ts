@@ -10,6 +10,10 @@ import { getListeningServiceClient } from '../../src/services/listening/publicat
 import { abandonListeningSession } from '../../src/services/listening/execution/abandon-listening-session';
 import { submitListeningAnswer } from '../../src/services/listening/execution/submit-listening-answer';
 import { markListeningPlaybackCompleted } from '../../src/services/listening/execution/mark-listening-playback-completed';
+import { getListeningToday } from '../../src/services/listening/daily/get-listening-today';
+import { getListeningByDate } from '../../src/services/listening/daily/get-listening-by-date';
+import { resolveListeningActivityDate } from '../../src/services/listening/daily/resolve-listening-activity-date';
+import { enqueueListeningJob } from '../../src/services/listening/jobs/enqueue-listening-job';
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
@@ -169,6 +173,44 @@ async function handleSessionAnswer(req: any, res: any) {
     const serviceClient = getListeningServiceClient();
     const result = await submitListeningAnswer(serviceClient, { sessionId, userId, questionId, selectedOption, submissionId, playbackRate: typeof playbackRate === 'number' ? playbackRate : 1.0 });
     safeLog('listening/session/answer', 'answer_processed', 200, { sessionId, correct: result.correct, attemptNumber: result.attemptNumber });
+
+    if (result.episodeCompleted) {
+      try {
+        // Get episodeId from session
+        const { data: sess } = await serviceClient
+          .from('user_listening_block_sessions')
+          .select('episode_id')
+          .eq('id', sessionId)
+          .maybeSingle();
+        if (sess?.episode_id) {
+          const activityDate = resolveListeningActivityDate();
+          const { data: assignment } = await serviceClient
+            .from('user_listening_assignments')
+            .select('id')
+            .eq('user_id', userId)
+            .eq('episode_id', sess.episode_id)
+            .eq('activity_date', activityDate)
+            .maybeSingle();
+          if (assignment?.id) {
+            // Update assignment to completed
+            await serviceClient
+              .from('user_listening_assignments')
+              .update({ status: 'completed', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+              .eq('id', assignment.id);
+            // Enqueue performance calculation
+            await enqueueListeningJob(serviceClient, {
+              jobType: 'CALCULATE_LISTENING_PERFORMANCE',
+              idempotencyKey: `CALCULATE_LISTENING_PERFORMANCE:${assignment.id}`,
+              payload: { jobType: 'CALCULATE_LISTENING_PERFORMANCE', userId, assignmentId: assignment.id, episodeId: sess.episode_id },
+              episodeId: sess.episode_id,
+            });
+          }
+        }
+      } catch (err) {
+        safeLog('listening/session/answer', 'performance_enqueue_error', 500, { sessionId });
+      }
+    }
+
     return res.status(200).json(result);
   } catch (err) {
     if (err instanceof ListeningExecutionError) {
@@ -181,6 +223,75 @@ async function handleSessionAnswer(req: any, res: any) {
     }
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno.');
   }
+}
+
+// ─── GET /api/listening/today ─────────────────────────────────────────────────
+
+async function handleToday(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+  try {
+    const result = await getListeningToday(supabase, userId);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/today', 'today_delivered', 200, { status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    safeLog('listening/today', 'internal_error', 500, {});
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao carregar listening do dia.');
+  }
+}
+
+// ─── GET /api/listening/by-date ───────────────────────────────────────────────
+
+async function handleByDate(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+  const date = String(req.query?.date ?? '').trim();
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return jsonError(res, 400, 'INVALID_REQUEST', 'date inválido (YYYY-MM-DD).');
+  try {
+    const result = await getListeningByDate(supabase, userId, date);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    safeLog('listening/by-date', 'by_date_delivered', 200, { date, status: result.status });
+    return res.status(200).json(result);
+  } catch {
+    safeLog('listening/by-date', 'internal_error', 500, { date });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao buscar listening por data.');
+  }
+}
+
+// ─── GET /api/listening/assignment-result ────────────────────────────────────
+
+async function handleAssignmentResult(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+  const assignmentId = String(req.query?.assignmentId ?? '').trim();
+  if (!assignmentId || !/^[0-9a-f-]{36}$/i.test(assignmentId)) return jsonError(res, 400, 'INVALID_REQUEST', 'assignmentId inválido.');
+  const { data, error } = await supabase
+    .from('user_listening_results')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('assignment_id', assignmentId)
+    .maybeSingle();
+  if (error) return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao buscar resultado.');
+  if (!data) return jsonError(res, 404, 'NOT_FOUND', 'Resultado não encontrado.');
+  return res.status(200).json({
+    assignmentId:        data.assignment_id,
+    episodeId:           data.episode_id,
+    activityDate:        data.activity_date,
+    performanceScore:    data.performance_score,
+    q1AttemptCycle:      data.q1_attempt_cycle,
+    q2AttemptCycle:      data.q2_attempt_cycle,
+    q1Weight:            data.q1_weight,
+    q2Weight:            data.q2_weight,
+    calculationVersion:  data.calculation_version,
+    calculatedAt:        data.calculated_at,
+  });
 }
 
 // ─── POST /api/listening/session/audio-refresh ───────────────────────────────
@@ -252,6 +363,9 @@ export default async function handler(req: any, res: any) {
     case 'session/answer':             return handleSessionAnswer(req, res);
     case 'session/audio-refresh':      return handleSessionAudioRefresh(req, res);
     case 'session/playback-completed': return handleSessionPlaybackCompleted(req, res);
+    case 'today':                      return handleToday(req, res);
+    case 'by-date':                    return handleByDate(req, res);
+    case 'assignment-result':          return handleAssignmentResult(req, res);
     default:                           return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

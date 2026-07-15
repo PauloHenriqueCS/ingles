@@ -46,18 +46,20 @@ export function computeDailyProgress(
   convTotalSec: number,
   convGoalSec: number,
   pronunciationDates: Set<string>,
+  listeningStatus?: 'not_started' | 'in_progress' | 'completed',
 ): DailyProgress {
   const writing = writingStatus(entry);
   const pronunciation: DailyActivityStatus = pronunciationDates.has(date)
     ? 'completed'
     : 'not_started';
   const conversation = conversationStatus(convTotalSec, convGoalSec);
-  const listening: DailyActivityStatus = 'coming_soon';
+  const listening: DailyActivityStatus = listeningStatus ?? 'coming_soon';
 
   const allActiveCompleted =
     writing === 'completed' &&
     pronunciation === 'completed' &&
-    conversation === 'completed';
+    conversation === 'completed' &&
+    (listening === 'completed' || listening === 'coming_soon');
 
   return { date, writing, pronunciation, conversation, listening, allActiveCompleted };
 }
