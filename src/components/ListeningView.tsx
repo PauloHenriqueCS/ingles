@@ -299,7 +299,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
-  const { currentTimeMs, durationMs, isPlaying } = player.state;
+  const { currentTimeMs, durationMs } = player.state;
   const pct = durationMs > 0 ? Math.min((currentTimeMs / durationMs) * 100, 100) : 0;
   const isPlayerPhase = phase === 'ready_to_play' || phase === 'playing' || phase === 'paused' || phase === 'marking';
 

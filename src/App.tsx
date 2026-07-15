@@ -39,7 +39,7 @@ export default function App() {
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(DEFAULT_SETTINGS);
   const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [listeningEpisodeId, setListeningEpisodeId] = useState<string | undefined>(undefined);
+  const [listeningEpisodeId] = useState<string | undefined>(undefined);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
