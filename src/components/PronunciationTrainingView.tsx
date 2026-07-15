@@ -17,6 +17,7 @@ import {
   type TrainingCategory,
 } from '../lib/trainingWordCategory';
 import type { PronunciationNormalizedResult } from '../types';
+import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -29,12 +30,12 @@ function cleanWordForTts(displayWord: string): string {
   return displayWord.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim();
 }
 
-async function fetchTtsUrl(text: string): Promise<string> {
+async function fetchTtsUrl(text: string, voice: string): Promise<string> {
   const headers = await getAuthHeader();
   const resp = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, voice }),
   });
   if (!resp.ok) throw new Error('TTS_FAILED');
   const blob = await resp.blob();
@@ -63,6 +64,8 @@ interface WordTrainerProps {
   sharedAudioRef: MutableRefObject<HTMLAudioElement | null>;
   onAudioStart: () => void;
   onCategoryUpdate: (wordId: string, category: TrainingCategory) => void;
+  voice: string;
+  speed: AudioSettings['playbackRate'];
 }
 
 function WordTrainer({
@@ -72,6 +75,8 @@ function WordTrainer({
   sharedAudioRef,
   onAudioStart,
   onCategoryUpdate,
+  voice,
+  speed,
 }: WordTrainerProps) {
   const recorder = useAudioRecorder();
   const [ttsPhase, setTtsPhase] = useState<'idle' | 'loading' | 'playing' | 'error'>('idle');
@@ -119,7 +124,7 @@ function WordTrainer({
     if (!url) {
       setTtsPhase('loading');
       try {
-        url = await fetchTtsUrl(cleanWord);
+        url = await fetchTtsUrl(cleanWord, voice);
         if (!mountedRef.current) { URL.revokeObjectURL(url); return; }
         wordTtsCacheRef.current.set(ttsKey, url);
       } catch {
@@ -129,6 +134,7 @@ function WordTrainer({
     }
 
     const audio = new Audio(url);
+    audio.playbackRate = speed;
     myAudioRef.current = audio;
     sharedAudioRef.current = audio;
     audio.onended  = () => { if (mountedRef.current) setTtsPhase('idle'); };
@@ -341,6 +347,8 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const [wordResults, setWordResults]     = useState<PronunciationWordDetail[] | null>(null);
   const [wordCategories, setWordCategories] = useState<Map<string, TrainingCategory>>(new Map());
   const [selectedWordId, setSelectedWordId] = useState<string | null>(null);
+  const [audioVoice, setAudioVoice] = useState<string>(DEFAULT_AUDIO_SETTINGS.voice);
+  const [speed, setSpeed] = useState<AudioSettings['playbackRate']>(DEFAULT_AUDIO_SETTINGS.playbackRate);
 
   const mountedRef       = useRef(true);
   const ttsUrlRef        = useRef<string | null>(null);
@@ -348,9 +356,29 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const wordTtsCacheRef  = useRef<Map<string, string>>(new Map());
   const cancelAnalysisRef = useRef<(() => void) | null>(null);
   const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const prevVoiceRef     = useRef<string>(DEFAULT_AUDIO_SETTINGS.voice);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
 
   const recorder = useAudioRecorder();
+
+  // Load voice/speed from user settings on mount
+  useEffect(() => {
+    fetchAudioSettings().then(s => {
+      if (!mountedRef.current) return;
+      setAudioVoice(s.voice);
+      setSpeed(s.playbackRate);
+      prevVoiceRef.current = s.voice;
+    }).catch(() => { /* use defaults */ });
+  }, []);
+
+  // Invalidate TTS cache whenever the user's chosen voice changes
+  useEffect(() => {
+    if (audioVoice === prevVoiceRef.current) return;
+    prevVoiceRef.current = audioVoice;
+    if (ttsUrlRef.current) { URL.revokeObjectURL(ttsUrlRef.current); ttsUrlRef.current = null; }
+    wordTtsCacheRef.current.forEach(url => URL.revokeObjectURL(url));
+    wordTtsCacheRef.current.clear();
+  }, [audioVoice]);
 
   // Generate text on mount; cleanup all resources on unmount
   useEffect(() => {
@@ -438,7 +466,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     if (!url) {
       setTtsPhase('loading');
       try {
-        url = await fetchTtsUrl(generatedText);
+        url = await fetchTtsUrl(generatedText, audioVoice);
         if (!mountedRef.current) { URL.revokeObjectURL(url); return; }
         ttsUrlRef.current = url;
       } catch {
@@ -448,6 +476,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     }
 
     const audio = new Audio(url);
+    audio.playbackRate = speed;
     sharedAudioRef.current = audio;
     audio.onended = () => { if (mountedRef.current) setTtsPhase('idle'); };
     audio.onerror = () => { if (mountedRef.current) setTtsPhase('error'); };
@@ -646,8 +675,8 @@ export default function PronunciationTrainingView({ onBack }: Props) {
             )}
           </div>
 
-          {/* TTS — listen to text */}
-          <div className="flex items-center gap-2 mb-4">
+          {/* TTS — listen to text + speed selector */}
+          <div className="flex flex-wrap items-center gap-2 mb-4">
             <button
               onClick={handlePlayFullText}
               disabled={ttsPhase === 'loading'}
@@ -659,6 +688,23 @@ export default function PronunciationTrainingView({ onBack }: Props) {
               {(ttsPhase === 'idle' || ttsPhase === 'error') && <Volume2 className="w-4 h-4" />}
               {ttsPhase === 'loading' ? 'Carregando áudio…' : ttsPhase === 'playing' ? 'Parar áudio' : 'Ouvir texto'}
             </button>
+            <div className="flex items-center gap-1" aria-label="Velocidade de reprodução">
+              {([0.75, 0.9, 1] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setSpeed(s)}
+                  className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
+                    speed === s
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-700 text-slate-400 hover:text-slate-100'
+                  }`}
+                  aria-pressed={speed === s}
+                  aria-label={`Velocidade ${s}×`}
+                >
+                  {s}×
+                </button>
+              ))}
+            </div>
             {ttsPhase === 'error' && (
               <span className="text-xs text-red-400">Erro ao reproduzir o áudio.</span>
             )}
@@ -832,6 +878,8 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                                 sharedAudioRef={sharedAudioRef}
                                 onAudioStart={handleWordAudioStart}
                                 onCategoryUpdate={handleWordCategoryUpdate}
+                                voice={audioVoice}
+                                speed={speed}
                               />
                             </div>
                           )}
