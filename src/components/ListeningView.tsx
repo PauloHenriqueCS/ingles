@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Headphones, Play, Pause, RotateCcw, ChevronRight, ArrowLeft,
-  Check, X, Clock, AlertCircle, Trophy, RefreshCw, Volume2,
+  Headphones, Play, Pause, RotateCcw, ArrowLeft,
+  Check, X, AlertCircle, Trophy, RefreshCw, Lock,
+  ScrollText, Rewind, Clock,
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
@@ -18,27 +19,30 @@ import {
 } from '../lib/listeningApi';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 type Phase =
   | 'loading'
-  | 'selecting'        // no episodeId provided — show episode list
+  | 'selecting'
+  | 'intro'
   | 'error'
   | 'ready_to_play'
   | 'playing'
   | 'paused'
-  | 'marking'          // calling POST /playback-completed
+  | 'marking'
   | 'question'
   | 'submitting'
   | 'correct'
-  | 'wrong'            // wrong answer (not last)
-  | 'cycle_failed'     // 3 wrong answers
+  | 'wrong'
+  | 'cycle_failed'
   | 'done';
 
-type Speed = 0.75 | 0.90 | 1.00 | 1.10 | 1.25;
-const SPEEDS: Speed[] = [0.75, 0.90, 1.00, 1.10, 1.25];
+type Speed = 0.75 | 1.00 | 1.25 | 1.50;
+const SPEEDS: Speed[] = [0.75, 1.00, 1.25, 1.50];
 
-function formatSpeed(s: Speed): string {
-  return s === 1.00 ? '1×' : `${s}×`;
-}
+type SubtitleChoice = 'en' | 'pt-BR' | 'both';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmtMs(ms: number): string {
   const total = Math.floor(ms / 1000);
@@ -47,12 +51,29 @@ function fmtMs(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function fmtSec(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+// Deterministic color from speaker name
+const SPEAKER_PALETTE = ['#c084fc', '#4ade80', '#f59e0b', '#60a5fa', '#f87171', '#34d399', '#fb923c', '#a78bfa'];
+function getSpeakerColor(speaker: string | null | undefined): string {
+  if (!speaker) return '#94a3b8';
+  if (speaker.toLowerCase().includes('narrat')) return '#94a3b8';
+  const hash = speaker.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  return SPEAKER_PALETTE[hash % SPEAKER_PALETTE.length];
+}
+
+// ── Waveform ──────────────────────────────────────────────────────────────────
+
 function Waveform({ playing }: { playing: boolean }) {
   const heights = [35, 60, 80, 55, 70, 45, 85, 50, 65, 40, 75, 55, 30, 70, 85, 50, 65, 45, 80, 55, 70, 40, 60, 75, 50, 35, 65, 55];
   return (
     <>
-      <style>{`@keyframes bar-wave{0%,100%{transform:scaleY(1)}50%{transform:scaleY(0.25)}}`}</style>
-      <div className="flex items-end justify-center gap-0.5 h-16 px-2">
+      <style>{`@keyframes bar-wave{0%,100%{transform:scaleY(1)}50%{transform:scaleY(0.2)}}`}</style>
+      <div className="flex items-end justify-center gap-0.5 h-14 px-2">
         {heights.map((h, i) => (
           <div
             key={i}
@@ -65,8 +86,8 @@ function Waveform({ playing }: { playing: boolean }) {
               animation: playing
                 ? `bar-wave ${0.55 + (i % 5) * 0.13}s ease-in-out ${i * 0.035}s infinite`
                 : 'none',
-              opacity: playing ? 0.75 + (i % 3) * 0.08 : 0.2,
-              transition: 'opacity 0.3s',
+              opacity: playing ? 0.7 + (i % 3) * 0.1 : 0.15,
+              transition: 'opacity 0.4s',
             }}
           />
         ))}
@@ -75,10 +96,47 @@ function Waveform({ playing }: { playing: boolean }) {
   );
 }
 
+// ── AutoAdvance countdown ─────────────────────────────────────────────────────
+
+function AutoAdvanceBar({ durationMs, onDone }: { durationMs: number; onDone: () => void }) {
+  const [pct, setPct] = useState(100);
+  const startRef = useRef(Date.now());
+  const cbRef = useRef(onDone);
+  cbRef.current = onDone;
+
+  useEffect(() => {
+    startRef.current = Date.now();
+    const raf = requestAnimationFrame(function tick() {
+      const elapsed = Date.now() - startRef.current;
+      const remaining = Math.max(0, 100 - (elapsed / durationMs) * 100);
+      setPct(remaining);
+      if (elapsed >= durationMs) {
+        cbRef.current();
+        return;
+      }
+      requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [durationMs]);
+
+  return (
+    <div className="h-0.5 bg-slate-700 rounded-full overflow-hidden mt-3">
+      <div
+        className="h-full bg-purple-500 rounded-full transition-none"
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
 interface Props {
   onBack: () => void;
   episodeId?: string;
 }
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function ListeningView({ onBack, episodeId: propEpisodeId }: Props) {
   const [phase, setPhase] = useState<Phase>(propEpisodeId ? 'loading' : 'selecting');
@@ -91,34 +149,41 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [episodes, setEpisodes] = useState<PublishedEpisode[]>([]);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [subtitleChoice, setSubtitleChoice] = useState<SubtitleChoice>('pt-BR');
+  const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
 
   const player = useListeningAudioPlayer();
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrongTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Determine active block data
+  // ── Active block data ───────────────────────────────────────────────────────
   const block: SessionBlockInfo | null = episodeData?.blocks[blockIdx] ?? null;
   const session = block?.session ?? null;
   const subtitleMode = session?.subtitleMode ?? 'none';
-  const cues: PublicSubtitleCue[] =
-    subtitleMode === 'none'
-      ? []
-      : subtitleMode === 'en'
-      ? (block?.subtitles?.en ?? [])
-      : (block?.subtitles?.ptBr ?? []);
 
-  const subtitlesEnabled = subtitleMode !== 'none' && (phase === 'playing' || phase === 'paused' || phase === 'marking');
-  const activeCue = useListeningSubtitles(cues, player.audioRef, subtitlesEnabled);
+  // Determine which cues to show based on mode and user choice
+  const enCues: PublicSubtitleCue[] = block?.subtitles?.en ?? [];
+  const ptCues: PublicSubtitleCue[] = block?.subtitles?.ptBr ?? [];
 
-  // ── Apply speed to audio when it changes ──────────────────────────────────
-  // player.setRate is stable (defined with useCallback + empty deps inside the hook)
+  const showEnSubs = subtitleMode !== 'none' && (subtitleMode === 'en' || subtitleChoice === 'en' || subtitleChoice === 'both');
+  const showPtSubs = subtitleMode === 'pt-BR' && (subtitleChoice === 'pt-BR' || subtitleChoice === 'both');
+
+  const isPlayerPhase = phase === 'ready_to_play' || phase === 'playing' || phase === 'paused' || phase === 'marking';
+  const subtitlesActive = subtitleMode !== 'none' && (isPlayerPhase);
+
+  const activeCueEn = useListeningSubtitles(enCues, player.audioRef, subtitlesActive && showEnSubs);
+  const activeCuePt = useListeningSubtitles(ptCues, player.audioRef, subtitlesActive && showPtSubs);
+
+  // Speaker for the active cue (prefer EN for speaker identification)
+  const activeSpeaker = activeCueEn?.speaker ?? activeCuePt?.speaker ?? null;
+
+  // ── Apply speed ─────────────────────────────────────────────────────────────
   const { setRate: playerSetRate } = player;
-  useEffect(() => {
-    playerSetRate(speed);
-  }, [speed, playerSetRate]);
+  useEffect(() => { playerSetRate(speed); }, [speed, playerSetRate]);
 
-  // ── Load episode session ───────────────────────────────────────────────────
-  async function loadSession(epId: string) {
+  // ── Load session ────────────────────────────────────────────────────────────
+  async function loadSession(epId: string, skipIntro = false) {
     setPhase('loading');
     setSelectedOption(null);
     setLastResult(null);
@@ -127,12 +192,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       setEpisodeData(data);
 
       if (data.progress?.completedAt) {
+        setTranscriptUnlocked(true);
         setPhase('done');
         return;
       }
 
       const idx = data.blocks.findIndex(b => !b.completed && !b.locked);
       if (idx === -1) {
+        setTranscriptUnlocked(true);
         setPhase('done');
         return;
       }
@@ -159,7 +226,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       if (sess.status === 'awaiting_answer') {
         setPhase('question');
       } else {
-        setPhase('ready_to_play');
+        setPhase(skipIntro ? 'ready_to_play' : 'intro');
       }
     } catch (err) {
       const msg = err instanceof ListeningApiError ? err.message : 'Erro ao carregar episódio.';
@@ -168,19 +235,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     }
   }
 
-  // ── Handle audio ended ─────────────────────────────────────────────────────
   async function handleAudioEnded(sessionId: string) {
     setPhase('marking');
     try {
       await markPlaybackCompleted(sessionId);
-      setPhase('question');
     } catch {
-      // If marking fails, still show question (idempotent on backend)
-      setPhase('question');
+      // idempotent on backend
     }
+    setPhase('question');
   }
 
-  // ── Register ended callback whenever session changes ───────────────────────
   const { setOnEnded: playerSetOnEnded } = player;
   useEffect(() => {
     if (!session?.sessionId) return;
@@ -188,13 +252,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     playerSetOnEnded(() => handleAudioEnded(sid));
   }, [session?.sessionId, playerSetOnEnded]);
 
-  // ── Initial load ───────────────────────────────────────────────────────────
   useEffect(() => {
-    if (episodeId) {
-      loadSession(episodeId);
-    } else {
-      loadEpisodeList();
-    }
+    if (episodeId) loadSession(episodeId);
+    else loadEpisodeList();
   }, [episodeId]);
 
   async function loadEpisodeList() {
@@ -202,7 +262,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     try {
       const list = await getPublishedEpisodes();
       if (list.length === 1) {
-        // Auto-select single episode
         setEpisodeId(list[0].id);
       } else {
         setEpisodes(list);
@@ -216,46 +275,38 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     }
   }
 
-  // ── URL refresh scheduling ─────────────────────────────────────────────────
+  // ── URL refresh ─────────────────────────────────────────────────────────────
   function scheduleUrlRefresh(sessionId: string, expiresAt: string) {
     if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
     const msLeft = new Date(expiresAt).getTime() - Date.now() - 5 * 60 * 1000;
-    if (msLeft <= 0) {
-      doUrlRefresh(sessionId, expiresAt);
-      return;
-    }
+    if (msLeft <= 0) { doUrlRefresh(sessionId, expiresAt); return; }
     urlRefreshTimerRef.current = setTimeout(() => doUrlRefresh(sessionId, expiresAt), msLeft);
   }
 
-  async function doUrlRefresh(sessionId: string, _prevExpiresAt: string) {
+  async function doUrlRefresh(sessionId: string, _prev: string) {
     try {
       const info = await refreshAudioUrl(sessionId);
       player.updateUrl(info.url);
       scheduleUrlRefresh(sessionId, info.expiresAt);
-    } catch {
-      // Silently ignore — user will encounter error on next play attempt
-    }
+    } catch { /* silent */ }
   }
 
-  // ── Submit answer ──────────────────────────────────────────────────────────
+  // ── Submit answer ───────────────────────────────────────────────────────────
   async function handleSubmit() {
     if (selectedOption === null || !session || !block) return;
-    const submissionId = crypto.randomUUID();
     setPhase('submitting');
-
     try {
       const result = await submitAnswer({
         sessionId: session.sessionId,
         questionId: block.question!.id,
         selectedOption,
-        submissionId,
+        submissionId: crypto.randomUUID(),
         playbackRate: speed,
       });
-
       setLastResult(result);
-
       if (result.correct) {
         if (result.episodeCompleted) {
+          setTranscriptUnlocked(true);
           setPhase('done');
         } else {
           setPhase('correct');
@@ -263,10 +314,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       } else if (result.sessionStatus === 'abandoned') {
         setPhase('cycle_failed');
       } else {
-        // Wrong but more attempts available
         setPhase('wrong');
         wrongTimerRef.current = setTimeout(() => {
-          if (episodeId) loadSession(episodeId);
+          if (episodeId) loadSession(episodeId, true);
         }, 2500);
       }
     } catch (err) {
@@ -276,7 +326,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     }
   }
 
-  // ── Cleanup ────────────────────────────────────────────────────────────────
+  // ── Cleanup ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
@@ -284,94 +334,69 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     };
   }, []);
 
-  // ── Play handler ───────────────────────────────────────────────────────────
+  // ── Play ────────────────────────────────────────────────────────────────────
   async function handlePlay() {
     setPhase('playing');
     await player.play();
   }
 
-  // ── Navigate back within the view ─────────────────────────────────────────
-  function handleBack() {
-    if (phase === 'question' || phase === 'wrong' || phase === 'correct' || phase === 'cycle_failed') {
-      // Go back to player (allow re-listen before answering)
-      setPhase(player.state.isPlaying ? 'playing' : player.state.isEnded ? 'ready_to_play' : 'paused');
-    } else {
-      onBack();
-    }
-  }
-
-  // ── Derived ───────────────────────────────────────────────────────────────
+  // ── Derived ─────────────────────────────────────────────────────────────────
   const { currentTimeMs, durationMs } = player.state;
   const pct = durationMs > 0 ? Math.min((currentTimeMs / durationMs) * 100, 100) : 0;
-  const isPlayerPhase = phase === 'ready_to_play' || phase === 'playing' || phase === 'paused' || phase === 'marking';
 
-  // ── Subtitle mode label ───────────────────────────────────────────────────
-  function subtitleBadge() {
-    if (subtitleMode === 'none') return null;
-    return (
-      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${
-        subtitleMode === 'en'
-          ? 'bg-blue-900/40 border-blue-600/40 text-blue-300'
-          : 'bg-teal-900/40 border-teal-600/40 text-teal-300'
-      }`}>
-        <Volume2 className="w-3 h-3" />
-        {subtitleMode === 'en' ? 'Legendas: Inglês' : 'Legendas: Português'}
-      </span>
-    );
-  }
+  // ── Full transcript text (all blocks, en cues) ───────────────────────────────
+  const transcriptLines = useMemo(() => {
+    if (!episodeData) return [];
+    const lines: Array<{ speaker: string | null; text: string; lang: 'en' | 'pt' }> = [];
+    for (const b of episodeData.blocks) {
+      for (const cue of b.subtitles?.en ?? []) {
+        lines.push({ speaker: cue.speaker ?? null, text: cue.text, lang: 'en' });
+      }
+    }
+    return lines;
+  }, [episodeData]);
 
-  // ── Attempt badge ─────────────────────────────────────────────────────────
-  function attemptBadge() {
-    if (!session || session.currentAttempt === 1) return null;
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-900/40 border border-amber-600/40 text-amber-300">
-        Tentativa {session.currentAttempt}/3
-      </span>
-    );
-  }
-
-  // ── Header ────────────────────────────────────────────────────────────────
+  // ── Render: header ───────────────────────────────────────────────────────────
   function renderHeader() {
-    const showBack = phase !== 'loading' && phase !== 'selecting';
     return (
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 sticky top-0 bg-slate-900/95 backdrop-blur z-10">
         <button
-          onClick={showBack ? handleBack : onBack}
+          onClick={onBack}
           className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
           aria-label="Voltar"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <Headphones className="w-4 h-4 text-purple-400 shrink-0" />
-          <span className="text-sm font-medium text-slate-300 truncate">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-slate-200 truncate">
             {episodeData?.title ?? 'Listening'}
-          </span>
+          </p>
         </div>
         {episodeData && (
-          <span className="text-xs text-purple-400 font-medium shrink-0">{episodeData.cefrLevel}</span>
+          <span className="text-xs font-semibold text-purple-400 shrink-0 px-2 py-0.5 rounded-full bg-purple-600/15 border border-purple-500/20">
+            {episodeData.cefrLevel}
+          </span>
         )}
       </div>
     );
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
+  // ── Render: loading ──────────────────────────────────────────────────────────
   function renderLoading() {
     return (
-      <div className="flex flex-col items-center justify-center py-20 gap-4">
+      <div className="flex flex-col items-center justify-center py-20 gap-3">
         <div className="w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-slate-400 text-sm">Carregando episódio...</p>
+        <p className="text-slate-500 text-sm">Carregando...</p>
       </div>
     );
   }
 
-  // ── Error ─────────────────────────────────────────────────────────────────
+  // ── Render: error ────────────────────────────────────────────────────────────
   function renderError() {
     return (
       <div className="p-6 max-w-lg mx-auto text-center pt-10">
         <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
-        <h2 className="text-lg font-semibold text-slate-100 mb-2">Algo deu errado</h2>
-        <p className="text-sm text-slate-400 mb-6">{errorMsg || 'Erro ao carregar o episódio.'}</p>
+        <p className="text-sm text-slate-400 mb-6">{errorMsg || 'Erro ao carregar.'}</p>
         {episodeId && (
           <button
             onClick={() => loadSession(episodeId)}
@@ -384,7 +409,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     );
   }
 
-  // ── Episode selector ──────────────────────────────────────────────────────
+  // ── Render: selecting ────────────────────────────────────────────────────────
   function renderSelecting() {
     if (loadingEpisodes) return renderLoading();
     if (episodes.length === 0) {
@@ -396,172 +421,293 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       );
     }
     return (
-      <div className="p-4 pt-6 max-w-lg mx-auto">
-        <h2 className="text-lg font-semibold text-slate-100 mb-1">Escolha um episódio</h2>
-        <p className="text-sm text-slate-400 mb-5">Episódios disponíveis para praticar</p>
-        <div className="space-y-3">
-          {episodes.map(ep => (
-            <button
-              key={ep.id}
-              onClick={() => setEpisodeId(ep.id)}
-              className="w-full text-left bg-slate-800 border border-slate-700 hover:border-purple-500 rounded-xl p-4 transition-all"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-semibold text-slate-100 mb-1">{ep.title}</h3>
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <span className="px-2 py-0.5 rounded-full bg-purple-600/20 border border-purple-500/30 text-purple-300 font-medium">
-                      {ep.cefrLevel}
-                    </span>
-                    {ep.estimatedDurationSeconds && (
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {Math.round(ep.estimatedDurationSeconds / 60)}min
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+      <div className="p-4 pt-6 max-w-lg mx-auto space-y-3">
+        {episodes.map(ep => (
+          <button
+            key={ep.id}
+            onClick={() => setEpisodeId(ep.id)}
+            className="w-full text-left bg-slate-800 border border-slate-700 hover:border-purple-500/60 rounded-2xl p-5 transition-all group"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-purple-600/30 transition-colors">
+                <Headphones className="w-5 h-5 text-purple-400" />
               </div>
-            </button>
-          ))}
-        </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-semibold text-slate-100 mb-1 leading-snug">{ep.title}</h3>
+                {ep.synopsis && (
+                  <p className="text-xs text-slate-500 leading-relaxed line-clamp-2 mb-2">{ep.synopsis}</p>
+                )}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-purple-300 px-2 py-0.5 rounded-full bg-purple-600/15 border border-purple-500/20">
+                    {ep.cefrLevel}
+                  </span>
+                  {ep.estimatedDurationSeconds > 0 && (
+                    <span className="flex items-center gap-1 text-xs text-slate-500">
+                      <Clock className="w-3 h-3" />
+                      {Math.round(ep.estimatedDurationSeconds / 60)} min
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </button>
+        ))}
       </div>
     );
   }
 
-  // ── Player ────────────────────────────────────────────────────────────────
-  function renderPlayer() {
-    const isReadyToPlay = phase === 'ready_to_play';
-    const isMarking = phase === 'marking';
-    const playing = phase === 'playing';
+  // ── Render: intro ────────────────────────────────────────────────────────────
+  function renderIntro() {
+    const ep = episodeData;
+    if (!ep) return null;
+    const durationMin = ep.actualDurationSeconds
+      ? Math.ceil(ep.actualDurationSeconds / 60)
+      : ep.estimatedDurationSeconds
+      ? Math.ceil(ep.estimatedDurationSeconds / 60)
+      : null;
 
     return (
-      <div className="p-4 pt-2 max-w-lg mx-auto">
-        {/* Block indicator */}
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-xs font-medium text-slate-500">
-            Bloco {(blockIdx + 1)}/2
-          </span>
-          <div className="flex items-center gap-2">
-            {attemptBadge()}
-            {subtitleBadge()}
+      <div className="p-5 max-w-lg mx-auto space-y-5 pt-6">
+        {/* Episode card */}
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 space-y-5">
+          {/* Title */}
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold text-slate-100 leading-snug">{ep.title}</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-purple-300 px-2.5 py-1 rounded-full bg-purple-600/20 border border-purple-500/30">
+                {ep.cefrLevel}
+              </span>
+              {durationMin && (
+                <span className="flex items-center gap-1.5 text-xs text-slate-500 px-2.5 py-1 rounded-full bg-slate-700/60 border border-slate-600/40">
+                  <Clock className="w-3 h-3" />
+                  {durationMin} min
+                </span>
+              )}
+              <span className="flex items-center gap-1.5 text-xs text-slate-500 px-2.5 py-1 rounded-full bg-slate-700/60 border border-slate-600/40">
+                2 perguntas
+              </span>
+            </div>
+          </div>
+
+          {/* Synopsis */}
+          {ep.synopsis ? (
+            <div className="border-t border-slate-700 pt-4">
+              <p className="text-sm text-slate-300 leading-relaxed">{ep.synopsis}</p>
+            </div>
+          ) : null}
+
+          {/* What to expect */}
+          <div className="border-t border-slate-700 pt-4 space-y-2">
+            <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">Como funciona</p>
+            <ul className="space-y-1.5 text-xs text-slate-400">
+              <li className="flex items-start gap-2">
+                <span className="text-purple-400 mt-0.5">•</span>
+                Ouça a história e responda uma pergunta de compreensão por bloco
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-purple-400 mt-0.5">•</span>
+                Se errar, você poderá ouvir novamente — com legendas
+              </li>
+            </ul>
           </div>
         </div>
 
-        {/* Waveform + progress */}
-        <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4 mb-4">
+        <button
+          onClick={() => setPhase('ready_to_play')}
+          className="w-full py-4 rounded-2xl bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white font-semibold text-base transition-colors shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2"
+        >
+          <Headphones className="w-5 h-5" />
+          Começar a ouvir
+        </button>
+      </div>
+    );
+  }
+
+  // ── Render: subtitle area ─────────────────────────────────────────────────────
+  function renderSubtitleArea() {
+    if (subtitleMode === 'none') return null;
+    const hasCue = activeCueEn || activeCuePt;
+    const color = getSpeakerColor(activeSpeaker);
+
+    return (
+      <div className="mt-4 pt-4 border-t border-slate-700 min-h-[68px]">
+        {/* Subtitle choice (attempt 3 only) */}
+        {subtitleMode === 'pt-BR' && (
+          <div className="flex gap-1.5 mb-3">
+            {(['en', 'pt-BR', 'both'] as SubtitleChoice[]).map(c => (
+              <button
+                key={c}
+                onClick={() => setSubtitleChoice(c)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                  subtitleChoice === c
+                    ? 'bg-purple-600/40 border border-purple-500/50 text-purple-300'
+                    : 'bg-slate-700/50 border border-slate-600/30 text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                {c === 'en' ? 'Inglês' : c === 'pt-BR' ? 'Português' : 'Ambos'}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Active cue(s) */}
+        {hasCue ? (
+          <div className="space-y-1.5">
+            {activeSpeaker && (
+              <div className="flex items-center gap-1.5">
+                <div className="w-1 h-3 rounded-full shrink-0" style={{ background: color }} />
+                <span className="text-xs font-medium" style={{ color }}>{activeSpeaker}</span>
+              </div>
+            )}
+            {activeCueEn && showEnSubs && (
+              <p className="text-sm text-slate-100 leading-relaxed">{activeCueEn.text}</p>
+            )}
+            {activeCuePt && showPtSubs && (
+              <p className={`text-sm leading-relaxed ${showEnSubs ? 'text-slate-400' : 'text-slate-100'}`}>
+                {activeCuePt.text}
+              </p>
+            )}
+          </div>
+        ) : (
+          phase === 'playing' && (
+            <p className="text-xs text-slate-600 italic">Aguardando...</p>
+          )
+        )}
+      </div>
+    );
+  }
+
+  // ── Render: player ────────────────────────────────────────────────────────────
+  function renderPlayer() {
+    const playing = phase === 'playing';
+    const isMarking = phase === 'marking';
+    const isReady = phase === 'ready_to_play';
+
+    return (
+      <div className="p-4 pt-3 max-w-lg mx-auto space-y-4">
+        {/* Block + attempt context */}
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-500 font-medium">Bloco {blockIdx + 1} de 2</span>
+          {session && session.currentAttempt > 1 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400 font-medium">
+              Tentativa {session.currentAttempt}/3
+            </span>
+          )}
+        </div>
+
+        {/* Waveform + progress + subtitles */}
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4">
           <Waveform playing={playing} />
 
-          <div className="mt-4">
-            <div className="flex justify-between text-xs text-slate-500 mb-1.5">
-              <span>{fmtMs(currentTimeMs)}</span>
-              <span>{durationMs > 0 ? fmtMs(durationMs) : '--:--'}</span>
-            </div>
-            <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+          <div className="mt-3">
+            <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-1.5">
               <div
                 className="h-full bg-purple-500 rounded-full transition-all duration-100"
                 style={{ width: `${pct}%` }}
               />
             </div>
+            <div className="flex justify-between text-xs text-slate-600">
+              <span>{fmtMs(currentTimeMs)}</span>
+              <span>{durationMs > 0 ? fmtMs(durationMs) : '--:--'}</span>
+            </div>
           </div>
 
-          {/* Subtitle cue */}
-          {subtitleMode !== 'none' && (
-            <div className="mt-4 pt-4 border-t border-slate-700 min-h-[56px] flex items-center">
-              {activeCue ? (
-                <p className="text-sm text-slate-100 leading-relaxed italic">
-                  "{activeCue.text}"
-                </p>
-              ) : (
-                <p className="text-xs text-slate-600 italic">
-                  {playing ? 'Aguardando legenda...' : ''}
-                </p>
-              )}
-            </div>
-          )}
+          {renderSubtitleArea()}
         </div>
 
         {/* Controls */}
         {isMarking ? (
-          <div className="flex items-center justify-center py-4 gap-2 text-slate-400">
-            <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm">Salvando...</span>
+          <div className="flex items-center justify-center py-2 gap-2 text-slate-500">
+            <div className="w-4 h-4 border-2 border-slate-600 border-t-purple-500 rounded-full animate-spin" />
+            <span className="text-xs">Processando...</span>
           </div>
         ) : (
-          <div className="flex items-center justify-center gap-4 mb-5">
+          <div className="flex items-center justify-center gap-6">
+            {/* Back 10s */}
             <button
-              onClick={() => { player.restart(); if (!isReadyToPlay) setPhase('ready_to_play'); }}
-              className="p-3 rounded-full bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
-              title="Reiniciar"
+              onClick={() => player.seekBack(10)}
+              className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Voltar 10 segundos"
             >
-              <RotateCcw className="w-5 h-5" />
+              <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors relative">
+                <Rewind className="w-4 h-4" />
+                <span className="absolute bottom-0.5 right-0 text-[9px] font-bold text-slate-400 leading-none">10</span>
+              </div>
+              <span className="text-xs text-slate-600">-10s</span>
             </button>
 
-            {isReadyToPlay ? (
+            {/* Play / Pause */}
+            {isReady || !playing ? (
               <button
                 onClick={handlePlay}
-                className="p-5 rounded-full bg-purple-600 hover:bg-purple-500 text-white transition-colors shadow-lg shadow-purple-900/40"
+                className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
                 aria-label="Reproduzir"
               >
-                <Play className="w-7 h-7" />
+                <Play className="w-7 h-7 translate-x-0.5" />
               </button>
-            ) : playing ? (
+            ) : (
               <button
                 onClick={() => { player.pause(); setPhase('paused'); }}
-                className="p-5 rounded-full bg-purple-600 hover:bg-purple-500 text-white transition-colors shadow-lg shadow-purple-900/40"
+                className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
                 aria-label="Pausar"
               >
                 <Pause className="w-7 h-7" />
               </button>
-            ) : (
-              <button
-                onClick={handlePlay}
-                className="p-5 rounded-full bg-purple-600 hover:bg-purple-500 text-white transition-colors shadow-lg shadow-purple-900/40"
-                aria-label="Continuar"
-              >
-                <Play className="w-7 h-7" />
-              </button>
             )}
 
-            <div className="w-11 h-11" /> {/* spacer */}
+            {/* Replay block */}
+            <button
+              onClick={() => { player.restart(); setPhase('ready_to_play'); }}
+              className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Reouvir bloco"
+            >
+              <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors">
+                <RotateCcw className="w-4 h-4" />
+              </div>
+              <span className="text-xs text-slate-600">Reouvir</span>
+            </button>
           </div>
         )}
 
-        {/* Speed control */}
+        {/* Speed */}
         <div className="flex items-center justify-center gap-2">
           {SPEEDS.map(s => (
             <button
               key={s}
               onClick={() => setSpeed(s)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-w-[44px] ${
                 speed === s
                   ? 'bg-purple-600 text-white'
-                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                  : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
               }`}
             >
-              {formatSpeed(s)}
+              {s === 1.00 ? '1×' : `${s}×`}
             </button>
           ))}
         </div>
 
-        {/* Ready to play — context hint */}
-        {isReadyToPlay && subtitleMode !== 'none' && (
-          <div className={`mt-5 rounded-xl p-3 text-center text-xs border ${
-            subtitleMode === 'en'
-              ? 'bg-blue-900/20 border-blue-700/30 text-blue-300'
-              : 'bg-teal-900/20 border-teal-700/30 text-teal-300'
-          }`}>
-            {subtitleMode === 'en'
-              ? 'Desta vez você ouvirá com legendas em inglês.'
-              : 'Desta vez você ouvirá com legendas em português.'}
-          </div>
-        )}
+        {/* Transcript button */}
+        <button
+          onClick={() => transcriptUnlocked && setShowTranscript(true)}
+          disabled={!transcriptUnlocked}
+          className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-medium transition-colors ${
+            transcriptUnlocked
+              ? 'border-slate-600 text-slate-300 hover:bg-slate-800 hover:border-slate-500'
+              : 'border-slate-700/50 text-slate-600 cursor-not-allowed'
+          }`}
+        >
+          {transcriptUnlocked ? (
+            <ScrollText className="w-3.5 h-3.5" />
+          ) : (
+            <Lock className="w-3.5 h-3.5" />
+          )}
+          {transcriptUnlocked ? 'Transcrição' : 'Disponível ao concluir a atividade'}
+        </button>
       </div>
     );
   }
 
-  // ── Question ──────────────────────────────────────────────────────────────
+  // ── Render: question ──────────────────────────────────────────────────────────
   function renderQuestion() {
     const q = block?.question;
     if (!q) return null;
@@ -569,14 +715,18 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
     return (
       <div className="p-4 pt-4 max-w-lg mx-auto">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-medium text-purple-400">Bloco {blockIdx + 1}/2 — Pergunta</span>
-          {attemptBadge()}
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-xs text-purple-400 font-medium">Bloco {blockIdx + 1}/2</span>
+          {session && session.currentAttempt > 1 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400">
+              Tentativa {session.currentAttempt}/3
+            </span>
+          )}
         </div>
 
         <h3 className="text-base font-semibold text-slate-100 leading-snug mb-5">{q.prompt}</h3>
 
-        <div className="space-y-3 mb-6">
+        <div className="space-y-3 mb-5">
           {q.options.map((opt, i) => {
             const isSelected = selectedOption === i;
             return (
@@ -586,11 +736,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
                 disabled={isSubmitting}
                 className={`w-full text-left px-4 py-3.5 rounded-xl border text-sm transition-all ${
                   isSelected
-                    ? 'bg-purple-700/30 border-purple-500 text-slate-100'
-                    : 'bg-slate-800 border-slate-700 hover:border-purple-500/60 hover:bg-slate-700/60 text-slate-200'
-                } ${isSubmitting ? 'opacity-60 cursor-not-allowed' : ''}`}
+                    ? 'bg-purple-700/25 border-purple-500 text-slate-100'
+                    : 'bg-slate-800 border-slate-700 hover:border-purple-500/50 hover:bg-slate-700/50 text-slate-200'
+                } ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                <span className="font-semibold text-purple-400 mr-2">{String.fromCharCode(65 + i)}.</span>
+                <span className="font-bold text-purple-400 mr-2">{String.fromCharCode(65 + i)}.</span>
                 {opt}
               </button>
             );
@@ -604,7 +754,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         >
           {isSubmitting ? (
             <>
-              <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               Verificando...
             </>
           ) : (
@@ -614,185 +764,214 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
         <button
           onClick={() => setPhase(player.state.isEnded ? 'ready_to_play' : 'paused')}
-          className="w-full mt-3 py-2.5 text-xs text-slate-500 hover:text-slate-400 transition-colors"
+          className="w-full mt-2 py-2.5 text-xs text-slate-600 hover:text-slate-400 transition-colors"
         >
-          Ouvir novamente antes de responder
+          Ouvir novamente
         </button>
       </div>
     );
   }
 
-  // ── Correct answer ────────────────────────────────────────────────────────
+  // ── Render: correct ──────────────────────────────────────────────────────────
   function renderCorrect() {
     const explanation = lastResult?.explanationPt;
-    const blockDone = blockIdx === 0;
+    const advance = () => {
+      if (lastResult?.episodeCompleted || blockIdx === 1) {
+        setTranscriptUnlocked(true);
+        setPhase('done');
+      } else if (episodeId) {
+        loadSession(episodeId, true);
+      }
+    };
 
     return (
-      <div className="p-6 max-w-lg mx-auto text-center pt-8">
-        <div className="w-16 h-16 rounded-full bg-emerald-900/40 border border-emerald-600/50 flex items-center justify-center mx-auto mb-5">
-          <Check className="w-8 h-8 text-emerald-400" />
+      <div className="p-6 max-w-lg mx-auto pt-8 space-y-5">
+        <div className="text-center space-y-3">
+          <div className="w-14 h-14 rounded-full bg-emerald-900/40 border border-emerald-600/40 flex items-center justify-center mx-auto">
+            <Check className="w-7 h-7 text-emerald-400" />
+          </div>
+          <div>
+            <p className="text-lg font-bold text-emerald-300">Correto!</p>
+            <p className="text-sm text-slate-400 mt-0.5">
+              {blockIdx === 0 ? 'Bloco 1 concluído.' : 'Episódio concluído!'}
+            </p>
+          </div>
         </div>
-        <h2 className="text-xl font-bold text-emerald-300 mb-2">Correto!</h2>
-
-        {blockDone ? (
-          <p className="text-sm text-slate-400 mb-4">
-            Bloco 1 concluído! Continue para o bloco 2.
-          </p>
-        ) : (
-          <p className="text-sm text-slate-400 mb-4">
-            Parabéns! Você completou este episódio.
-          </p>
-        )}
 
         {explanation && (
-          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6 text-left">
-            <p className="text-xs text-slate-500 font-medium mb-1">Explicação</p>
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+            <p className="text-xs text-slate-500 font-medium mb-1.5">Explicação</p>
             <p className="text-sm text-slate-300 leading-relaxed">{explanation}</p>
           </div>
         )}
 
-        <button
-          onClick={() => {
-            if (lastResult?.episodeCompleted) {
-              setPhase('done');
-            } else if (episodeId) {
-              // Reload session to get block 2
-              loadSession(episodeId);
-            }
-          }}
-          className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
-        >
-          {blockDone ? (
-            <>
-              Continuar para o bloco 2
-              <ChevronRight className="w-5 h-5" />
-            </>
-          ) : (
-            <>
-              <Trophy className="w-5 h-5" />
-              Concluído!
-            </>
-          )}
-        </button>
+        <AutoAdvanceBar durationMs={3500} onDone={advance} />
+        <p className="text-xs text-slate-600 text-center">Continuando automaticamente...</p>
       </div>
     );
   }
 
-  // ── Wrong answer (not last attempt) ───────────────────────────────────────
+  // ── Render: wrong ────────────────────────────────────────────────────────────
   function renderWrong() {
-    const nextAttempt = lastResult?.nextAttempt;
     const nextMode = lastResult?.nextSubtitleMode;
-
     return (
-      <div className="p-6 max-w-lg mx-auto text-center pt-8">
-        <div className="w-16 h-16 rounded-full bg-red-900/40 border border-red-600/50 flex items-center justify-center mx-auto mb-5">
-          <X className="w-8 h-8 text-red-400" />
+      <div className="p-6 max-w-lg mx-auto text-center pt-8 space-y-4">
+        <div className="w-14 h-14 rounded-full bg-red-900/40 border border-red-600/40 flex items-center justify-center mx-auto">
+          <X className="w-7 h-7 text-red-400" />
         </div>
-        <h2 className="text-xl font-bold text-red-300 mb-2">Incorreto</h2>
-        <p className="text-sm text-slate-400 mb-3">
-          {nextAttempt
-            ? `Tentativa ${nextAttempt}/3`
-            : 'Mais uma chance!'}
-          {nextMode === 'en' && ' — ouça novamente com legendas em inglês.'}
-          {nextMode === 'pt-BR' && ' — ouça novamente com legendas em português.'}
-          {!nextMode && ' — ouça novamente.'}
-        </p>
-        <div className="flex items-center justify-center gap-2 text-xs text-slate-500">
-          <div className="w-4 h-4 border-2 border-slate-600 border-t-purple-500 rounded-full animate-spin" />
-          <span>Preparando nova tentativa...</span>
+        <div>
+          <p className="text-lg font-bold text-red-300">Incorreto</p>
+          <p className="text-sm text-slate-400 mt-1">
+            {nextMode === 'en' && 'Ouça novamente — desta vez com legendas em inglês.'}
+            {nextMode === 'pt-BR' && 'Ouça novamente — desta vez com legendas.'}
+            {!nextMode && 'Ouça novamente.'}
+          </p>
+        </div>
+        <div className="flex items-center justify-center gap-2 text-xs text-slate-600">
+          <div className="w-3.5 h-3.5 border-2 border-slate-700 border-t-purple-600 rounded-full animate-spin" />
+          Preparando...
         </div>
       </div>
     );
   }
 
-  // ── Cycle failed (3 wrong answers) ────────────────────────────────────────
+  // ── Render: cycle_failed ──────────────────────────────────────────────────────
   function renderCycleFailed() {
     const correctIndex = lastResult?.correctOption ?? null;
     const q = block?.question;
     const explanation = lastResult?.explanationPt;
+    const restart = () => { if (episodeId) loadSession(episodeId, true); };
 
     return (
-      <div className="p-4 pt-6 max-w-lg mx-auto">
-        <div className="flex items-center gap-3 p-4 rounded-xl bg-red-900/30 border border-red-700/40 mb-5">
-          <AlertCircle className="w-6 h-6 text-red-400 shrink-0" />
+      <div className="p-4 pt-6 max-w-lg mx-auto space-y-4">
+        <div className="flex items-center gap-3 p-4 rounded-xl bg-red-900/20 border border-red-700/30">
+          <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
           <div>
             <p className="font-semibold text-sm text-red-300">Ciclo esgotado</p>
-            <p className="text-xs text-slate-400 mt-0.5">Você usou as 3 tentativas deste ciclo.</p>
+            <p className="text-xs text-slate-500 mt-0.5">3 tentativas usadas.</p>
           </div>
         </div>
 
         {q && correctIndex !== null && (
-          <div className="mb-5">
-            <p className="text-xs text-slate-500 font-medium mb-3">Resposta correta:</p>
-            <div className="space-y-2">
-              {q.options.map((opt, i) => {
-                const isCorrect = i === correctIndex;
-                return (
-                  <div
-                    key={i}
-                    className={`flex items-start gap-3 px-4 py-3 rounded-xl border text-sm ${
-                      isCorrect
-                        ? 'bg-emerald-900/30 border-emerald-600/50 text-emerald-200'
-                        : 'bg-slate-800 border-slate-700 text-slate-500'
-                    }`}
-                  >
-                    <span className="font-semibold shrink-0">{String.fromCharCode(65 + i)}.</span>
-                    <span className="flex-1">{opt}</span>
-                    {isCorrect && <Check className="w-4 h-4 ml-auto shrink-0 text-emerald-400 mt-0.5" />}
-                  </div>
-                );
-              })}
-            </div>
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500 font-medium">Resposta correta:</p>
+            {q.options.map((opt, i) => {
+              const isCorrect = i === correctIndex;
+              return (
+                <div
+                  key={i}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
+                    isCorrect
+                      ? 'bg-emerald-900/25 border-emerald-600/40 text-emerald-200'
+                      : 'bg-slate-800 border-slate-700 text-slate-600'
+                  }`}
+                >
+                  <span className="font-semibold shrink-0">{String.fromCharCode(65 + i)}.</span>
+                  <span className="flex-1">{opt}</span>
+                  {isCorrect && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
+                </div>
+              );
+            })}
           </div>
         )}
 
         {explanation && (
-          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
             <p className="text-xs text-slate-500 font-medium mb-1">Explicação</p>
             <p className="text-sm text-slate-300 leading-relaxed">{explanation}</p>
           </div>
         )}
 
+        <AutoAdvanceBar durationMs={5000} onDone={restart} />
+        <p className="text-xs text-slate-600 text-center">Iniciando novo ciclo...</p>
+
         <button
-          onClick={() => { if (episodeId) loadSession(episodeId); }}
-          className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+          onClick={restart}
+          className="w-full py-3 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-600/30 text-purple-300 text-sm font-medium transition-colors flex items-center justify-center gap-2"
         >
           <RefreshCw className="w-4 h-4" />
-          Começar novo ciclo
-        </button>
-
-        <button
-          onClick={onBack}
-          className="w-full mt-3 py-3 text-sm text-slate-500 hover:text-slate-400 transition-colors"
-        >
-          Sair
+          Novo ciclo agora
         </button>
       </div>
     );
   }
 
-  // ── Episode done ──────────────────────────────────────────────────────────
+  // ── Render: done ──────────────────────────────────────────────────────────────
   function renderDone() {
     return (
-      <div className="p-6 max-w-lg mx-auto text-center pt-10">
-        <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/50 flex items-center justify-center mx-auto mb-6">
+      <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
+        <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/40 flex items-center justify-center mx-auto">
           <Trophy className="w-10 h-10 text-purple-400" />
         </div>
-        <h2 className="text-2xl font-bold text-slate-100 mb-2">Episódio concluído!</h2>
-        <p className="text-sm text-slate-400 mb-8">
-          Você completou todos os blocos de "{episodeData?.title ?? 'este episódio'}".
-        </p>
+        <div>
+          <h2 className="text-2xl font-bold text-slate-100">Episódio concluído!</h2>
+          <p className="text-sm text-slate-400 mt-2">
+            Você completou "{episodeData?.title ?? 'este episódio'}".
+          </p>
+        </div>
+
+        {transcriptLines.length > 0 && (
+          <button
+            onClick={() => setShowTranscript(true)}
+            className="w-full py-4 rounded-xl border border-purple-500/40 bg-purple-600/15 hover:bg-purple-600/25 text-purple-300 font-semibold transition-colors flex items-center justify-center gap-2"
+          >
+            <ScrollText className="w-5 h-5" />
+            Ver transcrição completa
+          </button>
+        )}
+
         <button
           onClick={onBack}
-          className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors"
+          className="w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition-colors"
         >
-          Voltar ao início
+          Voltar
         </button>
       </div>
     );
   }
 
-  // ── Main render ───────────────────────────────────────────────────────────
+  // ── Render: transcript modal ──────────────────────────────────────────────────
+  function renderTranscriptModal() {
+    if (!showTranscript) return null;
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80"
+        onClick={() => setShowTranscript(false)}
+      >
+        <div
+          className="bg-slate-900 border border-slate-700 w-full sm:max-w-lg max-h-[85vh] rounded-t-2xl sm:rounded-2xl flex flex-col"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+            <p className="text-sm font-semibold text-slate-100">Transcrição — {episodeData?.title}</p>
+            <button onClick={() => setShowTranscript(false)} className="text-slate-500 hover:text-slate-300 text-lg leading-none">✕</button>
+          </div>
+          <div className="overflow-auto p-5 space-y-3">
+            {transcriptLines.map((line, i) => {
+              const color = getSpeakerColor(line.speaker);
+              return (
+                <div key={i} className="flex gap-3">
+                  {line.speaker && (
+                    <div className="flex flex-col items-center gap-1 shrink-0 pt-0.5">
+                      <div className="w-0.5 flex-1 rounded-full" style={{ background: color, minHeight: '100%' }} />
+                    </div>
+                  )}
+                  <div>
+                    {line.speaker && (
+                      <p className="text-xs font-semibold mb-0.5" style={{ color }}>{line.speaker}</p>
+                    )}
+                    <p className="text-sm text-slate-300 leading-relaxed">{line.text}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main render ───────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 pb-8">
       {renderHeader()}
@@ -800,6 +979,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       <div>
         {phase === 'loading' && renderLoading()}
         {phase === 'selecting' && renderSelecting()}
+        {phase === 'intro' && renderIntro()}
         {phase === 'error' && renderError()}
         {isPlayerPhase && renderPlayer()}
         {(phase === 'question' || phase === 'submitting') && renderQuestion()}
@@ -808,6 +988,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         {phase === 'cycle_failed' && renderCycleFailed()}
         {phase === 'done' && renderDone()}
       </div>
+
+      {renderTranscriptModal()}
     </div>
   );
 }
