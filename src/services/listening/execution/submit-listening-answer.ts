@@ -208,7 +208,7 @@ export async function submitListeningAnswer(
       sessionStatus: 'abandoned',
       nextAttempt: null,
       nextSubtitleMode: null,
-      explanationPt: null,
+      explanationPt: question.explanation_pt,
       correctOption: question.correct_option,
       blockCompleted: false,
       episodeCompleted: false,

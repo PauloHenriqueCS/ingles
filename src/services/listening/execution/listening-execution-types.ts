@@ -85,7 +85,10 @@ export type SubmitAnswerResult = {
   sessionStatus: ListeningBlockSessionStatus;
   nextAttempt: 1 | 2 | 3 | null;
   nextSubtitleMode: 'none' | 'en' | 'pt-BR' | null;
+  /** Returned on correct answer OR on cycle failure (session abandoned). Never on wrong mid-cycle. */
   explanationPt: string | null;
+  /** Returned only on cycle failure — index of the correct option (0-based). */
+  correctOption: number | null;
   blockCompleted: boolean;
   episodeCompleted: boolean;
 };
