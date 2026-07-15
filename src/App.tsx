@@ -39,6 +39,7 @@ export default function App() {
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(DEFAULT_SETTINGS);
   const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [listeningEpisodeId, setListeningEpisodeId] = useState<string | undefined>(undefined);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
@@ -182,7 +183,7 @@ export default function App() {
           <ConversationView />
         )}
         {view === 'listening' && (
-          <ListeningView onBack={() => setView('home')} />
+          <ListeningView onBack={() => setView('home')} episodeId={listeningEpisodeId} />
         )}
         {view === 'audio-settings' && (
           <AudioSettingsView onBack={() => setView('home')} />
