@@ -24,6 +24,7 @@ export const PAYLOAD_LIMITS = {
   COMPARE:    131_072,    // 128 KB — three texts + mistakes list
   CONVERSATION:  4_096,   //   4 KB — session config (body is minimal)
   PREVIEW:       2_048,   //   2 KB — voice + pace
+  TTS:          16_384,   //  16 KB — TTS text payload
 } as const;
 
 // ── Timeout values (ms) ───────────────────────────────────────────────────────

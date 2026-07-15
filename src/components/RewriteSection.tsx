@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { PenLine, Loader2, Target } from 'lucide-react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
 import { getAuthHeader } from '../lib/apiAuth';
+import V2AudioPlayer from './V2AudioPlayer';
 
 type CompareState = 'idle' | 'loading' | 'done' | 'error';
 
@@ -121,6 +122,14 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
           <p className="text-xs text-amber-400">Escreva sua versão 2 antes de comparar.</p>
         )}
       </div>
+
+      {/* Listen to Version 2 */}
+      {rewriteText.trim() && (
+        <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3">
+          <p className="text-xs text-slate-500 mb-2">Ouça como sua versão 2 soa em inglês</p>
+          <V2AudioPlayer text={rewriteText.trim()} />
+        </div>
+      )}
 
       {/* Compare button */}
       <button
