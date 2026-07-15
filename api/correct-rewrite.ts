@@ -35,16 +35,19 @@ export default async function handler(req: any, res: any) {
   const { rewriteText, originalCorrectedText, studentLevel } = req.body ?? {};
 
   if (typeof rewriteText !== 'string' || !rewriteText.trim()) {
+    safeLog('correct-rewrite', 'invalid_request', 400, { reason: 'missing_rewrite_text' });
     jsonError(res, 400, 'INVALID_REQUEST', 'rewriteText é obrigatório.');
     return;
   }
   if (typeof originalCorrectedText !== 'string' || !originalCorrectedText.trim()) {
+    safeLog('correct-rewrite', 'invalid_request', 400, { reason: 'missing_corrected_text' });
     jsonError(res, 400, 'INVALID_REQUEST', 'originalCorrectedText é obrigatório.');
     return;
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    safeLog('correct-rewrite', 'config_error', 500, { reason: 'missing_api_key' });
     jsonError(res, 500, 'INTERNAL_ERROR', 'Serviço de IA não configurado.');
     return;
   }

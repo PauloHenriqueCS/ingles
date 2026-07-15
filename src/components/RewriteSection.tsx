@@ -39,6 +39,10 @@ export default function RewriteSection({
   const isComparing = compareState === 'loading';
 
   async function fetchFinalText(v2Text: string) {
+    if (!v2Text || !aiReview.correctedText) {
+      setFinalCorrectState('error');
+      return;
+    }
     setFinalCorrectState('loading');
     try {
       const authHeader = await getAuthHeader();
@@ -52,13 +56,14 @@ export default function RewriteSection({
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar versão final');
+      if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
       const final = String(data.finalCorrectedText ?? '');
       if (!final) throw new Error('Resposta vazia');
       setFinalCorrectedText(final);
       setFinalCorrectState('done');
       onV2FinalText?.(final);
-    } catch {
+    } catch (err) {
+      console.error('[correct-rewrite]', err);
       setFinalCorrectState('error');
     }
   }
