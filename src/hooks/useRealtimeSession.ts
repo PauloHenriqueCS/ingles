@@ -60,11 +60,14 @@ export function useRealtimeSession(): UseRealtimeSession {
   const endCalledRef       = useRef(false);
   const transcriptAccumRef = useRef('');
   const responseActiveRef  = useRef(false);
+  const displayCountRef    = useRef(0);
+  const revealTimerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const cleanup = useCallback((nextStatus?: SessionStatus) => {
     endCalledRef.current = true;
 
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
     if (dcRef.current) { try { dcRef.current.close(); } catch { /* ignore */ } dcRef.current = null; }
     if (pcRef.current) { try { pcRef.current.close(); } catch { /* ignore */ } pcRef.current = null; }
     stopStream(streamRef.current);
@@ -72,6 +75,7 @@ export function useRealtimeSession(): UseRealtimeSession {
 
     startTimeRef.current = null;
     transcriptAccumRef.current = '';
+    displayCountRef.current = 0;
     responseActiveRef.current = false;
     setIsSpeaking(false);
     setSessionInfo(null);
@@ -207,34 +211,40 @@ export function useRealtimeSession(): UseRealtimeSession {
           error?: { type?: string; code?: string; param?: string };
         };
 
-        // Log all non-audio-delta events for debugging captions
-        if (ev.type !== 'response.output_audio.delta') {
-          console.debug('[realtime] event:', ev.type, ev.delta !== undefined ? { delta: ev.delta } : '');
-        }
-
-        // Reset transcript on new response (response.created fires before any deltas)
+        // Reset transcript and start paced reveal on new response
         if (ev.type === 'response.created') {
           responseActiveRef.current = true;
           transcriptAccumRef.current = '';
+          displayCountRef.current = 0;
           setTranscriptText('');
+          if (revealTimerRef.current) clearInterval(revealTimerRef.current);
+          // Reveal ~10 chars/sec (~120 WPM) so captions pace with spoken audio
+          revealTimerRef.current = setInterval(() => {
+            const full = transcriptAccumRef.current;
+            if (displayCountRef.current >= full.length) return;
+            displayCountRef.current++;
+            setTranscriptText(full.slice(0, displayCountRef.current));
+          }, 100);
         }
 
         if (ev.type === 'response.output_audio.delta') {
           setIsSpeaking(true);
         }
 
-        // Accumulate transcript deltas — handle both known event type variants
+        // Accumulate transcript deltas into ref only — reveal timer controls display
         const isTranscriptDelta =
           ev.type === 'response.audio_transcript.delta' ||
           ev.type === 'response.output_audio_transcript.delta';
         if (isTranscriptDelta && typeof ev.delta === 'string') {
           transcriptAccumRef.current += ev.delta;
-          setTranscriptText(transcriptAccumRef.current);
         }
 
-        if (ev.type === 'response.output_audio.done' || ev.type === 'response.done') {
+        if (ev.type === 'response.done') {
           responseActiveRef.current = false;
           setIsSpeaking(false);
+          // Stop reveal timer and snap to full text so nothing is cut off
+          if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+          setTranscriptText(transcriptAccumRef.current);
         }
 
         // Error events from the server
