@@ -50,7 +50,7 @@ export class ListeningTimingAudioNotReadyError extends Error {
 export class ListeningTimingVersionMismatchError extends Error {
   readonly code = 'LISTENING_TIMING_VERSION_MISMATCH';
   readonly retryable = false;
-  constructor(readonly episodeId: string, blockOrder: number, message: string) {
+  constructor(readonly episodeId: string, _blockOrder: number, message: string) {
     super(message);
     this.name = 'ListeningTimingVersionMismatchError';
   }

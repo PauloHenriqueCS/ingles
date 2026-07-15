@@ -143,8 +143,8 @@ export async function persistListeningQuestions(
     await insertQuestion(supabase, episodeId, blockId2, questions[1], validationResults[1]);
   } catch (err) {
     // Tentar remover a pergunta 1 já inserida para evitar estado parcial
-    await supabase.from('listening_questions').delete().eq('id', q1Id).catch(() => {});
-    await updateEpisodeQuestionsStatus(supabase, episodeId, 'failed').catch(() => {});
+    try { await supabase.from('listening_questions').delete().eq('id', q1Id); } catch {}
+    try { await updateEpisodeQuestionsStatus(supabase, episodeId, 'failed'); } catch {}
     throw err;
   }
 

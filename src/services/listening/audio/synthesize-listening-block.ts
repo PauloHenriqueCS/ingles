@@ -113,7 +113,7 @@ async function runSynthesisOnce(
   ssml: string,
   azureConfig: ListeningAzureSpeechConfig,
 ): Promise<ListeningSynthesisRawResult> {
-  const speechConfig = SpeechConfig.fromSubscriptionKey(
+  const speechConfig = SpeechConfig.fromSubscription(
     azureConfig.subscriptionKey,
     azureConfig.region,
   );

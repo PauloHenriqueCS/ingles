@@ -124,7 +124,7 @@ export function validateTranslationDeterministic(
     const validated: ValidatedTranslatedCue[] = [];
 
     for (let i = 0; i < ptCues.length; i++) {
-      const ptCue = ptCues[i] as RawTranslatedCue;
+      const ptCue = ptCues[i] as unknown as RawTranslatedCue;
       const expectedKey = enCues[i].cueKey;
 
       if (ptCue.cueKey !== expectedKey) {

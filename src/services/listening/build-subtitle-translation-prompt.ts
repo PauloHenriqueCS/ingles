@@ -1,5 +1,5 @@
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
-import type { EnglishCueDraft, SubtitleAIValidationResult } from './listening-subtitle-schema';
+import type { EnglishCueDraft } from './listening-subtitle-schema';
 
 export const TRANSLATION_PROMPT_VERSION = 'listening-subtitle-translation-v1';
 export const VALIDATOR_PROMPT_VERSION = 'listening-subtitle-translation-validator-v1';

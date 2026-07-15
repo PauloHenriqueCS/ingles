@@ -2,7 +2,6 @@ import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { EnglishCueDraft } from './listening-subtitle-schema';
 import {
   CUE_WORD_COUNT,
-  MAX_SENTENCES_PER_CUE,
   SPLIT_CONJUNCTIONS,
   NO_BREAK_BEFORE,
 } from './listening-subtitle-config';

@@ -1,5 +1,4 @@
 import type {
-  RawQuestionsResponse,
   RawGeneratedQuestion,
   ValidatedGeneratedQuestion,
 } from './listening-question-schema';

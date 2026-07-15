@@ -146,7 +146,7 @@ export function createQuestionAICallFn(apiKey: string): AICallWithUsageFn {
         totalTokens: resp.usage?.total_tokens ?? 0,
         durationMs,
       },
-      requestId: (resp as Record<string, unknown>)._request_id as string | null ?? null,
+      requestId: (resp as unknown as Record<string, unknown>)._request_id as string | null ?? null,
     };
   };
 }
