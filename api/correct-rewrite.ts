@@ -29,7 +29,7 @@ export default async function handler(req: any, res: any) {
   const user = await requireAuth(req, res);
   if (!user) return;
 
-  const limited = await applyRateLimit(req, res, user.id, 'correct-rewrite');
+  const limited = await applyRateLimit(res, user.userId, 'correct-rewrite');
   if (limited) return;
 
   const { rewriteText, originalCorrectedText, studentLevel } = req.body ?? {};
