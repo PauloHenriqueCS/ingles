@@ -1,0 +1,78 @@
+/**
+ * POST /api/listening/session/answer
+ * Body: { sessionId, questionId, selectedOption, submissionId, playbackRate? }
+ * Validates the user's answer server-side.
+ * Never leaks the correct option. Returns explanationPt only on correct answer.
+ */
+
+import { requireAuth } from '../../_auth';
+import { methodGuard, sizeGuard, jsonError, safeLog } from '../../_helpers';
+import { getListeningServiceClient } from '../../../src/services/listening/publication/_supabase';
+import { submitListeningAnswer } from '../../../src/services/listening/execution/submit-listening-answer';
+import { ListeningExecutionError, LISTENING_EXECUTION_ERRORS } from '../../../src/services/listening/execution/listening-execution-types';
+
+const MAX_BODY_BYTES = 512;
+
+export default async function handler(req: any, res: any): Promise<void> {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, MAX_BODY_BYTES)) return;
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const { sessionId, questionId, selectedOption, submissionId, playbackRate } = req.body ?? {};
+
+  if (!sessionId || !/^[0-9a-f-]{36}$/i.test(String(sessionId))) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
+  }
+  if (!questionId || !/^[0-9a-f-]{36}$/i.test(String(questionId))) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'questionId inválido.');
+  }
+  if (typeof selectedOption !== 'number' || !Number.isInteger(selectedOption) || selectedOption < 0) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'selectedOption inválido.');
+  }
+  if (!submissionId || !/^[0-9a-f-]{36}$/i.test(String(submissionId))) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'submissionId inválido (deve ser UUID).');
+  }
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await submitListeningAnswer(serviceClient, {
+      sessionId,
+      userId,
+      questionId,
+      selectedOption,
+      submissionId,
+      playbackRate: typeof playbackRate === 'number' ? playbackRate : 1.0,
+    });
+
+    safeLog('listening/session/answer', 'answer_processed', 200, {
+      sessionId,
+      correct: result.correct,
+      attemptNumber: result.attemptNumber,
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof ListeningExecutionError) {
+      if (err.code === LISTENING_EXECUTION_ERRORS.SESSION_NOT_FOUND) {
+        return jsonError(res, 404, err.code, 'Sessão não encontrada.');
+      }
+      if (err.code === LISTENING_EXECUTION_ERRORS.SESSION_EXPIRED) {
+        return jsonError(res, 410, err.code, 'Sessão expirada.');
+      }
+      if (err.code === LISTENING_EXECUTION_ERRORS.SESSION_WRONG_STATE) {
+        return jsonError(res, 409, err.code, 'Estado da sessão inválido.');
+      }
+      if (err.code === LISTENING_EXECUTION_ERRORS.QUESTION_NOT_FOUND) {
+        return jsonError(res, 404, err.code, 'Pergunta não encontrada.');
+      }
+      if (err.code === LISTENING_EXECUTION_ERRORS.DUPLICATE_SUBMISSION) {
+        return jsonError(res, 409, err.code, 'Submissão duplicada.');
+      }
+      safeLog('listening/session/answer', 'execution_error', 500, { sessionId, code: err.code });
+    }
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno.');
+  }
+}
