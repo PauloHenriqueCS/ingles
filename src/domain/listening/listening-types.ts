@@ -59,6 +59,7 @@ export type ListeningEpisodeStatus =
   | 'content_ready'
   | 'audio_processing'
   | 'ready'
+  | 'publishing'
   | 'published'
   | 'failed'
   | 'archived';
@@ -68,6 +69,7 @@ export const LISTENING_EPISODE_STATUSES: readonly ListeningEpisodeStatus[] = [
   'content_ready',
   'audio_processing',
   'ready',
+  'publishing',
   'published',
   'failed',
   'archived',
@@ -134,6 +136,10 @@ export interface ListeningEpisode {
   voiceName: string | null;
   locale: string | null;
   publishedAt: string | null;
+  publicationVersion: number;
+  publishedBy: string | null;
+  publicationSource: 'admin' | 'system' | 'script' | null;
+  accessTier: 'free' | 'premium' | 'all';
   questionsStatus: ListeningEpisodeQuestionsStatus | null;
   questionsGeneratedAt: string | null;
   subtitlesStatus: ListeningEpisodeSubtitlesStatus | null;
@@ -292,6 +298,38 @@ export interface ListeningActivity {
   episode: ListeningEpisode;
   blocks: ListeningActivityBlock[];
   progress: UserListeningProgress | null;
+}
+
+export type ListeningAudioAssetStatus = 'pending' | 'processing' | 'ready' | 'published' | 'failed';
+
+export interface ListeningAudioAsset {
+  id: string;
+  episodeId: string;
+  blockId: string;
+  ssmlHash: string;
+  audioHash: string;
+  stagingPath: string | null;
+  publishedPath: string | null;
+  fileSizeBytes: number | null;
+  durationMs: number | null;
+  contentType: string;
+  status: ListeningAudioAssetStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ListeningTimingArtifactStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export interface ListeningTimingArtifact {
+  id: string;
+  audioAssetId: string;
+  blockId: string;
+  ssmlHash: string;
+  audioHash: string;
+  timingHash: string;
+  status: ListeningTimingArtifactStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ListeningSentence {

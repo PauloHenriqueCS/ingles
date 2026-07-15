@@ -17,7 +17,10 @@
     "listening:prepare-subtitles": "npx tsx scripts/prepare-listening-subtitles.ts",
     "listening:generate-ssml": "npx tsx scripts/generate-listening-ssml.ts",
     "listening:synthesize-audio": "npx tsx scripts/synthesize-listening-audio.ts",
-    "listening:synchronize": "npx tsx scripts/synchronize-listening-audio.ts"
+    "listening:synchronize": "npx tsx scripts/synchronize-listening-audio.ts",
+    "listening:publish": "npx tsx scripts/listening-publish.ts",
+    "listening:storage-audit": "npx tsx scripts/listening-storage-audit.ts",
+    "listening:cleanup-staging": "npx tsx scripts/listening-cleanup-staging.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
