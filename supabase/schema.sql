@@ -1022,12 +1022,13 @@ CREATE POLICY "rsh_delete" ON public.review_schedule_history
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS public.user_learning_settings (
-  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id         UUID         NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+  id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             UUID         NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
   -- Array de dias ativos: 0=Dom, 1=Seg, 2=Ter, 3=Qua, 4=Qui, 5=Sex, 6=Sáb
-  active_weekdays JSONB        NOT NULL DEFAULT '[1,2,3,4,5]'::jsonb,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  active_weekdays     JSONB        NOT NULL DEFAULT '[1,2,3,4,5]'::jsonb,
+  audio_preferences   JSONB        DEFAULT NULL,
+  created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE public.user_learning_settings ENABLE ROW LEVEL SECURITY;
