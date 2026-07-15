@@ -165,7 +165,7 @@ export default async function handler(req: any, res: any) {
       });
       const finalCorrectedText = (completion.choices[0]?.message?.content ?? '').trim();
       if (!finalCorrectedText) throw new Error('Resposta vazia');
-      safeLog('compare-rewrite', 'final_only_success', 200, null);
+      safeLog('compare-rewrite', 'final_only_success', 200);
       return res.json({ finalCorrectedText });
     } catch (err) {
       const { code, status } = sanitizeProviderError(err);
