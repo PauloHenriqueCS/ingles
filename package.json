@@ -20,7 +20,16 @@
     "listening:synchronize": "npx tsx scripts/synchronize-listening-audio.ts",
     "listening:publish": "npx tsx scripts/listening-publish.ts",
     "listening:storage-audit": "npx tsx scripts/listening-storage-audit.ts",
-    "listening:cleanup-staging": "npx tsx scripts/listening-cleanup-staging.ts"
+    "listening:cleanup-staging": "npx tsx scripts/listening-cleanup-staging.ts",
+    "listening:jobs:list": "npx tsx scripts/listening-jobs-list.ts",
+    "listening:jobs:process": "npx tsx scripts/listening-jobs-process.ts",
+    "listening:jobs:retry": "npx tsx scripts/listening-jobs-retry.ts",
+    "listening:jobs:cancel": "npx tsx scripts/listening-jobs-cancel.ts",
+    "listening:pipeline:create": "npx tsx scripts/listening-pipeline-create.ts",
+    "listening:pipeline:repair": "npx tsx scripts/listening-pipeline-repair.ts",
+    "listening:inventory:check": "npx tsx scripts/listening-inventory-check.ts",
+    "listening:inventory:ensure": "npx tsx scripts/listening-inventory-ensure.ts",
+    "listening:audit": "npx tsx scripts/listening-audit.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

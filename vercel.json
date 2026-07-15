@@ -4,5 +4,31 @@
   "framework": "vite",
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    {
+      "path": "/api/internal/listening/jobs/dispatch",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/listening/repair",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/internal/listening/inventory/ensure",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/internal/listening/audit",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/internal/listening/storage-audit",
+      "schedule": "0 8 * * 0"
+    },
+    {
+      "path": "/api/internal/listening/cleanup",
+      "schedule": "0 9 * * 0"
+    }
   ]
 }
