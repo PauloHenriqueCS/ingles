@@ -198,6 +198,7 @@ export default async function handler(req: any, res: any) {
     session: {
       type: 'realtime',
       model: REALTIME_MODEL,
+      modalities: ['audio', 'text'],
       instructions,
       audio: {
         input: {

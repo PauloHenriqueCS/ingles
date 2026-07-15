@@ -203,21 +203,31 @@ export function useRealtimeSession(): UseRealtimeSession {
         const ev = JSON.parse(e.data as string) as {
           type: string;
           delta?: string;
+          transcript?: string;
           error?: { type?: string; code?: string; param?: string };
         };
 
-        // Speaking state + transcript reset on new response
-        if (ev.type === 'response.output_audio.delta') {
-          setIsSpeaking(true);
-          if (!responseActiveRef.current) {
-            responseActiveRef.current = true;
-            transcriptAccumRef.current = '';
-            setTranscriptText('');
-          }
+        // Log all non-audio-delta events for debugging captions
+        if (ev.type !== 'response.output_audio.delta') {
+          console.debug('[realtime] event:', ev.type, ev.delta !== undefined ? { delta: ev.delta } : '');
         }
 
-        // Accumulate transcript deltas for captions
-        if (ev.type === 'response.audio_transcript.delta' && typeof ev.delta === 'string') {
+        // Reset transcript on new response (response.created fires before any deltas)
+        if (ev.type === 'response.created') {
+          responseActiveRef.current = true;
+          transcriptAccumRef.current = '';
+          setTranscriptText('');
+        }
+
+        if (ev.type === 'response.output_audio.delta') {
+          setIsSpeaking(true);
+        }
+
+        // Accumulate transcript deltas — handle both known event type variants
+        const isTranscriptDelta =
+          ev.type === 'response.audio_transcript.delta' ||
+          ev.type === 'response.output_audio_transcript.delta';
+        if (isTranscriptDelta && typeof ev.delta === 'string') {
           transcriptAccumRef.current += ev.delta;
           setTranscriptText(transcriptAccumRef.current);
         }
