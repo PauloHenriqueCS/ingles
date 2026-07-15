@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS ai_conversation_preferences (
   id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id          UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  teacher_name     TEXT        NOT NULL DEFAULT 'Lemon AI',
+  teacher_name     TEXT        NOT NULL DEFAULT 'Lemon',
   personality      TEXT        NOT NULL DEFAULT 'friendly'
                                CHECK (personality IN ('friendly', 'professional', 'strict')),
   correction_style TEXT        NOT NULL DEFAULT 'gentle'

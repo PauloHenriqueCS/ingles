@@ -143,7 +143,7 @@ export const DETAIL_LABELS: Record<AIPreferences['correctionDetail'], { label: s
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
 export const BASE_DEFAULTS: AIPreferences = {
-  teacherName: 'Lemon AI',
+  teacherName: 'Lemon',
   voice: 'coral',
   accent: 'american',
   speechPace: 'slow',

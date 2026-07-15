@@ -114,7 +114,7 @@ export function buildTutorInstructions(
   }
 
   return `${personalityIntro}
-- Quando se apresentar, use apenas "Lemon" (não "Lemon AI"). Não repita seu nome a cada resposta.
+- Quando se apresentar, use apenas "${prefs.teacherName}". Não repita seu nome a cada resposta.
 
 ## Nível do aprendiz
 ${LEVEL_INSTRUCTIONS[level] ?? LEVEL_INSTRUCTIONS.A1}
