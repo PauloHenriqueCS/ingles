@@ -170,3 +170,103 @@ Seu objetivo principal: fazer o aprendiz se sentir seguro para falar inglês em 
 export function buildSystemPrompt(prefs: AIPreferences): string {
   return buildTutorInstructions(prefs, 'A1');
 }
+
+// ── Conversation context ───────────────────────────────────────────────────────
+
+export interface ConversationStartContext {
+  theme: string | null;
+  missionTitle: string | null;
+  missionDescription: string | null;
+  studentText: string | null;
+  version2: string | null;
+  mandatoryWords: string[];
+  recentMistakes: string[];
+  currentGrammarObjectives: string[];
+  conversationGoalMinutes: number;
+  remainingConversationMinutes: number;
+}
+
+export function buildTutorInstructionsWithContext(
+  prefs: AIPreferences,
+  cefrLevel: string,
+  ctx: ConversationStartContext,
+): string {
+  const base = buildTutorInstructions(prefs, cefrLevel);
+  return `${base}\n\n${buildContextSection(ctx)}`;
+}
+
+function buildContextSection(ctx: ConversationStartContext): string {
+  const lines: string[] = [];
+  lines.push('## Contexto da sessão de hoje');
+  lines.push('');
+  lines.push('Use este contexto para conduzir a conversa de forma natural. NUNCA diga ao aluno que possui um "contexto" ou "briefing" — use as informações organicamente, como se fossem sua memória natural.');
+  lines.push('');
+
+  if (ctx.missionTitle) {
+    lines.push('### Missão de escrita do aluno hoje');
+    lines.push(`Título: ${ctx.missionTitle}`);
+    if (ctx.missionDescription) lines.push(`Tema: ${ctx.missionDescription}`);
+    lines.push('');
+  }
+
+  if (ctx.studentText) {
+    const excerpt = ctx.studentText.length > 400
+      ? ctx.studentText.slice(0, 400) + '...'
+      : ctx.studentText;
+    lines.push('### Texto que o aluno escreveu hoje');
+    lines.push(`"${excerpt}"`);
+    lines.push('');
+  }
+
+  if (ctx.version2) {
+    const excerpt = ctx.version2.length > 300
+      ? ctx.version2.slice(0, 300) + '...'
+      : ctx.version2;
+    lines.push('### Versão 2 do aluno (reescrita após correção)');
+    lines.push(`"${excerpt}"`);
+    lines.push('');
+  }
+
+  if (ctx.mandatoryWords.length > 0) {
+    lines.push('### Palavras obrigatórias da missão');
+    lines.push('Use naturalmente durante a conversa (nunca liste-as explicitamente): ' + ctx.mandatoryWords.join(', '));
+    lines.push('');
+  }
+
+  if (ctx.recentMistakes.length > 0) {
+    lines.push('### Erros recentes do aluno (pontos fracos a trabalhar)');
+    ctx.recentMistakes.forEach((m) => lines.push(`- ${m}`));
+    lines.push('');
+  }
+
+  if (ctx.currentGrammarObjectives.length > 0) {
+    lines.push('### Objetivos gramaticais atuais');
+    ctx.currentGrammarObjectives.forEach((o) => lines.push(`- ${o}`));
+    lines.push('');
+  }
+
+  const remaining = Math.max(0, ctx.remainingConversationMinutes);
+  lines.push('### Meta de conversação');
+  lines.push(`Meta diária: ${ctx.conversationGoalMinutes} min | Restante hoje: ${remaining} min`);
+  if (remaining > 0 && remaining <= 3) {
+    lines.push('ATENÇÃO: Pouquíssimos minutos restantes. Encerre naturalmente em breve: "Before we finish, one last question..."');
+  } else if (remaining > 0 && remaining <= 5) {
+    lines.push('Poucos minutos restantes. Comece a preparar um encerramento natural.');
+  }
+  lines.push('');
+
+  lines.push('### Como iniciar a conversa');
+  lines.push('IMPORTANTE: Você DEVE falar primeiro. Não espere o aluno. Inicie imediatamente ao conectar.');
+  lines.push('');
+  if (ctx.studentText) {
+    const ref = ctx.missionTitle ? `about "${ctx.missionTitle}"` : '';
+    lines.push(`Inicie referenciando o texto do aluno ${ref}. Exemplo: "I really enjoyed reading your text! [observe algo específico do texto]. Tell me more about [aspecto concreto]..."`);
+    lines.push('Após explorar o texto, migre naturalmente para outros ângulos: hipóteses, conflitos, roleplay, pedidos de opinião, comparações.');
+  } else if (ctx.missionTitle) {
+    lines.push(`Inicie com o tema da missão: "${ctx.missionTitle}". Exemplo: "Today I'd love to explore the topic of ${ctx.missionTitle} with you. What's your take on this?"`);
+  } else {
+    lines.push('Inicie de forma acolhedora e natural. Exemplo: "Hi! Great to see you here. How has your day been so far?"');
+  }
+
+  return lines.join('\n');
+}

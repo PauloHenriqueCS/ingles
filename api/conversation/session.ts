@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { requireAuth } from '../_auth';
-import { buildTutorInstructions } from '../../src/lib/promptBuilder';
+import { buildTutorInstructionsWithContext, ConversationStartContext } from '../../src/lib/promptBuilder';
 import { BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog } from '../_helpers';
@@ -26,6 +26,37 @@ const ERROR_MESSAGE: Record<string, string> = {
   OPENAI_UNAVAILABLE:     'O serviço de conversa está indisponível no momento.',
   OPENAI_SESSION_FAILED:  'Não foi possível criar a sessão de conversa.',
 };
+
+// ── Today's date (UTC) used to fetch today's context ─────────────────────────
+
+function getTodayUtc(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+// ── Inline mission snapshot extraction (avoids importing frontend lib) ────────
+
+function extractMission(snapshot: unknown): { title: string; description: string; requiredWords: string[] } | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const r = snapshot as Record<string, unknown>;
+  if (typeof r.missionTitle === 'string') {
+    return {
+      title: r.missionTitle,
+      description: String(r.missionPromptPt ?? r.missionPromptEn ?? r.missionTask ?? ''),
+      requiredWords: Array.isArray(r.missionRequiredWords) ? (r.missionRequiredWords as string[]) : [],
+    };
+  }
+  if (typeof r.title === 'string') {
+    return {
+      title: r.title,
+      description: String(r.mission ?? r.themePtBr ?? r.themeEn ?? ''),
+      requiredWords: [
+        ...(Array.isArray(r.useTheseWords) ? (r.useTheseWords as string[]) : []),
+        ...(Array.isArray(r.requiredWords) ? (r.requiredWords as string[]) : []),
+      ],
+    };
+  }
+  return null;
+}
 
 function mapOpenAIStatus(status: number): string {
   if (status === 400) return 'OPENAI_INVALID_SESSION';
@@ -74,26 +105,87 @@ export default async function handler(req: any, res: any) {
 
   const safetyIdentifier = createHash('sha256').update(userId).digest('hex');
 
-  // Load user prefs + CEFR level in parallel
+  const today = getTodayUtc();
+
+  // Load user prefs, CEFR level, and session context in parallel
   let prefs: AIPreferences = { ...BASE_DEFAULTS };
   let cefrLevel = 'A1';
+  let ctx: ConversationStartContext = {
+    theme: null,
+    missionTitle: null,
+    missionDescription: null,
+    studentText: null,
+    version2: null,
+    mandatoryWords: [],
+    recentMistakes: [],
+    currentGrammarObjectives: [],
+    conversationGoalMinutes: BASE_DEFAULTS.dailyConversationGoalMinutes,
+    remainingConversationMinutes: 0,
+  };
+
   try {
-    const [prefsResult, memoryResult] = await Promise.all([
+    const [prefsResult, memoryResult, todayReviewResult, recentReviewsResult, convTotalResult] = await Promise.all([
       supabase.from('ai_conversation_preferences').select('*').maybeSingle(),
       supabase.from('english_learning_memory').select('current_level').order('updated_at', { ascending: false }).limit(1),
+      supabase.from('english_reviews').select('original_text,version_2_text,main_mistakes,mission_snapshot').eq('entry_date', today).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      supabase.from('english_reviews').select('main_mistakes,objective,next_practice').order('created_at', { ascending: false }).limit(5),
+      supabase.from('conversation_sessions').select('duration_sec').eq('session_date', today),
     ]);
+
     if (prefsResult.data) {
       prefs = rowToPrefs(prefsResult.data as Record<string, unknown>);
     }
     const memRow = memoryResult.data?.[0] as { current_level?: string } | undefined;
     if (memRow?.current_level) cefrLevel = memRow.current_level;
+
+    ctx.conversationGoalMinutes = prefs.dailyConversationGoalMinutes;
+
+    // Today's review → mission + student text
+    if (todayReviewResult.data) {
+      const r = todayReviewResult.data as Record<string, unknown>;
+      ctx.studentText = r.original_text ? String(r.original_text) : null;
+      ctx.version2    = r.version_2_text ? String(r.version_2_text) : null;
+      const mission = extractMission(r.mission_snapshot);
+      if (mission) {
+        ctx.missionTitle       = mission.title;
+        ctx.missionDescription = mission.description || null;
+        ctx.mandatoryWords     = mission.requiredWords;
+      }
+    }
+
+    // Recent mistakes + grammar objectives from last 5 reviews
+    const reviewRows = (recentReviewsResult.data ?? []) as Record<string, unknown>[];
+    const seenMistakes = new Set<string>();
+    const seenObjectives = new Set<string>();
+    for (const r of reviewRows) {
+      for (const m of Array.isArray(r.main_mistakes) ? (r.main_mistakes as Record<string, string>[]) : []) {
+        const key = (m.original ?? '').trim().toLowerCase();
+        if (!key || seenMistakes.has(key)) continue;
+        seenMistakes.add(key);
+        ctx.recentMistakes.push(`${m.original} → ${m.correct}: ${m.explanation}`);
+        if (ctx.recentMistakes.length >= 5) break;
+      }
+      const obj = r.objective ? String(r.objective).trim() : '';
+      if (obj && !seenObjectives.has(obj)) {
+        seenObjectives.add(obj);
+        ctx.currentGrammarObjectives.push(obj);
+      }
+      if (ctx.recentMistakes.length >= 5 && ctx.currentGrammarObjectives.length >= 3) break;
+    }
+    ctx.currentGrammarObjectives = ctx.currentGrammarObjectives.slice(0, 3);
+
+    // Remaining conversation minutes
+    const totalConvSec = ((convTotalResult.data ?? []) as Record<string, number>[])
+      .reduce((sum, row) => sum + (row.duration_sec ?? 0), 0);
+    const totalConvMin = Math.floor(totalConvSec / 60);
+    ctx.remainingConversationMinutes = Math.max(0, prefs.dailyConversationGoalMinutes - totalConvMin);
   } catch {
-    // use defaults
+    // use defaults — context is optional, conversation will still work
   }
 
   if (!await applyRateLimit(res, userId, 'conversation-session')) return;
 
-  const instructions = buildTutorInstructions(prefs, cefrLevel);
+  const instructions = buildTutorInstructionsWithContext(prefs, cefrLevel, ctx);
   if (!instructions) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }

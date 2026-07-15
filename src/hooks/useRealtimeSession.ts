@@ -183,6 +183,12 @@ export function useRealtimeSession(): UseRealtimeSession {
         setElapsedMs(elapsed);
         if (elapsed >= MAX_SESSION_MS) cleanup('ended');
       }, 1000);
+      // Trigger AI greeting immediately — it reads context from system prompt
+      setTimeout(() => {
+        if (!endCalledRef.current && dcRef.current?.readyState === 'open') {
+          dcRef.current.send(JSON.stringify({ type: 'response.create' }));
+        }
+      }, 600);
     };
 
     dc.onmessage = (e) => {
