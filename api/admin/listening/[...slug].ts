@@ -1,5 +1,5 @@
 import { requireAuth } from '../../_auth';
-import { methodGuard, sizeGuard, jsonError, safeLog } from '../../_helpers';
+import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../../_helpers';
 import { archiveListeningEpisode } from '../../../src/services/listening/publication/archive-listening-episode';
 import { publishListeningEpisode } from '../../../src/services/listening/publication/publish-listening-episode';
 import { validateListeningEpisodeForPublication } from '../../../src/services/listening/publication/validate-listening-publication';
@@ -78,7 +78,7 @@ async function handlePublish(req: any, res: any) {
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  const slug = (Array.isArray(req.query.slug) ? req.query.slug : [req.query.slug ?? '']).join('/');
+  const slug = resolveSlug(req, '/api/admin/listening');
   switch (slug) {
     case 'archive': return handleArchive(req, res);
     case 'publish':  return handlePublish(req, res);

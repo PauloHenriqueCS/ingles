@@ -3,7 +3,7 @@ import { requireAuth } from '../_auth';
 import { REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import { buildTutorInstructionsWithContext, ConversationStartContext } from '../../src/lib/promptBuilder';
 import type { AIPreferences } from '../../src/types';
-import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog } from '../_helpers';
+import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
 import { applyRateLimit } from '../_rateLimit';
 
 // ─── POST /api/conversation/preview ──────────────────────────────────────────
@@ -350,7 +350,7 @@ async function handleSession(req: any, res: any) {
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  const slug = (Array.isArray(req.query.slug) ? req.query.slug : [req.query.slug ?? '']).join('/');
+  const slug = resolveSlug(req, '/api/conversation');
   switch (slug) {
     case 'preview': return handlePreview(req, res);
     case 'session': return handleSession(req, res);

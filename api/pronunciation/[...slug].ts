@@ -2,7 +2,7 @@ import { requireAuth } from '../_auth';
 import { isValidUuid, buildStatusResponse, rowToAssessment } from '../../src/lib/pronunciationAssessment';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import type { PronunciationNormalizedResult, PronunciationFailCode } from '../../src/types';
-import { methodGuard, safeLog } from '../_helpers';
+import { methodGuard, safeLog, resolveSlug } from '../_helpers';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -206,7 +206,7 @@ async function handleStatus(req: any, res: any) {
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  const slug = (Array.isArray(req.query.slug) ? req.query.slug : [req.query.slug ?? '']).join('/');
+  const slug = resolveSlug(req, '/api/pronunciation');
   switch (slug) {
     case 'start':    return handleStart(req, res);
     case 'complete': return handleComplete(req, res);

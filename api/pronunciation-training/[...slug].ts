@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { requireAuth } from '../_auth';
-import { methodGuard, jsonError, safeLog, sanitizeProviderError } from '../_helpers';
+import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -102,7 +102,7 @@ async function handleToken(req: any, res: any) {
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
-  const slug = (Array.isArray(req.query.slug) ? req.query.slug : [req.query.slug ?? '']).join('/');
+  const slug = resolveSlug(req, '/api/pronunciation-training');
   switch (slug) {
     case 'generate-text': return handleGenerateText(req, res);
     case 'token':          return handleToken(req, res);

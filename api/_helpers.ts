@@ -98,6 +98,26 @@ export function safeLog(
   console.error(JSON.stringify(entry));
 }
 
+// ── Catch-all slug resolver ───────────────────────────────────────────────────
+
+/**
+ * Extracts the slug from a [...slug].ts catch-all dispatcher.
+ * Primary source: Vercel-injected req.query.slug (works on Next.js and some
+ * framework configs). Fallback: parse from req.url directly, which always
+ * works regardless of how Vercel injects path params.
+ *
+ * @param apiBase  The static URL prefix of this dispatcher, e.g. '/api/listening'
+ */
+export function resolveSlug(req: any, apiBase: string): string {
+  const s = req.query?.slug;
+  if (Array.isArray(s) && s.length > 0) return s.join('/');
+  if (typeof s === 'string' && s) return s;
+  // URL fallback: strip the static prefix and any query string
+  const urlPath = ((req.url ?? '') as string).split('?')[0];
+  const prefix = apiBase.endsWith('/') ? apiBase : `${apiBase}/`;
+  return urlPath.startsWith(prefix) ? urlPath.slice(prefix.length).replace(/\/$/, '') : '';
+}
+
 // ── Provider error sanitizer ──────────────────────────────────────────────────
 
 /**
