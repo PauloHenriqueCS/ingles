@@ -182,3 +182,14 @@ export interface ListeningActivity {
   blocks: ListeningActivityBlock[];
   progress: UserListeningProgress | null;
 }
+
+export interface ListeningSentence {
+  id: string;
+  blockId: string;
+  sentenceKey: string;
+  sentenceOrder: number;
+  paragraphOrder: number;
+  speaker: string | null;
+  textEn: string;
+  createdAt: string;
+}
