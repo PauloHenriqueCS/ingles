@@ -143,7 +143,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [speed, setSpeed] = useState<Speed>(1.00);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [episodes, setEpisodes] = useState<PublishedEpisode[]>([]);
-  const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [loadingEpisodes, setLoadingEpisodes] = useState(!propEpisodeId);
+  const [listError, setListError] = useState(false);
   const [subtitleChoice, setSubtitleChoice] = useState<SubtitleChoice>('pt-BR');
   const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -254,17 +255,18 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   async function loadEpisodeList() {
     setLoadingEpisodes(true);
+    setListError(false);
+    setPhase('selecting');
     try {
       const list = await getPublishedEpisodes();
       if (list.length === 1) {
         setEpisodeId(list[0].id);
       } else {
         setEpisodes(list);
-        setPhase('selecting');
       }
     } catch {
+      setListError(true);
       setEpisodes([]);
-      setPhase('selecting');
     } finally {
       setLoadingEpisodes(false);
     }
@@ -406,15 +408,78 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: selecting ────────────────────────────────────────────────────────
   function renderSelecting() {
-    if (loadingEpisodes) return renderLoading();
-    if (episodes.length === 0) {
+    if (loadingEpisodes) {
       return (
-        <div className="p-6 max-w-lg mx-auto text-center pt-10">
-          <Headphones className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-          <p className="text-slate-400 text-sm">Nenhum episódio disponível no momento.</p>
+        <div className="p-4 pt-6 max-w-lg mx-auto space-y-3">
+          {[0, 1].map(i => (
+            <div key={i} className="bg-slate-800 border border-slate-700 rounded-2xl p-5 animate-pulse">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-slate-700 shrink-0" />
+                <div className="flex-1 space-y-2.5">
+                  <div className="h-3.5 bg-slate-700 rounded w-2/3" />
+                  <div className="h-3 bg-slate-700 rounded w-full" />
+                  <div className="h-3 bg-slate-700 rounded w-4/5" />
+                  <div className="flex gap-2 pt-1">
+                    <div className="h-5 w-10 bg-slate-700 rounded-full" />
+                    <div className="h-5 w-16 bg-slate-700 rounded-full" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       );
     }
+
+    if (listError) {
+      return (
+        <div className="p-6 max-w-lg mx-auto pt-8 space-y-5">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center space-y-4">
+            <div className="w-14 h-14 rounded-full bg-red-900/20 border border-red-700/30 flex items-center justify-center mx-auto">
+              <AlertCircle className="w-7 h-7 text-red-400" />
+            </div>
+            <div>
+              <p className="font-semibold text-slate-200">Não foi possível carregar o Listening.</p>
+              <p className="text-sm text-slate-500 mt-1.5 leading-relaxed">Verifique sua conexão e tente novamente.</p>
+            </div>
+            <button
+              onClick={loadEpisodeList}
+              className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (episodes.length === 0) {
+      return (
+        <div className="p-6 max-w-lg mx-auto pt-8 space-y-5">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center space-y-5">
+            <div className="w-16 h-16 rounded-full bg-purple-600/15 border border-purple-500/25 flex items-center justify-center mx-auto">
+              <Headphones className="w-8 h-8 text-purple-400/70" />
+            </div>
+            <div>
+              <p className="font-semibold text-slate-100">Seu próximo Listening está sendo preparado</p>
+              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
+                Ainda não há um episódio disponível para o seu nível.
+                <br />
+                Tente novamente em alguns instantes.
+              </p>
+            </div>
+            <button
+              onClick={loadEpisodeList}
+              className="w-full py-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium transition-colors"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="p-4 pt-6 max-w-lg mx-auto space-y-3">
         {episodes.map(ep => (
