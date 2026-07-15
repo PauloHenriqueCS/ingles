@@ -1,4 +1,4 @@
-import { PenSquare, MessagesSquare, Headphones } from 'lucide-react';
+import { PenSquare, MessagesSquare, Headphones, AudioLines } from 'lucide-react';
 import type { View } from '../types';
 
 interface Props {
@@ -83,6 +83,28 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
 
           <span className="inline-flex items-center gap-1 text-sm font-medium text-purple-400 group-hover:text-purple-300 transition-colors">
             Ouvir agora
+            <span aria-hidden="true">→</span>
+          </span>
+        </button>
+
+        {/* Card 4 — Pronunciation training */}
+        <button
+          onClick={() => onNavigate('pronunciation-training')}
+          className="group text-left bg-slate-800 border border-slate-700 hover:border-orange-600 hover:bg-slate-700/60 rounded-2xl p-6 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+        >
+          <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-gradient-to-br from-orange-500 to-orange-700 mb-5 shadow-lg shadow-orange-900/40">
+            <AudioLines className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />
+          </div>
+
+          <h2 className="text-base font-semibold text-slate-100 mb-2">
+            Treinar pronúncia
+          </h2>
+          <p className="text-sm text-slate-400 leading-relaxed mb-6">
+            Leia um texto, descubra quais palavras precisam de atenção e pratique uma por uma.
+          </p>
+
+          <span className="inline-flex items-center gap-1 text-sm font-medium text-orange-400 group-hover:text-orange-300 transition-colors">
+            Começar treino
             <span aria-hidden="true">→</span>
           </span>
         </button>
