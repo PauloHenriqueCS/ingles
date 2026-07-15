@@ -26,11 +26,11 @@ export default async function handler(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.REVIEW)) return;
 
-  const user = await requireAuth(req, res);
-  if (!user) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
 
-  const limited = await applyRateLimit(res, user.userId, 'correct-rewrite');
-  if (limited) return;
+  const { userId } = auth;
+  if (!await applyRateLimit(res, userId, 'correct-rewrite')) return;
 
   const { rewriteText, originalCorrectedText, studentLevel } = req.body ?? {};
 
