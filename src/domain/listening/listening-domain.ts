@@ -57,7 +57,6 @@ export function toPublicListeningQuestion(question: ListeningQuestion): Listenin
     questionOrder: question.questionOrder,
     prompt: question.prompt,
     optionsJson: question.optionsJson,
-    explanationPt: question.explanationPt,
     maxAttempts: question.maxAttempts,
   };
 }

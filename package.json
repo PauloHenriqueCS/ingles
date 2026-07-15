@@ -12,7 +12,12 @@
     "test:e2e:node": "playwright test --project=node-checks",
     "test:e2e:chrome": "playwright test --project=chromium",
     "test:e2e:report": "playwright show-report",
-    "listening:generate-story": "npx tsx scripts/generate-listening-story.ts"
+    "listening:generate-story": "npx tsx scripts/generate-listening-story.ts",
+    "listening:generate-questions": "npx tsx scripts/generate-listening-questions.ts",
+    "listening:prepare-subtitles": "npx tsx scripts/prepare-listening-subtitles.ts",
+    "listening:generate-ssml": "npx tsx scripts/generate-listening-ssml.ts",
+    "listening:synthesize-audio": "npx tsx scripts/synthesize-listening-audio.ts",
+    "listening:synchronize": "npx tsx scripts/synchronize-listening-audio.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

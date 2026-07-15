@@ -2,6 +2,58 @@ import type { CEFRLevel } from '../curriculum/cefr';
 
 export type { CEFRLevel };
 
+// ─── Tipos de pergunta de compreensão auditiva ────────────────────────────────
+
+export type ListeningQuestionType =
+  | 'main_idea'
+  | 'detail'
+  | 'cause'
+  | 'sequence'
+  | 'intention'
+  | 'simple_inference';
+
+export const LISTENING_QUESTION_TYPES: readonly ListeningQuestionType[] = [
+  'main_idea',
+  'detail',
+  'cause',
+  'sequence',
+  'intention',
+  'simple_inference',
+] as const;
+
+export type ListeningQuestionDifficulty = 'easy' | 'appropriate' | 'hard';
+
+export const LISTENING_QUESTION_DIFFICULTIES: readonly ListeningQuestionDifficulty[] = [
+  'easy',
+  'appropriate',
+  'hard',
+] as const;
+
+export type ListeningQuestionValidationStatus = 'pending' | 'valid' | 'invalid' | 'needs_review';
+
+export const LISTENING_QUESTION_VALIDATION_STATUSES: readonly ListeningQuestionValidationStatus[] = [
+  'pending',
+  'valid',
+  'invalid',
+  'needs_review',
+] as const;
+
+export type ListeningEpisodeQuestionsStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export type ListeningEpisodeSubtitlesStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export type ListeningEpisodeSsmlStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export type ListeningEpisodeAudioStatus = 'pending' | 'processing' | 'ready' | 'partial' | 'failed';
+
+export type ListeningBlockAudioStatus = 'pending' | 'processing' | 'uploaded' | 'validated' | 'failed';
+
+export type ListeningTimingSource = 'word_boundaries' | 'sentence_bookmarks' | 'hybrid' | 'fallback';
+
+export type ListeningTimingStatus = 'pending' | 'processing' | 'ready' | 'needs_review' | 'failed';
+
+export type ListeningSubtitleStatus = 'text_ready' | 'timing_pending' | 'timed' | 'failed';
+
 export type ListeningEpisodeStatus =
   | 'draft'
   | 'content_ready'
@@ -80,7 +132,20 @@ export interface ListeningEpisode {
   estimatedDurationSeconds: number | null;
   actualDurationSeconds: number | null;
   voiceName: string | null;
+  locale: string | null;
   publishedAt: string | null;
+  questionsStatus: ListeningEpisodeQuestionsStatus | null;
+  questionsGeneratedAt: string | null;
+  subtitlesStatus: ListeningEpisodeSubtitlesStatus | null;
+  subtitlesGeneratedAt: string | null;
+  subtitlePromptVersion: string | null;
+  subtitleValidatorPromptVersion: string | null;
+  ssmlStatus: ListeningEpisodeSsmlStatus | null;
+  ssmlGeneratedAt: string | null;
+  ssmlGeneratorVersion: string | null;
+  audioStatus: ListeningEpisodeAudioStatus | null;
+  timingStatus: ListeningTimingStatus | null;
+  timingGeneratedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -92,8 +157,17 @@ export interface ListeningBlock {
   textEn: string;
   translationPt: string | null;
   ssml: string | null;
+  ssmlStatus: ListeningEpisodeSsmlStatus | null;
+  ssmlVersion: number | null;
+  ssmlGeneratorVersion: string | null;
+  ssmlGeneratedAt: string | null;
+  ssmlContentHash: string | null;
+  audioStatus: ListeningBlockAudioStatus | null;
+  audioAssetId: string | null;
   audioPath: string | null;
   durationMs: number | null;
+  timingStatus: ListeningTimingStatus | null;
+  timingGeneratedAt: string | null;
   status: ListeningBlockStatus;
   createdAt: string;
   updatedAt: string;
@@ -103,12 +177,36 @@ export interface ListeningSubtitleCue {
   id: string;
   blockId: string;
   language: ListeningSubtitleLanguage;
+  cueKey: string | null;
   cueOrder: number;
-  startMs: number;
-  endMs: number;
+  sourceSentenceKeys: string[] | null;
   text: string;
+  /** Null before audio synthesis; set by the TTS pipeline. */
+  startMs: number | null;
+  /** Null before audio synthesis; set by the TTS pipeline. */
+  endMs: number | null;
+  status: ListeningSubtitleStatus | null;
+  contentVersion: number | null;
+  timingSource: ListeningTimingSource | null;
+  timingConfidence: number | null;
+  /** Legacy single-key field — kept for backwards compatibility. */
   sentenceKey: string | null;
   createdAt: string;
+  updatedAt: string | null;
+}
+
+/** Draft cue produced by the subtitle preparation pipeline before audio. */
+export interface ListeningSubtitleCueDraft {
+  cueKey: string;
+  cueOrder: number;
+  blockOrder: 1 | 2;
+  sourceSentenceKeys: string[];
+  text: string;
+  language: ListeningSubtitleLanguage;
+  startMs: null;
+  endMs: null;
+  status: 'timing_pending';
+  contentVersion: number;
 }
 
 export interface ListeningQuestion {
@@ -122,11 +220,25 @@ export interface ListeningQuestion {
   correctOption: number;
   explanationPt: string;
   maxAttempts: number;
+  questionType: ListeningQuestionType | null;
+  difficulty: ListeningQuestionDifficulty | null;
+  /** Chaves das frases que comprovam a resposta. Nunca expor ao frontend. */
+  evidenceSentenceKeys: string[] | null;
+  validationStatus: ListeningQuestionValidationStatus | null;
+  /** Resultado completo do validador de IA. Nunca expor ao frontend. */
+  validationNotes: unknown | null;
+  generatorPromptVersion: string | null;
+  validatorPromptVersion: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-/** Versão pública da pergunta — sem correctOption nem campo equivalente. */
+/**
+ * Versão pública da pergunta — sem campos privados.
+ * Não contém: correctOption, evidenceSentenceKeys, validationNotes,
+ * validationStatus, generatorPromptVersion, validatorPromptVersion.
+ * A explanationPt é enviada separadamente após o aluno responder.
+ */
 export interface ListeningQuestionPublic {
   id: string;
   episodeId: string;
@@ -134,7 +246,6 @@ export interface ListeningQuestionPublic {
   questionOrder: 1 | 2;
   prompt: string;
   optionsJson: string[];
-  explanationPt: string;
   maxAttempts: number;
 }
 

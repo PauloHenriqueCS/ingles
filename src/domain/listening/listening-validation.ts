@@ -159,7 +159,7 @@ export function validateListeningActivityStructure(activity: ListeningActivity):
     }
 
     for (const cue of [...subtitlesEn, ...subtitlesPt]) {
-      if (cue.endMs <= cue.startMs) {
+      if (cue.startMs !== null && cue.endMs !== null && cue.endMs <= cue.startMs) {
         throw new RangeError(
           `Subtitle cue has endMs (${cue.endMs}) <= startMs (${cue.startMs}) in block ${block.blockOrder}`
         );
@@ -176,6 +176,13 @@ export function validateListeningActivityStructure(activity: ListeningActivity):
         throw new TypeError(
           `Published episode must have Portuguese subtitles for block ${block.blockOrder}`
         );
+      }
+      for (const cue of [...subtitlesEn, ...subtitlesPt]) {
+        if (cue.startMs === null || cue.endMs === null) {
+          throw new TypeError(
+            `Published episode subtitle cue "${cue.cueKey ?? cue.id}" is missing timing in block ${block.blockOrder}`
+          );
+        }
       }
     }
   }
