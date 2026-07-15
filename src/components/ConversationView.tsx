@@ -2,8 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2 } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
+import { useConversationCaptions } from '../hooks/useConversationCaptions';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
+import CaptionToggle from './CaptionToggle';
+import AiSpeechCaption from './AiSpeechCaption';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS } from '../lib/tutorPreferences';
 import { recordConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
@@ -109,6 +112,7 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 export default function ConversationView() {
   const hp      = useTutorPreferences();
   const session = useRealtimeSession();
+  const { captionsEnabled, toggleCaptions } = useConversationCaptions();
   const today   = new Date().toISOString().split('T')[0];
 
   const [showSheet,       setShowSheet]       = useState(false);
@@ -264,15 +268,20 @@ export default function ConversationView() {
               <div className="bg-slate-800 rounded-2xl p-6 flex flex-col items-center gap-5">
                 <AIAvatar state={avatarState} size={112} />
 
-                <div className="text-center">
+                <div className="text-center w-full">
                   <p className="text-slate-200 font-medium text-base min-h-[1.5rem]">
                     {statusLabel(avatarState, hp.prefs.teacherName)}
                   </p>
-                  <p className={`text-sm mt-1 tabular-nums ${nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
-                    {formatTime(session.elapsedMs)}
-                    {nearLimit && ' — encerrando em breve'}
-                  </p>
+                  <div className="flex items-center justify-center gap-2 mt-1">
+                    <p className={`text-sm tabular-nums ${nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {formatTime(session.elapsedMs)}
+                      {nearLimit && ' — encerrando em breve'}
+                    </p>
+                    <CaptionToggle enabled={captionsEnabled} onToggle={toggleCaptions} />
+                  </div>
                 </div>
+
+                <AiSpeechCaption text={session.transcriptText} visible={captionsEnabled} />
 
                 <button
                   onClick={session.end}

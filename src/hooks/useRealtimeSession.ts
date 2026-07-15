@@ -16,6 +16,8 @@ export interface UseRealtimeSession {
   elapsedMs: number;
   sessionInfo: SessionInfo | null;
   isSpeaking: boolean;
+  /** Accumulated transcript of the current (or last) AI response, from audio_transcript.delta events. */
+  transcriptText: string;
   start: () => Promise<void>;
   end: () => void;
   updateInstructions: (instructions: string) => void;
@@ -48,13 +50,16 @@ export function useRealtimeSession(): UseRealtimeSession {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [transcriptText, setTranscriptText] = useState('');
 
-  const pcRef        = useRef<RTCPeerConnection | null>(null);
-  const dcRef        = useRef<RTCDataChannel | null>(null);
-  const streamRef    = useRef<MediaStream | null>(null);
-  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startTimeRef = useRef<number | null>(null);
-  const endCalledRef = useRef(false);
+  const pcRef              = useRef<RTCPeerConnection | null>(null);
+  const dcRef              = useRef<RTCDataChannel | null>(null);
+  const streamRef          = useRef<MediaStream | null>(null);
+  const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef       = useRef<number | null>(null);
+  const endCalledRef       = useRef(false);
+  const transcriptAccumRef = useRef('');
+  const responseActiveRef  = useRef(false);
 
   const cleanup = useCallback((nextStatus?: SessionStatus) => {
     endCalledRef.current = true;
@@ -66,6 +71,8 @@ export function useRealtimeSession(): UseRealtimeSession {
     streamRef.current = null;
 
     startTimeRef.current = null;
+    transcriptAccumRef.current = '';
+    responseActiveRef.current = false;
     setIsSpeaking(false);
     setSessionInfo(null);
     if (nextStatus) setStatus(nextStatus);
@@ -193,11 +200,30 @@ export function useRealtimeSession(): UseRealtimeSession {
 
     dc.onmessage = (e) => {
       try {
-        const ev = JSON.parse(e.data as string) as { type: string; error?: { type?: string; code?: string; param?: string } };
+        const ev = JSON.parse(e.data as string) as {
+          type: string;
+          delta?: string;
+          error?: { type?: string; code?: string; param?: string };
+        };
 
-        // GA speaking events
-        if (ev.type === 'response.output_audio.delta') setIsSpeaking(true);
+        // Speaking state + transcript reset on new response
+        if (ev.type === 'response.output_audio.delta') {
+          setIsSpeaking(true);
+          if (!responseActiveRef.current) {
+            responseActiveRef.current = true;
+            transcriptAccumRef.current = '';
+            setTranscriptText('');
+          }
+        }
+
+        // Accumulate transcript deltas for captions
+        if (ev.type === 'response.audio_transcript.delta' && typeof ev.delta === 'string') {
+          transcriptAccumRef.current += ev.delta;
+          setTranscriptText(transcriptAccumRef.current);
+        }
+
         if (ev.type === 'response.output_audio.done' || ev.type === 'response.done') {
+          responseActiveRef.current = false;
           setIsSpeaking(false);
         }
 
@@ -289,6 +315,7 @@ export function useRealtimeSession(): UseRealtimeSession {
 
   return {
     status, errorMessage, errorCode, elapsedMs, sessionInfo, isSpeaking,
+    transcriptText,
     start, end, updateInstructions,
   };
 }
