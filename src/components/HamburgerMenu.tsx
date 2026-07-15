@@ -1,6 +1,6 @@
 import {
   House, LayoutDashboard, CalendarDays, ChartSpline, Search,
-  History, TrendingUp, BrainCircuit, BotMessageSquare, LogOut, X,
+  History, TrendingUp, BrainCircuit, BotMessageSquare, Volume2, LogOut, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -21,7 +21,8 @@ const MENU_ITEMS: MenuItem[] = [
   { view: 'history',      label: 'Histórico',        icon: History },
   { view: 'evolution',    label: 'Evolução',         icon: TrendingUp },
   { view: 'memory',       label: 'Memória',          icon: BrainCircuit },
-  { view: 'conversation', label: 'Conversar com IA', icon: BotMessageSquare },
+  { view: 'conversation',   label: 'Conversar com IA',       icon: BotMessageSquare },
+  { view: 'audio-settings', label: 'Configurações de áudio', icon: Volume2 },
 ];
 
 interface Props {

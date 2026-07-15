@@ -22,6 +22,7 @@ import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
 import ConversationView from './components/ConversationView';
 import ListeningView from './components/ListeningView';
+import AudioSettingsView from './components/AudioSettingsView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
@@ -181,6 +182,9 @@ export default function App() {
         )}
         {view === 'listening' && (
           <ListeningView onBack={() => setView('home')} />
+        )}
+        {view === 'audio-settings' && (
+          <AudioSettingsView onBack={() => setView('home')} />
         )}
       </main>
     </div>

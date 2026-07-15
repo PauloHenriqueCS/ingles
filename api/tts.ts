@@ -14,6 +14,13 @@ import { methodGuard, sizeGuard, safeLog, jsonError, PAYLOAD_LIMITS } from './_h
 
 export const DEFAULT_ENGLISH_VOICE = 'en-US-AvaMultilingualNeural';
 
+const ALLOWED_VOICES = new Set([
+  'en-US-AvaMultilingualNeural',
+  'en-US-AndrewMultilingualNeural',
+  'en-US-JennyNeural',
+  'en-US-GuyNeural',
+]);
+
 const TTS_MAX_CHARS = 4_500;
 const TTS_TIMEOUT_MS = 25_000;
 
@@ -28,10 +35,10 @@ function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
-function buildSsml(text: string): string {
+function buildSsml(text: string, voice: string): string {
   return (
     `<speak version="1.0" xml:lang="en-US">` +
-    `<voice name="${DEFAULT_ENGLISH_VOICE}">` +
+    `<voice name="${voice}">` +
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`
   );
@@ -59,7 +66,9 @@ export default async function handler(req: any, res: any) {
 
   // ── Input validation ───────────────────────────────────────────────────────
 
-  const { text } = req.body ?? {};
+  const { text, voice } = req.body ?? {};
+  const resolvedVoice =
+    typeof voice === 'string' && ALLOWED_VOICES.has(voice) ? voice : DEFAULT_ENGLISH_VOICE;
 
   if (!text || typeof text !== 'string') {
     return jsonError(res, 400, 'INVALID_REQUEST', 'O campo text é obrigatório.');
@@ -87,7 +96,7 @@ export default async function handler(req: any, res: any) {
 
   // ── Call Azure TTS REST API ────────────────────────────────────────────────
 
-  const ssml = buildSsml(normalized);
+  const ssml = buildSsml(normalized, resolvedVoice);
   const ttsUrl = `https://${config.region}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
   const controller = new AbortController();

@@ -11,6 +11,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Volume2, Loader2, Play, Pause, RotateCcw, AlertCircle } from 'lucide-react';
 import { getAuthHeader } from '../lib/apiAuth';
+import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, AudioSettings } from '../lib/audioSettings';
 
 type AudioState = 'idle' | 'loading' | 'playing' | 'paused' | 'done' | 'error';
 type Speed = 0.75 | 0.9 | 1;
@@ -30,10 +31,15 @@ export default function V2AudioPlayer({ text }: Props) {
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const prevTextRef = useRef(text);
+  const audioSettingsRef = useRef<AudioSettings>(DEFAULT_AUDIO_SETTINGS);
 
-  // Track mounting
+  // Track mounting + load audio settings
   useEffect(() => {
     mountedRef.current = true;
+    fetchAudioSettings().then((s) => {
+      audioSettingsRef.current = s;
+      if (mountedRef.current) setSpeed(s.playbackRate);
+    }).catch(() => {});
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
@@ -82,7 +88,7 @@ export default function V2AudioPlayer({ text }: Props) {
     const res = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, voice: audioSettingsRef.current.voice }),
       signal: controller.signal,
     });
 
