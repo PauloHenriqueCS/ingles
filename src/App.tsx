@@ -21,6 +21,7 @@ import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
 import MemoryView from './components/MemoryView';
 import ConversationView from './components/ConversationView';
+import ListeningView from './components/ListeningView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
@@ -177,6 +178,9 @@ export default function App() {
         )}
         {view === 'conversation' && (
           <ConversationView />
+        )}
+        {view === 'listening' && (
+          <ListeningView onBack={() => setView('home')} />
         )}
       </main>
     </div>
