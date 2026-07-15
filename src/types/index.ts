@@ -117,6 +117,7 @@ export interface EnglishReviewSaved {
   version2Text: string | null;
   version2Comparison: RewriteComparisonResult | null;
   version2ImprovementScore: number | null;
+  version2FinalText: string | null;
 }
 
 export interface DaySchedule {

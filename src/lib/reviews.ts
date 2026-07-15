@@ -66,3 +66,14 @@ export async function updateReviewV2(
     .eq('id', reviewId);
   if (error) throw new Error(error.message);
 }
+
+export async function updateV2FinalText(
+  reviewId: string,
+  v2FinalText: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('english_reviews')
+    .update({ version_2_final_text: v2FinalText })
+    .eq('id', reviewId);
+  if (error) throw new Error(error.message);
+}

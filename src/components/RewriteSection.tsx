@@ -1,10 +1,12 @@
 import { useState } from 'react';
-import { PenLine, Loader2, Target } from 'lucide-react';
+import { Loader2, Target } from 'lucide-react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
 import { getAuthHeader } from '../lib/apiAuth';
 import V2AudioPlayer from './V2AudioPlayer';
+import CollapsibleBlock from './CollapsibleBlock';
 
 type CompareState = 'idle' | 'loading' | 'done' | 'error';
+type FinalCorrectState = 'idle' | 'loading' | 'done' | 'error';
 
 interface Props {
   originalText: string;
@@ -12,16 +14,54 @@ interface Props {
   reviewId?: string;
   initialV2Text?: string;
   initialV2Comparison?: RewriteComparisonResult;
+  initialV2FinalText?: string;
+  studentLevel?: string;
   onSaveV2?: (v2Text: string, v2Comparison: RewriteComparisonResult) => void;
+  onV2FinalText?: (finalText: string) => void;
 }
 
-export default function RewriteSection({ originalText, aiReview, initialV2Text, initialV2Comparison, onSaveV2 }: Props) {
-  const [isOpen, setIsOpen] = useState(!!(initialV2Text || initialV2Comparison));
+export default function RewriteSection({
+  originalText,
+  aiReview,
+  initialV2Text,
+  initialV2Comparison,
+  initialV2FinalText,
+  studentLevel,
+  onSaveV2,
+  onV2FinalText,
+}: Props) {
   const [rewriteText, setRewriteText] = useState(initialV2Text ?? '');
   const [compareState, setCompareState] = useState<CompareState>(initialV2Comparison ? 'done' : 'idle');
   const [result, setResult] = useState<RewriteComparisonResult | null>(initialV2Comparison ?? null);
   const [emptyWarning, setEmptyWarning] = useState(false);
+  const [finalCorrectedText, setFinalCorrectedText] = useState<string | null>(initialV2FinalText ?? null);
+  const [finalCorrectState, setFinalCorrectState] = useState<FinalCorrectState>(initialV2FinalText ? 'done' : 'idle');
   const isComparing = compareState === 'loading';
+
+  async function fetchFinalText(v2Text: string) {
+    setFinalCorrectState('loading');
+    try {
+      const authHeader = await getAuthHeader();
+      const res = await fetch('/api/correct-rewrite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          rewriteText: v2Text,
+          originalCorrectedText: aiReview.correctedText,
+          studentLevel: studentLevel ?? undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar versão final');
+      const final = String(data.finalCorrectedText ?? '');
+      if (!final) throw new Error('Resposta vazia');
+      setFinalCorrectedText(final);
+      setFinalCorrectState('done');
+      onV2FinalText?.(final);
+    } catch {
+      setFinalCorrectState('error');
+    }
+  }
 
   async function compare() {
     if (!rewriteText.trim()) {
@@ -51,32 +91,18 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
       onSaveV2?.(rewriteText.trim(), comparison);
     } catch {
       setCompareState('error');
+      return;
+    }
+    if (!finalCorrectedText) {
+      fetchFinalText(rewriteText.trim());
     }
   }
 
-  if (!isOpen) {
-    return (
-      <button
-        onClick={() => setIsOpen(true)}
-        className="w-full py-3 rounded-xl border border-dashed border-slate-600 text-slate-400 hover:border-blue-500 hover:text-blue-400 text-sm font-medium transition-colors"
-      >
-        <span className="flex items-center justify-center gap-2">
-          <PenLine className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-          Criar versão 2
-        </span>
-      </button>
-    );
-  }
+  const showGenerateFinalButton =
+    !!(initialV2Text && !initialV2FinalText && finalCorrectState === 'idle');
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="h-px flex-1 bg-slate-700" />
-        <span className="text-xs text-slate-500 font-medium uppercase tracking-wider px-3">Versão 2</span>
-        <div className="h-px flex-1 bg-slate-700" />
-      </div>
-
       {/* Motivation */}
       <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-4 space-y-1">
         <p className="text-sm text-slate-200 leading-relaxed">
@@ -123,18 +149,10 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
         )}
       </div>
 
-      {/* Listen to Version 2 */}
-      {rewriteText.trim() && (
-        <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3">
-          <p className="text-xs text-slate-500 mb-2">Ouça como sua versão 2 soa em inglês</p>
-          <V2AudioPlayer text={rewriteText.trim()} />
-        </div>
-      )}
-
       {/* Compare button */}
       <button
         onClick={compare}
-        disabled={isComparing}
+        disabled={isComparing || finalCorrectState === 'loading'}
         className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
         {isComparing ? (
@@ -145,7 +163,7 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
         ) : 'Comparar versão 2'}
       </button>
 
-      {/* Error state */}
+      {/* Compare error */}
       {compareState === 'error' && (
         <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center space-y-2">
           <p className="text-sm text-red-300">Não foi possível comparar sua versão 2 agora.</p>
@@ -155,9 +173,53 @@ export default function RewriteSection({ originalText, aiReview, initialV2Text, 
         </div>
       )}
 
-      {/* Result */}
+      {/* Comparison result */}
       {compareState === 'done' && result && (
         <ComparisonResult result={result} />
+      )}
+
+      {/* Final correction loading */}
+      {finalCorrectState === 'loading' && (
+        <div className="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3">
+          <Loader2 className="w-4 h-4 shrink-0 text-blue-400 animate-spin" strokeWidth={2} />
+          <p className="text-xs text-slate-400">Gerando versão final corrigida...</p>
+        </div>
+      )}
+
+      {/* Generate final text button (old records without final text) */}
+      {showGenerateFinalButton && (
+        <button
+          onClick={() => fetchFinalText(rewriteText.trim())}
+          className="w-full py-2.5 rounded-xl text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors"
+        >
+          Gerar versão final corrigida
+        </button>
+      )}
+
+      {/* Final corrected text + audio */}
+      {finalCorrectedText && finalCorrectState === 'done' && (
+        <CollapsibleBlock title="Versão final corrigida" defaultOpen={true}>
+          <div className="space-y-4 pt-1">
+            <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">{finalCorrectedText}</p>
+            <div className="border-t border-slate-700 pt-3">
+              <p className="text-xs text-slate-500 mb-2">Ouça a versão final corrigida</p>
+              <V2AudioPlayer text={finalCorrectedText} />
+            </div>
+          </div>
+        </CollapsibleBlock>
+      )}
+
+      {/* Final correction error */}
+      {finalCorrectState === 'error' && (
+        <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center space-y-2">
+          <p className="text-sm text-red-300">Não foi possível gerar a versão final corrigida.</p>
+          <button
+            onClick={() => fetchFinalText(rewriteText.trim())}
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            Tentar novamente
+          </button>
+        </div>
       )}
     </div>
   );

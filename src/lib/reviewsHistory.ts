@@ -41,6 +41,7 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
     version2Text: row.version_2_text != null ? String(row.version_2_text) : null,
     version2Comparison: row.version_2_comparison != null ? row.version_2_comparison as RewriteComparisonResult : null,
     version2ImprovementScore: row.version_2_improvement_score != null ? Number(row.version_2_improvement_score) : null,
+    version2FinalText: row.version_2_final_text != null ? String(row.version_2_final_text) : null,
   };
 }
 

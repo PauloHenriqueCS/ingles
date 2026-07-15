@@ -5,12 +5,13 @@ import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation'
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
-import { saveEnglishReview, updateReviewV2 } from '../lib/reviews';
+import { saveEnglishReview, updateReviewV2, updateV2FinalText } from '../lib/reviews';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
 import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
+import CollapsibleBlock from './CollapsibleBlock';
 import DailyThemeCard from './DailyThemeCard';
 import RewriteSection from './RewriteSection';
 import PronunciationRecorder from './PronunciationRecorder';
@@ -69,7 +70,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [existingV2Text, setExistingV2Text] = useState<string | null>(null);
   const [existingV2Comparison, setExistingV2Comparison] = useState<RewriteComparisonResult | null>(null);
-  const [ptDraftOpen, setPtDraftOpen] = useState(false);
+  const [existingV2FinalText, setExistingV2FinalText] = useState<string | null>(null);
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -94,6 +95,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     setReviewId(null);
     setExistingV2Text(null);
     setExistingV2Comparison(null);
+    setExistingV2FinalText(null);
     if (entry?.aiReview) {
       fetchReviewByDate(date)
         .then((r) => {
@@ -101,6 +103,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
             setReviewId(r.id);
             setExistingV2Text(r.version2Text ?? null);
             setExistingV2Comparison(r.version2Comparison ?? null);
+            setExistingV2FinalText(r.version2FinalText ?? null);
           }
         })
         .catch(() => {});
@@ -114,6 +117,14 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     });
     setExistingV2Text(v2Text);
     setExistingV2Comparison(v2Comparison);
+  }
+
+  function handleV2FinalText(finalText: string) {
+    if (!reviewId) return;
+    updateV2FinalText(reviewId, finalText).catch((err) => {
+      console.error('Failed to save v2 final text:', err);
+    });
+    setExistingV2FinalText(finalText);
   }
 
   async function handleActivateDay() {
@@ -290,41 +301,28 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         </div>
 
         {/* Portuguese draft — local only, never sent anywhere */}
-        <div className="border border-slate-700 rounded-xl overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setPtDraftOpen((o) => !o)}
-            className="w-full flex items-center justify-between px-4 py-3 text-left bg-slate-800 hover:bg-slate-750 transition-colors"
-          >
-            <div>
-              <span className="text-sm text-slate-300 font-medium">Ideia em português</span>
-              <span className="text-xs text-slate-500 ml-2">opcional</span>
-            </div>
-            <span className="text-slate-500 text-xs">{ptDraftOpen ? '▲' : '▼'}</span>
-          </button>
-          {ptDraftOpen && (
-            <div className="px-4 pb-4 pt-2 bg-slate-800/60 space-y-2">
-              <p className="text-xs text-slate-500">
-                Esse rascunho é só para você. A IA vai avaliar apenas o texto em inglês.
-              </p>
-              <textarea
-                value={ptDraft}
-                onChange={(e) => setPtDraft(e.target.value)}
-                placeholder="Escreva aqui sua ideia em português. Esse texto não será corrigido nem salvo."
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg p-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-slate-500 min-h-[120px] resize-none"
-              />
-              {ptDraft && (
-                <button
-                  type="button"
-                  onClick={() => setPtDraft('')}
-                  className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-                >
-                  Limpar rascunho
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <CollapsibleBlock title="Ideia em português" badge="opcional" defaultOpen={false}>
+          <div className="space-y-2 pt-1">
+            <p className="text-xs text-slate-500">
+              Esse rascunho é só para você. A IA vai avaliar apenas o texto em inglês.
+            </p>
+            <textarea
+              value={ptDraft}
+              onChange={(e) => setPtDraft(e.target.value)}
+              placeholder="Escreva aqui sua ideia em português. Esse texto não será corrigido nem salvo."
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg p-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-slate-500 min-h-[120px] resize-none"
+            />
+            {ptDraft && (
+              <button
+                type="button"
+                onClick={() => setPtDraft('')}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Limpar rascunho
+              </button>
+            )}
+          </div>
+        </CollapsibleBlock>
 
         <div>
           <div className="flex justify-between mb-2">
@@ -421,26 +419,50 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
             {isReviewMode && reviewSchedule && (
               <ScheduleResultCard schedule={reviewSchedule} />
             )}
-            <TeacherReport
-              review={aiReview}
-              grammarObjective={schedule?.grammarObjective ?? ''}
-              onReviewAgain={handleReview}
-              reviewing={isReviewing}
-            />
-            <RewriteSection
-              key={reviewId ?? 'no-review'}
-              originalText={originalText}
-              aiReview={aiReview}
-              reviewId={reviewId ?? undefined}
-              initialV2Text={existingV2Text ?? undefined}
-              initialV2Comparison={existingV2Comparison ?? undefined}
-              onSaveV2={handleSaveV2}
-            />
-            <PronunciationRecorder
-              key={`pronunciation-${reviewId ?? 'no-review'}-${!!existingV2Text}`}
-              referenceText={existingV2Text ?? aiReview.correctedText}
-              reviewId={reviewId}
-            />
+            <CollapsibleBlock title="Relatório do Professor" defaultOpen={true}>
+              <TeacherReport
+                review={aiReview}
+                grammarObjective={schedule?.grammarObjective ?? ''}
+                onReviewAgain={handleReview}
+                reviewing={isReviewing}
+              />
+            </CollapsibleBlock>
+            <CollapsibleBlock
+              title="Versão 2"
+              defaultOpen={!!(existingV2Text || existingV2Comparison)}
+            >
+              <RewriteSection
+                key={reviewId ?? 'no-review'}
+                originalText={originalText}
+                aiReview={aiReview}
+                reviewId={reviewId ?? undefined}
+                initialV2Text={existingV2Text ?? undefined}
+                initialV2Comparison={existingV2Comparison ?? undefined}
+                initialV2FinalText={existingV2FinalText ?? undefined}
+                onSaveV2={handleSaveV2}
+                onV2FinalText={handleV2FinalText}
+              />
+            </CollapsibleBlock>
+            <CollapsibleBlock title="Treino de pronúncia" defaultOpen={false}>
+              {existingV2FinalText ? (
+                <PronunciationRecorder
+                  key={`pronunciation-${reviewId ?? 'no-review'}-final`}
+                  referenceText={existingV2FinalText}
+                  reviewId={reviewId}
+                />
+              ) : existingV2Text ? (
+                <div className="py-3 space-y-1">
+                  <p className="text-sm text-slate-400">Aguardando versão final corrigida.</p>
+                  <p className="text-xs text-slate-500">Gere a versão final na seção Versão 2 para treinar pronúncia com o texto corrigido.</p>
+                </div>
+              ) : (
+                <PronunciationRecorder
+                  key={`pronunciation-${reviewId ?? 'no-review'}-v1`}
+                  referenceText={aiReview.correctedText}
+                  reviewId={reviewId}
+                />
+              )}
+            </CollapsibleBlock>
           </>
         )}
 
