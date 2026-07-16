@@ -13,13 +13,13 @@ import {
   submitAnswer,
   refreshAudioUrl,
   getTodayListening,
-  generateStorySession as generateStorySessionApi,
+  generateListeningStory,
   verifyStoryAnswer,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
   type PublishedEpisode,
-  type StorySessionData,
+  type ListeningStoryData,
   type StoryAnswerResult,
 } from '../lib/listeningApi';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
@@ -132,6 +132,12 @@ function AutoAdvanceBar({ durationMs, onDone }: { durationMs: number; onDone: ()
   );
 }
 
+const GENERATION_PROGRESS = [
+  'Criando a história...',
+  'Preparando o áudio...',
+  'Quase pronto...',
+];
+
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
@@ -157,12 +163,15 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [subtitleChoice, setSubtitleChoice] = useState<SubtitleChoice>('pt-BR');
   const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [storySession, setStorySession] = useState<StorySessionData | null>(null);
-  const [storyAttempts, setStoryAttempts] = useState(0);
+  const [storyData, setStoryData] = useState<ListeningStoryData | null>(null);
+  const [currentPartIdx, setCurrentPartIdx] = useState<0 | 1>(0);
+  const [attemptsByPart, setAttemptsByPart] = useState<[number, number]>([0, 0]);
+  const [showPartTranscript, setShowPartTranscript] = useState(false);
   const [storySelectedOption, setStorySelectedOption] = useState<number | null>(null);
   const [storyResult, setStoryResult] = useState<StoryAnswerResult | null>(null);
   const [storyGenerating, setStoryGenerating] = useState(false);
   const [storyMode, setStoryMode] = useState(false);
+  const [progressMsgIdx, setProgressMsgIdx] = useState(0);
 
   const player = useListeningAudioPlayer();
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -192,6 +201,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   // ── Apply speed ─────────────────────────────────────────────────────────────
   const { setRate: playerSetRate } = player;
   useEffect(() => { playerSetRate(speed); }, [speed, playerSetRate]);
+
+  // ── Progress messages cycling during story generation ────────────────────────
+  useEffect(() => {
+    if (phase !== 'generating') return;
+    setProgressMsgIdx(0);
+    const id = setInterval(() => setProgressMsgIdx(i => (i + 1) % GENERATION_PROGRESS.length), 3500);
+    return () => clearInterval(id);
+  }, [phase]);
 
   // ── Load session ────────────────────────────────────────────────────────────
   async function loadSession(epId: string, skipIntro = false) {
@@ -322,45 +339,91 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   async function handleStartGeneration() {
     if (storyGenerating) return;
     setStoryGenerating(true);
-    setStorySession(null);
+    setStoryData(null);
     setStoryResult(null);
+    setCurrentPartIdx(0);
+    setAttemptsByPart([0, 0]);
+    setShowPartTranscript(false);
+    setStorySelectedOption(null);
     setPhase('generating');
     try {
-      const data = await generateStorySessionApi();
-      setStorySession(data);
-      setStoryAttempts(0);
-      setStorySelectedOption(null);
-      setStoryResult(null);
-      player.load(data.audioUrl);
+      const data = await generateListeningStory();
+      setStoryData(data);
+      player.load(data.parts[0].audioUrl);
       player.setOnEnded(() => setPhase('question'));
       setPhase('intro');
     } catch (err) {
-      const msg = err instanceof ListeningApiError ? err.message : 'Não foi possível criar a história.';
-      setErrorMsg(msg);
+      if (err instanceof ListeningApiError) {
+        console.error('[listening] generation failed', { status: err.status, code: err.code });
+      } else {
+        console.error('[listening] generation failed', err);
+      }
+      setErrorMsg('Não conseguimos preparar sua história. Tente novamente.');
       setPhase('error');
     } finally {
       setStoryGenerating(false);
     }
   }
 
+  function handleStoryAdvance() {
+    if (!storyData) return;
+    const part2 = storyData.parts[1];
+    player.load(part2.audioUrl);
+    player.setOnEnded(() => setPhase('question'));
+    setCurrentPartIdx(1);
+    setStorySelectedOption(null);
+    setShowPartTranscript(false);
+    setStoryResult(null);
+    setPhase('ready_to_play');
+  }
+
   async function handleStorySubmit() {
-    if (storySelectedOption === null || !storySession || phase === 'submitting') return;
+    if (storySelectedOption === null || !storyData || phase === 'submitting') return;
+    const part = storyData.parts[currentPartIdx];
     setPhase('submitting');
     try {
       const result = await verifyStoryAnswer({
-        answerToken: storySession.answerToken,
+        answerToken: part.answerToken,
         selectedOption: storySelectedOption,
       });
+      setStoryResult(result);
+
       if (result.correct) {
-        setStoryResult(result);
-        setPhase('done');
+        if (currentPartIdx === 0) {
+          setPhase('correct'); // show success + "Continuar para a Parte 2" button
+        } else {
+          setPhase('done');
+        }
+        return;
+      }
+
+      // Wrong answer
+      const curAttempts = attemptsByPart[currentPartIdx];
+      const newCount = curAttempts + 1;
+      const newAttempts: [number, number] = [
+        currentPartIdx === 0 ? newCount : attemptsByPart[0],
+        currentPartIdx === 1 ? newCount : attemptsByPart[1],
+      ];
+      setAttemptsByPart(newAttempts);
+
+      if (newCount >= 2) {
+        // Second wrong: show correct answer then allow advancing
+        setPhase('cycle_failed');
       } else {
-        setStoryAttempts(prev => prev + 1);
-        setPhase('question');
+        // First wrong: show transcript + replay same part
+        setShowPartTranscript(true);
+        setStorySelectedOption(null);
+        player.setOnEnded(() => setPhase('question'));
+        player.restart();
+        setPhase('playing');
       }
     } catch (err) {
-      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao verificar resposta.';
-      setErrorMsg(msg);
+      if (err instanceof ListeningApiError) {
+        console.error('[listening] verify failed', { status: err.status, code: err.code });
+      } else {
+        console.error('[listening] verify failed', err);
+      }
+      setErrorMsg('Erro ao verificar resposta. Tente novamente.');
       setPhase('error');
     }
   }
@@ -563,14 +626,25 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: generating ───────────────────────────────────────────────────────
   function renderGenerating() {
+    const msg = GENERATION_PROGRESS[progressMsgIdx];
     return (
-      <div className="flex flex-col items-center justify-center py-24 gap-4">
-        <div className="w-12 h-12 rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
-          <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
+      <div className="flex flex-col items-center justify-center py-24 gap-5">
+        <div className="w-14 h-14 rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
+          <Loader2 className="w-7 h-7 text-purple-400 animate-spin" />
         </div>
-        <div className="text-center space-y-1">
-          <p className="text-sm font-medium text-slate-200">Criando sua história...</p>
-          <p className="text-xs text-slate-500">Isso pode levar alguns segundos.</p>
+        <div className="text-center space-y-1.5">
+          <p className="text-sm font-semibold text-slate-200 transition-all">{msg}</p>
+          <p className="text-xs text-slate-500">Isso pode levar até 1 minuto.</p>
+        </div>
+        <div className="flex gap-1.5 mt-1">
+          {GENERATION_PROGRESS.map((_, i) => (
+            <div
+              key={i}
+              className={`w-1.5 h-1.5 rounded-full transition-colors duration-500 ${
+                i === progressMsgIdx ? 'bg-purple-400' : 'bg-slate-700'
+              }`}
+            />
+          ))}
         </div>
       </div>
     );
@@ -688,31 +762,44 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: intro ────────────────────────────────────────────────────────────
   function renderIntro() {
-    if (storySession) {
+    if (storyData) {
       return (
         <div className="p-5 max-w-lg mx-auto space-y-5 pt-6">
           <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 space-y-5">
             <div className="space-y-2">
-              <h2 className="text-xl font-bold text-slate-100 leading-snug">{storySession.title}</h2>
+              <h2 className="text-xl font-bold text-slate-100 leading-snug">{storyData.title}</h2>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-purple-300 px-2.5 py-1 rounded-full bg-purple-600/20 border border-purple-500/30">
-                  {storySession.level}
+                  {storyData.level}
                 </span>
                 <span className="flex items-center gap-1.5 text-xs text-slate-500 px-2.5 py-1 rounded-full bg-slate-700/60 border border-slate-600/40">
-                  1 pergunta
+                  2 partes
+                </span>
+                <span className="flex items-center gap-1.5 text-xs text-slate-500 px-2.5 py-1 rounded-full bg-slate-700/60 border border-slate-600/40">
+                  <Clock className="w-3 h-3" />
+                  ~10 min
                 </span>
               </div>
             </div>
+            {storyData.summary && (
+              <div className="border-t border-slate-700 pt-4">
+                <p className="text-sm text-slate-300 leading-relaxed">{storyData.summary}</p>
+              </div>
+            )}
             <div className="border-t border-slate-700 pt-4 space-y-2">
               <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">Como funciona</p>
               <ul className="space-y-1.5 text-xs text-slate-400">
                 <li className="flex items-start gap-2">
                   <span className="text-purple-400 mt-0.5">•</span>
-                  Ouça a história e responda uma pergunta de compreensão
+                  Ouça cada parte e responda uma pergunta de compreensão
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="text-purple-400 mt-0.5">•</span>
-                  Se errar duas vezes, o texto e a tradução serão revelados
+                  Após um erro, o texto aparece e você reouve a mesma parte
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-purple-400 mt-0.5">•</span>
+                  Após dois erros, a resposta correta é revelada
                 </li>
               </ul>
             </div>
@@ -856,7 +943,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     return (
       <div className="p-4 pt-3 max-w-lg mx-auto space-y-4">
         {/* Block + attempt context */}
-        {!storySession && (
+        {storyData ? (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-500 font-medium">Parte {currentPartIdx + 1} de 2</span>
+            {showPartTranscript && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400 font-medium">
+                Reouvindo com legenda
+              </span>
+            )}
+          </div>
+        ) : (
           <div className="flex items-center justify-between">
             <span className="text-xs text-slate-500 font-medium">Bloco {blockIdx + 1} de 2</span>
             {session && session.currentAttempt > 1 && (
@@ -958,8 +1054,20 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
           ))}
         </div>
 
+        {/* Story transcript (shown after first wrong answer) */}
+        {storyData && showPartTranscript && (
+          <div className="bg-slate-800/60 border border-amber-700/20 rounded-xl p-4 space-y-2">
+            <p className="text-xs text-amber-400/80 font-medium uppercase tracking-wide">
+              Texto — Parte {currentPartIdx + 1}
+            </p>
+            <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">
+              {storyData.parts[currentPartIdx].text}
+            </p>
+          </div>
+        )}
+
         {/* Transcript button */}
-        {!storySession && (
+        {!storyData && (
           <button
             onClick={() => transcriptUnlocked && setShowTranscript(true)}
             disabled={!transcriptUnlocked}
@@ -983,26 +1091,27 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: question ──────────────────────────────────────────────────────────
   function renderQuestion() {
-    if (storySession) {
-      const q = storySession.question;
+    if (storyData) {
+      const part = storyData.parts[currentPartIdx];
+      const q = part.question;
       const isSubmitting = phase === 'submitting';
-      const showText = storyAttempts >= 2;
+      const curAttempts = attemptsByPart[currentPartIdx];
 
       return (
         <div className="p-4 pt-4 max-w-lg mx-auto space-y-4">
-          {storyAttempts > 0 && (
-            <div className="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30 text-amber-400">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-              {showText
-                ? 'Texto revelado. Leia e tente novamente.'
-                : `Tentativa ${storyAttempts + 1} de 2 — resposta incorreta.`}
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-purple-400 font-medium">Parte {currentPartIdx + 1} de 2</span>
+            {curAttempts > 0 && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400">
+                Tentativa {curAttempts + 1} de 2
+              </span>
+            )}
+          </div>
 
           <h3 className="text-base font-semibold text-slate-100 leading-snug">{q.prompt}</h3>
 
           <div className="space-y-3">
-            {q.options.map((opt, i) => {
+            {q.options.map((opt: string, i: number) => {
               const isSelected = storySelectedOption === i;
               return (
                 <button
@@ -1044,15 +1153,13 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
             Ouvir novamente
           </button>
 
-          {showText && (
-            <div className="space-y-3 pt-2 border-t border-slate-700">
-              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-                <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">Texto em inglês</p>
-                <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">{storySession.storyEn}</p>
-              </div>
-              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-                <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">Tradução</p>
-                <p className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">{storySession.storyPt}</p>
+          {showPartTranscript && (
+            <div className="pt-2 border-t border-slate-700">
+              <div className="bg-slate-800/60 border border-amber-700/20 rounded-xl p-4">
+                <p className="text-xs text-amber-400/80 font-medium mb-2 uppercase tracking-wide">
+                  Texto — Parte {currentPartIdx + 1}
+                </p>
+                <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">{part.text}</p>
               </div>
             </div>
           )}
@@ -1125,6 +1232,37 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: correct ──────────────────────────────────────────────────────────
   function renderCorrect() {
+    if (storyData) {
+      return (
+        <div className="p-6 max-w-lg mx-auto pt-8 space-y-5">
+          <div className="text-center space-y-3">
+            <div className="w-14 h-14 rounded-full bg-emerald-900/40 border border-emerald-600/40 flex items-center justify-center mx-auto">
+              <Check className="w-7 h-7 text-emerald-400" />
+            </div>
+            <div>
+              <p className="text-lg font-bold text-emerald-300">Correto!</p>
+              <p className="text-sm text-slate-400 mt-0.5">Parte 1 concluída.</p>
+            </div>
+          </div>
+
+          {storyResult?.explanationPt && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+              <p className="text-xs text-slate-500 font-medium mb-1.5">Explicação</p>
+              <p className="text-sm text-slate-300 leading-relaxed">{storyResult.explanationPt}</p>
+            </div>
+          )}
+
+          <button
+            onClick={handleStoryAdvance}
+            className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+          >
+            <Headphones className="w-5 h-5" />
+            Continuar para a Parte 2
+          </button>
+        </div>
+      );
+    }
+
     const explanation = lastResult?.explanationPt;
     const advance = () => {
       if (lastResult?.episodeCompleted || blockIdx === 1) {
@@ -1188,6 +1326,79 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: cycle_failed ──────────────────────────────────────────────────────
   function renderCycleFailed() {
+    if (storyData) {
+      const part = storyData.parts[currentPartIdx];
+      const correctIndex = storyResult?.correctOption ?? null;
+      const isLastPart = currentPartIdx === 1;
+
+      const advance = () => {
+        if (isLastPart) {
+          setPhase('done');
+        } else {
+          handleStoryAdvance();
+        }
+      };
+
+      return (
+        <div className="p-4 pt-6 max-w-lg mx-auto space-y-4">
+          <div className="flex items-center gap-3 p-4 rounded-xl bg-red-900/20 border border-red-700/30">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
+            <div>
+              <p className="font-semibold text-sm text-red-300">Duas tentativas usadas</p>
+              <p className="text-xs text-slate-500 mt-0.5">Parte {currentPartIdx + 1} de 2.</p>
+            </div>
+          </div>
+
+          {correctIndex !== null && (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-500 font-medium">Resposta correta:</p>
+              {part.question.options.map((opt: string, i: number) => {
+                const isCorrect = i === correctIndex;
+                return (
+                  <div
+                    key={i}
+                    className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
+                      isCorrect
+                        ? 'bg-emerald-900/25 border-emerald-600/40 text-emerald-200'
+                        : 'bg-slate-800 border-slate-700 text-slate-600'
+                    }`}
+                  >
+                    <span className="font-semibold shrink-0">{String.fromCharCode(65 + i)}.</span>
+                    <span className="flex-1">{opt}</span>
+                    {isCorrect && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {storyResult?.explanationPt && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+              <p className="text-xs text-slate-500 font-medium mb-1">Explicação</p>
+              <p className="text-sm text-slate-300 leading-relaxed">{storyResult.explanationPt}</p>
+            </div>
+          )}
+
+          <button
+            onClick={advance}
+            className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+          >
+            {isLastPart ? (
+              <>
+                <Trophy className="w-5 h-5" />
+                Concluir atividade
+              </>
+            ) : (
+              <>
+                <Headphones className="w-5 h-5" />
+                Continuar para a Parte 2
+              </>
+            )}
+          </button>
+        </div>
+      );
+    }
+
     const correctIndex = lastResult?.correctOption ?? null;
     const q = block?.question;
     const explanation = lastResult?.explanationPt;
@@ -1249,23 +1460,18 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: done ──────────────────────────────────────────────────────────────
   function renderDone() {
-    if (storySession) {
+    if (storyData) {
       return (
         <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
-          <div className="w-20 h-20 rounded-full bg-emerald-600/20 border-2 border-emerald-500/40 flex items-center justify-center mx-auto">
-            <Check className="w-10 h-10 text-emerald-400" />
+          <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/40 flex items-center justify-center mx-auto">
+            <Trophy className="w-10 h-10 text-purple-400" />
           </div>
           <div>
-            <h2 className="text-2xl font-bold text-slate-100">Resposta correta!</h2>
-            <p className="text-sm text-slate-400 mt-2">Você completou "{storySession.title}".</p>
+            <h2 className="text-2xl font-bold text-slate-100">Atividade concluída!</h2>
+            <p className="text-sm text-slate-400 mt-2">
+              Você completou "{storyData.title}".
+            </p>
           </div>
-
-          {storyResult?.explanationPt && (
-            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 text-left">
-              <p className="text-xs text-slate-500 font-medium mb-1.5 uppercase tracking-wide">Explicação</p>
-              <p className="text-sm text-slate-300 leading-relaxed">{storyResult.explanationPt}</p>
-            </div>
-          )}
 
           <button
             onClick={handleStartGeneration}

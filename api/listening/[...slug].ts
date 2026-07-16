@@ -27,6 +27,7 @@ import {
   generateStorySession,
   decodeAnswerToken,
 } from '../../src/services/listening/story-session/generate-story-session';
+import { generateListeningStory as generateListeningStoryService } from '../../src/services/listening/story-session/generate-listening-story';
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
@@ -421,6 +422,41 @@ async function handleStoryVerify(req: any, res: any) {
   }
 }
 
+// ─── POST /api/listening/generate ────────────────────────────────────────────
+
+async function handleListeningGenerate(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const openaiKey = process.env.OPENAI_API_KEY ?? '';
+  const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
+  const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
+  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+
+  if (!openaiKey || !azureKey || !azureRegion || !secret) {
+    safeLog('listening/generate', 'misconfigured', 503, {});
+    return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço temporariamente indisponível.');
+  }
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await generateListeningStoryService(
+      userId, serviceClient, openaiKey, azureKey, azureRegion, secret,
+    );
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/generate', 'generated', 200, { level: result.level });
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error('[listening] generation failed', err);
+    const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
+    safeLog('listening/generate', 'failed', 500, { step });
+    return jsonError(res, 500, 'GENERATION_FAILED', 'Não conseguimos preparar sua história. Tente novamente.');
+  }
+}
+
 // ─── POST /api/listening/on-demand/start ─────────────────────────────────────
 
 async function handleOnDemandStart(req: any, res: any) {
@@ -556,6 +592,7 @@ export default async function handler(req: any, res: any) {
     case 'today':                      return handleToday(req, res);
     case 'by-date':                    return handleByDate(req, res);
     case 'assignment-result':          return handleAssignmentResult(req, res);
+    case 'generate':                   return handleListeningGenerate(req, res);
     case 'story/generate':             return handleStoryGenerate(req, res);
     case 'story/verify':               return handleStoryVerify(req, res);
     case 'on-demand/start':            return handleOnDemandStart(req, res);

@@ -134,6 +134,34 @@ export function getListeningResult(assignmentId: string): Promise<ListeningResul
   return apiFetch<ListeningResultData>(`/api/listening/assignment-result?assignmentId=${encodeURIComponent(assignmentId)}`);
 }
 
+// ── Two-part listening story (on-the-fly, no DB) ─────────────────────────────
+
+export type StoryPart = {
+  id: 1 | 2;
+  text: string;
+  audioUrl: string;
+  audioExpiresAt: string;
+  question: {
+    prompt: string;
+    options: string[]; // exactly 5
+  };
+  answerToken: string;
+};
+
+export type ListeningStoryData = {
+  title: string;
+  level: string;
+  summary: string;
+  parts: [StoryPart, StoryPart];
+};
+
+export function generateListeningStory(): Promise<ListeningStoryData> {
+  return apiFetch<ListeningStoryData>('/api/listening/generate', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 // ── Story session (simplified, no DB) ─────────────────────────────────────────
 
 export type StorySessionData = {
