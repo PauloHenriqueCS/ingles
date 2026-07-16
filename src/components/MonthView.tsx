@@ -26,7 +26,7 @@ const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export default function MonthView({
-  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening,
+  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening: _onOpenListening,
   activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
   const today = (() => {
