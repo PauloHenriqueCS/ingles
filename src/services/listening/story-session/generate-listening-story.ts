@@ -13,6 +13,8 @@ export interface StoryPartResult {
   question: {
     prompt: string;
     options: string[]; // exactly 5
+    correctOptionIndex: number; // 0-indexed, for client-side comparison
+    explanationPt: string;
   };
   answerToken: string;
 }
@@ -158,7 +160,7 @@ Rules:
 
 // ── Normalize correctIndex from AI (may return letter, 1-indexed, or text) ────
 
-function normalizeCorrectIndex(raw: unknown, options: string[]): number {
+export function normalizeCorrectIndex(raw: unknown, options: string[]): number {
   if (typeof raw === 'number' && Number.isInteger(raw)) {
     if (raw >= 0 && raw <= 4) return raw;      // 0-indexed ✓
     if (raw >= 1 && raw <= 5) return raw - 1;  // 1-indexed → 0-indexed
@@ -363,7 +365,12 @@ async function synthesizeParts(
         text: ai.parts[0].text,
         audioBase64: audio1.toString('base64'),
         audioMimeType: 'audio/mpeg',
-        question: { prompt: ai.parts[0].question.text, options: ai.parts[0].question.options },
+        question: {
+          prompt: ai.parts[0].question.text,
+          options: ai.parts[0].question.options,
+          correctOptionIndex: ai.parts[0].question.correctIndex,
+          explanationPt: ai.parts[0].question.explanationPt,
+        },
         answerToken: token1,
       },
       {
@@ -371,7 +378,12 @@ async function synthesizeParts(
         text: ai.parts[1].text,
         audioBase64: audio2.toString('base64'),
         audioMimeType: 'audio/mpeg',
-        question: { prompt: ai.parts[1].question.text, options: ai.parts[1].question.options },
+        question: {
+          prompt: ai.parts[1].question.text,
+          options: ai.parts[1].question.options,
+          correctOptionIndex: ai.parts[1].question.correctIndex,
+          explanationPt: ai.parts[1].question.explanationPt,
+        },
         answerToken: token2,
       },
     ],

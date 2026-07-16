@@ -14,13 +14,11 @@ import {
   refreshAudioUrl,
   getTodayListening,
   generateListeningStory,
-  verifyStoryAnswer,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
   type PublishedEpisode,
   type ListeningStoryData,
-  type StoryAnswerResult,
 } from '../lib/listeningApi';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
 
@@ -169,16 +167,17 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [attemptsByPart, setAttemptsByPart] = useState<[number, number]>([0, 0]);
   const [showPartTranscript, setShowPartTranscript] = useState(false);
   const [storySelectedOption, setStorySelectedOption] = useState<number | null>(null);
-  const [storyResult, setStoryResult] = useState<StoryAnswerResult | null>(null);
+  const [storyResult, setStoryResult] = useState<{ correct: boolean; correctOption: number; explanationPt: string } | null>(null);
   const [storyGenerating, setStoryGenerating] = useState(false);
   const [storyMode, setStoryMode] = useState(false);
   const [progressMsgIdx, setProgressMsgIdx] = useState(0);
 
   const player = useListeningAudioPlayer();
+  const audioRef = player.audioRef;
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrongTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Blob URLs created from story audio — revoked on unmount to free memory
-  const storyBlobUrlsRef = useRef<string[]>([]);
+  const audioUrlsByPart = useRef<string[]>([]);
 
   // ── Active block data ───────────────────────────────────────────────────────
   const block: SessionBlockInfo | null = episodeData?.blocks[blockIdx] ?? null;
@@ -340,6 +339,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   }
 
   async function handleStartGeneration() {
+    console.trace('[LISTENING_GENERATE_CALLED]');
     if (storyGenerating) return;
     setStoryGenerating(true);
     setStoryData(null);
@@ -353,7 +353,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       // Pass cached storyPackage on retry — skips OpenAI, re-generates only TTS
       const data = await generateListeningStory(storyPackage);
       // Revoke any blob URLs from a previous story before creating new ones
-      revokeStoryBlobUrls();
+      revokeAudioUrls();
       const url0 = base64ToBlobUrl(data.parts[0].audioBase64, data.parts[0].audioMimeType);
       // Pre-create part 2 URL now so it's ready when needed
       base64ToBlobUrl(data.parts[1].audioBase64, data.parts[1].audioMimeType);
@@ -385,9 +385,12 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   function handleStoryAdvance() {
     if (!storyData) return;
-    // storyBlobUrlsRef.current[1] is the pre-created URL for part 2
-    const url1 = storyBlobUrlsRef.current[1] ?? '';
-    player.load(url1);
+    const url1 = audioUrlsByPart.current[1] ?? '';
+    const audio = audioRef.current;
+    if (audio) {
+      audio.src = url1;
+      player.restart(); // resets currentTime + state without creating new Audio
+    }
     player.setOnEnded(() => setPhase('question'));
     setCurrentPartIdx(1);
     setStorySelectedOption(null);
@@ -396,66 +399,76 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     setPhase('ready_to_play');
   }
 
-  async function handleStorySubmit() {
+  function handleStorySubmit() {
     if (storySelectedOption === null || !storyData || phase === 'submitting') return;
     const part = storyData.parts[currentPartIdx];
-    setPhase('submitting');
-    try {
-      const result = await verifyStoryAnswer({
-        answerToken: part.answerToken,
-        selectedOption: storySelectedOption,
-      });
-      // Debug: remove after confirming index format is canonical
-      console.log('[story-verify]', {
-        selectedAnswer: storySelectedOption,
-        selectedAnswerType: typeof storySelectedOption,
-        correctAnswer: result.correctOption,
-        correctAnswerType: typeof result.correctOption,
-        options: part.question.options,
-        clientComparison: storySelectedOption === result.correctOption,
-        serverCorrect: result.correct,
-      });
-      setStoryResult(result);
 
-      if (result.correct) {
-        if (currentPartIdx === 0) {
-          setPhase('correct'); // show success + "Continuar para a Parte 2" button
-        } else {
-          setPhase('done');
-        }
-        return;
-      }
+    console.log('[LISTENING_ANSWER_DEBUG]', {
+      selectedOption: storySelectedOption,
+      selectedOptionType: typeof storySelectedOption,
+      correctOptionIndex: part.question.correctOptionIndex,
+      correctOptionIndexType: typeof part.question.correctOptionIndex,
+      comparison: Number(storySelectedOption) === Number(part.question.correctOptionIndex),
+      options: part.question.options,
+    });
 
-      // Wrong answer
-      const curAttempts = attemptsByPart[currentPartIdx];
-      const newCount = curAttempts + 1;
-      const newAttempts: [number, number] = [
-        currentPartIdx === 0 ? newCount : attemptsByPart[0],
-        currentPartIdx === 1 ? newCount : attemptsByPart[1],
-      ];
-      setAttemptsByPart(newAttempts);
+    const correct = Number(storySelectedOption) === Number(part.question.correctOptionIndex);
+    const result = {
+      correct,
+      correctOption: part.question.correctOptionIndex,
+      explanationPt: part.question.explanationPt,
+    };
+    setStoryResult(result);
 
-      if (newCount >= 2) {
-        // Second wrong: show correct answer then allow advancing
-        setPhase('cycle_failed');
+    if (correct) {
+      if (currentPartIdx === 0) {
+        setPhase('correct');
       } else {
-        // First wrong: show transcript, replay the same part immediately
-        // No API call — reuse the existing blob URL already loaded in the player
-        setShowPartTranscript(true);
-        setStorySelectedOption(null);
-        player.setOnEnded(() => setPhase('question'));
-        player.restart(); // seek to 0
-        player.play();    // auto-start (restart() alone does not play)
-        setPhase('playing');
+        setPhase('done');
       }
-    } catch (err) {
-      if (err instanceof ListeningApiError) {
-        console.error('[listening] verify failed', { status: err.status, code: err.code });
+      return;
+    }
+
+    // Wrong answer
+    const curAttempts = attemptsByPart[currentPartIdx];
+    const newCount = curAttempts + 1;
+    const newAttempts: [number, number] = [
+      currentPartIdx === 0 ? newCount : attemptsByPart[0],
+      currentPartIdx === 1 ? newCount : attemptsByPart[1],
+    ];
+    setAttemptsByPart(newAttempts);
+
+    if (newCount >= 2) {
+      setPhase('cycle_failed');
+    } else {
+      // First wrong: show transcript, replay immediately within the user gesture
+      setShowPartTranscript(true);
+      setStorySelectedOption(null);
+      player.setOnEnded(() => setPhase('question'));
+
+      const audio = audioRef.current;
+      console.log('[LISTENING_REPLAY_DEBUG]', {
+        audioUrlsByPart: audioUrlsByPart.current,
+        audioElement: !!audio,
+        audioPaused: audio?.paused,
+        audioSrc: audio?.src?.slice(0, 60),
+        audioCurrentTime: audio?.currentTime,
+      });
+
+      if (audio) {
+        audio.currentTime = 0;
+        audio.play()
+          .then(() => {
+            console.log('[LISTENING_REPLAY_STARTED]');
+            setPhase('playing');
+          })
+          .catch((err: Error) => {
+            console.log('[LISTENING_REPLAY_FAILED]', err?.message);
+            setPhase('ready_to_play');
+          });
       } else {
-        console.error('[listening] verify failed', err);
+        setPhase('ready_to_play');
       }
-      setErrorMsg('Erro ao verificar resposta. Tente novamente.');
-      setPhase('error');
     }
   }
 
@@ -536,13 +549,13 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const blob = new Blob([bytes], { type: mimeType });
     const url = URL.createObjectURL(blob);
-    storyBlobUrlsRef.current.push(url);
+    audioUrlsByPart.current.push(url);
     return url;
   }
 
-  function revokeStoryBlobUrls() {
-    storyBlobUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
-    storyBlobUrlsRef.current = [];
+  function revokeAudioUrls() {
+    audioUrlsByPart.current.forEach(u => URL.revokeObjectURL(u));
+    audioUrlsByPart.current = [];
   }
 
   // ── Cleanup ─────────────────────────────────────────────────────────────────
@@ -550,7 +563,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     return () => {
       if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
       if (wrongTimerRef.current) clearTimeout(wrongTimerRef.current);
-      revokeStoryBlobUrls();
+      revokeAudioUrls();
     };
   }, []);
 

@@ -159,6 +159,8 @@ export type StoryPart = {
   question: {
     prompt: string;
     options: string[]; // exactly 5
+    correctOptionIndex: number; // 0-indexed, for client-side comparison
+    explanationPt: string;
   };
   answerToken: string;
 };
