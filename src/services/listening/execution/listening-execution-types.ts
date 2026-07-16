@@ -93,6 +93,8 @@ export type SubmitAnswerResult = {
   correctOption: number | null;
   blockCompleted: boolean;
   episodeCompleted: boolean;
+  /** Present when episodeCompleted=true. False means the calendar assignment update failed. */
+  completionSaved?: boolean;
 };
 
 export const LISTENING_EXECUTION_ERRORS = {

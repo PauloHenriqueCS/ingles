@@ -26,6 +26,10 @@ export async function getListeningToday(
   let currentStatus: string;
 
   if (existing) {
+    if (!existing.episode_id) {
+      // Story-mode completion recorded for today — no episode session to load.
+      return { status: 'story_completed', assignmentId: existing.id, activityDate };
+    }
     assignmentId  = existing.id;
     episodeId     = existing.episode_id;
     currentStatus = existing.status;

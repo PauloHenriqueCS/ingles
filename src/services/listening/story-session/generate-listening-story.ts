@@ -249,6 +249,25 @@ async function callAI(
 
 // ── Azure TTS ─────────────────────────────────────────────────────────────────
 
+const DEFAULT_STORY_VOICE = 'en-US-AvaMultilingualNeural';
+
+const ALLOWED_STORY_VOICES = new Set([
+  'en-US-AvaMultilingualNeural',
+  'en-US-AndrewMultilingualNeural',
+  'en-US-JennyNeural',
+  'en-US-GuyNeural',
+]);
+
+async function resolveUserVoice(userId: string, supabase: SupabaseClient): Promise<string> {
+  const { data } = await supabase
+    .from('user_learning_settings')
+    .select('audio_preferences')
+    .eq('user_id', userId)
+    .single();
+  const voice = (data?.audio_preferences as { voice?: string } | null)?.voice ?? '';
+  return ALLOWED_STORY_VOICES.has(voice) ? voice : DEFAULT_STORY_VOICE;
+}
+
 function escapeXml(t: string): string {
   return t
     .replace(/&/g, '&amp;')
@@ -262,12 +281,13 @@ async function synthesizeAudio(
   text: string,
   azureKey: string,
   azureRegion: string,
+  voice: string,
   partLabel: string,
   requestId: string,
 ): Promise<Buffer> {
   const ssml =
     `<speak version="1.0" xml:lang="en-US">` +
-    `<voice name="en-US-AvaMultilingualNeural">` +
+    `<voice name="${voice}">` +
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`;
 
@@ -331,6 +351,7 @@ async function synthesizeParts(
   ai: AIStory,
   azureKey: string,
   azureRegion: string,
+  voice: string,
   secret: string,
   requestId: string,
 ): Promise<ListeningStoryResult> {
@@ -342,8 +363,8 @@ async function synthesizeParts(
   });
 
   const [audio1, audio2] = await Promise.all([
-    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, 'part1', requestId),
-    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, 'part2', requestId),
+    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, voice, 'part1', requestId),
+    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, voice, 'part2', requestId),
   ]);
 
   stepLog(requestId, 'tts_all_done', {
@@ -413,9 +434,12 @@ export async function generateListeningStory(
     hasSecret: !!secret,
   });
 
-  // 1. Resolve CEFR level from DB
-  const level = await resolveUserListeningLevel(serviceClient, userId);
-  stepLog(requestId, 'level_resolved', { level });
+  // 1. Resolve CEFR level and user's preferred voice from DB
+  const [level, voice] = await Promise.all([
+    resolveUserListeningLevel(serviceClient, userId),
+    resolveUserVoice(userId, serviceClient),
+  ]);
+  stepLog(requestId, 'level_resolved', { level, voice });
 
   // 2. Get story content — either from retry package or fresh OpenAI call
   let ai: AIStory;
@@ -438,7 +462,7 @@ export async function generateListeningStory(
 
   // 3. TTS (throws StoryTtsError on failure, carrying the packed story for retry)
   try {
-    const result = await synthesizeParts(ai, azureKey, azureRegion, secret, requestId);
+    const result = await synthesizeParts(ai, azureKey, azureRegion, voice, secret, requestId);
     stepLog(requestId, 'complete', { totalMs: Date.now() - totalStart });
     return result;
   } catch (err) {

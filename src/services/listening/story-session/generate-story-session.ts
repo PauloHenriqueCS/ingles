@@ -129,6 +129,25 @@ async function callAI(level: string, openaiKey: string): Promise<AIStory> {
 
 // ── Azure TTS ─────────────────────────────────────────────────────────────────
 
+const DEFAULT_STORY_VOICE = 'en-US-AvaMultilingualNeural';
+
+const ALLOWED_STORY_VOICES = new Set([
+  'en-US-AvaMultilingualNeural',
+  'en-US-AndrewMultilingualNeural',
+  'en-US-JennyNeural',
+  'en-US-GuyNeural',
+]);
+
+async function resolveUserVoice(userId: string, supabase: SupabaseClient): Promise<string> {
+  const { data } = await supabase
+    .from('user_learning_settings')
+    .select('audio_preferences')
+    .eq('user_id', userId)
+    .single();
+  const voice = (data?.audio_preferences as { voice?: string } | null)?.voice ?? '';
+  return ALLOWED_STORY_VOICES.has(voice) ? voice : DEFAULT_STORY_VOICE;
+}
+
 function escapeXml(t: string): string {
   return t
     .replace(/&/g, '&amp;')
@@ -142,10 +161,11 @@ async function synthesizeAudio(
   text: string,
   azureKey: string,
   azureRegion: string,
+  voice: string,
 ): Promise<Buffer> {
   const ssml =
     `<speak version="1.0" xml:lang="en-US">` +
-    `<voice name="en-US-AvaMultilingualNeural">` +
+    `<voice name="${voice}">` +
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`;
 
@@ -259,18 +279,21 @@ export async function generateStorySession(
   // 1. Resolve CEFR level from DB (never from caller)
   const level = await resolveUserListeningLevel(serviceClient, userId);
 
-  // 2. AI: story text + question (includes correctIndex on server side only)
+  // 2. Resolve user's preferred Azure voice
+  const voice = await resolveUserVoice(userId, serviceClient);
+
+  // 3. AI: story text + question (includes correctIndex on server side only)
   const ai = await callAI(level, openaiKey);
 
-  // 3. Azure TTS: synthesize story audio
-  const audioBuffer = await synthesizeAudio(ai.storyEn, azureKey, azureRegion);
+  // 4. Azure TTS: synthesize story audio using user's preferred voice
+  const audioBuffer = await synthesizeAudio(ai.storyEn, azureKey, azureRegion, voice);
 
-  // 4. Upload to Supabase Storage, get 1-hour signed URL
+  // 5. Upload to Supabase Storage, get 1-hour signed URL
   const { url: audioUrl, expiresAt: audioExpiresAt } = await uploadAndSign(
     audioBuffer, userId, serviceClient,
   );
 
-  // 5. Sign answer token (correctIndex stays on server, never sent in plain form)
+  // 6. Sign answer token (correctIndex stays on server, never sent in plain form)
   const answerToken = signToken(ai.question.correctIndex, ai.question.explanationPt, secret);
 
   return {

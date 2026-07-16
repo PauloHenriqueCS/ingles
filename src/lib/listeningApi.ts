@@ -110,13 +110,16 @@ export function abandonSession(sessionId: string): Promise<void> {
   });
 }
 
-export type TodayListeningResult = {
-  status: 'assigned' | 'in_progress' | 'completed';
-  assignmentId: string;
-  episodeId: string;
-  activityDate: string;
-  session: EpisodeSessionResponse;
-} | { status: 'empty_inventory' };
+export type TodayListeningResult =
+  | {
+      status: 'assigned' | 'in_progress' | 'completed';
+      assignmentId: string;
+      episodeId: string;
+      activityDate: string;
+      session: EpisodeSessionResponse;
+    }
+  | { status: 'empty_inventory' }
+  | { status: 'story_completed'; assignmentId: string; activityDate: string };
 
 export type ByDateListeningResult = {
   status: 'assigned' | 'in_progress' | 'completed';
@@ -215,6 +218,13 @@ export function verifyStoryAnswer(input: {
   return apiFetch<StoryAnswerResult>('/api/listening/story/verify', {
     method: 'POST',
     body: JSON.stringify(input),
+  });
+}
+
+export function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
+  return apiFetch('/api/listening/story/complete', {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
 }
 

@@ -188,9 +188,10 @@ async function handleSessionAnswer(req: any, res: any) {
     const result = await submitListeningAnswer(serviceClient, { sessionId, userId, questionId, selectedOption, submissionId, playbackRate: typeof playbackRate === 'number' ? playbackRate : 1.0 });
     safeLog('listening/session/answer', 'answer_processed', 200, { sessionId, correct: result.correct, attemptNumber: result.attemptNumber });
 
+    let completionSaved: boolean | undefined;
     if (result.episodeCompleted) {
+      completionSaved = false;
       try {
-        // Get episodeId from session
         const { data: sess } = await serviceClient
           .from('user_listening_block_sessions')
           .select('episode_id')
@@ -206,26 +207,25 @@ async function handleSessionAnswer(req: any, res: any) {
             .eq('activity_date', activityDate)
             .maybeSingle();
           if (assignment?.id) {
-            // Update assignment to completed
             await serviceClient
               .from('user_listening_assignments')
               .update({ status: 'completed', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
               .eq('id', assignment.id);
-            // Enqueue performance calculation
             await enqueueListeningJob(serviceClient, {
               jobType: 'CALCULATE_LISTENING_PERFORMANCE',
               idempotencyKey: `CALCULATE_LISTENING_PERFORMANCE:${assignment.id}`,
               payload: { jobType: 'CALCULATE_LISTENING_PERFORMANCE', userId, assignmentId: assignment.id, episodeId: sess.episode_id },
               episodeId: sess.episode_id,
             });
+            completionSaved = true;
           }
         }
       } catch (err) {
-        safeLog('listening/session/answer', 'performance_enqueue_error', 500, { sessionId });
+        safeLog('listening/session/answer', 'completion_save_error', 500, { sessionId });
       }
     }
 
-    return res.status(200).json(result);
+    return res.status(200).json({ ...result, completionSaved });
   } catch (err) {
     if (err instanceof ListeningExecutionError) {
       if (err.code === LISTENING_EXECUTION_ERRORS.SESSION_NOT_FOUND) return jsonError(res, 404, err.code, 'Sessão não encontrada.');
@@ -361,6 +361,60 @@ async function handleSessionPlaybackCompleted(req: any, res: any) {
       safeLog('listening/session/playback-completed', 'execution_error', 500, { sessionId, code: err.code });
     }
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno.');
+  }
+}
+
+// ─── POST /api/listening/story/complete ──────────────────────────────────────
+
+async function handleStoryComplete(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  try {
+    const serviceClient = getListeningServiceClient();
+    const activityDate = resolveListeningActivityDate();
+    const now = new Date().toISOString();
+
+    const { data: existing } = await serviceClient
+      .from('user_listening_assignments')
+      .select('id, status')
+      .eq('user_id', userId)
+      .eq('activity_date', activityDate)
+      .maybeSingle();
+
+    if (existing) {
+      if (existing.status === 'completed') {
+        safeLog('listening/story/complete', 'already_completed', 200, { userId, activityDate });
+        return res.status(200).json({ activityDate, saved: true });
+      }
+      const { error } = await serviceClient
+        .from('user_listening_assignments')
+        .update({ status: 'completed', completed_at: now, updated_at: now })
+        .eq('id', existing.id);
+      if (error) throw error;
+    } else {
+      const { error } = await serviceClient
+        .from('user_listening_assignments')
+        .insert({
+          user_id: userId,
+          episode_id: null,
+          activity_date: activityDate,
+          status: 'completed',
+          assigned_at: now,
+          completed_at: now,
+          created_at: now,
+          updated_at: now,
+        });
+      if (error) throw error;
+    }
+
+    safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
+    return res.status(200).json({ activityDate, saved: true });
+  } catch (err) {
+    safeLog('listening/story/complete', 'internal_error', 500, { error: String(err) });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível registrar a conclusão.');
   }
 }
 
@@ -654,6 +708,7 @@ export default async function handler(req: any, res: any) {
     case 'by-date':                    return handleByDate(req, res);
     case 'assignment-result':          return handleAssignmentResult(req, res);
     case 'generate':                   return handleListeningGenerate(req, res);
+    case 'story/complete':             return handleStoryComplete(req, res);
     case 'story/generate':             return handleStoryGenerate(req, res);
     case 'story/verify':               return handleStoryVerify(req, res);
     case 'on-demand/start':            return handleOnDemandStart(req, res);

@@ -23,7 +23,8 @@ export type TodayListeningResponse =
       activityDate: string;
       session: EpisodeSessionResponse;
     }
-  | { status: 'empty_inventory' };
+  | { status: 'empty_inventory' }
+  | { status: 'story_completed'; assignmentId: string; activityDate: string };
 
 export type ByDateListeningResponse =
   | {

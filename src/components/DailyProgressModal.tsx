@@ -10,6 +10,7 @@ interface Props {
   convTotalSec: number;
   convGoalSec: number;
   onOpenDay: (date: string) => void;
+  onOpenListening?: () => void;
   onClose: () => void;
 }
 
@@ -35,6 +36,7 @@ export default function DailyProgressModal({
   convTotalSec,
   convGoalSec,
   onOpenDay,
+  onOpenListening,
   onClose,
 }: Props) {
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -80,6 +82,8 @@ export default function DailyProgressModal({
       icon: Headphones,
       label: 'Listening',
       status: progress.listening,
+      action: onOpenListening ? () => { onOpenListening(); onClose(); } : undefined,
+      actionLabel: 'Abrir',
     },
   ];
 

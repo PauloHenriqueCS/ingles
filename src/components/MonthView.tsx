@@ -15,6 +15,7 @@ interface Props {
   currentYear: number;
   onChangeMonth: (month: number, year: number) => void;
   onOpenDay: (date: string) => void;
+  onOpenListening?: () => void;
   activeWeekdays?: number[];
   overrideDates?: string[];
   onSettingsChange?: (settings: LearningSettings) => void;
@@ -25,7 +26,7 @@ const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export default function MonthView({
-  entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
+  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening,
   activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
   const today = (() => {

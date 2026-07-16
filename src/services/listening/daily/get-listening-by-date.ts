@@ -22,7 +22,7 @@ export async function getListeningByDate(
   return {
     status:       data.status,
     assignmentId: data.id,
-    episodeId:    data.episode_id,
+    episodeId:    data.episode_id ?? '',
     activityDate,
   };
 }

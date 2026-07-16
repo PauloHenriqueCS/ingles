@@ -14,6 +14,7 @@ import {
   refreshAudioUrl,
   getTodayListening,
   generateListeningStory,
+  completeStoryListening,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
@@ -170,6 +171,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [storyResult, setStoryResult] = useState<{ correct: boolean; correctOption: number; explanationPt: string } | null>(null);
   const [storyGenerating, setStoryGenerating] = useState(false);
   const [storyMode, setStoryMode] = useState(false);
+  const [completionSaveError, setCompletionSaveError] = useState(false);
   const [progressMsgIdx, setProgressMsgIdx] = useState(0);
 
   const player = useListeningAudioPlayer();
@@ -299,6 +301,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         setPhase('prompt');
         return;
       }
+      if (result.status === 'story_completed') {
+        setStoryMode(true);
+        setPhase('done');
+        return;
+      }
       setAssignmentId(result.assignmentId);
       setEpisodeId(result.episodeId);
       setEpisodeData(result.session);
@@ -399,18 +406,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     setPhase('ready_to_play');
   }
 
-  function handleStorySubmit() {
+  async function handleStorySubmit() {
     if (storySelectedOption === null || !storyData || phase === 'submitting') return;
     const part = storyData.parts[currentPartIdx];
-
-    console.log('[LISTENING_ANSWER_DEBUG]', {
-      selectedOption: storySelectedOption,
-      selectedOptionType: typeof storySelectedOption,
-      correctOptionIndex: part.question.correctOptionIndex,
-      correctOptionIndexType: typeof part.question.correctOptionIndex,
-      comparison: Number(storySelectedOption) === Number(part.question.correctOptionIndex),
-      options: part.question.options,
-    });
 
     const correct = Number(storySelectedOption) === Number(part.question.correctOptionIndex);
     const result = {
@@ -424,6 +422,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       if (currentPartIdx === 0) {
         setPhase('correct');
       } else {
+        // Part 2 correct — persist completion, then show done.
+        setPhase('submitting');
+        try {
+          await completeStoryListening();
+          setCompletionSaveError(false);
+        } catch {
+          setCompletionSaveError(true);
+        }
         setPhase('done');
       }
       return;
@@ -523,6 +529,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       if (result.correct) {
         if (result.episodeCompleted) {
           setTranscriptUnlocked(true);
+          if (result.completionSaved === false) {
+            setCompletionSaveError(true);
+          }
           setPhase('done');
         } else {
           setPhase('correct');
@@ -1523,9 +1532,35 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     );
   }
 
+  // ── Completion save retry (works for both story and episode mode) ─────────────
+  async function handleCompletionRetry() {
+    try {
+      await completeStoryListening();
+      setCompletionSaveError(false);
+    } catch {
+      // keep error shown
+    }
+  }
+
+  function renderCompletionErrorBanner() {
+    if (!completionSaveError) return null;
+    return (
+      <div className="flex items-center gap-3 p-3 rounded-xl bg-amber-900/20 border border-amber-700/30 text-left">
+        <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+        <p className="text-sm text-amber-300 flex-1">Não foi possível registrar no calendário.</p>
+        <button
+          onClick={handleCompletionRetry}
+          className="text-xs text-amber-400 hover:text-amber-300 font-medium shrink-0 underline"
+        >
+          Tentar novamente
+        </button>
+      </div>
+    );
+  }
+
   // ── Render: done ──────────────────────────────────────────────────────────────
   function renderDone() {
-    if (storyData) {
+    if (storyMode) {
       return (
         <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
           <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/40 flex items-center justify-center mx-auto">
@@ -1534,9 +1569,13 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
           <div>
             <h2 className="text-2xl font-bold text-slate-100">Atividade concluída!</h2>
             <p className="text-sm text-slate-400 mt-2">
-              Você completou "{storyData.title}".
+              {storyData
+                ? `Você completou "${storyData.title}".`
+                : 'Você já concluiu o Listening de hoje.'}
             </p>
           </div>
+
+          {renderCompletionErrorBanner()}
 
           <button
             onClick={handleStartGeneration}
@@ -1577,6 +1616,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
             Você completou "{episodeData?.title ?? 'este episódio'}".
           </p>
         </div>
+
+        {renderCompletionErrorBanner()}
 
         {transcriptLines.length > 0 && (
           <button

@@ -7,7 +7,7 @@ import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { getAuthHeader } from '../lib/apiAuth';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
 import { createRecognitionSession, PronunciationServiceError } from '../lib/pronunciationService';
-import { DEFAULT_AUDIO_SETTINGS } from '../lib/audioSettings';
+import { DEFAULT_AUDIO_SETTINGS, fetchAudioSettings } from '../lib/audioSettings';
 import type { PronunciationNormalizedResult } from '../types';
 
 interface Props {
@@ -19,6 +19,11 @@ export default function PronunciationWordGrid({ aligned, insertions }: Props) {
   const [selectedWord, setSelectedWord] = useState<PronunciationWordDetail | null>(null);
   const [returnFocusId, setReturnFocusId] = useState<string | null>(null);
   const [activeRecordingWordId, setActiveRecordingWordId] = useState<string | null>(null);
+  const [voice, setVoice] = useState<string>(DEFAULT_AUDIO_SETTINGS.voice);
+
+  useEffect(() => {
+    fetchAudioSettings().then(s => setVoice(s.voice)).catch(() => {});
+  }, []);
   const legendId = useId();
 
   const sharedAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -91,6 +96,7 @@ export default function PronunciationWordGrid({ aligned, insertions }: Props) {
                   activeRecordingWordId={activeRecordingWordId}
                   onRecordingChange={setActiveRecordingWordId}
                   onAudioStart={handleAudioStart}
+                  voice={voice}
                 />
               ))}
             </div>
@@ -138,6 +144,7 @@ interface PracticeWordRowProps {
   activeRecordingWordId: string | null;
   onRecordingChange: (wordId: string | null) => void;
   onAudioStart: () => void;
+  voice: string;
 }
 
 function PracticeWordRow({
@@ -147,6 +154,7 @@ function PracticeWordRow({
   activeRecordingWordId,
   onRecordingChange,
   onAudioStart,
+  voice,
 }: PracticeWordRowProps) {
   const [band, setBand] = useState(getWordBand(word));
   const [ttsPhase, setTtsPhase] = useState<'idle' | 'loading' | 'playing'>('idle');
@@ -200,7 +208,7 @@ function PracticeWordRow({
         const resp = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify({ text: cleanWord, voice: DEFAULT_AUDIO_SETTINGS.voice }),
+          body: JSON.stringify({ text: cleanWord, voice }),
         });
         if (!resp.ok) throw new Error('TTS_FAILED');
         const blob = await resp.blob();
@@ -214,7 +222,7 @@ function PracticeWordRow({
     }
 
     const audio = new Audio(url);
-    audio.playbackRate = DEFAULT_AUDIO_SETTINGS.playbackRate;
+    audio.playbackRate = 1;
     myAudioRef.current = audio;
     sharedAudioRef.current = audio;
     audio.onended = () => { if (mountedRef.current) setTtsPhase('idle'); };
