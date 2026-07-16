@@ -4,6 +4,12 @@ import { BASE_DEFAULTS, getDefaultsForLevel, resolvePreset } from '../lib/tutorP
 import { DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import type { AIPreferences } from '../types';
 
+// Legacy names that must always be remapped to their current equivalents.
+const LEGACY_NAME_MAP: Record<string, string> = { Alex: 'Lemon' };
+function migrateName(name: string): string {
+  return LEGACY_NAME_MAP[name] ?? name;
+}
+
 export interface UseTutorPreferences {
   /** Current draft (local, unsaved) */
   prefs: AIPreferences;
@@ -23,7 +29,7 @@ export interface UseTutorPreferences {
 function rowToPrefs(row: Record<string, unknown>): AIPreferences {
   const personality = (row.personality_preset as string | undefined) ?? BASE_DEFAULTS.personalityPreset;
   const prefs: AIPreferences = {
-    teacherName:        (row.teacher_name         as string)  ?? BASE_DEFAULTS.teacherName,
+    teacherName:        migrateName((row.teacher_name as string) ?? BASE_DEFAULTS.teacherName),
     voice:              (row.voice                as string)  ?? BASE_DEFAULTS.voice,
     accent:             (row.accent               as AIPreferences['accent'])      ?? BASE_DEFAULTS.accent,
     speechPace:         (row.speech_pace          as AIPreferences['speechPace'])  ?? BASE_DEFAULTS.speechPace,
@@ -91,7 +97,16 @@ export function useTutorPreferences(): UseTutorPreferences {
 
         const levelDefaults = getDefaultsForLevel(level);
         if (prefsResult.data) {
-          const fromDb = rowToPrefs(prefsResult.data as Record<string, unknown>);
+          const rawRow = prefsResult.data as Record<string, unknown>;
+          const rawName = rawRow.teacher_name as string | undefined;
+          const fromDb = rowToPrefs(rawRow);
+          // One-time migration: if DB contains a legacy name, persist the corrected value immediately.
+          if (rawName && LEGACY_NAME_MAP[rawName]) {
+            supabase
+              .from('ai_conversation_preferences')
+              .update({ teacher_name: fromDb.teacherName })
+              .then(() => {});
+          }
           setSaved(fromDb);
           setDraft(fromDb);
         } else {
