@@ -13,16 +13,14 @@ import {
   submitAnswer,
   refreshAudioUrl,
   getTodayListening,
-  startListeningGeneration,
-  processNextListeningStep,
-  retryListeningGeneration,
-  getListeningGenerationStatus,
+  generateStorySession as generateStorySessionApi,
+  verifyStoryAnswer,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
   type PublishedEpisode,
-  type GenerationStatusResult,
-  type GenerationSessionStatus,
+  type StorySessionData,
+  type StoryAnswerResult,
 } from '../lib/listeningApi';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
 
@@ -49,37 +47,6 @@ type Phase =
 type Speed = 0.75 | 0.90 | 1.00 | 1.10 | 1.25;
 const SPEEDS: Speed[] = [0.75, 0.90, 1.00, 1.10, 1.25];
 
-const ORDERED_STEPS: GenerationSessionStatus[] = [
-  'identifying_level',
-  'generating_block_1',
-  'validating_block_1',
-  'generating_block_2',
-  'validating_block_2',
-  'generating_questions',
-  'preparing_description',
-  'preparing_subtitles',
-  'generating_audio_block_1',
-  'generating_audio_block_2',
-  'validating_duration',
-  'finalizing',
-];
-
-const STEP_DISPLAY: Record<string, string> = {
-  identifying_level: 'Identificando seu nível',
-  generating_block_1: 'Criando a primeira parte da história',
-  validating_block_1: 'Validando a primeira parte',
-  generating_block_2: 'Criando a segunda parte da história',
-  validating_block_2: 'Validando a segunda parte',
-  generating_questions: 'Criando as perguntas',
-  preparing_description: 'Preparando a descrição',
-  preparing_subtitles: 'Preparando as legendas',
-  generating_audio_block_1: 'Gerando o primeiro áudio',
-  generating_audio_block_2: 'Gerando o segundo áudio',
-  validating_duration: 'Validando a duração',
-  finalizing: 'Finalizando sua atividade',
-};
-
-const GENERATION_SESSION_KEY = 'lemon_listening_gen_session';
 
 type SubtitleChoice = 'en' | 'pt-BR' | 'both';
 
@@ -190,9 +157,12 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [subtitleChoice, setSubtitleChoice] = useState<SubtitleChoice>('pt-BR');
   const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [generationStatus, setGenerationStatus] = useState<GenerationStatusResult | null>(null);
-  const [generationStarting, setGenerationStarting] = useState(false);
-  const generationAbortRef = useRef(false);
+  const [storySession, setStorySession] = useState<StorySessionData | null>(null);
+  const [storyAttempts, setStoryAttempts] = useState(0);
+  const [storySelectedOption, setStorySelectedOption] = useState<number | null>(null);
+  const [storyResult, setStoryResult] = useState<StoryAnswerResult | null>(null);
+  const [storyGenerating, setStoryGenerating] = useState(false);
+  const [storyMode, setStoryMode] = useState(false);
 
   const player = useListeningAudioPlayer();
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -306,28 +276,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     try {
       const result = await getTodayListening();
       if (result.status === 'empty_inventory') {
-        // Check if there's an in-progress generation session
-        const savedSessionId = localStorage.getItem(GENERATION_SESSION_KEY);
-        if (savedSessionId) {
-          try {
-            const status = await getListeningGenerationStatus(savedSessionId);
-            if (status.status === 'ready' && status.episodeId) {
-              localStorage.removeItem(GENERATION_SESSION_KEY);
-              await loadSession(status.episodeId);
-              return;
-            }
-            if (status.status !== 'cancelled') {
-              setGenerationStatus(status);
-              setPhase('generating');
-              if (status.status !== 'failed') {
-                runGenerationLoop(savedSessionId, status);
-              }
-              return;
-            }
-          } catch {
-            localStorage.removeItem(GENERATION_SESSION_KEY);
-          }
-        }
+        setStoryMode(true);
         setPhase('prompt');
         return;
       }
@@ -370,91 +319,49 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     }
   }
 
-  async function runGenerationLoop(sessionId: string, initialStatus?: GenerationStatusResult) {
-    generationAbortRef.current = false;
-    if (initialStatus) setGenerationStatus(initialStatus);
-
-    while (!generationAbortRef.current) {
-      try {
-        const result = await processNextListeningStep(sessionId);
-        setGenerationStatus(result);
-
-        if (result.status === 'ready') {
-          if (result.episodeId) {
-            localStorage.removeItem(GENERATION_SESSION_KEY);
-            await loadSession(result.episodeId);
-          }
-          return;
-        }
-
-        if (result.status === 'failed' || result.status === 'cancelled') {
-          return;
-        }
-      } catch (err) {
-        const msg = err instanceof ListeningApiError ? err.message : 'Erro na geração.';
-        setGenerationStatus(prev => prev ? {
-          ...prev,
-          status: 'failed' as GenerationSessionStatus,
-          errorCode: 'LOOP_ERROR',
-          errorMessage: msg,
-          retryable: true,
-        } : null);
-        return;
-      }
-    }
-  }
-
   async function handleStartGeneration() {
-    if (generationStarting) return;
-    setGenerationStarting(true);
+    if (storyGenerating) return;
+    setStoryGenerating(true);
+    setStorySession(null);
+    setStoryResult(null);
+    setPhase('generating');
     try {
-      const result = await startListeningGeneration();
-      const sessionId = result.generationSessionId;
-      localStorage.setItem(GENERATION_SESSION_KEY, sessionId);
-
-      const statusResult: GenerationStatusResult = {
-        generationSessionId: sessionId,
-        status: result.status,
-        currentStep: result.currentStep,
-        progressPercent: result.progressPercent,
-        episodeId: result.episodeId,
-        errorCode: null,
-        errorMessage: null,
-        retryable: false,
-      };
-      setGenerationStatus(statusResult);
-      setPhase('generating');
-
-      if (result.status === 'ready' && result.episodeId) {
-        localStorage.removeItem(GENERATION_SESSION_KEY);
-        await loadSession(result.episodeId);
-        return;
-      }
-
-      if (result.status !== 'failed' && result.status !== 'cancelled') {
-        runGenerationLoop(sessionId, statusResult);
-      }
+      const data = await generateStorySessionApi();
+      setStorySession(data);
+      setStoryAttempts(0);
+      setStorySelectedOption(null);
+      setStoryResult(null);
+      player.load(data.audioUrl);
+      player.setOnEnded(() => setPhase('question'));
+      setPhase('intro');
     } catch (err) {
-      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao iniciar geração.';
+      const msg = err instanceof ListeningApiError ? err.message : 'Não foi possível criar a história.';
       setErrorMsg(msg);
       setPhase('error');
     } finally {
-      setGenerationStarting(false);
+      setStoryGenerating(false);
     }
   }
 
-  async function handleRetryGeneration() {
-    const sessionId = generationStatus?.generationSessionId;
-    if (!sessionId) return;
+  async function handleStorySubmit() {
+    if (storySelectedOption === null || !storySession || phase === 'submitting') return;
+    setPhase('submitting');
     try {
-      const result = await retryListeningGeneration(sessionId);
-      setGenerationStatus(result);
-      if (result.status !== 'failed' && result.status !== 'cancelled' && result.status !== 'ready') {
-        runGenerationLoop(sessionId, result);
+      const result = await verifyStoryAnswer({
+        answerToken: storySession.answerToken,
+        selectedOption: storySelectedOption,
+      });
+      if (result.correct) {
+        setStoryResult(result);
+        setPhase('done');
+      } else {
+        setStoryAttempts(prev => prev + 1);
+        setPhase('question');
       }
     } catch (err) {
-      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao tentar novamente.';
+      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao verificar resposta.';
       setErrorMsg(msg);
+      setPhase('error');
     }
   }
 
@@ -533,7 +440,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     return () => {
       if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
       if (wrongTimerRef.current) clearTimeout(wrongTimerRef.current);
-      generationAbortRef.current = true;
     };
   }, []);
 
@@ -596,7 +502,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: error ────────────────────────────────────────────────────────────
   function renderError() {
-    const retryFn = episodeId
+    const retryFn = storyMode
+      ? handleStartGeneration
+      : episodeId
       ? () => loadSession(episodeId)
       : propEpisodeId
       ? undefined
@@ -633,10 +541,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
           </div>
           <button
             onClick={handleStartGeneration}
-            disabled={generationStarting}
+            disabled={storyGenerating}
             className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 active:bg-purple-700 disabled:opacity-60 text-white font-semibold text-base transition-colors shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2"
           >
-            {generationStarting ? (
+            {storyGenerating ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
                 Iniciando...
@@ -655,113 +563,15 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: generating ───────────────────────────────────────────────────────
   function renderGenerating() {
-    const gen = generationStatus;
-    const isFailed = gen?.status === 'failed';
-    const progressPct = gen?.progressPercent ?? 0;
-
-    const currentStatusIndex = gen?.status
-      ? ORDERED_STEPS.indexOf(gen.status as GenerationSessionStatus)
-      : -1;
-
     return (
-      <div className="p-5 max-w-lg mx-auto pt-6 space-y-5">
-        {/* Header card */}
-        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center shrink-0">
-              {isFailed ? (
-                <AlertCircle className="w-5 h-5 text-red-400" />
-              ) : (
-                <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
-              )}
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-slate-100">
-                {isFailed ? 'Falha na preparação' : 'Preparando sua atividade'}
-              </p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {isFailed
-                  ? 'Ocorreu um erro durante a geração.'
-                  : 'Estamos criando uma atividade personalizada para você. Isso pode levar alguns minutos.'}
-              </p>
-            </div>
-          </div>
-
-          {/* Progress bar */}
-          <div>
-            <div className="flex justify-between text-xs text-slate-500 mb-1.5">
-              <span>{gen?.currentStep ?? 'Iniciando...'}</span>
-              <span>{progressPct}%</span>
-            </div>
-            <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-purple-500 rounded-full transition-all duration-500"
-                style={{ width: `${progressPct}%` }}
-              />
-            </div>
-          </div>
+      <div className="flex flex-col items-center justify-center py-24 gap-4">
+        <div className="w-12 h-12 rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
+          <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
         </div>
-
-        {/* Steps list */}
-        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-4 space-y-2">
-          {ORDERED_STEPS.map((stepStatus, i) => {
-            const isDone = currentStatusIndex > i || gen?.status === 'ready';
-            const isCurrent = currentStatusIndex === i && !isFailed;
-            const label = STEP_DISPLAY[stepStatus] ?? stepStatus;
-            return (
-              <div key={stepStatus} className="flex items-center gap-3 py-1">
-                <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 transition-colors ${
-                  isDone
-                    ? 'bg-emerald-600/30 border border-emerald-500/50'
-                    : isCurrent
-                    ? 'bg-purple-600/30 border border-purple-500/50'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}>
-                  {isDone ? (
-                    <Check className="w-3 h-3 text-emerald-400" />
-                  ) : isCurrent ? (
-                    <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
-                  ) : (
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                  )}
-                </div>
-                <span className={`text-sm ${
-                  isDone ? 'text-slate-400 line-through' :
-                  isCurrent ? 'text-slate-100 font-medium' :
-                  'text-slate-600'
-                }`}>
-                  {label}
-                </span>
-              </div>
-            );
-          })}
+        <div className="text-center space-y-1">
+          <p className="text-sm font-medium text-slate-200">Criando sua história...</p>
+          <p className="text-xs text-slate-500">Isso pode levar alguns segundos.</p>
         </div>
-
-        {/* Error state */}
-        {isFailed && gen && (
-          <div className="space-y-3">
-            <div className="bg-red-900/20 border border-red-700/30 rounded-xl p-4 text-sm text-red-300">
-              {gen.retryable
-                ? 'Ocorreu um erro temporário. Você pode tentar novamente.'
-                : 'Não foi possível criar a atividade. Tente mais tarde.'}
-            </div>
-            {gen.retryable && (
-              <button
-                onClick={handleRetryGeneration}
-                className="w-full py-3 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-600/30 text-purple-300 font-medium transition-colors flex items-center justify-center gap-2"
-              >
-                <RefreshCw className="w-4 h-4" />
-                Tentar novamente
-              </button>
-            )}
-            <button
-              onClick={() => setPhase('prompt')}
-              className="w-full py-2.5 text-xs text-slate-600 hover:text-slate-400 transition-colors"
-            >
-              Voltar
-            </button>
-          </div>
-        )}
       </div>
     );
   }
@@ -878,6 +688,46 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: intro ────────────────────────────────────────────────────────────
   function renderIntro() {
+    if (storySession) {
+      return (
+        <div className="p-5 max-w-lg mx-auto space-y-5 pt-6">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 space-y-5">
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-slate-100 leading-snug">{storySession.title}</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-purple-300 px-2.5 py-1 rounded-full bg-purple-600/20 border border-purple-500/30">
+                  {storySession.level}
+                </span>
+                <span className="flex items-center gap-1.5 text-xs text-slate-500 px-2.5 py-1 rounded-full bg-slate-700/60 border border-slate-600/40">
+                  1 pergunta
+                </span>
+              </div>
+            </div>
+            <div className="border-t border-slate-700 pt-4 space-y-2">
+              <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">Como funciona</p>
+              <ul className="space-y-1.5 text-xs text-slate-400">
+                <li className="flex items-start gap-2">
+                  <span className="text-purple-400 mt-0.5">•</span>
+                  Ouça a história e responda uma pergunta de compreensão
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-purple-400 mt-0.5">•</span>
+                  Se errar duas vezes, o texto e a tradução serão revelados
+                </li>
+              </ul>
+            </div>
+          </div>
+          <button
+            onClick={() => setPhase('ready_to_play')}
+            className="w-full py-4 rounded-2xl bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white font-semibold text-base transition-colors shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2"
+          >
+            <Headphones className="w-5 h-5" />
+            Começar a ouvir
+          </button>
+        </div>
+      );
+    }
+
     const ep = episodeData;
     if (!ep) return null;
     const durationMin = ep.actualDurationSeconds
@@ -1006,14 +856,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     return (
       <div className="p-4 pt-3 max-w-lg mx-auto space-y-4">
         {/* Block + attempt context */}
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-slate-500 font-medium">Bloco {blockIdx + 1} de 2</span>
-          {session && session.currentAttempt > 1 && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400 font-medium">
-              Tentativa {session.currentAttempt}/3
-            </span>
-          )}
-        </div>
+        {!storySession && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-500 font-medium">Bloco {blockIdx + 1} de 2</span>
+            {session && session.currentAttempt > 1 && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/30 border border-amber-700/30 text-amber-400 font-medium">
+                Tentativa {session.currentAttempt}/3
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Waveform + progress + subtitles */}
         <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4">
@@ -1107,28 +959,107 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         </div>
 
         {/* Transcript button */}
-        <button
-          onClick={() => transcriptUnlocked && setShowTranscript(true)}
-          disabled={!transcriptUnlocked}
-          className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-medium transition-colors ${
-            transcriptUnlocked
-              ? 'border-slate-600 text-slate-300 hover:bg-slate-800 hover:border-slate-500'
-              : 'border-slate-700/50 text-slate-600 cursor-not-allowed'
-          }`}
-        >
-          {transcriptUnlocked ? (
-            <ScrollText className="w-3.5 h-3.5" />
-          ) : (
-            <Lock className="w-3.5 h-3.5" />
-          )}
-          {transcriptUnlocked ? 'Transcrição' : 'Disponível ao concluir a atividade'}
-        </button>
+        {!storySession && (
+          <button
+            onClick={() => transcriptUnlocked && setShowTranscript(true)}
+            disabled={!transcriptUnlocked}
+            className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-medium transition-colors ${
+              transcriptUnlocked
+                ? 'border-slate-600 text-slate-300 hover:bg-slate-800 hover:border-slate-500'
+                : 'border-slate-700/50 text-slate-600 cursor-not-allowed'
+            }`}
+          >
+            {transcriptUnlocked ? (
+              <ScrollText className="w-3.5 h-3.5" />
+            ) : (
+              <Lock className="w-3.5 h-3.5" />
+            )}
+            {transcriptUnlocked ? 'Transcrição' : 'Disponível ao concluir a atividade'}
+          </button>
+        )}
       </div>
     );
   }
 
   // ── Render: question ──────────────────────────────────────────────────────────
   function renderQuestion() {
+    if (storySession) {
+      const q = storySession.question;
+      const isSubmitting = phase === 'submitting';
+      const showText = storyAttempts >= 2;
+
+      return (
+        <div className="p-4 pt-4 max-w-lg mx-auto space-y-4">
+          {storyAttempts > 0 && (
+            <div className="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30 text-amber-400">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              {showText
+                ? 'Texto revelado. Leia e tente novamente.'
+                : `Tentativa ${storyAttempts + 1} de 2 — resposta incorreta.`}
+            </div>
+          )}
+
+          <h3 className="text-base font-semibold text-slate-100 leading-snug">{q.prompt}</h3>
+
+          <div className="space-y-3">
+            {q.options.map((opt, i) => {
+              const isSelected = storySelectedOption === i;
+              return (
+                <button
+                  key={i}
+                  onClick={() => !isSubmitting && setStorySelectedOption(i)}
+                  disabled={isSubmitting}
+                  className={`w-full text-left px-4 py-3.5 rounded-xl border text-sm transition-all ${
+                    isSelected
+                      ? 'bg-purple-700/25 border-purple-500 text-slate-100'
+                      : 'bg-slate-800 border-slate-700 hover:border-purple-500/50 hover:bg-slate-700/50 text-slate-200'
+                  } ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <span className="font-bold text-purple-400 mr-2">{String.fromCharCode(65 + i)}.</span>
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            onClick={handleStorySubmit}
+            disabled={storySelectedOption === null || isSubmitting}
+            className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+          >
+            {isSubmitting ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Verificando...
+              </>
+            ) : (
+              'Confirmar resposta'
+            )}
+          </button>
+
+          <button
+            onClick={() => { player.restart(); setPhase('ready_to_play'); }}
+            className="w-full py-2.5 text-xs text-slate-600 hover:text-slate-400 transition-colors"
+          >
+            Ouvir novamente
+          </button>
+
+          {showText && (
+            <div className="space-y-3 pt-2 border-t border-slate-700">
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">Texto em inglês</p>
+                <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">{storySession.storyEn}</p>
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">Tradução</p>
+                <p className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">{storySession.storyPt}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     const q = block?.question;
     if (!q) return null;
     const isSubmitting = phase === 'submitting';
@@ -1318,6 +1249,52 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   // ── Render: done ──────────────────────────────────────────────────────────────
   function renderDone() {
+    if (storySession) {
+      return (
+        <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
+          <div className="w-20 h-20 rounded-full bg-emerald-600/20 border-2 border-emerald-500/40 flex items-center justify-center mx-auto">
+            <Check className="w-10 h-10 text-emerald-400" />
+          </div>
+          <div>
+            <h2 className="text-2xl font-bold text-slate-100">Resposta correta!</h2>
+            <p className="text-sm text-slate-400 mt-2">Você completou "{storySession.title}".</p>
+          </div>
+
+          {storyResult?.explanationPt && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 text-left">
+              <p className="text-xs text-slate-500 font-medium mb-1.5 uppercase tracking-wide">Explicação</p>
+              <p className="text-sm text-slate-300 leading-relaxed">{storyResult.explanationPt}</p>
+            </div>
+          )}
+
+          <button
+            onClick={handleStartGeneration}
+            disabled={storyGenerating}
+            className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-60 text-white font-semibold transition-colors flex items-center justify-center gap-2"
+          >
+            {storyGenerating ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Gerando...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-5 h-5" />
+                Nova história
+              </>
+            )}
+          </button>
+
+          <button
+            onClick={onBack}
+            className="w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition-colors"
+          >
+            Voltar
+          </button>
+        </div>
+      );
+    }
+
     return (
       <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
         <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/40 flex items-center justify-center mx-auto">
