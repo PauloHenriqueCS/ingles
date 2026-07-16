@@ -6,6 +6,7 @@ import { saveLearningSettings, LearningSettings } from '../lib/learningSettings'
 import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
 import { getPronunciationDatesForMonth, computeDailyProgress } from '../lib/dailyProgress';
 import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
+import { fetchStreaks } from '../lib/activeDates';
 import DailyProgressIcons from './DailyProgressIcons';
 import DailyProgressModal from './DailyProgressModal';
 
@@ -48,6 +49,7 @@ export default function MonthView({
   const [pronunciationDates, setPronunciationDates] = useState<Set<string>>(new Set());
   const [listeningProgress, setListeningProgress] = useState<Record<string, 'not_started' | 'in_progress' | 'completed'>>({});
   const [modalDate, setModalDate] = useState<string | null>(null);
+  const [streaks, setStreaks] = useState<{ current: number; max: number }>({ current: 0, max: 0 });
 
   useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
 
@@ -62,6 +64,10 @@ export default function MonthView({
   useEffect(() => {
     getConversationGoalMinutes().then((min) => setConvGoalSec(min * 60)).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetchStreaks(activeWeekdays).then(setStreaks).catch(() => {});
+  }, [activeWeekdays.join(',')]);
 
   const dailyProgressMap = useMemo<Record<string, DailyProgress>>(() => {
     const allDates = getAllDatesInMonth(currentYear, currentMonth);
@@ -162,7 +168,15 @@ export default function MonthView({
             const dow = date.getDay();
             const isInactive = !activeWeekdays.includes(dow) && !overrideDates.includes(dateStr);
             const isToday = dateStr === today;
+            const isFuture = dateStr > today;
             const progress = dailyProgressMap[dateStr];
+
+            // Background: green=done, slate-700=today/past-active, slate-800=future or inactive
+            const bgCls = progress?.allActiveCompleted
+              ? 'bg-green-700'
+              : (isInactive || isFuture)
+              ? 'bg-slate-800'
+              : 'bg-slate-700';
 
             return (
               <button
@@ -170,22 +184,45 @@ export default function MonthView({
                 onClick={() => setModalDate(dateStr)}
                 className={`
                   aspect-square rounded-md flex flex-col items-center justify-center text-xs font-medium transition-all cursor-pointer
-                  ${isInactive ? 'opacity-40' : 'hover:ring-1 hover:ring-blue-400'}
-                  ${isToday ? 'ring-2 ring-blue-400' : ''}
-                  ${progress?.allActiveCompleted ? 'bg-green-700' : isInactive ? 'bg-slate-800' : 'bg-slate-700'}
+                  ${isInactive ? 'opacity-40' : ''}
+                  ${!isInactive && !isToday ? 'hover:ring-1 hover:ring-blue-400' : ''}
+                  ${isToday ? 'ring-2 ring-blue-500' : ''}
+                  ${bgCls}
                 `}
               >
-                <span className={isToday ? 'text-white font-bold' : 'text-slate-300'}>
+                <span className={
+                  isToday
+                    ? 'text-white font-bold'
+                    : (isFuture && !isInactive)
+                    ? 'text-slate-500'
+                    : 'text-slate-300'
+                }>
                   {date.getDate()}
                 </span>
-                {progress && <DailyProgressIcons progress={progress} />}
+                {/* Show dots only for today and past days — future days have no activity yet */}
+                {!isFuture && progress && <DailyProgressIcons progress={progress} />}
               </button>
             );
           })}
         </div>
 
-        {/* Month summary */}
-        <div className="mt-4 bg-slate-800 rounded-lg p-3">
+        {/* Month summary + streaks */}
+        <div className="mt-4 bg-slate-800 rounded-lg p-3 space-y-2.5">
+          {/* Streaks — compact single row */}
+          {(streaks.current > 0 || streaks.max > 0) && (
+            <div className="flex gap-4 text-xs text-slate-400 pb-2 border-b border-slate-700">
+              <span>
+                Sequência:{' '}
+                <span className="text-amber-400 font-medium">{streaks.current}d</span>
+              </span>
+              <span>
+                Recorde:{' '}
+                <span className="text-slate-200 font-medium">{streaks.max}d</span>
+              </span>
+            </div>
+          )}
+
+          {/* Per-activity counts — 2×2 on mobile, 4-col on sm+ */}
           {(() => {
             const activeDates = dates.filter((d) => {
               const dow = new Date(d + 'T12:00:00').getDay();
@@ -195,22 +232,33 @@ export default function MonthView({
             const writingDone = activeDates.filter(
               (d) => dailyProgressMap[d]?.writing === 'completed',
             ).length;
-            const convDone = activeDates.filter(
-              (d) => dailyProgressMap[d]?.conversation === 'completed',
-            ).length;
             const pronDone = activeDates.filter(
               (d) => dailyProgressMap[d]?.pronunciation === 'completed',
             ).length;
+            const convDone = activeDates.filter(
+              (d) => dailyProgressMap[d]?.conversation === 'completed',
+            ).length;
+            const listeningDone = activeDates.filter(
+              (d) => dailyProgressMap[d]?.listening === 'completed',
+            ).length;
+
             return (
-              <div className="flex gap-4 text-sm flex-wrap">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1.5 text-sm">
                 <span className="text-slate-400">
-                  Escrita: <span className="text-slate-200 font-medium">{writingDone}/{total}</span>
+                  Escrita:{' '}
+                  <span className="text-violet-400 font-medium">{writingDone}/{total}</span>
                 </span>
                 <span className="text-slate-400">
-                  Conversa: <span className="text-teal-400 font-medium">{convDone}/{total}</span>
+                  Pronúncia:{' '}
+                  <span className="text-blue-400 font-medium">{pronDone}/{total}</span>
                 </span>
                 <span className="text-slate-400">
-                  Pronúncia: <span className="text-blue-400 font-medium">{pronDone}/{total}</span>
+                  Conversa:{' '}
+                  <span className="text-teal-400 font-medium">{convDone}/{total}</span>
+                </span>
+                <span className="text-slate-400">
+                  Listening:{' '}
+                  <span className="text-amber-400 font-medium">{listeningDone}/{total}</span>
                 </span>
               </div>
             );

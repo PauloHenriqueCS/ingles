@@ -31,6 +31,35 @@ export function deduplicateReviews(reviews: EnglishReviewSaved[]): EnglishReview
   );
 }
 
+// All-time maximum weekday streak across the entire history of activeDates.
+export function computeMaxWeekdayStreak(
+  activeDates: string[],
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+): number {
+  if (activeDates.length === 0) return 0;
+  const sorted = [...activeDates].sort();
+  const activeSet = new Set(activeDates);
+  const first = new Date(sorted[0] + 'T12:00:00');
+  const last = new Date(sorted[sorted.length - 1] + 'T12:00:00');
+  let max = 0;
+  let cur = 0;
+  const cursor = new Date(first);
+  while (cursor <= last) {
+    const dateStr = cursor.toISOString().slice(0, 10);
+    const dow = cursor.getDay();
+    if (activeWeekdays.includes(dow)) {
+      if (activeSet.has(dateStr)) {
+        cur++;
+        if (cur > max) max = cur;
+      } else {
+        cur = 0;
+      }
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return max;
+}
+
 // Canonical weekday-aware streak.
 //
 // Rules (per business spec):

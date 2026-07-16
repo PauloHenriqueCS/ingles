@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { toSpDate } from './timezone';
-import { computeWeekdayStreak } from './metricsCore';
+import { computeWeekdayStreak, computeMaxWeekdayStreak } from './metricsCore';
 
 // Fetches every calendar date where the user completed at least one activity:
 //   writing (english_reviews), pronunciation, conversation (goal met), listening.
@@ -75,4 +75,15 @@ export async function fetchCurrentStreak(
 ): Promise<number> {
   const dates = await fetchAllActiveDates();
   return computeWeekdayStreak(dates, undefined, activeWeekdays);
+}
+
+// Fetch both current and all-time max streak in a single DB round-trip.
+export async function fetchStreaks(
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+): Promise<{ current: number; max: number }> {
+  const dates = await fetchAllActiveDates();
+  return {
+    current: computeWeekdayStreak(dates, undefined, activeWeekdays),
+    max: computeMaxWeekdayStreak(dates, activeWeekdays),
+  };
 }
