@@ -1,6 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getListeningInventoryStatus } from './get-listening-inventory-status';
 import { selectListeningGenerationTheme } from './select-listening-generation-theme';
+import { ensureListeningInventory } from './ensure-listening-inventory';
+import { enqueueListeningEpisodePipeline } from '../pipeline/enqueue-listening-episode-pipeline';
+
+vi.mock('../pipeline/enqueue-listening-episode-pipeline', () => ({
+  enqueueListeningEpisodePipeline: vi.fn(),
+}));
 
 // ── Mock builder ──────────────────────────────────────────────────────────────
 
@@ -186,5 +192,100 @@ describe('selectListeningGenerationTheme', () => {
       const theme = await selectListeningGenerationTheme(client as any, level);
       expect(typeof theme === 'string' || theme === null).toBe(true);
     }
+  });
+});
+
+// ── ensureListeningInventory ──────────────────────────────────────────────────
+
+describe('ensureListeningInventory', () => {
+  const mockEnqueue = vi.mocked(enqueueListeningEpisodePipeline);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEnqueue.mockResolvedValue({ jobId: 'mock-job', created: true, idempotencyKey: 'mock-key' });
+  });
+
+  it('returns created=0 when inventory meets desired target', async () => {
+    const episodes = Array.from({ length: 7 }, (_, i) => ({
+      id:         `ep-${i}`,
+      cefr_level: 'B1',
+      status:     'published',
+      title:      null,
+      synopsis:   null,
+      theme:      null,
+    }));
+
+    const client = buildMockClient({ listening_episodes: episodes });
+    const result = await ensureListeningInventory(client as any, { targetLevel: 'B1' });
+
+    expect(result.created).toBe(0);
+    expect(result.levels).toEqual([]);
+    expect(mockEnqueue).not.toHaveBeenCalled();
+  });
+
+  it('creates pipelines to fill missing slots when inventory is empty', async () => {
+    const client = buildMockClient({ listening_episodes: [] });
+    const result = await ensureListeningInventory(client as any, { targetLevel: 'B1' });
+
+    // DESIRED_PER_LEVEL = 7, published = 0, inPipeline = 0 → missing = 7
+    expect(result.created).toBe(7);
+    expect(result.levels).toContain('B1');
+    expect(mockEnqueue).toHaveBeenCalledTimes(7);
+  });
+
+  it('creates only missing slots when 2 published episodes already exist', async () => {
+    const episodes = [
+      { id: 'ep-1', cefr_level: 'B1', status: 'published', title: null, synopsis: null, theme: null },
+      { id: 'ep-2', cefr_level: 'B1', status: 'published', title: null, synopsis: null, theme: null },
+    ];
+
+    const client = buildMockClient({ listening_episodes: episodes });
+    const result = await ensureListeningInventory(client as any, { targetLevel: 'B1' });
+
+    // DESIRED_PER_LEVEL = 7, published = 2, missing = 5
+    expect(result.created).toBe(5);
+    expect(result.levels).toContain('B1');
+    expect(mockEnqueue).toHaveBeenCalledTimes(5);
+  });
+
+  it('does not count duplicates when enqueue returns created=false', async () => {
+    mockEnqueue.mockResolvedValue({ jobId: 'existing-job', created: false, idempotencyKey: 'dup-key' });
+
+    const client = buildMockClient({ listening_episodes: [] });
+    const result = await ensureListeningInventory(client as any, { targetLevel: 'B1' });
+
+    // enqueue was called but all returned created=false → totalCreated = 0
+    expect(result.created).toBe(0);
+    expect(result.levels).toEqual([]);
+    expect(mockEnqueue).toHaveBeenCalled();
+  });
+
+  it('respects targetLevel and ignores other levels', async () => {
+    // Only A1 has episodes; B1 is empty
+    const episodes = Array.from({ length: 7 }, (_, i) => ({
+      id:         `a1-${i}`,
+      cefr_level: 'A1',
+      status:     'published',
+      title:      null,
+      synopsis:   null,
+      theme:      null,
+    }));
+
+    const client = buildMockClient({ listening_episodes: episodes });
+    const result = await ensureListeningInventory(client as any, { targetLevel: 'A1' });
+
+    // A1 has 7 published → no work needed, B1 was not checked
+    expect(result.created).toBe(0);
+    expect(mockEnqueue).not.toHaveBeenCalled();
+  });
+
+  it('passes cefrLevel and theme to enqueueListeningEpisodePipeline', async () => {
+    const client = buildMockClient({ listening_episodes: [] });
+    await ensureListeningInventory(client as any, { targetLevel: 'C1', source: 'admin' });
+
+    expect(mockEnqueue).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ cefrLevel: 'C1', source: 'admin' }),
+    );
   });
 });

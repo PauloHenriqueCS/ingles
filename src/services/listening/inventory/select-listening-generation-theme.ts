@@ -39,26 +39,34 @@ export async function selectListeningGenerationTheme(
   supabase: SupabaseClient,
   cefrLevel: CEFRLevel,
 ): Promise<string | null> {
-  // Get recent episode themes/titles for this level
+  // Get recent episodes including stored theme for this level
   const { data: recentEpisodes } = await supabase
     .from('listening_episodes')
-    .select('title, synopsis')
+    .select('title, synopsis, theme')
     .eq('cefr_level', cefrLevel)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(15);
 
   const recentContent = (recentEpisodes ?? [])
-    .map((ep: { title: string | null; synopsis: string | null }) =>
-      `${ep.title ?? ''} ${ep.synopsis ?? ''}`.toLowerCase(),
+    .map((ep: { title: string | null; synopsis: string | null; theme: string | null }) =>
+      `${ep.theme ?? ''} ${ep.title ?? ''} ${ep.synopsis ?? ''}`.toLowerCase(),
     )
     .join(' ');
+
+  // Themes explicitly stored in DB get a hard avoidance boost
+  const storedThemes = new Set(
+    (recentEpisodes ?? [])
+      .map((ep: { theme: string | null }) => (ep.theme ?? '').toLowerCase())
+      .filter(Boolean),
+  );
 
   // Score each theme by how absent it is from recent content
   const scoredThemes = THEME_POOL.map(theme => {
     const keywords = theme.toLowerCase().split(' ');
     const hits = keywords.filter(k => recentContent.includes(k)).length;
     const avoided = AVOID_THEMES.some(av => theme.toLowerCase().includes(av.toLowerCase()));
-    return { theme, score: hits + (avoided ? 100 : 0) };
+    const recentlyUsed = storedThemes.has(theme.toLowerCase());
+    return { theme, score: hits + (avoided ? 100 : 0) + (recentlyUsed ? 50 : 0) };
   });
 
   // Sort ascending by score (least-used themes first), shuffle ties

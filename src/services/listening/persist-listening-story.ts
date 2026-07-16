@@ -13,6 +13,7 @@ async function insertEpisode(
   supabase: SupabaseClient,
   story: ValidatedStory,
   idempotencyKey: string,
+  theme?: string | null,
 ): Promise<string> {
   const { data, error } = await supabase
     .from('listening_episodes')
@@ -23,6 +24,7 @@ async function insertEpisode(
       status: 'draft',
       content_version: 1,
       generation_key: idempotencyKey,
+      ...(theme ? { theme } : {}),
     })
     .select('id')
     .single();
@@ -116,8 +118,9 @@ export async function persistListeningStory(
   story: ValidatedStory,
   idempotencyKey: string,
   supabase: SupabaseClient,
+  theme?: string | null,
 ): Promise<string> {
-  const episodeId = await insertEpisode(supabase, story, idempotencyKey);
+  const episodeId = await insertEpisode(supabase, story, idempotencyKey, theme);
 
   const blockIds: string[] = [];
   for (const block of story.blocks) {

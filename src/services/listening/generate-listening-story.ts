@@ -141,6 +141,6 @@ export async function generateListeningStory(
     throw new Error('Supabase client is required when dryRun is false');
   }
 
-  const episodeId = await persistListeningStory(story, idempotencyKey, supabase);
+  const episodeId = await persistListeningStory(story, idempotencyKey, supabase, opts.theme);
   return { story, episodeId, idempotencyKey };
 }
