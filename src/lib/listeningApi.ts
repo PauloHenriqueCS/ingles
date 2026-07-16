@@ -134,6 +134,45 @@ export function getListeningResult(assignmentId: string): Promise<ListeningResul
   return apiFetch<ListeningResultData>(`/api/listening/assignment-result?assignmentId=${encodeURIComponent(assignmentId)}`);
 }
 
+// ── Story session (simplified, no DB) ─────────────────────────────────────────
+
+export type StorySessionData = {
+  title: string;
+  storyEn: string;
+  storyPt: string;
+  level: string;
+  audioUrl: string;
+  audioExpiresAt: string;
+  question: {
+    prompt: string;
+    options: string[];
+  };
+  answerToken: string;
+};
+
+export type StoryAnswerResult = {
+  correct: boolean;
+  correctOption: number;
+  explanationPt: string;
+};
+
+export function generateStorySession(): Promise<StorySessionData> {
+  return apiFetch<StorySessionData>('/api/listening/story/generate', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function verifyStoryAnswer(input: {
+  answerToken: string;
+  selectedOption: number;
+}): Promise<StoryAnswerResult> {
+  return apiFetch<StoryAnswerResult>('/api/listening/story/verify', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 // ── On-demand generation ───────────────────────────────────────────────────────
 
 export type GenerationSessionStatus =

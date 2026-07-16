@@ -23,6 +23,10 @@ import {
   OnDemandSessionLockedError,
   OnDemandSessionTerminalError,
 } from '../../src/services/listening/on-demand/listening-on-demand-types';
+import {
+  generateStorySession,
+  decodeAnswerToken,
+} from '../../src/services/listening/story-session/generate-story-session';
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
@@ -359,6 +363,64 @@ async function handleSessionPlaybackCompleted(req: any, res: any) {
   }
 }
 
+// ─── POST /api/listening/story/generate ──────────────────────────────────────
+
+async function handleStoryGenerate(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const openaiKey = process.env.OPENAI_API_KEY ?? '';
+  const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
+  const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
+  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+
+  if (!openaiKey || !azureKey || !azureRegion || !secret) {
+    safeLog('listening/story/generate', 'misconfigured', 503, {});
+    return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço temporariamente indisponível.');
+  }
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await generateStorySession(userId, serviceClient, openaiKey, azureKey, azureRegion, secret);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/story/generate', 'generated', 200, { level: result.level });
+    return res.status(200).json(result);
+  } catch (err) {
+    const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
+    safeLog('listening/story/generate', 'failed', 500, { step });
+    return jsonError(res, 500, 'GENERATION_FAILED', 'Não foi possível criar a história. Tente novamente.');
+  }
+}
+
+// ─── POST /api/listening/story/verify ────────────────────────────────────────
+
+async function handleStoryVerify(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 2048)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  const { answerToken, selectedOption } = req.body ?? {};
+  if (!answerToken || typeof answerToken !== 'string')
+    return jsonError(res, 400, 'INVALID_REQUEST', 'answerToken é obrigatório.');
+  if (typeof selectedOption !== 'number' || selectedOption < 0 || selectedOption > 4)
+    return jsonError(res, 400, 'INVALID_REQUEST', 'selectedOption inválido (0–4).');
+
+  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  if (!secret) return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço indisponível.');
+
+  try {
+    const { correctIndex, explanationPt } = decodeAnswerToken(answerToken, secret);
+    const correct = correctIndex === selectedOption;
+    return res.status(200).json({ correct, correctOption: correctIndex, explanationPt });
+  } catch {
+    return jsonError(res, 400, 'INVALID_TOKEN', 'Token inválido ou expirado.');
+  }
+}
+
 // ─── POST /api/listening/on-demand/start ─────────────────────────────────────
 
 async function handleOnDemandStart(req: any, res: any) {
@@ -494,6 +556,8 @@ export default async function handler(req: any, res: any) {
     case 'today':                      return handleToday(req, res);
     case 'by-date':                    return handleByDate(req, res);
     case 'assignment-result':          return handleAssignmentResult(req, res);
+    case 'story/generate':             return handleStoryGenerate(req, res);
+    case 'story/verify':               return handleStoryVerify(req, res);
     case 'on-demand/start':            return handleOnDemandStart(req, res);
     case 'on-demand/status':           return handleOnDemandStatus(req, res);
     case 'on-demand/process-next':     return handleOnDemandProcessNext(req, res);
