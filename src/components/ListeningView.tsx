@@ -372,12 +372,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   async function runGenerationLoop(sessionId: string, initialStatus?: GenerationStatusResult) {
     generationAbortRef.current = false;
-    let current = initialStatus;
+    if (initialStatus) setGenerationStatus(initialStatus);
 
     while (!generationAbortRef.current) {
       try {
         const result = await processNextListeningStep(sessionId);
-        current = result;
         setGenerationStatus(result);
 
         if (result.status === 'ready') {
