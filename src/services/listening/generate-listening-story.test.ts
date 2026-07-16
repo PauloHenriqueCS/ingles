@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { countWords } from './listening-level-config';
-import { buildStoryUserPrompt, buildRetryUserPrompt } from './build-listening-story-prompt';
+import { buildStoryUserPrompt, buildRetryUserPrompt, buildTruncatedRetryUserPrompt } from './build-listening-story-prompt';
 import {
   parseStoryJson,
   validateListeningStoryResponse,
@@ -10,6 +10,7 @@ import {
 import {
   generateListeningStory,
   StoryAITimeoutError,
+  StoryOutputTruncatedError,
   buildIdempotencyKey,
 } from './generate-listening-story';
 import type { AICallFn } from './generate-listening-story';
@@ -130,6 +131,20 @@ describe('buildRetryUserPrompt', () => {
   });
 });
 
+// ── Group 2c: buildTruncatedRetryUserPrompt ───────────────────────────────────
+
+describe('buildTruncatedRetryUserPrompt', () => {
+  it('includes "truncated" in the message', () => {
+    const prompt = buildTruncatedRetryUserPrompt({ cefrLevel: 'A1' }, 2);
+    expect(prompt.toLowerCase()).toContain('truncated');
+  });
+
+  it('includes instruction to return only required fields', () => {
+    const prompt = buildTruncatedRetryUserPrompt({ cefrLevel: 'A1' }, 2);
+    expect(prompt).toContain('required fields');
+  });
+});
+
 // ── Group 3: parseStoryJson ───────────────────────────────────────────────────
 
 describe('parseStoryJson', () => {
@@ -171,13 +186,14 @@ describe('validateListeningStoryResponse — structure', () => {
     expect(() => validateListeningStoryResponse(dupBlocks, 'A1')).toThrow(StoryValidationError);
   });
 
-  it('throws when sentences array is empty', () => {
+  it('ignores sentences array in raw block (slim schema)', () => {
     const raw = makeValidRawStory();
     const noSentences = {
       ...raw,
       blocks: [{ ...raw.blocks[0], sentences: [] }, raw.blocks[1]],
     };
-    expect(() => validateListeningStoryResponse(noSentences, 'A1')).toThrow(StoryValidationError);
+    // Slim schema: sentences are derived, not validated from AI response
+    expect(() => validateListeningStoryResponse(noSentences, 'A1')).not.toThrow();
   });
 
   it('valid response passes validation', () => {
@@ -250,37 +266,37 @@ describe('validateListeningStoryResponse — word count boundaries', () => {
   });
 });
 
-// ── Group 6: validateListeningStoryResponse — question validation ─────────────
+// ── Group 6: no longer validates question or translation in story step ─────────
 
-describe('validateListeningStoryResponse — question', () => {
-  it('throws when correct_option is out of range', () => {
-    const raw = makeValidRawStory();
-    const badBlock = {
-      ...raw.blocks[0],
-      question: { ...raw.blocks[0].question, correct_option: 99 },
+describe('validateListeningStoryResponse — slim schema (no translation or question)', () => {
+  it('accepts a block without translation_pt', () => {
+    const raw = {
+      title: 'Test',
+      synopsis: 'Test synopsis.',
+      blocks: [
+        { block_order: 1, text_en: makeWords(420) },
+        { block_order: 2, text_en: makeWords(420) },
+      ],
     };
-    const story = { ...raw, blocks: [badBlock, raw.blocks[1]] };
-    expect(() => validateListeningStoryResponse(story, 'A1')).toThrow(StoryValidationError);
+    expect(() => validateListeningStoryResponse(raw, 'A1')).not.toThrow();
   });
 
-  it('throws when options_json has fewer than 2 options', () => {
-    const raw = makeValidRawStory();
-    const badBlock = {
-      ...raw.blocks[0],
-      question: { ...raw.blocks[0].question, options_json: ['Only one'] },
+  it('accepts a block without question', () => {
+    const raw = {
+      title: 'Test',
+      synopsis: 'Test synopsis.',
+      blocks: [
+        { block_order: 1, text_en: makeWords(420) },
+        { block_order: 2, text_en: makeWords(420) },
+      ],
     };
-    const story = { ...raw, blocks: [badBlock, raw.blocks[1]] };
-    expect(() => validateListeningStoryResponse(story, 'A1')).toThrow(StoryValidationError);
+    const story = validateListeningStoryResponse(raw, 'A1');
+    expect(story.blocks[0].sentences.length).toBeGreaterThan(0);
   });
 
-  it('throws when correct_option is negative', () => {
-    const raw = makeValidRawStory();
-    const badBlock = {
-      ...raw.blocks[0],
-      question: { ...raw.blocks[0].question, correct_option: -1 },
-    };
-    const story = { ...raw, blocks: [badBlock, raw.blocks[1]] };
-    expect(() => validateListeningStoryResponse(story, 'A1')).toThrow(StoryValidationError);
+  it('ignores extra fields like translation_pt and question', () => {
+    const raw = makeValidRawStory('A1'); // has translation_pt, sentences, question
+    expect(() => validateListeningStoryResponse(raw, 'A1')).not.toThrow();
   });
 });
 
@@ -288,7 +304,15 @@ describe('validateListeningStoryResponse — question', () => {
 
 describe('generateListeningStory — mocked callAI', () => {
   function makeValidAIResponse(level = 'A1'): string {
-    return JSON.stringify(makeValidRawStory(level));
+    const wc = level === 'A1' ? 420 : level === 'B2' ? 570 : 420;
+    return JSON.stringify({
+      title: 'A Day at the Market',
+      synopsis: 'A short story about a visit to the local market.',
+      blocks: [
+        { block_order: 1, text_en: makeWords(wc) },
+        { block_order: 2, text_en: makeWords(wc) },
+      ],
+    });
   }
 
   it('successful generation returns a ValidatedStory in dry-run mode', async () => {
@@ -340,6 +364,18 @@ describe('generateListeningStory — mocked callAI', () => {
 // ── Group 7b: generateListeningStory — retry with error feedback ──────────────
 
 describe('generateListeningStory — retry feedback', () => {
+  function makeValidAIResponse(level = 'A1'): string {
+    const wc = level === 'A1' ? 420 : level === 'B2' ? 570 : 420;
+    return JSON.stringify({
+      title: 'A Day at the Market',
+      synopsis: 'A short story about a visit to the local market.',
+      blocks: [
+        { block_order: 1, text_en: makeWords(wc) },
+        { block_order: 2, text_en: makeWords(wc) },
+      ],
+    });
+  }
+
   function makeTooShortStory(block1Words: number, block2Words: number): string {
     return JSON.stringify({
       title: 'Test',
@@ -349,7 +385,7 @@ describe('generateListeningStory — retry feedback', () => {
   }
 
   it('first attempt receives normal prompt without "Previous attempt"', async () => {
-    const callAI: AICallFn = vi.fn().mockResolvedValue(JSON.stringify(makeValidRawStory('A1')));
+    const callAI: AICallFn = vi.fn().mockResolvedValue(makeValidAIResponse('A1'));
     await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     const [, firstPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
     expect(firstPrompt).not.toContain('Previous attempt');
@@ -358,7 +394,7 @@ describe('generateListeningStory — retry feedback', () => {
   it('second attempt includes error from first attempt', async () => {
     const callAI: AICallFn = vi.fn()
       .mockResolvedValueOnce(makeTooShortStory(200, 420))
-      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+      .mockResolvedValueOnce(makeValidAIResponse('A1'));
     await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(callAI).toHaveBeenCalledTimes(2);
     const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
@@ -370,7 +406,7 @@ describe('generateListeningStory — retry feedback', () => {
     const callAI: AICallFn = vi.fn()
       .mockResolvedValueOnce(makeTooShortStory(200, 420))
       .mockResolvedValueOnce(makeTooShortStory(250, 420))
-      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+      .mockResolvedValueOnce(makeValidAIResponse('A1'));
     await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(callAI).toHaveBeenCalledTimes(3);
     const [, thirdPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
@@ -381,12 +417,38 @@ describe('generateListeningStory — retry feedback', () => {
   it('error in one block forces full regeneration on next attempt', async () => {
     const callAI: AICallFn = vi.fn()
       .mockResolvedValueOnce(makeTooShortStory(420, 200))
-      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+      .mockResolvedValueOnce(makeValidAIResponse('A1'));
     await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(callAI).toHaveBeenCalledTimes(2);
     const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
     expect(secondPrompt).toContain('Regenerate the COMPLETE JSON');
     expect(secondPrompt).toContain('Block 2');
+  });
+
+  it('StoryOutputTruncatedError has retryable = true', () => {
+    const err = new StoryOutputTruncatedError('gpt-4o', 1234);
+    expect(err.retryable).toBe(true);
+    expect(err.code).toBe('STORY_OUTPUT_TRUNCATED');
+  });
+
+  it('truncation error triggers retry with truncated prompt', async () => {
+    const truncatedError = new StoryOutputTruncatedError('gpt-4o', 100);
+    const callAI: AICallFn = vi.fn()
+      .mockRejectedValueOnce(truncatedError)
+      .mockResolvedValueOnce(makeValidAIResponse('A1'));
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondPrompt).toContain('truncated');
+  });
+
+  it('throws StoryOutputTruncatedError after 3 truncation failures', async () => {
+    const truncatedError = new StoryOutputTruncatedError('gpt-4o', 100);
+    const callAI: AICallFn = vi.fn().mockRejectedValue(truncatedError);
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryOutputTruncatedError);
+    expect(callAI).toHaveBeenCalledTimes(3);
   });
 });
 

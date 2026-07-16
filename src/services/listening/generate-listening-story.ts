@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
-import { STORY_SYSTEM_PROMPT, PROMPT_VERSION, CONTENT_VERSION, buildStoryUserPrompt, buildRetryUserPrompt } from './build-listening-story-prompt';
+import {
+  STORY_SYSTEM_PROMPT, PROMPT_VERSION, CONTENT_VERSION,
+  buildStoryUserPrompt, buildRetryUserPrompt, buildTruncatedRetryUserPrompt,
+} from './build-listening-story-prompt';
 import { parseStoryJson, validateListeningStoryResponse, StoryParseError, StoryValidationError } from './validate-listening-story';
 import { persistListeningStory, StoryPersistError } from './persist-listening-story';
 import type { ValidatedStory } from './listening-story-schema';
@@ -24,9 +27,21 @@ export class StoryAIUnavailableError extends Error {
   }
 }
 
+export class StoryOutputTruncatedError extends Error {
+  readonly code = 'STORY_OUTPUT_TRUNCATED';
+  readonly retryable = true;
+  constructor(readonly model: string, readonly responseChars: number) {
+    super(`AI response was truncated (finish_reason: length, chars: ${responseChars}, model: ${model})`);
+    this.name = 'StoryOutputTruncatedError';
+  }
+}
+
 const AI_MODEL = 'gpt-4o';
 const STORY_TIMEOUT_MS = 90_000;
 const MAX_ATTEMPTS = 3;
+// Slim schema: ~2x450 words of English text + title + synopsis + JSON structure
+// 450 words ≈ 600 tokens, x2 = 1200, overhead ~200 → 1600 tokens with margin
+const MAX_OUTPUT_TOKENS = 1600;
 
 export interface GenerateStoryOptions {
   cefrLevel: CEFRLevel;
@@ -74,9 +89,19 @@ export function createDefaultAICallFn(apiKey: string): AICallFn {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      max_tokens: 4096,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      response_format: { type: 'json_object' },
     });
-    return resp.choices[0]?.message?.content ?? '';
+
+    const choice = resp.choices[0];
+    const finishReason = choice?.finish_reason;
+    const content = choice?.message?.content ?? '';
+
+    if (finishReason === 'length') {
+      throw new StoryOutputTruncatedError(AI_MODEL, content.length);
+    }
+
+    return content;
   };
 }
 
@@ -86,24 +111,42 @@ export async function generateListeningStory(
   supabase?: SupabaseClient,
 ): Promise<GenerateStoryResult> {
   const idempotencyKey = buildIdempotencyKey(opts);
-  const userPrompt = buildStoryUserPrompt(opts);
+  const basePrompt = buildStoryUserPrompt(opts);
 
   const aiCallFn: AICallFn = callAI ?? createDefaultAICallFn(
     process.env.OPENAI_API_KEY ?? ''
   );
 
   let story: ValidatedStory | null = null;
-  let lastError: StoryParseError | StoryValidationError | null = null;
+  let lastError: StoryOutputTruncatedError | StoryParseError | StoryValidationError | null = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const currentPrompt = attempt === 1 || lastError === null
-      ? userPrompt
-      : buildRetryUserPrompt(opts, attempt, lastError.message);
+    let currentPrompt: string;
+    if (attempt === 1 || lastError === null) {
+      currentPrompt = basePrompt;
+    } else if (lastError instanceof StoryOutputTruncatedError) {
+      currentPrompt = buildTruncatedRetryUserPrompt(opts, attempt);
+    } else {
+      currentPrompt = buildRetryUserPrompt(opts, attempt, lastError.message);
+    }
 
     let rawText: string;
     try {
       rawText = await aiCallFn(STORY_SYSTEM_PROMPT, currentPrompt);
     } catch (err) {
+      if (err instanceof StoryOutputTruncatedError) {
+        console.error(JSON.stringify({
+          event: 'listening_story_truncated',
+          model: err.model,
+          finish_reason: 'length',
+          responseChars: err.responseChars,
+          attempt,
+          cefrLevel: opts.cefrLevel,
+          code: err.code,
+        }));
+        lastError = err;
+        continue;
+      }
       if (isTimeoutError(err)) throw new StoryAITimeoutError();
       if (isUnavailableError(err)) throw new StoryAIUnavailableError();
       throw new StoryAIUnavailableError(`AI call failed: ${String(err)}`);

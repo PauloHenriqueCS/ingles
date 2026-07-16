@@ -17,62 +17,25 @@ Your task: generate a two-part English listening story at a specified CEFR level
 Rules:
 - Return ONLY valid JSON. No markdown. No preamble. No postamble. The first character must be "{".
 - The story MUST have exactly 2 blocks (block_order 1 and block_order 2).
-- Each block MUST contain: block_order, text_en, translation_pt, sentences (array), and question (object).
+- Each block MUST contain: block_order (integer 1 or 2) and text_en (string).
 - text_en: the full continuous paragraph text for the block.
-- sentences: each sentence in text_en listed individually.
-  - sentence_key format: "b1s01", "b1s02", "b2s01", etc. (bN = block N, sNN = sentence number)
-  - sentence_order: 1-based, sequential within the block
-  - paragraph_order: 1-based paragraph number the sentence belongs to
-  - speaker: character name if dialogue, "narrator" if narration, null if ambiguous
-  - text_en: the sentence exactly as it appears in text_en
-  - CRITICAL: joining all sentences[].text_en with a single space MUST reproduce text_en exactly (after normalizing whitespace)
-- Word count of text_en per block MUST match the requested range.
-- translation_pt: complete Brazilian Portuguese translation of the block.
-- question: one multiple-choice comprehension question testing the block content.
-  - options_json: exactly 4 answer choices as a string array
-  - correct_option: 0-based index of the correct answer
-  - explanation_pt: brief explanation of the correct answer in Brazilian Portuguese
-- Block 1 and block 2 should form a coherent two-part story with a beginning, middle, and end across both.
+- Do NOT include translation_pt, sentences arrays, or questions — those are generated in separate steps.
+- Block 1 and block 2 should form a coherent two-part story with a beginning, middle, and end.
 - Vocabulary and grammar complexity MUST match the CEFR level precisely.
+- The story should be engaging, culturally appropriate for Brazilian adults, and educational.
 
-JSON schema:
+JSON schema (return EXACTLY this structure, nothing more):
 {
   "title": string,
   "synopsis": string,
   "blocks": [
     {
       "block_order": 1,
-      "text_en": string,
-      "translation_pt": string,
-      "sentences": [
-        {
-          "sentence_key": "b1s01",
-          "sentence_order": 1,
-          "paragraph_order": 1,
-          "speaker": string | null,
-          "text_en": string
-        }
-      ],
-      "question": {
-        "question_order": 1,
-        "prompt": string,
-        "options_json": [string, string, string, string],
-        "correct_option": number,
-        "explanation_pt": string
-      }
+      "text_en": string
     },
     {
       "block_order": 2,
-      "text_en": string,
-      "translation_pt": string,
-      "sentences": [...],
-      "question": {
-        "question_order": 2,
-        "prompt": string,
-        "options_json": [string, string, string, string],
-        "correct_option": number,
-        "explanation_pt": string
-      }
+      "text_en": string
     }
   ]
 }`;
@@ -87,7 +50,7 @@ function wordCountHeader(cefrLevel: string): string[] {
     `• Minimum absolute: ${range.min} words — fewer than ${range.min} words is INVALID.`,
     `• Maximum absolute: ${range.max} words.`,
     '• Both blocks must independently satisfy this range.',
-    '• Only the words in text_en count — translation_pt and sentences do NOT count.',
+    '• Only the words in text_en count — do NOT add translation, questions, or sentences.',
     '• Before returning the JSON, verify the word count of each text_en block.',
     '• Do not summarize the story to save tokens. Write the full narrative.',
     `• Do not return the JSON until BOTH blocks contain between ${range.min} and ${range.max} words.`,
@@ -126,6 +89,31 @@ export function buildRetryUserPrompt(
     '',
     'Regenerate the COMPLETE JSON from scratch.',
     'Do not fix or complete only part of the JSON — generate the entire object again.',
+    'Return ONLY the required fields: title, synopsis, blocks (block_order + text_en).',
+    'Do NOT include translation_pt, questions, explanations, or sentences arrays.',
+    `Each text_en must contain between ${range.min} and ${range.max} words independently.`,
+    '',
+    'Generate the JSON story now.',
+  );
+  return lines.join('\n');
+}
+
+export function buildTruncatedRetryUserPrompt(opts: StoryPromptOptions, attempt: number): string {
+  const range = WORD_COUNT_RANGES[opts.cefrLevel];
+  const lines: string[] = [
+    `CEFR Level: ${opts.cefrLevel}`,
+    `Words per block: ${range.min}–${range.max}`,
+  ];
+  if (opts.theme) lines.push(`Theme: ${opts.theme}`);
+  if (opts.seed) lines.push(`Seed / additional context: ${opts.seed}`);
+  lines.push(
+    ...wordCountHeader(opts.cefrLevel),
+    '',
+    `Previous attempt ${attempt - 1} failed because the JSON output was truncated (too long).`,
+    '',
+    'Generate the COMPLETE JSON again.',
+    'Return ONLY the required fields: title, synopsis, blocks (block_order + text_en).',
+    'Do NOT include translation_pt, questions, explanations, or sentences arrays.',
     `Each text_en must contain between ${range.min} and ${range.max} words independently.`,
     '',
     'Generate the JSON story now.',

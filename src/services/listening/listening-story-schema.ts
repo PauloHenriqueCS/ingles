@@ -1,5 +1,17 @@
-// Raw types: exactly as returned by the AI (snake_case JSON)
+// Raw types from AI response (slim schema — only text fields)
 
+export interface RawSlimBlock {
+  block_order: number;
+  text_en: string;
+}
+
+export interface RawSlimStoryResponse {
+  title: string;
+  synopsis: string;
+  blocks: RawSlimBlock[];
+}
+
+// Legacy raw types — kept for backward compatibility with tests
 export interface RawStorySentence {
   sentence_key: string;
   sentence_order: number;
@@ -19,15 +31,9 @@ export interface RawStoryQuestion {
 export interface RawStoryBlock {
   block_order: number;
   text_en: string;
-  translation_pt: string;
-  sentences: RawStorySentence[];
-  question: RawStoryQuestion;
-}
-
-export interface RawStoryResponse {
-  title: string;
-  synopsis: string;
-  blocks: RawStoryBlock[];
+  translation_pt?: string;
+  sentences?: RawStorySentence[];
+  question?: RawStoryQuestion;
 }
 
 // Validated types: camelCase, narrowed, guaranteed structure
@@ -51,10 +57,8 @@ export interface ValidatedQuestion {
 export interface ValidatedBlock {
   blockOrder: 1 | 2;
   textEn: string;
-  translationPt: string;
   wordCount: number;
-  sentences: ValidatedSentence[];
-  question: ValidatedQuestion;
+  sentences: ValidatedSentence[];  // derived by segmentListeningText
 }
 
 export interface ValidatedStory {
