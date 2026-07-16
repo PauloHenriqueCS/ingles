@@ -1,4 +1,5 @@
 import { getAuthHeader } from './apiAuth';
+import { supabase } from './supabase';
 import type {
   EpisodeSessionResponse,
   SubmitAnswerResult,
@@ -222,10 +223,9 @@ export function verifyStoryAnswer(input: {
 }
 
 export async function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
-  const { data: { session } } = await (await import('./supabase')).supabase.auth.getSession();
+  const { data: { session } } = await supabase.auth.getSession();
   console.log('[3] Payload enviado → POST /api/listening/story/complete', {
     hasToken: !!session?.access_token,
-    tokenPrefix: session?.access_token?.slice(0, 20) ?? 'NONE',
     userId: session?.user?.id ?? 'NONE',
     body: '{}',
   });

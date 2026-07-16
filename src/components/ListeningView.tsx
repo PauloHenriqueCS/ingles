@@ -1414,11 +1414,15 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       const advance = async () => {
         if (isLastPart) {
           setPhase('submitting');
+          console.log('[1] Story finalizada via cycle_failed — iniciando save');
+          console.log('[2] Chamando completeStoryListening() [via cycle_failed]');
           try {
-            await completeStoryListening();
+            const saveResult = await completeStoryListening();
+            console.log('[12] Frontend recebeu sucesso [via cycle_failed]', saveResult);
             setCompletionSaveError(false);
             onComplete?.();
-          } catch {
+          } catch (err) {
+            console.error('[12] Frontend recebeu erro [via cycle_failed]', err);
             setCompletionSaveError(true);
           }
           setPhase('done');
