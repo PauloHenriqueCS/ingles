@@ -142,11 +142,12 @@ const GENERATION_PROGRESS = [
 interface Props {
   onBack: () => void;
   episodeId?: string;
+  onComplete?: () => void;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function ListeningView({ onBack, episodeId: propEpisodeId }: Props) {
+export default function ListeningView({ onBack, episodeId: propEpisodeId, onComplete }: Props) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [episodeId, setEpisodeId] = useState<string | null>(propEpisodeId ?? null);
   const [, setAssignmentId] = useState<string | null>(null);
@@ -427,6 +428,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         try {
           await completeStoryListening();
           setCompletionSaveError(false);
+          onComplete?.();
         } catch {
           setCompletionSaveError(true);
         }
@@ -1405,8 +1407,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       const correctIndex = storyResult?.correctOption ?? null;
       const isLastPart = currentPartIdx === 1;
 
-      const advance = () => {
+      const advance = async () => {
         if (isLastPart) {
+          setPhase('submitting');
+          try {
+            await completeStoryListening();
+            setCompletionSaveError(false);
+            onComplete?.();
+          } catch {
+            setCompletionSaveError(true);
+          }
           setPhase('done');
         } else {
           handleStoryAdvance();

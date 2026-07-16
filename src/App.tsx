@@ -14,8 +14,6 @@ import { getTodaySP, getSpMonth, getSpYear } from './lib/timezone';
 import HomePage from './components/HomePage';
 import Dashboard from './components/Dashboard';
 import MonthView from './components/MonthView';
-import YearView from './components/YearView';
-import FilterView from './components/FilterView';
 import DayView from './components/DayView';
 import HistoryView from './components/HistoryView';
 import EvolutionView from './components/EvolutionView';
@@ -146,6 +144,7 @@ export default function App() {
             entries={entries}
             today={today}
             onOpenDay={openDay}
+            onNavigate={setView}
             activeWeekdays={learningSettings.activeWeekdays}
           />
         )}
@@ -162,16 +161,19 @@ export default function App() {
           />
         )}
         {view === 'year' && (
-          <YearView
+          <MonthView
             entries={entries}
-            onOpenMonth={(m) => { setCurrentMonth(m); setView('month'); }}
+            currentMonth={currentMonth}
+            currentYear={currentYear}
+            onChangeMonth={handleChangeMonth}
+            onOpenDay={openDay}
+            activeWeekdays={learningSettings.activeWeekdays}
+            overrideDates={monthOverrides}
+            onSettingsChange={setLearningSettings}
           />
         )}
-        {view === 'filters' && (
-          <FilterView entries={entries} onOpenDay={openDay} />
-        )}
-        {view === 'history' && (
-          <HistoryView />
+        {(view === 'filters' || view === 'history') && (
+          <HistoryView entries={entries} onOpenDay={openDay} />
         )}
         {view === 'evolution' && (
           <EvolutionView onNavigate={setView} />
@@ -183,7 +185,13 @@ export default function App() {
           <ConversationView />
         )}
         {view === 'listening' && (
-          <ListeningView onBack={() => setView('home')} episodeId={listeningEpisodeId} />
+          <ListeningView
+            onBack={() => setView('home')}
+            episodeId={listeningEpisodeId}
+            onComplete={() => {
+              console.log('[CALENDAR_CACHE_INVALIDATED] listening completed — calendar will refresh on next visit');
+            }}
+          />
         )}
         {view === 'audio-settings' && (
           <AudioSettingsView onBack={() => setView('home')} />
