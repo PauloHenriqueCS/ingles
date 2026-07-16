@@ -38,6 +38,7 @@ export default function App() {
   const [monthOverrides, setMonthOverrides] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [listeningEpisodeId] = useState<string | undefined>(undefined);
+  const [listeningRefreshKey, setListeningRefreshKey] = useState(0);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
@@ -155,6 +156,8 @@ export default function App() {
             currentYear={currentYear}
             onChangeMonth={handleChangeMonth}
             onOpenDay={openDay}
+            onOpenListening={() => setView('listening')}
+            listeningRefreshKey={listeningRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
             onSettingsChange={setLearningSettings}
@@ -167,6 +170,8 @@ export default function App() {
             currentYear={currentYear}
             onChangeMonth={handleChangeMonth}
             onOpenDay={openDay}
+            onOpenListening={() => setView('listening')}
+            listeningRefreshKey={listeningRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
             onSettingsChange={setLearningSettings}
@@ -189,7 +194,8 @@ export default function App() {
             onBack={() => setView('home')}
             episodeId={listeningEpisodeId}
             onComplete={() => {
-              console.log('[CALENDAR_CACHE_INVALIDATED] listening completed — calendar will refresh on next visit');
+              setListeningRefreshKey((k) => k + 1);
+              console.log('[LISTENING_CALENDAR_REFRESHED] calendar refresh triggered after listening completion');
             }}
           />
         )}

@@ -6,8 +6,8 @@ import { computeDailyProgress } from '../../../lib/dailyProgress';
 // ── resolveListeningCalendarStatus ───────────────────────────────────────────
 
 describe('resolveListeningCalendarStatus', () => {
-  it('undefined → coming_soon', () => {
-    expect(resolveListeningCalendarStatus(undefined)).toBe('coming_soon');
+  it('undefined → not_started (listening is available, not "coming soon")', () => {
+    expect(resolveListeningCalendarStatus(undefined)).toBe('not_started');
   });
 
   it("'completed' → 'completed'", () => {
@@ -41,9 +41,9 @@ describe('buildListeningCalendarActivity', () => {
     expect(entry).toEqual({ date: '2026-07-14', listeningStatus: 'not_started' });
   });
 
-  it('returns coming_soon when status is undefined', () => {
+  it('returns not_started when status is undefined (listening is a real activity)', () => {
     const entry = buildListeningCalendarActivity('2026-07-16', undefined);
-    expect(entry).toEqual({ date: '2026-07-16', listeningStatus: 'coming_soon' });
+    expect(entry).toEqual({ date: '2026-07-16', listeningStatus: 'not_started' });
   });
 });
 
@@ -146,16 +146,16 @@ describe('computeDailyProgress — listening integration', () => {
     expect(progress.allActiveCompleted).toBe(false);
   });
 
-  // Test: listening not_started blocks allActiveCompleted even when others are done
-  it('listening not_started blocks allActiveCompleted', () => {
+  // Test: listening not_started does NOT block allActiveCompleted (backward compat for past days)
+  it('listening not_started does not block allActiveCompleted (optional activity)', () => {
     const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'not_started');
-    expect(progress.allActiveCompleted).toBe(false);
+    expect(progress.allActiveCompleted).toBe(true);
   });
 
-  // Test: listening coming_soon (no assignment) does NOT block allActiveCompleted
-  it('listening coming_soon allows allActiveCompleted when other activities done', () => {
+  // Test: listening undefined (no assignment) defaults to not_started and does NOT block allActiveCompleted
+  it('listening undefined (no assignment) defaults to not_started, allows allActiveCompleted', () => {
     const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, undefined);
-    expect(progress.listening).toBe('coming_soon');
+    expect(progress.listening).toBe('not_started');
     expect(progress.allActiveCompleted).toBe(true);
   });
 });

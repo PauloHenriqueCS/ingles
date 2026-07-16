@@ -53,13 +53,13 @@ export function computeDailyProgress(
     ? 'completed'
     : 'not_started';
   const conversation = conversationStatus(convTotalSec, convGoalSec);
-  const listening: DailyActivityStatus = listeningStatus ?? 'coming_soon';
+  const listening: DailyActivityStatus = listeningStatus ?? 'not_started';
 
   const allActiveCompleted =
     writing === 'completed' &&
     pronunciation === 'completed' &&
     conversation === 'completed' &&
-    (listening === 'completed' || listening === 'coming_soon');
+    (listening === 'completed' || listening === 'not_started' || listening === 'coming_soon');
 
   return { date, writing, pronunciation, conversation, listening, allActiveCompleted };
 }

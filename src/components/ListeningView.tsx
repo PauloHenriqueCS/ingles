@@ -425,11 +425,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       } else {
         // Part 2 correct — persist completion, then show done.
         setPhase('submitting');
+        console.log('[LISTENING_COMPLETION_STARTED]');
         try {
           await completeStoryListening();
+          console.log('[LISTENING_COMPLETION_SAVED]');
           setCompletionSaveError(false);
           onComplete?.();
-        } catch {
+        } catch (err) {
+          console.error('[LISTENING_COMPLETION_FAILED]', err);
           setCompletionSaveError(true);
         }
         setPhase('done');

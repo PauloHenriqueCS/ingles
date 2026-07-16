@@ -17,6 +17,7 @@ interface Props {
   onChangeMonth: (month: number, year: number) => void;
   onOpenDay: (date: string) => void;
   onOpenListening?: () => void;
+  listeningRefreshKey?: number;
   activeWeekdays?: number[];
   overrideDates?: string[];
   onSettingsChange?: (settings: LearningSettings) => void;
@@ -27,8 +28,8 @@ const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export default function MonthView({
-  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening: _onOpenListening,
-  activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
+  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening,
+  listeningRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
   const today = (() => {
     try {
@@ -58,8 +59,15 @@ export default function MonthView({
     getPronunciationDatesForMonth(currentYear, currentMonth)
       .then(setPronunciationDates)
       .catch(() => {});
-    getListeningDatesForMonth(currentYear, currentMonth).then(setListeningProgress).catch(() => {});
-  }, [currentYear, currentMonth]);
+    getListeningDatesForMonth(currentYear, currentMonth)
+      .then((data) => {
+        setListeningProgress(data);
+        if (listeningRefreshKey > 0) {
+          console.log('[LISTENING_CALENDAR_REFRESHED]', { refreshKey: listeningRefreshKey });
+        }
+      })
+      .catch(() => {});
+  }, [currentYear, currentMonth, listeningRefreshKey]);
 
   useEffect(() => {
     getConversationGoalMinutes().then((min) => setConvGoalSec(min * 60)).catch(() => {});
@@ -324,6 +332,7 @@ export default function MonthView({
           convTotalSec={convTotals[modalDate] ?? 0}
           convGoalSec={convGoalSec}
           onOpenDay={onOpenDay}
+          onOpenListening={onOpenListening}
           onClose={() => setModalDate(null)}
         />
       )}
