@@ -177,6 +177,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const player = useListeningAudioPlayer();
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrongTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Blob URLs created from story audio — revoked on unmount to free memory
+  const storyBlobUrlsRef = useRef<string[]>([]);
 
   // ── Active block data ───────────────────────────────────────────────────────
   const block: SessionBlockInfo | null = episodeData?.blocks[blockIdx] ?? null;
@@ -348,11 +350,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     setStorySelectedOption(null);
     setPhase('generating');
     try {
-      // Pass cached storyPackage on retry — skips OpenAI, re-generates only audio
+      // Pass cached storyPackage on retry — skips OpenAI, re-generates only TTS
       const data = await generateListeningStory(storyPackage);
+      // Revoke any blob URLs from a previous story before creating new ones
+      revokeStoryBlobUrls();
+      const url0 = base64ToBlobUrl(data.parts[0].audioBase64, data.parts[0].audioMimeType);
+      // Pre-create part 2 URL now so it's ready when needed
+      base64ToBlobUrl(data.parts[1].audioBase64, data.parts[1].audioMimeType);
       setStoryData(data);
       setStoryPackage(null);
-      player.load(data.parts[0].audioUrl);
+      player.load(url0);
       player.setOnEnded(() => setPhase('question'));
       setPhase('intro');
     } catch (err) {
@@ -378,8 +385,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
   function handleStoryAdvance() {
     if (!storyData) return;
-    const part2 = storyData.parts[1];
-    player.load(part2.audioUrl);
+    // storyBlobUrlsRef.current[1] is the pre-created URL for part 2
+    const url1 = storyBlobUrlsRef.current[1] ?? '';
+    player.load(url1);
     player.setOnEnded(() => setPhase('question'));
     setCurrentPartIdx(1);
     setStorySelectedOption(null);
@@ -509,11 +517,28 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     }
   }
 
+  // ── Story audio helpers ──────────────────────────────────────────────────────
+  function base64ToBlobUrl(base64: string, mimeType: string): string {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    storyBlobUrlsRef.current.push(url);
+    return url;
+  }
+
+  function revokeStoryBlobUrls() {
+    storyBlobUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
+    storyBlobUrlsRef.current = [];
+  }
+
   // ── Cleanup ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
       if (wrongTimerRef.current) clearTimeout(wrongTimerRef.current);
+      revokeStoryBlobUrls();
     };
   }, []);
 

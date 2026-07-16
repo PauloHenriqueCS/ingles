@@ -154,8 +154,8 @@ export function getListeningResult(assignmentId: string): Promise<ListeningResul
 export type StoryPart = {
   id: 1 | 2;
   text: string;
-  audioUrl: string;
-  audioExpiresAt: string;
+  audioBase64: string;
+  audioMimeType: string;
   question: {
     prompt: string;
     options: string[]; // exactly 5

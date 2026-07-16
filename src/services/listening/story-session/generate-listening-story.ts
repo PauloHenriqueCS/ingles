@@ -8,8 +8,8 @@ import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level
 export interface StoryPartResult {
   id: 1 | 2;
   text: string;
-  audioUrl: string;
-  audioExpiresAt: string;
+  audioBase64: string;
+  audioMimeType: string;
   question: {
     prompt: string;
     options: string[]; // exactly 5
@@ -24,7 +24,7 @@ export interface ListeningStoryResult {
   parts: [StoryPartResult, StoryPartResult];
 }
 
-// Thrown when OpenAI succeeded but TTS/upload failed — carries packed story for retry
+// Thrown when OpenAI succeeded but TTS failed — carries packed story for retry
 export class StoryTtsError extends Error {
   constructor(
     message: string,
@@ -107,7 +107,6 @@ export function unpackStory(token: string, secret: string): AIStory {
 // ── Structured step logger ────────────────────────────────────────────────────
 
 function stepLog(requestId: string, step: string, extra: Record<string, unknown> = {}) {
-  // console.error so it appears in Vercel's error log stream even on info events
   console.error(JSON.stringify({ src: 'listening/generate', requestId, step, t: Date.now(), ...extra }));
 }
 
@@ -253,7 +252,8 @@ async function synthesizeAudio(
       headers: {
         'Ocp-Apim-Subscription-Key': azureKey,
         'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+        // 64 kbps mono — adequate for speech, ~half the size of 128 kbps
+        'X-Microsoft-OutputFormat': 'audio-16khz-64kbitrate-mono-mp3',
         'User-Agent': 'lemon-english-app/1.0',
       },
       body: ssml,
@@ -282,46 +282,6 @@ async function synthesizeAudio(
   return Buffer.from(buf);
 }
 
-// ── Supabase Storage ──────────────────────────────────────────────────────────
-
-const BUCKET = 'listening-audio';
-const SIGNED_URL_SECONDS = 3600;
-
-async function uploadAndSign(
-  audio: Buffer,
-  userId: string,
-  partId: 1 | 2,
-  supabase: SupabaseClient,
-  requestId: string,
-): Promise<{ url: string; expiresAt: string }> {
-  const path = `story-sessions/${userId}/${crypto.randomUUID()}-part${partId}.mp3`;
-
-  const t0 = Date.now();
-  const { error: upErr } = await supabase.storage
-    .from(BUCKET)
-    .upload(path, audio, { contentType: 'audio/mpeg', upsert: false });
-
-  if (upErr) {
-    stepLog(requestId, 'upload_error', { partId, msg: upErr.message.slice(0, 120) });
-    throw new Error(`STORAGE_UPLOAD_PART${partId}: ${upErr.message}`);
-  }
-
-  const { data: signed, error: signErr } = await supabase.storage
-    .from(BUCKET)
-    .createSignedUrl(path, SIGNED_URL_SECONDS);
-
-  if (signErr || !signed?.signedUrl) {
-    stepLog(requestId, 'sign_error', { partId, msg: (signErr?.message ?? 'no URL').slice(0, 120) });
-    throw new Error(`STORAGE_SIGN_PART${partId}: ${signErr?.message ?? 'no URL'}`);
-  }
-
-  stepLog(requestId, 'upload_done', { partId, uploadMs: Date.now() - t0 });
-  return {
-    url: signed.signedUrl,
-    expiresAt: new Date(Date.now() + SIGNED_URL_SECONDS * 1000).toISOString(),
-  };
-}
-
 // ── HMAC answer token ─────────────────────────────────────────────────────────
 
 function signToken(correctIndex: number, explanationPt: string, secret: string): string {
@@ -334,36 +294,33 @@ function signToken(correctIndex: number, explanationPt: string, secret: string):
   return Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
 }
 
-// ── TTS + upload (shared between first call and retry) ────────────────────────
+// ── Synthesize both parts, return audio as base64 (no storage) ────────────────
 
-async function synthesizeAndUpload(
+async function synthesizeParts(
   ai: AIStory,
-  userId: string,
-  serviceClient: SupabaseClient,
   azureKey: string,
   azureRegion: string,
   secret: string,
   requestId: string,
 ): Promise<ListeningStoryResult> {
-  // Synthesize both parts in parallel
   const t0 = Date.now();
-  stepLog(requestId, 'tts_start', { region: azureRegion, part1Words: ai.parts[0].text.split(' ').length, part2Words: ai.parts[1].text.split(' ').length });
+  stepLog(requestId, 'tts_start', {
+    region: azureRegion,
+    part1Words: ai.parts[0].text.split(' ').length,
+    part2Words: ai.parts[1].text.split(' ').length,
+  });
 
   const [audio1, audio2] = await Promise.all([
     synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, 'part1', requestId),
     synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, 'part2', requestId),
   ]);
-  stepLog(requestId, 'tts_all_done', { ttsMs: Date.now() - t0 });
 
-  // Upload both in parallel
-  const t1 = Date.now();
-  const [stored1, stored2] = await Promise.all([
-    uploadAndSign(audio1, userId, 1, serviceClient, requestId),
-    uploadAndSign(audio2, userId, 2, serviceClient, requestId),
-  ]);
-  stepLog(requestId, 'upload_all_done', { uploadMs: Date.now() - t1 });
+  stepLog(requestId, 'tts_all_done', {
+    ttsMs: Date.now() - t0,
+    bytes1: audio1.byteLength,
+    bytes2: audio2.byteLength,
+  });
 
-  // Sign answer tokens
   const token1 = signToken(ai.parts[0].question.correctIndex, ai.parts[0].question.explanationPt, secret);
   const token2 = signToken(ai.parts[1].question.correctIndex, ai.parts[1].question.explanationPt, secret);
 
@@ -375,16 +332,16 @@ async function synthesizeAndUpload(
       {
         id: 1,
         text: ai.parts[0].text,
-        audioUrl: stored1.url,
-        audioExpiresAt: stored1.expiresAt,
+        audioBase64: audio1.toString('base64'),
+        audioMimeType: 'audio/mpeg',
         question: { prompt: ai.parts[0].question.text, options: ai.parts[0].question.options },
         answerToken: token1,
       },
       {
         id: 2,
         text: ai.parts[1].text,
-        audioUrl: stored2.url,
-        audioExpiresAt: stored2.expiresAt,
+        audioBase64: audio2.toString('base64'),
+        audioMimeType: 'audio/mpeg',
         question: { prompt: ai.parts[1].question.text, options: ai.parts[1].question.options },
         answerToken: token2,
       },
@@ -438,14 +395,14 @@ export async function generateListeningStory(
   // Pack the story now — before TTS — so we can return it on audio failure
   const packed = packStory(ai, secret);
 
-  // 3. TTS + Upload (throws StoryTtsError on failure, carrying the packed story)
+  // 3. TTS (throws StoryTtsError on failure, carrying the packed story for retry)
   try {
-    const result = await synthesizeAndUpload(ai, userId, serviceClient, azureKey, azureRegion, secret, requestId);
+    const result = await synthesizeParts(ai, azureKey, azureRegion, secret, requestId);
     stepLog(requestId, 'complete', { totalMs: Date.now() - totalStart });
     return result;
   } catch (err) {
     const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
-    stepLog(requestId, 'tts_or_upload_failed', { step, totalMs: Date.now() - totalStart });
+    stepLog(requestId, 'tts_failed', { step, totalMs: Date.now() - totalStart });
     throw new StoryTtsError(step, packed, step);
   }
 }
