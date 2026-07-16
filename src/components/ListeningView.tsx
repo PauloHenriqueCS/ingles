@@ -405,6 +405,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         answerToken: part.answerToken,
         selectedOption: storySelectedOption,
       });
+      // Debug: remove after confirming index format is canonical
+      console.log('[story-verify]', {
+        selectedAnswer: storySelectedOption,
+        selectedAnswerType: typeof storySelectedOption,
+        correctAnswer: result.correctOption,
+        correctAnswerType: typeof result.correctOption,
+        options: part.question.options,
+        clientComparison: storySelectedOption === result.correctOption,
+        serverCorrect: result.correct,
+      });
       setStoryResult(result);
 
       if (result.correct) {

@@ -156,6 +156,23 @@ Rules:
 - Do NOT include Portuguese translations of the story text`;
 }
 
+// ── Normalize correctIndex from AI (may return letter, 1-indexed, or text) ────
+
+function normalizeCorrectIndex(raw: unknown, options: string[]): number {
+  if (typeof raw === 'number' && Number.isInteger(raw)) {
+    if (raw >= 0 && raw <= 4) return raw;      // 0-indexed ✓
+    if (raw >= 1 && raw <= 5) return raw - 1;  // 1-indexed → 0-indexed
+  }
+  if (typeof raw === 'string') {
+    const upper = raw.trim().toUpperCase();
+    if (/^[A-E]$/.test(upper)) return upper.charCodeAt(0) - 65; // 'A'→0 … 'E'→4
+    const lower = raw.trim().toLowerCase();
+    const idx = options.findIndex(o => o.trim().toLowerCase() === lower);
+    if (idx >= 0) return idx; // matched option text
+  }
+  throw new Error('UNNORMALIZABLE');
+}
+
 // ── OpenAI call ───────────────────────────────────────────────────────────────
 
 async function callAI(
@@ -212,9 +229,15 @@ async function callAI(
     if (!p.question?.text?.trim()) throw new Error(`AI_MISSING_PART_${i + 1}_QUESTION`);
     if (!Array.isArray(p.question?.options) || p.question.options.length !== 5)
       throw new Error(`AI_WRONG_OPTION_COUNT_PART_${i + 1}`);
-    const ci = p.question?.correctIndex;
-    if (typeof ci !== 'number' || ci < 0 || ci > 4)
+    // Normalize: AI may return letter, 1-indexed number, or option text
+    let ci: number;
+    try {
+      ci = normalizeCorrectIndex(p.question?.correctIndex, p.question?.options ?? []);
+    } catch {
+      stepLog(requestId, `ai_bad_correct_index_part${i + 1}`, { raw: p.question?.correctIndex });
       throw new Error(`AI_INVALID_CORRECT_INDEX_PART_${i + 1}`);
+    }
+    p.question.correctIndex = ci; // write back canonical 0-indexed value
     if (!p.question?.explanationPt?.trim())
       throw new Error(`AI_MISSING_EXPLANATION_PART_${i + 1}`);
   }

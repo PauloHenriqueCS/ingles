@@ -100,8 +100,28 @@ async function callAI(level: string, openaiKey: string): Promise<AIStory> {
   if (!parsed.question?.prompt?.trim()) throw new Error('AI_MISSING_QUESTION');
   if (!Array.isArray(parsed.question?.options) || parsed.question.options.length !== 5)
     throw new Error('AI_WRONG_OPTION_COUNT');
-  const ci = parsed.question?.correctIndex;
-  if (typeof ci !== 'number' || ci < 0 || ci > 4) throw new Error('AI_INVALID_CORRECT_INDEX');
+  // Normalize: AI may return letter ('A'–'E'), 1-indexed (1–5), or option text
+  const rawCi = parsed.question?.correctIndex;
+  let ci: number;
+  {
+    const opts: string[] = parsed.question?.options ?? [];
+    const normalize = (raw: unknown): number => {
+      if (typeof raw === 'number' && Number.isInteger(raw)) {
+        if (raw >= 0 && raw <= 4) return raw;
+        if (raw >= 1 && raw <= 5) return raw - 1;
+      }
+      if (typeof raw === 'string') {
+        const upper = raw.trim().toUpperCase();
+        if (/^[A-E]$/.test(upper)) return upper.charCodeAt(0) - 65;
+        const lower = raw.trim().toLowerCase();
+        const idx = opts.findIndex((o: string) => o.trim().toLowerCase() === lower);
+        if (idx >= 0) return idx;
+      }
+      throw new Error('UNNORMALIZABLE');
+    };
+    try { ci = normalize(rawCi); } catch { throw new Error('AI_INVALID_CORRECT_INDEX'); }
+  }
+  parsed.question.correctIndex = ci;
   if (!parsed.question?.explanationPt?.trim()) throw new Error('AI_MISSING_EXPLANATION');
 
   return parsed;
