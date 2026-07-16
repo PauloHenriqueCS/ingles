@@ -133,3 +133,59 @@ export function getListeningByDate(date: string): Promise<ByDateListeningResult>
 export function getListeningResult(assignmentId: string): Promise<ListeningResultData> {
   return apiFetch<ListeningResultData>(`/api/listening/assignment-result?assignmentId=${encodeURIComponent(assignmentId)}`);
 }
+
+// ── On-demand generation ───────────────────────────────────────────────────────
+
+export type GenerationSessionStatus =
+  | 'created' | 'identifying_level'
+  | 'generating_block_1' | 'validating_block_1'
+  | 'generating_block_2' | 'validating_block_2'
+  | 'generating_questions' | 'preparing_description' | 'preparing_subtitles'
+  | 'generating_audio_block_1' | 'generating_audio_block_2'
+  | 'validating_duration' | 'finalizing' | 'ready' | 'failed' | 'cancelled';
+
+export type StartGenerationResult = {
+  generationSessionId: string;
+  status: GenerationSessionStatus;
+  currentStep: string | null;
+  progressPercent: number;
+  episodeId: string | null;
+};
+
+export type GenerationStatusResult = {
+  generationSessionId: string;
+  status: GenerationSessionStatus;
+  currentStep: string | null;
+  progressPercent: number;
+  episodeId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  retryable: boolean;
+};
+
+export function startListeningGeneration(): Promise<StartGenerationResult> {
+  return apiFetch<StartGenerationResult>('/api/listening/on-demand/start', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function getListeningGenerationStatus(sessionId: string): Promise<GenerationStatusResult> {
+  return apiFetch<GenerationStatusResult>(
+    `/api/listening/on-demand/status?sessionId=${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export function processNextListeningStep(sessionId: string): Promise<GenerationStatusResult> {
+  return apiFetch<GenerationStatusResult>('/api/listening/on-demand/process-next', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
+  });
+}
+
+export function retryListeningGeneration(sessionId: string): Promise<GenerationStatusResult> {
+  return apiFetch<GenerationStatusResult>('/api/listening/on-demand/retry', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
+  });
+}

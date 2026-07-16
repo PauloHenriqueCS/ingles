@@ -14,6 +14,15 @@ import { getListeningToday } from '../../src/services/listening/daily/get-listen
 import { getListeningByDate } from '../../src/services/listening/daily/get-listening-by-date';
 import { resolveListeningActivityDate } from '../../src/services/listening/daily/resolve-listening-activity-date';
 import { enqueueListeningJob } from '../../src/services/listening/jobs/enqueue-listening-job';
+import { startListeningGeneration } from '../../src/services/listening/on-demand/start-listening-generation';
+import { getListeningGenerationStatus } from '../../src/services/listening/on-demand/get-listening-generation-status';
+import { processListeningGenerationStep } from '../../src/services/listening/on-demand/process-listening-generation-step';
+import { retryListeningGeneration } from '../../src/services/listening/on-demand/retry-listening-generation';
+import {
+  OnDemandSessionNotFoundError,
+  OnDemandSessionLockedError,
+  OnDemandSessionTerminalError,
+} from '../../src/services/listening/on-demand/listening-on-demand-types';
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
@@ -350,6 +359,125 @@ async function handleSessionPlaybackCompleted(req: any, res: any) {
   }
 }
 
+// ─── POST /api/listening/on-demand/start ─────────────────────────────────────
+
+async function handleOnDemandStart(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  try {
+    const serviceClient = getListeningServiceClient();
+    const localDate = resolveListeningActivityDate();
+    const result = await startListeningGeneration(userId, serviceClient, localDate);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/on-demand/start', 'generation_started', 200, { userId, status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    safeLog('listening/on-demand/start', 'internal_error', 500, { error: String(err) });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao iniciar geração.');
+  }
+}
+
+// ─── GET /api/listening/on-demand/status?sessionId=UUID ──────────────────────
+
+async function handleOnDemandStatus(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  const sessionId = String(req.query?.sessionId ?? '').trim();
+  if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
+  }
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await getListeningGenerationStatus(sessionId, userId, serviceClient);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof OnDemandSessionNotFoundError) {
+      return jsonError(res, 404, 'ON_DEMAND_SESSION_NOT_FOUND', 'Sessão não encontrada.');
+    }
+    safeLog('listening/on-demand/status', 'internal_error', 500, {});
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao buscar status.');
+  }
+}
+
+// ─── POST /api/listening/on-demand/process-next ───────────────────────────────
+
+async function handleOnDemandProcessNext(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 256)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  const { sessionId } = req.body ?? {};
+  if (!sessionId || !/^[0-9a-f-]{36}$/i.test(String(sessionId))) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
+  }
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await processListeningGenerationStep(String(sessionId), userId, serviceClient);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/on-demand/process-next', 'step_processed', 200, { status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof OnDemandSessionNotFoundError) {
+      return jsonError(res, 404, 'ON_DEMAND_SESSION_NOT_FOUND', 'Sessão não encontrada.');
+    }
+    if (err instanceof OnDemandSessionLockedError) {
+      // Return current status instead of error — safe for concurrent calls
+      try {
+        const serviceClient = getListeningServiceClient();
+        const status = await getListeningGenerationStatus(String(sessionId), userId, serviceClient);
+        return res.status(200).json(status);
+      } catch {
+        return jsonError(res, 409, 'ON_DEMAND_SESSION_LOCKED', 'Sessão ocupada. Tente novamente.');
+      }
+    }
+    if (err instanceof OnDemandSessionTerminalError) {
+      try {
+        const serviceClient = getListeningServiceClient();
+        const status = await getListeningGenerationStatus(String(sessionId), userId, serviceClient);
+        return res.status(200).json(status);
+      } catch {
+        return jsonError(res, 409, 'ON_DEMAND_SESSION_TERMINAL', 'Sessão já finalizada.');
+      }
+    }
+    safeLog('listening/on-demand/process-next', 'internal_error', 500, { error: String(err) });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao processar etapa.');
+  }
+}
+
+// ─── POST /api/listening/on-demand/retry ──────────────────────────────────────
+
+async function handleOnDemandRetry(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 256)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  const { sessionId } = req.body ?? {};
+  if (!sessionId || !/^[0-9a-f-]{36}$/i.test(String(sessionId))) {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
+  }
+  try {
+    const serviceClient = getListeningServiceClient();
+    const result = await retryListeningGeneration(String(sessionId), userId, serviceClient);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/on-demand/retry', 'retry_requested', 200, { status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof OnDemandSessionNotFoundError) {
+      return jsonError(res, 404, 'ON_DEMAND_SESSION_NOT_FOUND', 'Sessão não encontrada.');
+    }
+    safeLog('listening/on-demand/retry', 'internal_error', 500, {});
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao tentar novamente.');
+  }
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -366,6 +494,10 @@ export default async function handler(req: any, res: any) {
     case 'today':                      return handleToday(req, res);
     case 'by-date':                    return handleByDate(req, res);
     case 'assignment-result':          return handleAssignmentResult(req, res);
+    case 'on-demand/start':            return handleOnDemandStart(req, res);
+    case 'on-demand/status':           return handleOnDemandStatus(req, res);
+    case 'on-demand/process-next':     return handleOnDemandProcessNext(req, res);
+    case 'on-demand/retry':            return handleOnDemandRetry(req, res);
     default:                           return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

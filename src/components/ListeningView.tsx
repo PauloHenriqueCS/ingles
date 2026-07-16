@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Headphones, Play, Pause, RotateCcw, ArrowLeft,
   Check, X, AlertCircle, Trophy, RefreshCw, Lock,
-  ScrollText, Rewind, Clock,
+  ScrollText, Rewind, Clock, Loader2,
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
@@ -13,10 +13,16 @@ import {
   submitAnswer,
   refreshAudioUrl,
   getTodayListening,
+  startListeningGeneration,
+  processNextListeningStep,
+  retryListeningGeneration,
+  getListeningGenerationStatus,
   ListeningApiError,
   type EpisodeSessionResponse,
   type SubmitAnswerResult,
   type PublishedEpisode,
+  type GenerationStatusResult,
+  type GenerationSessionStatus,
 } from '../lib/listeningApi';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
 
@@ -24,6 +30,8 @@ import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/
 
 type Phase =
   | 'loading'
+  | 'prompt'
+  | 'generating'
   | 'selecting'
   | 'intro'
   | 'error'
@@ -38,8 +46,40 @@ type Phase =
   | 'cycle_failed'
   | 'done';
 
-type Speed = 0.75 | 1.00 | 1.25 | 1.50;
-const SPEEDS: Speed[] = [0.75, 1.00, 1.25, 1.50];
+type Speed = 0.75 | 0.90 | 1.00 | 1.10 | 1.25;
+const SPEEDS: Speed[] = [0.75, 0.90, 1.00, 1.10, 1.25];
+
+const ORDERED_STEPS: GenerationSessionStatus[] = [
+  'identifying_level',
+  'generating_block_1',
+  'validating_block_1',
+  'generating_block_2',
+  'validating_block_2',
+  'generating_questions',
+  'preparing_description',
+  'preparing_subtitles',
+  'generating_audio_block_1',
+  'generating_audio_block_2',
+  'validating_duration',
+  'finalizing',
+];
+
+const STEP_DISPLAY: Record<string, string> = {
+  identifying_level: 'Identificando seu nível',
+  generating_block_1: 'Criando a primeira parte da história',
+  validating_block_1: 'Validando a primeira parte',
+  generating_block_2: 'Criando a segunda parte da história',
+  validating_block_2: 'Validando a segunda parte',
+  generating_questions: 'Criando as perguntas',
+  preparing_description: 'Preparando a descrição',
+  preparing_subtitles: 'Preparando as legendas',
+  generating_audio_block_1: 'Gerando o primeiro áudio',
+  generating_audio_block_2: 'Gerando o segundo áudio',
+  validating_duration: 'Validando a duração',
+  finalizing: 'Finalizando sua atividade',
+};
+
+const GENERATION_SESSION_KEY = 'lemon_listening_gen_session';
 
 type SubtitleChoice = 'en' | 'pt-BR' | 'both';
 
@@ -150,6 +190,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [subtitleChoice, setSubtitleChoice] = useState<SubtitleChoice>('pt-BR');
   const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [generationStatus, setGenerationStatus] = useState<GenerationStatusResult | null>(null);
+  const [generationStarting, setGenerationStarting] = useState(false);
+  const generationAbortRef = useRef(false);
 
   const player = useListeningAudioPlayer();
   const urlRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -263,9 +306,29 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     try {
       const result = await getTodayListening();
       if (result.status === 'empty_inventory') {
-        setEpisodes([]);
-        setLoadingEpisodes(false);
-        setPhase('selecting');
+        // Check if there's an in-progress generation session
+        const savedSessionId = localStorage.getItem(GENERATION_SESSION_KEY);
+        if (savedSessionId) {
+          try {
+            const status = await getListeningGenerationStatus(savedSessionId);
+            if (status.status === 'ready' && status.episodeId) {
+              localStorage.removeItem(GENERATION_SESSION_KEY);
+              await loadSession(status.episodeId);
+              return;
+            }
+            if (status.status !== 'cancelled') {
+              setGenerationStatus(status);
+              setPhase('generating');
+              if (status.status !== 'failed') {
+                runGenerationLoop(savedSessionId, status);
+              }
+              return;
+            }
+          } catch {
+            localStorage.removeItem(GENERATION_SESSION_KEY);
+          }
+        }
+        setPhase('prompt');
         return;
       }
       setAssignmentId(result.assignmentId);
@@ -304,6 +367,95 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
       const msg = err instanceof ListeningApiError ? err.message : 'Erro ao carregar listening do dia.';
       setErrorMsg(msg);
       setPhase('error');
+    }
+  }
+
+  async function runGenerationLoop(sessionId: string, initialStatus?: GenerationStatusResult) {
+    generationAbortRef.current = false;
+    let current = initialStatus;
+
+    while (!generationAbortRef.current) {
+      try {
+        const result = await processNextListeningStep(sessionId);
+        current = result;
+        setGenerationStatus(result);
+
+        if (result.status === 'ready') {
+          if (result.episodeId) {
+            localStorage.removeItem(GENERATION_SESSION_KEY);
+            await loadSession(result.episodeId);
+          }
+          return;
+        }
+
+        if (result.status === 'failed' || result.status === 'cancelled') {
+          return;
+        }
+      } catch (err) {
+        const msg = err instanceof ListeningApiError ? err.message : 'Erro na geração.';
+        setGenerationStatus(prev => prev ? {
+          ...prev,
+          status: 'failed' as GenerationSessionStatus,
+          errorCode: 'LOOP_ERROR',
+          errorMessage: msg,
+          retryable: true,
+        } : null);
+        return;
+      }
+    }
+  }
+
+  async function handleStartGeneration() {
+    if (generationStarting) return;
+    setGenerationStarting(true);
+    try {
+      const result = await startListeningGeneration();
+      const sessionId = result.generationSessionId;
+      localStorage.setItem(GENERATION_SESSION_KEY, sessionId);
+
+      const statusResult: GenerationStatusResult = {
+        generationSessionId: sessionId,
+        status: result.status,
+        currentStep: result.currentStep,
+        progressPercent: result.progressPercent,
+        episodeId: result.episodeId,
+        errorCode: null,
+        errorMessage: null,
+        retryable: false,
+      };
+      setGenerationStatus(statusResult);
+      setPhase('generating');
+
+      if (result.status === 'ready' && result.episodeId) {
+        localStorage.removeItem(GENERATION_SESSION_KEY);
+        await loadSession(result.episodeId);
+        return;
+      }
+
+      if (result.status !== 'failed' && result.status !== 'cancelled') {
+        runGenerationLoop(sessionId, statusResult);
+      }
+    } catch (err) {
+      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao iniciar geração.';
+      setErrorMsg(msg);
+      setPhase('error');
+    } finally {
+      setGenerationStarting(false);
+    }
+  }
+
+  async function handleRetryGeneration() {
+    const sessionId = generationStatus?.generationSessionId;
+    if (!sessionId) return;
+    try {
+      const result = await retryListeningGeneration(sessionId);
+      setGenerationStatus(result);
+      if (result.status !== 'failed' && result.status !== 'cancelled' && result.status !== 'ready') {
+        runGenerationLoop(sessionId, result);
+      }
+    } catch (err) {
+      const msg = err instanceof ListeningApiError ? err.message : 'Erro ao tentar novamente.';
+      setErrorMsg(msg);
     }
   }
 
@@ -382,6 +534,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     return () => {
       if (urlRefreshTimerRef.current) clearTimeout(urlRefreshTimerRef.current);
       if (wrongTimerRef.current) clearTimeout(wrongTimerRef.current);
+      generationAbortRef.current = true;
     };
   }, []);
 
@@ -460,6 +613,155 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
           >
             Tentar novamente
           </button>
+        )}
+      </div>
+    );
+  }
+
+  // ── Render: prompt ───────────────────────────────────────────────────────────
+  function renderPrompt() {
+    return (
+      <div className="p-6 max-w-lg mx-auto pt-10 space-y-6">
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-8 text-center space-y-5">
+          <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/30 flex items-center justify-center mx-auto">
+            <Headphones className="w-10 h-10 text-purple-400" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold text-slate-100">Listening de hoje</h2>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Uma nova história será criada especialmente para o seu nível.
+            </p>
+          </div>
+          <button
+            onClick={handleStartGeneration}
+            disabled={generationStarting}
+            className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 active:bg-purple-700 disabled:opacity-60 text-white font-semibold text-base transition-colors shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2"
+          >
+            {generationStarting ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Iniciando...
+              </>
+            ) : (
+              <>
+                <Headphones className="w-5 h-5" />
+                Preparar minha história
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Render: generating ───────────────────────────────────────────────────────
+  function renderGenerating() {
+    const gen = generationStatus;
+    const isFailed = gen?.status === 'failed';
+    const progressPct = gen?.progressPercent ?? 0;
+
+    const currentStatusIndex = gen?.status
+      ? ORDERED_STEPS.indexOf(gen.status as GenerationSessionStatus)
+      : -1;
+
+    return (
+      <div className="p-5 max-w-lg mx-auto pt-6 space-y-5">
+        {/* Header card */}
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center shrink-0">
+              {isFailed ? (
+                <AlertCircle className="w-5 h-5 text-red-400" />
+              ) : (
+                <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
+              )}
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-100">
+                {isFailed ? 'Falha na preparação' : 'Preparando sua atividade'}
+              </p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {isFailed
+                  ? 'Ocorreu um erro durante a geração.'
+                  : 'Estamos criando uma atividade personalizada para você. Isso pode levar alguns minutos.'}
+              </p>
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div>
+            <div className="flex justify-between text-xs text-slate-500 mb-1.5">
+              <span>{gen?.currentStep ?? 'Iniciando...'}</span>
+              <span>{progressPct}%</span>
+            </div>
+            <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-purple-500 rounded-full transition-all duration-500"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Steps list */}
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl p-4 space-y-2">
+          {ORDERED_STEPS.map((stepStatus, i) => {
+            const isDone = currentStatusIndex > i || gen?.status === 'ready';
+            const isCurrent = currentStatusIndex === i && !isFailed;
+            const label = STEP_DISPLAY[stepStatus] ?? stepStatus;
+            return (
+              <div key={stepStatus} className="flex items-center gap-3 py-1">
+                <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+                  isDone
+                    ? 'bg-emerald-600/30 border border-emerald-500/50'
+                    : isCurrent
+                    ? 'bg-purple-600/30 border border-purple-500/50'
+                    : 'bg-slate-700 border border-slate-600'
+                }`}>
+                  {isDone ? (
+                    <Check className="w-3 h-3 text-emerald-400" />
+                  ) : isCurrent ? (
+                    <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                  ) : (
+                    <div className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                  )}
+                </div>
+                <span className={`text-sm ${
+                  isDone ? 'text-slate-400 line-through' :
+                  isCurrent ? 'text-slate-100 font-medium' :
+                  'text-slate-600'
+                }`}>
+                  {label}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Error state */}
+        {isFailed && gen && (
+          <div className="space-y-3">
+            <div className="bg-red-900/20 border border-red-700/30 rounded-xl p-4 text-sm text-red-300">
+              {gen.retryable
+                ? 'Ocorreu um erro temporário. Você pode tentar novamente.'
+                : 'Não foi possível criar a atividade. Tente mais tarde.'}
+            </div>
+            {gen.retryable && (
+              <button
+                onClick={handleRetryGeneration}
+                className="w-full py-3 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-600/30 text-purple-300 font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Tentar novamente
+              </button>
+            )}
+            <button
+              onClick={() => setPhase('prompt')}
+              className="w-full py-2.5 text-xs text-slate-600 hover:text-slate-400 transition-colors"
+            >
+              Voltar
+            </button>
+          </div>
         )}
       </div>
     );
@@ -1097,6 +1399,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
 
       <div>
         {phase === 'loading' && renderLoading()}
+        {phase === 'prompt' && renderPrompt()}
+        {phase === 'generating' && renderGenerating()}
         {phase === 'selecting' && renderSelecting()}
         {phase === 'intro' && renderIntro()}
         {phase === 'error' && renderError()}
