@@ -1,7 +1,9 @@
 import { supabase } from './supabase';
 import { EnglishReviewSaved, EnglishLearningMemory, RecurringMistake, VocabularyItem } from '../types';
 import { fetchEnglishReviews } from './reviewsHistory';
-import { getUniquePracticeDays, calculateCurrentStreak } from './evolutionStats';
+import { getUniquePracticeDays } from './evolutionStats';
+import { deduplicateReviews } from './metricsCore';
+import { fetchCurrentStreak } from './activeDates';
 
 // ── Row mapper ────────────────────────────────────────────────────────────────
 
@@ -125,7 +127,11 @@ export function buildLearningMemoryFromReviews(
     };
   }
 
-  const sorted = [...reviews].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // Deduplicate so that re-evaluations of the same text don't inflate averages or counts.
+  // Use the full reviews list (not deduplicated) for practicedDays/currentStreak since
+  // we want to count unique calendar days, and those functions already handle deduplication.
+  const unique = deduplicateReviews(reviews);
+  const sorted = [...unique].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   const currentLevel = String(sorted[0].level || 'A1');
   const averageScore = Math.round(sorted.reduce((s, r) => s + (r.score || 0), 0) / sorted.length);
@@ -189,9 +195,13 @@ export function buildLearningMemoryFromReviews(
     recommendedNextFocus,
     recommendedNextTheme,
     teacherSummary,
-    totalReviews: reviews.length,
+    // totalReviews counts unique texts, not evaluation events.
+    totalReviews: unique.length,
+    // practicedDays uses the full (non-deduplicated) list so days are counted by
+    // practice date (entryDate), not by how many times the text was re-evaluated.
     practicedDays: getUniquePracticeDays(reviews).length,
-    currentStreak: calculateCurrentStreak(reviews),
+    // currentStreak is updated asynchronously after save via updateLearningMemory.
+    currentStreak: 0,
     lastReviewAt: sorted[0]?.createdAt ?? null,
   };
 }
@@ -224,8 +234,12 @@ export async function fetchLearningMemory(): Promise<EnglishLearningMemory | nul
 
 export async function updateLearningMemory(): Promise<EnglishLearningMemory> {
   const { data: { user } } = await supabase.auth.getUser();
-  const reviews = await fetchEnglishReviews(50);
-  const memory = buildLearningMemoryFromReviews(reviews);
+  // Fetch reviews and canonical streak (all activity types) in parallel.
+  const [reviews, currentStreak] = await Promise.all([
+    fetchEnglishReviews(50),
+    fetchCurrentStreak(),
+  ]);
+  const memory = { ...buildLearningMemoryFromReviews(reviews), currentStreak };
 
   const existing = await fetchLearningMemory();
 

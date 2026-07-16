@@ -1,5 +1,7 @@
 import { EnglishReviewSaved, MainMistake, VocabularyItem, CefrLevel } from '../types';
-import { getTodaySP, getYesterdaySP } from './timezone';
+import { getTodaySP } from './timezone';
+import { getPracticeDate, computeWeekdayStreak } from './metricsCore';
+export { deduplicateReviews } from './metricsCore';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -73,25 +75,24 @@ export function calculateAverage(nums: number[]): number {
   return Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
 }
 
+// Returns unique practice dates using the text's entry date (not the review creation date),
+// so that re-evaluating the same text on different days doesn't inflate the day count.
 export function getUniquePracticeDays(reviews: EnglishReviewSaved[]): string[] {
-  const days = new Set(reviews.map((r) => r.createdAt.slice(0, 10)));
+  const days = new Set(reviews.map(getPracticeDate));
   return Array.from(days).sort();
 }
 
-export function calculateCurrentStreak(reviews: EnglishReviewSaved[]): number {
+// Canonical weekday-aware streak. Delegates to computeWeekdayStreak so ALL screens
+// use the exact same rules: Mon-Fri only, weekends skipped, today not penalised.
+// NOTE: for a full "active day" streak that includes pronunciation/conversation/listening,
+// use fetchCurrentStreak() from activeDates.ts (async) instead.
+export function calculateCurrentStreak(
+  reviews: EnglishReviewSaved[],
+  todayOverride?: string,
+  activeWeekdays?: number[],
+): number {
   const days = getUniquePracticeDays(reviews);
-  if (days.length === 0) return 0;
-  const today = getTodaySP();
-  const yesterday = getYesterdaySP();
-  const latest = days[days.length - 1];
-  if (latest !== today && latest !== yesterday) return 0;
-  let streak = 1;
-  for (let i = days.length - 2; i >= 0; i--) {
-    const diffMs = new Date(days[i + 1]).getTime() - new Date(days[i]).getTime();
-    if (Math.round(diffMs / 86_400_000) === 1) streak++;
-    else break;
-  }
-  return streak;
+  return computeWeekdayStreak(days, todayOverride, activeWeekdays);
 }
 
 export function getRecentReviews(reviews: EnglishReviewSaved[], n: number): EnglishReviewSaved[] {

@@ -7,6 +7,7 @@ import { fetchLearningMemory } from '../lib/learningMemory';
 import { getDayTotalSeconds, getConversationGoalMinutes } from '../lib/conversationSessions';
 import { fetchSkillsOverview, SkillOverview, SkillProgressStatus } from '../lib/dashboardSkillsService';
 import { getTodaySP } from '../lib/timezone';
+import { fetchCurrentStreak } from '../lib/activeDates';
 
 interface Props {
   entries: EntriesStore;
@@ -137,6 +138,7 @@ export default function Dashboard({ entries, today, onOpenDay, activeWeekdays = 
   const [convGoalMin, setConvGoalMin] = useState<number>(15);
   const [skills, setSkills] = useState<SkillOverview[] | null>(null);
   const [skillsError, setSkillsError] = useState(false);
+  const [activeStreak, setActiveStreak] = useState<number | null>(null);
 
   // Ensure today is always in São Paulo timezone
   const todaySP = getTodaySP();
@@ -146,9 +148,9 @@ export default function Dashboard({ entries, today, onOpenDay, activeWeekdays = 
     fetchLearningMemory().then(setMemory).catch(() => {});
     getDayTotalSeconds(effectiveToday).then(setConvTotalSec).catch(() => {});
     getConversationGoalMinutes().then(setConvGoalMin).catch(() => {});
-    fetchSkillsOverview()
-      .then(setSkills)
-      .catch(() => setSkillsError(true));
+    fetchSkillsOverview().then(setSkills).catch(() => setSkillsError(true));
+    fetchCurrentStreak().then(setActiveStreak).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveToday]);
 
   const recentWritten = Object.values(entries)
@@ -266,7 +268,7 @@ export default function Dashboard({ entries, today, onOpenDay, activeWeekdays = 
       <div className="grid grid-cols-2 gap-3 mb-6">
         <StatCard label="Textos este mês" value={stats.textsThisMonth} />
         <StatCard label="Textos este ano" value={stats.textsThisYear} />
-        <StatCard label="Sequência atual" value={`${stats.currentStreak}d`} />
+        <StatCard label="Sequência atual" value={activeStreak !== null ? `${activeStreak}d` : `${stats.currentStreak}d`} />
         <StatCard label="Maior sequência" value={`${stats.bestStreak}d`} />
         <StatCard label="Total de palavras" value={stats.totalWords.toLocaleString('pt-BR')} />
         <StatCard label="Média por texto" value={`${stats.avgWords} pal.`} />

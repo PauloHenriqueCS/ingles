@@ -18,9 +18,10 @@ import {
   buildAllMistakes,
   buildRecommendedFocus,
   estimateCurrentLevel,
-  calculateCurrentStreak,
   getUniquePracticeDays,
+  deduplicateReviews,
 } from '../lib/evolutionStats';
+import { fetchCurrentStreak } from '../lib/activeDates';
 
 type LoadState = 'loading' | 'done' | 'error';
 
@@ -143,11 +144,16 @@ export default function EvolutionView({ onNavigate }: Props) {
     avgScore: number | null;
     recentSessions: Array<{ date: string; score: number }>;
   } | null>(null);
+  const [currentStreak, setCurrentStreak] = useState(0);
 
   function load() {
     setLoadState('loading');
-    fetchEnglishReviews()
-      .then((data) => { setReviews(data); setLoadState('done'); })
+    Promise.all([fetchEnglishReviews(), fetchCurrentStreak()])
+      .then(([data, streak]) => {
+        setReviews(data);
+        setCurrentStreak(streak);
+        setLoadState('done');
+      })
       .catch(() => setLoadState('error'));
   }
 
@@ -178,16 +184,20 @@ export default function EvolutionView({ onNavigate }: Props) {
     })();
   }, []);
 
-  const filteredReviews = useMemo(() => filterByPeriod(reviews, period), [reviews, period]);
-  const previousReviews = useMemo(() => getPreviousPeriodReviews(reviews, period), [reviews, period]);
+  // Deduplicate so each text contributes exactly one evaluation to all metrics.
+  // Activity calendar and practicedDays use the raw list intentionally (see comments below).
+  const deduplicatedReviews = useMemo(() => deduplicateReviews(reviews), [reviews]);
+  const filteredReviews = useMemo(() => filterByPeriod(deduplicatedReviews, period), [deduplicatedReviews, period]);
+  const previousReviews = useMemo(() => getPreviousPeriodReviews(deduplicatedReviews, period), [deduplicatedReviews, period]);
   const chartData = useMemo(() => buildChartData(filteredReviews), [filteredReviews]);
-  const comparison = useMemo(() => buildPeriodComparison(reviews, period), [reviews, period]);
+  const comparison = useMemo(() => buildPeriodComparison(deduplicatedReviews, period), [deduplicatedReviews, period]);
+  // Activity calendar uses raw reviews so it shows ALL evaluation events per day.
   const activityCalendar = useMemo(() => buildActivityCalendar(reviews), [reviews]);
   const topMistakes = useMemo(() => buildRecurringMistakes(filteredReviews, 5), [filteredReviews]);
   const allMistakes = useMemo(() => buildAllMistakes(filteredReviews), [filteredReviews]);
   const focus = useMemo(() => buildRecommendedFocus(filteredReviews, previousReviews), [filteredReviews, previousReviews]);
-  const estimatedLevel = useMemo(() => estimateCurrentLevel(reviews), [reviews]);
-  const currentStreak = useMemo(() => calculateCurrentStreak(reviews), [reviews]);
+  const estimatedLevel = useMemo(() => estimateCurrentLevel(deduplicatedReviews), [deduplicatedReviews]);
+  // practicedDays counts unique writing practice dates across all (non-deduplicated) reviews.
   const practicedDays = useMemo(() => getUniquePracticeDays(reviews).length, [reviews]);
 
   const avgScore = useMemo(() => {
