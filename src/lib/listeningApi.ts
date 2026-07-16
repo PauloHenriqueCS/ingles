@@ -221,11 +221,29 @@ export function verifyStoryAnswer(input: {
   });
 }
 
-export function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
-  return apiFetch('/api/listening/story/complete', {
-    method: 'POST',
-    body: JSON.stringify({}),
+export async function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
+  const { data: { session } } = await (await import('./supabase')).supabase.auth.getSession();
+  console.log('[3] Payload enviado → POST /api/listening/story/complete', {
+    hasToken: !!session?.access_token,
+    tokenPrefix: session?.access_token?.slice(0, 20) ?? 'NONE',
+    userId: session?.user?.id ?? 'NONE',
+    body: '{}',
   });
+  try {
+    const result = await apiFetch<{ activityDate: string; saved: boolean }>(
+      '/api/listening/story/complete',
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    console.log('[4] Resposta HTTP → 200 OK', result);
+    return result;
+  } catch (err) {
+    if (err instanceof ListeningApiError) {
+      console.error('[4] Resposta HTTP → erro', { status: err.status, code: err.code, message: err.message, data: err.data });
+    } else {
+      console.error('[4] Resposta HTTP → erro desconhecido', err);
+    }
+    throw err;
+  }
 }
 
 // ── On-demand generation ───────────────────────────────────────────────────────

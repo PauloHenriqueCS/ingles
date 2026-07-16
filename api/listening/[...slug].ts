@@ -367,34 +367,53 @@ async function handleSessionPlaybackCompleted(req: any, res: any) {
 // ─── POST /api/listening/story/complete ──────────────────────────────────────
 
 async function handleStoryComplete(req: any, res: any) {
+  console.log('[5] Entrou na API → story/complete');
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, 64)) return;
   const auth = await requireAuth(req, res);
-  if (!auth) return;
+  if (!auth) {
+    console.error('[6] Autenticação falhou — requireAuth retornou null');
+    return;
+  }
   const { userId } = auth;
+  console.log('[6] Usuário autenticado', { userId });
+  console.log('[7] Payload recebido', { body: req.body });
   try {
     const serviceClient = getListeningServiceClient();
     const activityDate = resolveListeningActivityDate();
     const now = new Date().toISOString();
+    console.log('[8] Executando select em user_listening_assignments', { userId, activityDate });
 
-    const { data: existing } = await serviceClient
+    const { data: existing, error: selectError } = await serviceClient
       .from('user_listening_assignments')
       .select('id, status')
       .eq('user_id', userId)
       .eq('activity_date', activityDate)
       .maybeSingle();
 
+    console.log('[9] Resultado do select', { existing, selectError });
+
     if (existing) {
       if (existing.status === 'completed') {
+        console.log('[8] Já estava completed — retornando sem alterar');
         safeLog('listening/story/complete', 'already_completed', 200, { userId, activityDate });
+        console.log('[11] Retorno enviado ao frontend → 200 already_completed');
         return res.status(200).json({ activityDate, saved: true });
       }
+      console.log('[8] Executando UPDATE em user_listening_assignments', { id: existing.id });
       const { error } = await serviceClient
         .from('user_listening_assignments')
         .update({ status: 'completed', completed_at: now, updated_at: now })
         .eq('id', existing.id);
+      console.log('[9] Resultado do UPDATE', { error });
       if (error) throw error;
     } else {
+      console.log('[8] Executando INSERT em user_listening_assignments', {
+        user_id: userId,
+        episode_id: null,
+        activity_date: activityDate,
+        status: 'completed',
+      });
       const { error } = await serviceClient
         .from('user_listening_assignments')
         .insert({
@@ -407,13 +426,17 @@ async function handleStoryComplete(req: any, res: any) {
           created_at: now,
           updated_at: now,
         });
+      console.log('[9] Resultado do INSERT', { error });
       if (error) throw error;
     }
 
     safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
+    console.log('[11] Retorno enviado ao frontend → 200 saved');
     return res.status(200).json({ activityDate, saved: true });
   } catch (err) {
+    console.error('[10] Erro completo', err);
     safeLog('listening/story/complete', 'internal_error', 500, { error: String(err) });
+    console.log('[11] Retorno enviado ao frontend → 500 INTERNAL_ERROR');
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível registrar a conclusão.');
   }
 }

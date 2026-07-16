@@ -425,14 +425,15 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       } else {
         // Part 2 correct — persist completion, then show done.
         setPhase('submitting');
-        console.log('[LISTENING_COMPLETION_STARTED]');
+        console.log('[1] Story finalizada — part 2 correta, iniciando save');
+        console.log('[2] Chamando completeStoryListening()');
         try {
-          await completeStoryListening();
-          console.log('[LISTENING_COMPLETION_SAVED]');
+          const saveResult = await completeStoryListening();
+          console.log('[12] Frontend recebeu sucesso', saveResult);
           setCompletionSaveError(false);
           onComplete?.();
         } catch (err) {
-          console.error('[LISTENING_COMPLETION_FAILED]', err);
+          console.error('[12] Frontend recebeu erro', err);
           setCompletionSaveError(true);
         }
         setPhase('done');
