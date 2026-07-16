@@ -437,8 +437,11 @@ async function handleListeningGenerate(req: any, res: any) {
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
   const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
+  const requestId = crypto.randomUUID().slice(0, 8);
+
   // Log env-var presence without exposing values
   safeLog('listening/generate', 'config_check', 0, {
+    requestId,
     hasOpenaiKey: !!openaiKey,
     hasAzureKey: !!azureKey,
     azureRegion: (azureRegion || 'NOT_SET') as string,
@@ -446,7 +449,7 @@ async function handleListeningGenerate(req: any, res: any) {
   });
 
   if (!openaiKey || !azureKey || !azureRegion || !secret) {
-    safeLog('listening/generate', 'misconfigured', 503, {});
+    safeLog('listening/generate', 'misconfigured', 503, { requestId });
     return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço temporariamente indisponível.');
   }
 
@@ -461,15 +464,37 @@ async function handleListeningGenerate(req: any, res: any) {
       storyPackage ?? null,
     );
     res.setHeader('Cache-Control', 'private, no-store');
-    safeLog('listening/generate', 'generated', 200, { level: result.level });
+    safeLog('listening/generate', 'generated', 200, { requestId, level: result.level });
     return res.status(200).json(result);
   } catch (err) {
-    const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
-    safeLog('listening/generate', 'failed', 500, { step });
+    // Infer stage from error shape/message
+    let stage = 'calling_openai';
+    if (err instanceof StoryTtsError) {
+      stage = err.step.startsWith('STORAGE_') ? 'saving_audio' : 'calling_azure';
+    } else if (err instanceof Error) {
+      const m = err.message;
+      if (m.startsWith('AI_INVALID_JSON') || m.startsWith('STORY_PACKAGE')) stage = 'parsing_story';
+    }
+
+    // OpenAI SDK errors expose status / code / type / request_id / cause
+    const isOpenAIError = err instanceof Error && 'status' in err && 'type' in err;
+    const upstreamStatus  = isOpenAIError ? (err as any).status      : null;
+    const upstreamCode    = isOpenAIError ? (err as any).code        : null;
+    const upstreamType    = isOpenAIError ? (err as any).type        : null;
+    const upstreamReqId   = isOpenAIError ? (err as any).request_id  : null;
+    const upstreamCause   = isOpenAIError && (err as any).cause instanceof Error
+                              ? (err as any).cause.message : null;
+
+    const errorName    = err instanceof Error ? err.name    : typeof err;
+    const errorMessage = err instanceof Error ? err.message : String(err);
+
+    safeLog('listening/generate', 'failed', 500, {
+      requestId, stage, errorName,
+      errorMessage: errorMessage.slice(0, 200),
+      upstreamStatus, upstreamCode, upstreamType,
+    });
 
     if (err instanceof StoryTtsError) {
-      // Story was generated successfully — only audio/upload failed.
-      // Return storyPackage so the client can retry TTS without re-calling OpenAI.
       return jsonError(
         res, 500, 'TTS_FAILED',
         'Não conseguimos gerar o áudio. A história está preservada — tente novamente.',
@@ -477,7 +502,19 @@ async function handleListeningGenerate(req: any, res: any) {
       );
     }
 
-    return jsonError(res, 500, 'GENERATION_FAILED', 'Não conseguimos preparar sua história. Tente novamente.');
+    // Temporary debug: expose full error details in Network response
+    return res.status(500).json({
+      code: 'GENERATION_FAILED',
+      stage,
+      errorName,
+      errorMessage,
+      upstreamStatus,
+      upstreamCode,
+      upstreamType,
+      upstreamRequestId: upstreamReqId,
+      upstreamCause,
+      requestId,
+    });
   }
 }
 
