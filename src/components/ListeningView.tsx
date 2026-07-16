@@ -429,11 +429,13 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
         // Second wrong: show correct answer then allow advancing
         setPhase('cycle_failed');
       } else {
-        // First wrong: show transcript + replay same part
+        // First wrong: show transcript, replay the same part immediately
+        // No API call — reuse the existing blob URL already loaded in the player
         setShowPartTranscript(true);
         setStorySelectedOption(null);
         player.setOnEnded(() => setPhase('question'));
-        player.restart();
+        player.restart(); // seek to 0
+        player.play();    // auto-start (restart() alone does not play)
         setPhase('playing');
       }
     } catch (err) {
@@ -602,7 +604,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   // ── Render: error ────────────────────────────────────────────────────────────
   function renderError() {
     const retryFn = storyMode
-      ? handleStartGeneration
+      // Active story → go back to question (never regenerate mid-activity)
+      // No story yet → start generation
+      ? storyData !== null
+        ? () => { setErrorMsg(''); setPhase('question'); }
+        : handleStartGeneration
       : episodeId
       ? () => loadSession(episodeId)
       : propEpisodeId

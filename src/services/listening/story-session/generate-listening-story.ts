@@ -200,6 +200,12 @@ async function callAI(
   if (!Array.isArray(parsed.parts) || parsed.parts.length < 2)
     throw new Error('AI_WRONG_PARTS_COUNT');
 
+  // Enforce the requested level — the AI must not decide or change it
+  if (parsed.level !== level) {
+    stepLog(requestId, 'ai_level_override', { requested: level, returned: parsed.level });
+  }
+  parsed.level = level;
+
   for (let i = 0; i < 2; i++) {
     const p = parsed.parts[i];
     if (!p?.text?.trim()) throw new Error(`AI_MISSING_PART_${i + 1}_TEXT`);
