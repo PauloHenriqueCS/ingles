@@ -156,6 +156,9 @@ export default function App() {
             currentYear={currentYear}
             onChangeMonth={handleChangeMonth}
             onOpenDay={openDay}
+            onOpenWriting={() => openDay(today)}
+            onOpenPronunciation={() => setView('pronunciation-training')}
+            onOpenConversation={() => setView('conversation')}
             onOpenListening={() => setView('listening')}
             listeningRefreshKey={listeningRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
@@ -170,6 +173,9 @@ export default function App() {
             currentYear={currentYear}
             onChangeMonth={handleChangeMonth}
             onOpenDay={openDay}
+            onOpenWriting={() => openDay(today)}
+            onOpenPronunciation={() => setView('pronunciation-training')}
+            onOpenConversation={() => setView('conversation')}
             onOpenListening={() => setView('listening')}
             listeningRefreshKey={listeningRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}

@@ -1,12 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Settings } from 'lucide-react';
+import { Settings, Check, ChevronRight } from 'lucide-react';
 import { EntriesStore, DailyProgress } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
 import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
 import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
 import { getPronunciationDatesForMonth, computeDailyProgress } from '../lib/dailyProgress';
 import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
-import { fetchStreaks } from '../lib/activeDates';
 import DailyProgressIcons from './DailyProgressIcons';
 import DailyProgressModal from './DailyProgressModal';
 
@@ -16,6 +15,9 @@ interface Props {
   currentYear: number;
   onChangeMonth: (month: number, year: number) => void;
   onOpenDay: (date: string) => void;
+  onOpenWriting?: () => void;
+  onOpenPronunciation?: () => void;
+  onOpenConversation?: () => void;
   onOpenListening?: () => void;
   listeningRefreshKey?: number;
   activeWeekdays?: number[];
@@ -28,7 +30,8 @@ const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export default function MonthView({
-  entries, currentMonth, currentYear, onChangeMonth, onOpenDay, onOpenListening,
+  entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
+  onOpenWriting, onOpenPronunciation, onOpenConversation, onOpenListening,
   listeningRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
   const today = (() => {
@@ -50,7 +53,6 @@ export default function MonthView({
   const [pronunciationDates, setPronunciationDates] = useState<Set<string>>(new Set());
   const [listeningProgress, setListeningProgress] = useState<Record<string, 'not_started' | 'in_progress' | 'completed'>>({});
   const [modalDate, setModalDate] = useState<string | null>(null);
-  const [streaks, setStreaks] = useState<{ current: number; max: number }>({ current: 0, max: 0 });
 
   useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
 
@@ -73,10 +75,6 @@ export default function MonthView({
     getConversationGoalMinutes().then((min) => setConvGoalSec(min * 60)).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    fetchStreaks(activeWeekdays).then(setStreaks).catch(() => {});
-  }, [activeWeekdays.join(',')]);
-
   const dailyProgressMap = useMemo<Record<string, DailyProgress>>(() => {
     const allDates = getAllDatesInMonth(currentYear, currentMonth);
     const map: Record<string, DailyProgress> = {};
@@ -92,6 +90,15 @@ export default function MonthView({
     }
     return map;
   }, [currentYear, currentMonth, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress]);
+
+  const todayProgress = useMemo(() => computeDailyProgress(
+    today,
+    entries[today],
+    convTotals[today] ?? 0,
+    convGoalSec,
+    pronunciationDates,
+    listeningProgress[today],
+  ), [today, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress]);
 
   function toggleDay(dow: number) {
     setSelectedDays((prev) => {
@@ -214,64 +221,71 @@ export default function MonthView({
           })}
         </div>
 
-        {/* Month summary + streaks */}
-        <div className="mt-4 bg-slate-800 rounded-lg p-3 space-y-2.5">
-          {/* Streaks — compact single row */}
-          {(streaks.current > 0 || streaks.max > 0) && (
-            <div className="flex gap-4 text-xs text-slate-400 pb-2 border-b border-slate-700">
-              <span>
-                Sequência:{' '}
-                <span className="text-amber-400 font-medium">{streaks.current}d</span>
-              </span>
-              <span>
-                Recorde:{' '}
-                <span className="text-slate-200 font-medium">{streaks.max}d</span>
-              </span>
-            </div>
-          )}
+        {/* Today's checklist */}
+        {(() => {
+          const activities = [
+            { key: 'writing',      label: 'Escrita',     status: todayProgress.writing,      accent: 'text-violet-400', onClick: onOpenWriting },
+            { key: 'pronunciation',label: 'Pronúncia',   status: todayProgress.pronunciation, accent: 'text-blue-400',   onClick: onOpenPronunciation },
+            { key: 'conversation', label: 'Conversação', status: todayProgress.conversation,  accent: 'text-teal-400',   onClick: onOpenConversation },
+            { key: 'listening',    label: 'Listening',   status: todayProgress.listening,     accent: 'text-amber-400',  onClick: onOpenListening },
+          ] as const;
 
-          {/* Per-activity counts — 2×2 on mobile, 4-col on sm+ */}
-          {(() => {
-            const activeDates = dates.filter((d) => {
-              const dow = new Date(d + 'T12:00:00').getDay();
-              return activeWeekdays.includes(dow) || overrideDates.includes(d);
-            });
-            const total = activeDates.length;
-            const writingDone = activeDates.filter(
-              (d) => dailyProgressMap[d]?.writing === 'completed',
-            ).length;
-            const pronDone = activeDates.filter(
-              (d) => dailyProgressMap[d]?.pronunciation === 'completed',
-            ).length;
-            const convDone = activeDates.filter(
-              (d) => dailyProgressMap[d]?.conversation === 'completed',
-            ).length;
-            const listeningDone = activeDates.filter(
-              (d) => dailyProgressMap[d]?.listening === 'completed',
-            ).length;
+          const completed = activities.filter(a => a.status === 'completed').length;
+          const pct = (completed / activities.length) * 100;
 
-            return (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1.5 text-sm">
-                <span className="text-slate-400">
-                  Escrita:{' '}
-                  <span className="text-violet-400 font-medium">{writingDone}/{total}</span>
-                </span>
-                <span className="text-slate-400">
-                  Pronúncia:{' '}
-                  <span className="text-blue-400 font-medium">{pronDone}/{total}</span>
-                </span>
-                <span className="text-slate-400">
-                  Conversa:{' '}
-                  <span className="text-teal-400 font-medium">{convDone}/{total}</span>
-                </span>
-                <span className="text-slate-400">
-                  Listening:{' '}
-                  <span className="text-amber-400 font-medium">{listeningDone}/{total}</span>
-                </span>
+          return (
+            <div className="mt-4 bg-slate-800 rounded-xl overflow-hidden">
+              <div className="px-4 pt-3.5 pb-3 border-b border-slate-700">
+                <h3 className="text-sm font-semibold text-slate-100">Checklist de hoje</h3>
               </div>
-            );
-          })()}
-        </div>
+
+              <div className="divide-y divide-slate-700/50">
+                {activities.map(({ key, label, status, accent, onClick }) => {
+                  const done   = status === 'completed';
+                  const inProg = status === 'in_progress';
+                  return (
+                    <button
+                      key={key}
+                      onClick={onClick}
+                      className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-slate-700/40 active:bg-slate-700/60 transition-colors text-left"
+                    >
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 border-2 transition-colors ${
+                        done   ? 'bg-green-500 border-green-500' :
+                        inProg ? 'border-amber-500 bg-amber-500/10' :
+                                 'border-slate-600'
+                      }`}>
+                        {done   && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                        {inProg && <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />}
+                      </span>
+                      <span className={`flex-1 text-sm font-medium ${done ? accent : 'text-slate-200'}`}>
+                        {label}
+                      </span>
+                      <ChevronRight className="w-4 h-4 text-slate-600 shrink-0" />
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="px-4 py-3 border-t border-slate-700 space-y-2">
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span>Progresso de hoje</span>
+                  <span className="font-medium text-slate-300">{completed} de {activities.length} atividades concluídas</span>
+                </div>
+                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500 ease-out"
+                    style={{
+                      width: `${pct}%`,
+                      background: pct >= 100
+                        ? 'linear-gradient(to right, #22c55e, #16a34a)'
+                        : 'linear-gradient(to right, #3b82f6, #22c55e)',
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Practice days config */}
         <div className="mt-4">
