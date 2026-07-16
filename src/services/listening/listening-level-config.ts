@@ -2,16 +2,17 @@ import type { CEFRLevel } from '../../domain/curriculum/cefr';
 
 export interface WordCountRange {
   min: number;
+  target: number;
   max: number;
 }
 
 export const WORD_COUNT_RANGES: Record<CEFRLevel, WordCountRange> = {
-  A1: { min: 400, max: 475 },
-  A2: { min: 450, max: 525 },
-  B1: { min: 500, max: 575 },
-  B2: { min: 550, max: 625 },
-  C1: { min: 575, max: 675 },
-  C2: { min: 575, max: 675 },
+  A1: { min: 400, target: 440, max: 475 },
+  A2: { min: 450, target: 490, max: 525 },
+  B1: { min: 500, target: 537, max: 575 },
+  B2: { min: 550, target: 587, max: 625 },
+  C1: { min: 575, target: 625, max: 675 },
+  C2: { min: 575, target: 625, max: 675 },
 };
 
 export function countWords(text: string): number {

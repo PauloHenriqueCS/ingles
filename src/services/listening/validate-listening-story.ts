@@ -33,16 +33,51 @@ export function parseStoryJson(rawText: string): unknown {
   }
 }
 
+// New: for multi-call approach
+
+export interface Block1AIResponse {
+  title: string;
+  synopsis: string;
+  outline: string;
+  textEn: string;
+  wordCount: number;
+}
+
+export function validateBlock1AIResponse(raw: unknown): Block1AIResponse {
+  if (!raw || typeof raw !== 'object') throw new StoryValidationError('Block 1 AI response is not an object');
+  const r = raw as Record<string, unknown>;
+  if (typeof r.title !== 'string' || !r.title.trim()) throw new StoryValidationError('Block 1 AI response missing title');
+  if (typeof r.synopsis !== 'string' || !r.synopsis.trim()) throw new StoryValidationError('Block 1 AI response missing synopsis');
+  if (typeof r.outline !== 'string' || !r.outline.trim()) throw new StoryValidationError('Block 1 AI response missing outline');
+  if (typeof r.text_en !== 'string' || !r.text_en.trim()) throw new StoryValidationError('Block 1 AI response missing text_en');
+  const wordCount = countWords(r.text_en);
+  return {
+    title: r.title.trim(),
+    synopsis: r.synopsis.trim(),
+    outline: r.outline.trim(),
+    textEn: r.text_en,
+    wordCount,
+  };
+}
+
+export function validateTextEnResponse(raw: unknown): { textEn: string; wordCount: number } {
+  if (!raw || typeof raw !== 'object') throw new StoryValidationError('AI response is not an object');
+  const r = raw as Record<string, unknown>;
+  if (typeof r.text_en !== 'string' || !r.text_en.trim()) throw new StoryValidationError('AI response missing text_en');
+  const wordCount = countWords(r.text_en);
+  return { textEn: r.text_en, wordCount };
+}
+
+// Existing: kept for backward compatibility
+
 function validateBlock(raw: Record<string, unknown>, cefrLevel: string): ValidatedBlock {
   const blockOrder = raw.block_order;
   if (blockOrder !== 1 && blockOrder !== 2) {
     throw new StoryValidationError(`Invalid block_order: ${blockOrder}`);
   }
-
   if (typeof raw.text_en !== 'string' || raw.text_en.trim() === '') {
     throw new StoryValidationError(`Block ${blockOrder} has empty text_en`);
   }
-
   const wordCount = countWords(raw.text_en);
   const range = WORD_COUNT_RANGES[cefrLevel as keyof typeof WORD_COUNT_RANGES];
   if (range) {
@@ -57,7 +92,6 @@ function validateBlock(raw: Record<string, unknown>, cefrLevel: string): Validat
       );
     }
   }
-
   try {
     const sentences = segmentListeningText(raw.text_en, blockOrder as 1 | 2);
     return { blockOrder: blockOrder as 1 | 2, textEn: raw.text_en, wordCount, sentences };
@@ -74,7 +108,6 @@ export function validateListeningStoryResponse(raw: unknown, cefrLevel: string):
     throw new StoryValidationError('AI response is not a JSON object');
   }
   const r = raw as Record<string, unknown>;
-
   if (typeof r.title !== 'string' || r.title.trim() === '') {
     throw new StoryValidationError('Story is missing a title');
   }
@@ -87,19 +120,14 @@ export function validateListeningStoryResponse(raw: unknown, cefrLevel: string):
   if (r.blocks.length !== 2) {
     throw new StoryValidationError(`Story must have exactly 2 blocks, got: ${r.blocks.length}`);
   }
-
   const rawBlocks = r.blocks as Record<string, unknown>[];
   const orders = rawBlocks.map(b => b.block_order as number).sort((a, b) => a - b);
   if (orders[0] !== 1 || orders[1] !== 2) {
-    throw new StoryValidationError(
-      `Block orders must be [1, 2], got: [${orders.join(', ')}]`
-    );
+    throw new StoryValidationError(`Block orders must be [1, 2], got: [${orders.join(', ')}]`);
   }
-
   const sorted = [...rawBlocks].sort((a, b) => (a.block_order as number) - (b.block_order as number));
   const block1 = validateBlock(sorted[0], cefrLevel);
   const block2 = validateBlock(sorted[1], cefrLevel);
-
   return {
     title: r.title.trim(),
     synopsis: (r.synopsis as string).trim(),

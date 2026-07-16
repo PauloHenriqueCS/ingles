@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { countWords } from './listening-level-config';
-import { buildStoryUserPrompt, buildRetryUserPrompt, buildTruncatedRetryUserPrompt } from './build-listening-story-prompt';
+import {
+  buildBlock1UserPrompt, buildBlock2UserPrompt,
+  buildExpandBlockUserPrompt, buildCondenseBlockUserPrompt,
+  buildStoryUserPrompt, buildRetryUserPrompt, buildTruncatedRetryUserPrompt,
+  BLOCK1_SYSTEM_PROMPT, BLOCK2_SYSTEM_PROMPT,
+  EXPAND_BLOCK_SYSTEM_PROMPT, CONDENSE_BLOCK_SYSTEM_PROMPT,
+} from './build-listening-story-prompt';
 import {
   parseStoryJson,
   validateListeningStoryResponse,
@@ -11,6 +17,9 @@ import {
   generateListeningStory,
   StoryAITimeoutError,
   StoryOutputTruncatedError,
+  StoryBlock1TooShortError,
+  StoryBlock2TooShortError,
+  StoryBlockTooLongError,
   buildIdempotencyKey,
 } from './generate-listening-story';
 import type { AICallFn } from './generate-listening-story';
@@ -21,12 +30,32 @@ function makeWords(n: number): string {
   return Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
 }
 
-function makeRawSentence(
-  blockOrder: 1 | 2,
-  sentenceOrder: number,
-  text: string,
-  paragraphOrder = 1,
-) {
+/** Block 1 AI response: full structure with title/synopsis/outline/text_en */
+function makeBlock1Response(wordCount = 440, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    title: 'A Day at the Market',
+    synopsis: 'A short story about a visit to the local market.',
+    outline: 'Maria visits the market and meets a friendly vendor who helps her find what she needs.',
+    text_en: makeWords(wordCount),
+    ...extra,
+  });
+}
+
+/** Block 2 AI response: just text_en */
+function makeBlock2Response(wordCount = 440): string {
+  return JSON.stringify({ text_en: makeWords(wordCount) });
+}
+
+/** Happy-path callAI: returns valid block1 then valid block2 */
+function makeHappyCallAI(level = 'A1'): AICallFn {
+  const wc = level === 'A1' ? 440 : level === 'A2' ? 490 : level === 'B2' ? 570 : 440;
+  return vi.fn()
+    .mockResolvedValueOnce(makeBlock1Response(wc))
+    .mockResolvedValueOnce(makeBlock2Response(wc));
+}
+
+// Legacy helpers for existing tests that test validateListeningStoryResponse
+function makeRawSentence(blockOrder: 1 | 2, sentenceOrder: number, text: string, paragraphOrder = 1) {
   return {
     sentence_key: `b${blockOrder}s${String(sentenceOrder).padStart(2, '0')}`,
     sentence_order: sentenceOrder,
@@ -81,59 +110,131 @@ describe('countWords', () => {
   });
 });
 
-// ── Group 2: buildStoryUserPrompt ─────────────────────────────────────────────
+// ── Group 2: buildBlock1UserPrompt ────────────────────────────────────────────
 
-describe('buildStoryUserPrompt', () => {
+describe('buildBlock1UserPrompt', () => {
   it('A1 prompt includes correct word count range', () => {
-    const prompt = buildStoryUserPrompt({ cefrLevel: 'A1' });
-    expect(prompt).toContain('400–475');
+    const prompt = buildBlock1UserPrompt({ cefrLevel: 'A1' });
+    expect(prompt).toContain('400');
+    expect(prompt).toContain('475');
   });
 
   it('B2 prompt includes correct word count range', () => {
-    const prompt = buildStoryUserPrompt({ cefrLevel: 'B2' });
-    expect(prompt).toContain('550–625');
+    const prompt = buildBlock1UserPrompt({ cefrLevel: 'B2' });
+    expect(prompt).toContain('550');
+    expect(prompt).toContain('625');
   });
 
   it('includes theme when provided', () => {
-    const prompt = buildStoryUserPrompt({ cefrLevel: 'A1', theme: 'cooking' });
+    const prompt = buildBlock1UserPrompt({ cefrLevel: 'A1', theme: 'cooking' });
     expect(prompt).toContain('cooking');
   });
 
   it('does not include theme line when theme is null', () => {
-    const prompt = buildStoryUserPrompt({ cefrLevel: 'A1', theme: null });
+    const prompt = buildBlock1UserPrompt({ cefrLevel: 'A1', theme: null });
     expect(prompt).not.toContain('Theme:');
+  });
+
+  it('includes target word count for A1', () => {
+    const prompt = buildBlock1UserPrompt({ cefrLevel: 'A1' });
+    expect(prompt).toContain('440'); // A1 target
   });
 });
 
-// ── Group 2b: buildRetryUserPrompt ───────────────────────────────────────────
+// ── Group 2b: buildBlock2UserPrompt ──────────────────────────────────────────
 
-describe('buildRetryUserPrompt', () => {
+describe('buildBlock2UserPrompt', () => {
+  const context = {
+    title: 'The Market Visit',
+    synopsis: 'Maria goes shopping.',
+    outline: 'Maria visits the market and meets a vendor.',
+    textEn: 'Maria walked to the market early in the morning.',
+  };
+
+  it('includes the title in the prompt', () => {
+    const prompt = buildBlock2UserPrompt({ cefrLevel: 'A1' }, context);
+    expect(prompt).toContain('The Market Visit');
+  });
+
+  it('includes the outline in the prompt', () => {
+    const prompt = buildBlock2UserPrompt({ cefrLevel: 'A1' }, context);
+    expect(prompt).toContain('Maria visits the market and meets a vendor.');
+  });
+
+  it('includes block 1 text in the prompt', () => {
+    const prompt = buildBlock2UserPrompt({ cefrLevel: 'A1' }, context);
+    expect(prompt).toContain('Maria walked to the market');
+  });
+
+  it('includes word count range', () => {
+    const prompt = buildBlock2UserPrompt({ cefrLevel: 'A1' }, context);
+    expect(prompt).toContain('400');
+    expect(prompt).toContain('475');
+  });
+});
+
+// ── Group 2c: buildExpandBlockUserPrompt ──────────────────────────────────────
+
+describe('buildExpandBlockUserPrompt', () => {
+  it('includes current word count', () => {
+    const prompt = buildExpandBlockUserPrompt({ cefrLevel: 'A1' }, 1, makeWords(350), 350);
+    expect(prompt).toContain('350');
+  });
+
+  it('includes the minimum word count', () => {
+    const prompt = buildExpandBlockUserPrompt({ cefrLevel: 'A1' }, 1, makeWords(350), 350);
+    expect(prompt).toContain('400');
+  });
+
+  it('includes the current block text', () => {
+    const prompt = buildExpandBlockUserPrompt({ cefrLevel: 'A1' }, 1, 'Once upon a time.', 5);
+    expect(prompt).toContain('Once upon a time.');
+  });
+
+  it('mentions expand/expand instruction', () => {
+    const prompt = buildExpandBlockUserPrompt({ cefrLevel: 'A1' }, 1, makeWords(350), 350);
+    expect(prompt.toLowerCase()).toContain('expand');
+  });
+});
+
+// ── Group 2d: buildCondenseBlockUserPrompt ────────────────────────────────────
+
+describe('buildCondenseBlockUserPrompt', () => {
+  it('includes current word count and maximum', () => {
+    const prompt = buildCondenseBlockUserPrompt({ cefrLevel: 'A1' }, 1, makeWords(500), 500);
+    expect(prompt).toContain('500');
+    expect(prompt).toContain('475'); // A1 max
+  });
+
+  it('mentions condense instruction', () => {
+    const prompt = buildCondenseBlockUserPrompt({ cefrLevel: 'A1' }, 1, makeWords(500), 500);
+    expect(prompt.toLowerCase()).toContain('condense');
+  });
+});
+
+// ── Group 2e: backward-compat prompt functions ────────────────────────────────
+
+describe('buildStoryUserPrompt (compat)', () => {
+  it('A1 prompt includes correct word count range', () => {
+    const prompt = buildStoryUserPrompt({ cefrLevel: 'A1' });
+    expect(prompt).toContain('400');
+    expect(prompt).toContain('475');
+  });
+});
+
+describe('buildRetryUserPrompt (compat)', () => {
   it('includes "Previous attempt" with the attempt number', () => {
     const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'Block 1 word count (233) is below minimum (400)');
     expect(prompt).toContain('Previous attempt 1');
-  });
-
-  it('includes the exact previous error message', () => {
-    const error = 'Block 1 word count (233) is below minimum (400) for level A1';
-    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, error);
-    expect(prompt).toContain(error);
   });
 
   it('includes instruction to regenerate COMPLETE JSON', () => {
     const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'some error');
     expect(prompt).toContain('Regenerate the COMPLETE JSON');
   });
-
-  it('includes the min and max word counts', () => {
-    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'some error');
-    expect(prompt).toContain('400');
-    expect(prompt).toContain('475');
-  });
 });
 
-// ── Group 2c: buildTruncatedRetryUserPrompt ───────────────────────────────────
-
-describe('buildTruncatedRetryUserPrompt', () => {
+describe('buildTruncatedRetryUserPrompt (compat)', () => {
   it('includes "truncated" in the message', () => {
     const prompt = buildTruncatedRetryUserPrompt({ cefrLevel: 'A1' }, 2);
     expect(prompt.toLowerCase()).toContain('truncated');
@@ -192,7 +293,6 @@ describe('validateListeningStoryResponse — structure', () => {
       ...raw,
       blocks: [{ ...raw.blocks[0], sentences: [] }, raw.blocks[1]],
     };
-    // Slim schema: sentences are derived, not validated from AI response
     expect(() => validateListeningStoryResponse(noSentences, 'A1')).not.toThrow();
   });
 
@@ -235,7 +335,7 @@ describe('validateListeningStoryResponse — word count', () => {
   });
 });
 
-// ── Group 5b: validateListeningStoryResponse — word count boundaries ──────────
+// ── Group 5b: word count boundaries ──────────────────────────────────────────
 
 describe('validateListeningStoryResponse — word count boundaries', () => {
   it('rejects a block with exactly 399 words', () => {
@@ -256,23 +356,19 @@ describe('validateListeningStoryResponse — word count boundaries', () => {
   it('validates both blocks independently — error in block 2 while block 1 is valid', () => {
     const raw = { ...makeValidRawStory(), blocks: [makeRawBlock(1, 420, 1), makeRawBlock(2, 200, 2)] };
     let err: StoryValidationError | null = null;
-    try {
-      validateListeningStoryResponse(raw, 'A1');
-    } catch (e) {
-      err = e as StoryValidationError;
-    }
+    try { validateListeningStoryResponse(raw, 'A1'); }
+    catch (e) { err = e as StoryValidationError; }
     expect(err).toBeInstanceOf(StoryValidationError);
     expect(err!.message).toContain('Block 2');
   });
 });
 
-// ── Group 6: no longer validates question or translation in story step ─────────
+// ── Group 6: slim schema (no translation or question) ─────────────────────────
 
-describe('validateListeningStoryResponse — slim schema (no translation or question)', () => {
+describe('validateListeningStoryResponse — slim schema', () => {
   it('accepts a block without translation_pt', () => {
     const raw = {
-      title: 'Test',
-      synopsis: 'Test synopsis.',
+      title: 'Test', synopsis: 'Test synopsis.',
       blocks: [
         { block_order: 1, text_en: makeWords(420) },
         { block_order: 2, text_en: makeWords(420) },
@@ -281,10 +377,9 @@ describe('validateListeningStoryResponse — slim schema (no translation or ques
     expect(() => validateListeningStoryResponse(raw, 'A1')).not.toThrow();
   });
 
-  it('accepts a block without question', () => {
+  it('accepts a block without question and derives sentences', () => {
     const raw = {
-      title: 'Test',
-      synopsis: 'Test synopsis.',
+      title: 'Test', synopsis: 'Test synopsis.',
       blocks: [
         { block_order: 1, text_en: makeWords(420) },
         { block_order: 2, text_en: makeWords(420) },
@@ -295,61 +390,39 @@ describe('validateListeningStoryResponse — slim schema (no translation or ques
   });
 
   it('ignores extra fields like translation_pt and question', () => {
-    const raw = makeValidRawStory('A1'); // has translation_pt, sentences, question
+    const raw = makeValidRawStory('A1');
     expect(() => validateListeningStoryResponse(raw, 'A1')).not.toThrow();
   });
 });
 
-// ── Group 7: generateListeningStory — mocked callAI ──────────────────────────
+// ── Group 7: generateListeningStory — happy path and errors ──────────────────
 
-describe('generateListeningStory — mocked callAI', () => {
-  function makeValidAIResponse(level = 'A1'): string {
-    const wc = level === 'A1' ? 420 : level === 'B2' ? 570 : 420;
-    return JSON.stringify({
-      title: 'A Day at the Market',
-      synopsis: 'A short story about a visit to the local market.',
-      blocks: [
-        { block_order: 1, text_en: makeWords(wc) },
-        { block_order: 2, text_en: makeWords(wc) },
-      ],
-    });
-  }
-
-  it('successful generation returns a ValidatedStory in dry-run mode', async () => {
-    const callAI: AICallFn = vi.fn().mockResolvedValue(makeValidAIResponse('A1'));
+describe('generateListeningStory — happy path', () => {
+  it('successful generation (2 calls: block1 + block2) returns ValidatedStory in dry-run', async () => {
+    const callAI = makeHappyCallAI('A1');
     const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(result.episodeId).toBeNull();
     expect(result.story.title).toBe('A Day at the Market');
     expect(result.story.blocks.length).toBe(2);
-  });
-
-  it('retries after JSON parse error and succeeds on second attempt', async () => {
-    const callAI: AICallFn = vi.fn()
-      .mockResolvedValueOnce('not json at all %%')
-      .mockResolvedValueOnce(makeValidAIResponse('A1'));
-    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(callAI).toHaveBeenCalledTimes(2);
-    expect(result.story.title).toBe('A Day at the Market');
   });
 
-  it('throws StoryParseError after 3 failed parse attempts', async () => {
-    const callAI: AICallFn = vi.fn().mockResolvedValue('not json %%');
-    await expect(
-      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
-    ).rejects.toThrow(StoryParseError);
-    expect(callAI).toHaveBeenCalledTimes(3);
+  it('block 1 uses BLOCK1_SYSTEM_PROMPT', async () => {
+    const callAI = makeHappyCallAI('A1');
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const [firstSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    expect(firstSystem).toBe(BLOCK1_SYSTEM_PROMPT);
   });
 
-  it('throws StoryAITimeoutError when AI throws a timeout error', async () => {
-    const timeoutErr = Object.assign(new Error('timeout'), { message: 'timeout' });
-    const callAI: AICallFn = vi.fn().mockRejectedValue(timeoutErr);
-    await expect(
-      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
-    ).rejects.toThrow(StoryAITimeoutError);
+  it('block 2 uses BLOCK2_SYSTEM_PROMPT', async () => {
+    const callAI = makeHappyCallAI('A1');
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const [secondSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondSystem).toBe(BLOCK2_SYSTEM_PROMPT);
   });
 
   it('dry-run mode returns null episodeId without calling supabase', async () => {
-    const callAI: AICallFn = vi.fn().mockResolvedValue(makeValidAIResponse('A1'));
+    const callAI = makeHappyCallAI('A1');
     const mockSupabase = vi.fn();
     const result = await generateListeningStory(
       { cefrLevel: 'A1', dryRun: true },
@@ -359,90 +432,167 @@ describe('generateListeningStory — mocked callAI', () => {
     expect(result.episodeId).toBeNull();
     expect(mockSupabase).not.toHaveBeenCalled();
   });
+
+  it('throws StoryAITimeoutError when AI throws a timeout error', async () => {
+    const timeoutErr = Object.assign(new Error('timeout'), { message: 'timeout' });
+    const callAI: AICallFn = vi.fn().mockRejectedValue(timeoutErr);
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryAITimeoutError);
+  });
 });
 
-// ── Group 7b: generateListeningStory — retry with error feedback ──────────────
+// ── Group 8: block 1 word count enforcement ───────────────────────────────────
 
-describe('generateListeningStory — retry feedback', () => {
-  function makeValidAIResponse(level = 'A1'): string {
-    const wc = level === 'A1' ? 420 : level === 'B2' ? 570 : 420;
-    return JSON.stringify({
-      title: 'A Day at the Market',
-      synopsis: 'A short story about a visit to the local market.',
-      blocks: [
-        { block_order: 1, text_en: makeWords(wc) },
-        { block_order: 2, text_en: makeWords(wc) },
-      ],
-    });
-  }
-
-  function makeTooShortStory(block1Words: number, block2Words: number): string {
-    return JSON.stringify({
-      title: 'Test',
-      synopsis: 'Test synopsis.',
-      blocks: [makeRawBlock(1, block1Words, 1), makeRawBlock(2, block2Words, 2)],
-    });
-  }
-
-  it('first attempt receives normal prompt without "Previous attempt"', async () => {
-    const callAI: AICallFn = vi.fn().mockResolvedValue(makeValidAIResponse('A1'));
-    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
-    const [, firstPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
-    expect(firstPrompt).not.toContain('Previous attempt');
-  });
-
-  it('second attempt includes error from first attempt', async () => {
+describe('generateListeningStory — block 1 too short triggers expansion', () => {
+  it('short block 1 is expanded without regenerating block 2', async () => {
     const callAI: AICallFn = vi.fn()
-      .mockResolvedValueOnce(makeTooShortStory(200, 420))
-      .mockResolvedValueOnce(makeValidAIResponse('A1'));
-    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
-    expect(callAI).toHaveBeenCalledTimes(2);
-    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
-    expect(secondPrompt).toContain('Previous attempt 1');
-    expect(secondPrompt).toContain('below minimum');
-  });
+      .mockResolvedValueOnce(makeBlock1Response(350))   // block1: 350 words (below A1 min 400)
+      .mockResolvedValueOnce(makeBlock2Response(440))   // expand block1: 440 words (valid)
+      .mockResolvedValueOnce(makeBlock2Response(440));  // block2: 440 words (valid)
 
-  it('third attempt includes error from second attempt', async () => {
-    const callAI: AICallFn = vi.fn()
-      .mockResolvedValueOnce(makeTooShortStory(200, 420))
-      .mockResolvedValueOnce(makeTooShortStory(250, 420))
-      .mockResolvedValueOnce(makeValidAIResponse('A1'));
-    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
     expect(callAI).toHaveBeenCalledTimes(3);
-    const [, thirdPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
-    expect(thirdPrompt).toContain('Previous attempt 2');
-    expect(thirdPrompt).toContain('250');
+    expect(result.story.blocks[0].wordCount).toBe(440);
+    // The expand call uses EXPAND_BLOCK_SYSTEM_PROMPT, not BLOCK2_SYSTEM_PROMPT
+    const [secondSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondSystem).toBe(EXPAND_BLOCK_SYSTEM_PROMPT);
+    // Block 2 is the 3rd call, using BLOCK2_SYSTEM_PROMPT
+    const [thirdSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
+    expect(thirdSystem).toBe(BLOCK2_SYSTEM_PROMPT);
   });
 
-  it('error in one block forces full regeneration on next attempt', async () => {
+  it('A1 with exactly 399 words is rejected after all expand attempts', async () => {
     const callAI: AICallFn = vi.fn()
-      .mockResolvedValueOnce(makeTooShortStory(420, 200))
-      .mockResolvedValueOnce(makeValidAIResponse('A1'));
-    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
-    expect(callAI).toHaveBeenCalledTimes(2);
-    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
-    expect(secondPrompt).toContain('Regenerate the COMPLETE JSON');
-    expect(secondPrompt).toContain('Block 2');
+      .mockResolvedValueOnce(makeBlock1Response(399))  // initial: 399
+      .mockResolvedValueOnce(makeBlock2Response(399))  // expand 1: still 399
+      .mockResolvedValueOnce(makeBlock2Response(399)); // expand 2: still 399
+
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryBlock1TooShortError);
+    expect(callAI).toHaveBeenCalledTimes(3);
   });
 
+  it('A1 with exactly 400 words is accepted', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(400))
+      .mockResolvedValueOnce(makeBlock2Response(400));
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(result.story.blocks[0].wordCount).toBe(400);
+  });
+
+  it('A2 with exactly 449 words is rejected', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(449))
+      .mockResolvedValueOnce(makeBlock2Response(449))
+      .mockResolvedValueOnce(makeBlock2Response(449));
+
+    await expect(
+      generateListeningStory({ cefrLevel: 'A2', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryBlock1TooShortError);
+  });
+
+  it('A2 with exactly 450 words is accepted', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(450))
+      .mockResolvedValueOnce(makeBlock2Response(450));
+
+    const result = await generateListeningStory({ cefrLevel: 'A2', dryRun: true }, callAI);
+    expect(result.story.blocks[0].wordCount).toBe(450);
+  });
+
+  it('block 1 above maximum is condensed', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(500))  // initial: 500 (A1 max is 475)
+      .mockResolvedValueOnce(makeBlock2Response(440))  // condense: 440 (valid)
+      .mockResolvedValueOnce(makeBlock2Response(440)); // block2: 440
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(result.story.blocks[0].wordCount).toBe(440);
+    const [secondSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondSystem).toBe(CONDENSE_BLOCK_SYSTEM_PROMPT);
+  });
+});
+
+// ── Group 9: block 2 word count enforcement ───────────────────────────────────
+
+describe('generateListeningStory — block 2 too short triggers expansion', () => {
+  it('short block 2 is expanded without altering block 1', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(440))  // block1: valid
+      .mockResolvedValueOnce(makeBlock2Response(350))  // block2: 350 (below A1 min 400)
+      .mockResolvedValueOnce(makeBlock2Response(440)); // expand block2: 440 (valid)
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(result.story.blocks[0].wordCount).toBe(440); // block 1 unchanged
+    expect(result.story.blocks[1].wordCount).toBe(440);
+    // The expand call uses EXPAND_BLOCK_SYSTEM_PROMPT
+    const [thirdSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
+    expect(thirdSystem).toBe(EXPAND_BLOCK_SYSTEM_PROMPT);
+  });
+
+  it('block 2 too short after all expand attempts throws StoryBlock2TooShortError', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(440))  // block1: valid
+      .mockResolvedValueOnce(makeBlock2Response(350))  // block2: 350
+      .mockResolvedValueOnce(makeBlock2Response(350))  // expand 1: still 350
+      .mockResolvedValueOnce(makeBlock2Response(350)); // expand 2: still 350
+
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryBlock2TooShortError);
+    expect(callAI).toHaveBeenCalledTimes(4); // 1 block1 + 3 block2 attempts
+  });
+});
+
+// ── Group 10: block 2 continuity ─────────────────────────────────────────────
+
+describe('generateListeningStory — block 2 receives block 1 context', () => {
+  it('block 2 user prompt includes the title from block 1', async () => {
+    const callAI = makeHappyCallAI('A1');
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const [, block2UserPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(block2UserPrompt).toContain('A Day at the Market');
+  });
+
+  it('block 2 user prompt includes the outline from block 1', async () => {
+    const callAI = makeHappyCallAI('A1');
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const [, block2UserPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(block2UserPrompt).toContain('Maria visits the market');
+  });
+});
+
+// ── Group 11: JSON truncation ─────────────────────────────────────────────────
+
+describe('generateListeningStory — truncation handling', () => {
   it('StoryOutputTruncatedError has retryable = true', () => {
     const err = new StoryOutputTruncatedError('gpt-4o', 1234);
     expect(err.retryable).toBe(true);
     expect(err.code).toBe('STORY_OUTPUT_TRUNCATED');
   });
 
-  it('truncation error triggers retry with truncated prompt', async () => {
+  it('truncation on block 1 retries with fresh block 1 call', async () => {
     const truncatedError = new StoryOutputTruncatedError('gpt-4o', 100);
     const callAI: AICallFn = vi.fn()
-      .mockRejectedValueOnce(truncatedError)
-      .mockResolvedValueOnce(makeValidAIResponse('A1'));
-    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
-    expect(callAI).toHaveBeenCalledTimes(2);
-    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
-    expect(secondPrompt).toContain('truncated');
+      .mockRejectedValueOnce(truncatedError)     // block1 attempt 1: truncated
+      .mockResolvedValueOnce(makeBlock1Response(440)) // block1 attempt 2: valid
+      .mockResolvedValueOnce(makeBlock2Response(440)); // block2: valid
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(result.story.title).toBe('A Day at the Market');
+    // Both block1 retries use BLOCK1_SYSTEM_PROMPT (no expand on truncation)
+    const [firstSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    const [secondSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(firstSystem).toBe(BLOCK1_SYSTEM_PROMPT);
+    expect(secondSystem).toBe(BLOCK1_SYSTEM_PROMPT);
   });
 
-  it('throws StoryOutputTruncatedError after 3 truncation failures', async () => {
+  it('throws StoryOutputTruncatedError after 3 truncation failures on block 1', async () => {
     const truncatedError = new StoryOutputTruncatedError('gpt-4o', 100);
     const callAI: AICallFn = vi.fn().mockRejectedValue(truncatedError);
     await expect(
@@ -452,7 +602,103 @@ describe('generateListeningStory — retry feedback', () => {
   });
 });
 
-// ── Group 8: buildIdempotencyKey ──────────────────────────────────────────────
+// ── Group 12: block 1 parse error retry ──────────────────────────────────────
+
+describe('generateListeningStory — parse errors', () => {
+  it('retries block 1 after JSON parse error and succeeds', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce('not json at all %%')
+      .mockResolvedValueOnce(makeBlock1Response(440))
+      .mockResolvedValueOnce(makeBlock2Response(440));
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(result.story.title).toBe('A Day at the Market');
+  });
+
+  it('throws StoryParseError after 3 failed block 1 parse attempts', async () => {
+    const callAI: AICallFn = vi.fn().mockResolvedValue('not json %%');
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryParseError);
+    expect(callAI).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ── Group 13: pipeline — episodeId returned when not dryRun ──────────────────
+
+describe('generateListeningStory — pipeline advancement', () => {
+  it('returns non-null episodeId when not dryRun (verifies pipeline advances)', async () => {
+    const callAI = makeHappyCallAI('A1');
+    const fakeEpisodeId = 'ep-test-uuid-1234';
+    const fakeBlockId1 = 'block-id-1';
+    const fakeBlockId2 = 'block-id-2';
+
+    // insertEpisode: .from().insert().select('id').single()
+    // insertBlock x2: .from().insert().select('id').single()
+    // insertSentences x2: .from().insert()
+    // markContentReady: .from().update().eq() x3 (1 episode + 2 blocks)
+    const makeSingle = (data: unknown) => ({
+      single: vi.fn().mockResolvedValue({ data, error: null }),
+    });
+    const makeInsertSelect = (data: unknown) => ({
+      insert: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue(makeSingle(data)),
+      }),
+    });
+    const makeInsertOnly = () => ({
+      insert: vi.fn().mockResolvedValue({ error: null }),
+    });
+    const makeUpdateEq = () => ({
+      update: vi.fn().mockReturnValue({
+        eq: vi.fn().mockResolvedValue({ error: null }),
+      }),
+    });
+
+    let callCount = 0;
+    const mockSupabase = {
+      from: vi.fn().mockImplementation((table: string) => {
+        if (table === 'listening_episodes') {
+          callCount++;
+          if (callCount === 1) {
+            // insertEpisode
+            return makeInsertSelect({ id: fakeEpisodeId });
+          }
+          // markContentReady episode update
+          return makeUpdateEq();
+        }
+        if (table === 'listening_blocks') {
+          // insertBlock for block1 or block2, then markContentReady updates
+          return {
+            insert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn()
+                  .mockResolvedValueOnce({ data: { id: fakeBlockId1 }, error: null })
+                  .mockResolvedValueOnce({ data: { id: fakeBlockId2 }, error: null }),
+              }),
+            }),
+            update: vi.fn().mockReturnValue({
+              eq: vi.fn().mockResolvedValue({ error: null }),
+            }),
+          };
+        }
+        if (table === 'listening_sentences') {
+          return makeInsertOnly();
+        }
+        return {};
+      }),
+    };
+
+    const result = await generateListeningStory(
+      { cefrLevel: 'A1', dryRun: false },
+      callAI,
+      mockSupabase as unknown as Parameters<typeof generateListeningStory>[2],
+    );
+    expect(result.episodeId).toBe(fakeEpisodeId);
+  });
+});
+
+// ── Group 14: buildIdempotencyKey ─────────────────────────────────────────────
 
 describe('buildIdempotencyKey', () => {
   it('same inputs produce the same key', () => {
@@ -471,5 +717,10 @@ describe('buildIdempotencyKey', () => {
     const k1 = buildIdempotencyKey({ cefrLevel: 'A1', theme: 'travel' });
     const k2 = buildIdempotencyKey({ cefrLevel: 'A1', theme: 'cooking' });
     expect(k1).not.toBe(k2);
+  });
+
+  it('key includes PROMPT_VERSION to distinguish schema versions', () => {
+    const k = buildIdempotencyKey({ cefrLevel: 'A1' });
+    expect(k).toContain('listening-story-v2');
   });
 });
