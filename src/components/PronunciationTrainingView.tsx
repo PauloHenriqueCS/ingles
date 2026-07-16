@@ -21,6 +21,41 @@ import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+interface AnalysisErrorInfo {
+  userMessage: string;
+  technicalMessage: string | null;
+}
+
+function getAnalysisErrorInfo(err: unknown): AnalysisErrorInfo {
+  if (err instanceof PronunciationServiceError) {
+    const technical = err.message && err.message !== err.code ? err.message : null;
+    switch (err.code) {
+      case 'AZURE_NO_MATCH':
+        return { userMessage: 'Não foi possível detectar fala no áudio.', technicalMessage: technical };
+      case 'AZURE_TIMEOUT':
+        return { userMessage: 'A análise demorou demais. Verifique sua conexão e tente novamente.', technicalMessage: technical };
+      case 'AZURE_NETWORK_ERROR':
+        return { userMessage: 'O serviço de análise de pronúncia está indisponível.', technicalMessage: technical };
+      case 'AZURE_CANCELED':
+        return { userMessage: 'A análise foi interrompida inesperadamente.', technicalMessage: technical };
+      case 'CLIENT_INTERRUPTED':
+        return { userMessage: 'Análise cancelada.', technicalMessage: null };
+      case 'RESULT_INVALID':
+        return { userMessage: 'Não foi possível processar o resultado da análise.', technicalMessage: technical };
+      default:
+        return { userMessage: 'Não foi possível analisar a gravação. Verifique o volume e tente novamente.', technicalMessage: technical };
+    }
+  }
+  if (err instanceof AudioConversionError) {
+    return { userMessage: 'O formato do áudio não é compatível.', technicalMessage: err.message };
+  }
+  const message = err instanceof Error ? err.message.trim() : '';
+  return {
+    userMessage: message || 'Não foi possível analisar a gravação. Verifique o volume e tente novamente.',
+    technicalMessage: null,
+  };
+}
+
 function formatTime(ms: number): string {
   const s = Math.floor(ms / 1000);
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
@@ -215,12 +250,18 @@ function WordRow({
       submittedRef.current = false;
       if (!mountedRef.current) return;
 
-      let msg = 'Erro. Tente novamente.';
+      let msg = 'Erro. Gravar novamente.';
       if (err instanceof PronunciationServiceError) {
-        if (err.code === 'AZURE_NO_MATCH') msg = 'Nenhuma fala detectada.';
-        else if (err.code === 'AZURE_TIMEOUT') msg = 'Análise demorou.';
+        switch (err.code) {
+          case 'AZURE_NO_MATCH':       msg = 'Fala não detectada.'; break;
+          case 'AZURE_TIMEOUT':        msg = 'Análise demorou.'; break;
+          case 'AZURE_NETWORK_ERROR':  msg = 'Serviço indisponível.'; break;
+          case 'AZURE_CANCELED':       msg = 'Análise interrompida.'; break;
+          case 'CLIENT_INTERRUPTED':   msg = 'Cancelado.'; break;
+          case 'RESULT_INVALID':       msg = 'Resultado inválido.'; break;
+        }
       } else if (err instanceof AudioConversionError) {
-        msg = 'Áudio inválido.';
+        msg = 'Áudio incompatível.';
       }
       setErrorMsg(msg);
       setAnalysisState('error');
@@ -337,6 +378,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const [ttsPhase, setTtsPhase]             = useState<TtsPhase>('idle');
   const [analysisPhase, setAnalysisPhase]   = useState<AnalysisPhase>('idle');
   const [analysisError, setAnalysisError]   = useState<string | null>(null);
+  const [analysisErrorTechnical, setAnalysisErrorTechnical] = useState<string | null>(null);
   const [wordResults, setWordResults]       = useState<PronunciationWordDetail[] | null>(null);
   const [wordCategories, setWordCategories] = useState<Map<string, TrainingCategory>>(new Map());
   const [activeRecordingWordId, setActiveRecordingWordId] = useState<string | null>(null);
@@ -396,6 +438,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     setActiveRecordingWordId(null);
     setAnalysisPhase('idle');
     setAnalysisError(null);
+    setAnalysisErrorTechnical(null);
     setTtsPhase('idle');
     setPlaybackPlaying(false);
 
@@ -523,17 +566,9 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     } catch (err) {
       cancelAnalysisRef.current = null;
       if (!mountedRef.current) return;
-
-      let msg = 'Erro na análise. Tente novamente.';
-      if (err instanceof PronunciationServiceError) {
-        if (err.code === 'AZURE_NO_MATCH')
-          msg = 'Nenhuma fala detectada. Verifique o microfone e tente novamente.';
-        else if (err.code === 'AZURE_TIMEOUT')
-          msg = 'A análise demorou demais. Tente novamente.';
-      } else if (err instanceof AudioConversionError) {
-        msg = 'Não foi possível preparar a gravação. Grave novamente.';
-      }
-      setAnalysisError(msg);
+      const { userMessage, technicalMessage } = getAnalysisErrorInfo(err);
+      setAnalysisError(userMessage);
+      setAnalysisErrorTechnical(technicalMessage);
       setAnalysisPhase('error');
     }
   }
@@ -547,6 +582,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     setActiveRecordingWordId(null);
     setAnalysisPhase('idle');
     setAnalysisError(null);
+    setAnalysisErrorTechnical(null);
     setMainPhase('ready');
   }
 
@@ -746,7 +782,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                   </div>
                 )}
 
-                {recorder.phase === 'done' && (
+                {recorder.phase === 'done' && analysisPhase !== 'error' && (
                   <div className="flex flex-wrap gap-2">
                     <button
                       onClick={handlePlayMyRecording}
@@ -757,7 +793,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                       {playbackPlaying ? 'Parar' : 'Ouvir gravação'}
                     </button>
                     <button
-                      onClick={() => { playbackAudioRef.current?.pause(); setPlaybackPlaying(false); recorder.deleteRecording(); setAnalysisPhase('idle'); setAnalysisError(null); }}
+                      onClick={() => { playbackAudioRef.current?.pause(); setPlaybackPlaying(false); recorder.deleteRecording(); setAnalysisPhase('idle'); setAnalysisError(null); setAnalysisErrorTechnical(null); }}
                       className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
                       aria-label="Gravar novamente"
                     >
@@ -777,7 +813,24 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                   <p className="text-xs text-red-400">{recorder.errorMessage}</p>
                 )}
                 {analysisPhase === 'error' && analysisError && (
-                  <p className="text-xs text-red-400">{analysisError}</p>
+                  <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 space-y-3">
+                    <div>
+                      <p className="text-sm font-semibold text-red-300">Não foi possível analisar a gravação</p>
+                      <p className="text-sm text-red-200 mt-1">{analysisError}</p>
+                      {analysisErrorTechnical && analysisErrorTechnical !== analysisError && (
+                        <details className="mt-2">
+                          <summary className="text-xs text-red-400 cursor-pointer hover:text-red-300 select-none">Detalhes do erro</summary>
+                          <p className="text-xs text-red-400/80 mt-1 font-mono break-all whitespace-pre-wrap">{analysisErrorTechnical}</p>
+                        </details>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleRerecordFull}
+                      className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
+                    >
+                      <RotateCcw className="w-4 h-4" /> Gravar novamente
+                    </button>
+                  </div>
                 )}
               </div>
             )}
