@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Headphones, Play, Pause, RotateCcw, ArrowLeft,
   Check, X, AlertCircle, Trophy, RefreshCw, Lock,
-  ScrollText, Rewind, Clock, Loader2,
+  ScrollText, Rewind, Clock, Loader2, CheckCircle2,
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
@@ -173,6 +173,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const [storyGenerating, setStoryGenerating] = useState(false);
   const [storyMode, setStoryMode] = useState(false);
   const [completionSaveError, setCompletionSaveError] = useState(false);
+  const [completionSaved, setCompletionSaved] = useState(false);
   const [progressMsgIdx, setProgressMsgIdx] = useState(0);
 
   const player = useListeningAudioPlayer();
@@ -356,6 +357,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     setAttemptsByPart([0, 0]);
     setShowPartTranscript(false);
     setStorySelectedOption(null);
+    setCompletionSaveError(false);
+    setCompletionSaved(false);
     setPhase('generating');
     try {
       // Pass cached storyPackage on retry — skips OpenAI, re-generates only TTS
@@ -425,15 +428,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       } else {
         // Part 2 correct — persist completion, then show done.
         setPhase('submitting');
-        console.log('[1] Story finalizada — part 2 correta, iniciando save');
-        console.log('[2] Chamando completeStoryListening()');
         try {
-          const saveResult = await completeStoryListening();
-          console.log('[12] Frontend recebeu sucesso', saveResult);
+          await completeStoryListening();
           setCompletionSaveError(false);
           onComplete?.();
-        } catch (err) {
-          console.error('[12] Frontend recebeu erro', err);
+        } catch {
           setCompletionSaveError(true);
         }
         setPhase('done');
@@ -1414,15 +1413,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       const advance = async () => {
         if (isLastPart) {
           setPhase('submitting');
-          console.log('[1] Story finalizada via cycle_failed — iniciando save');
-          console.log('[2] Chamando completeStoryListening() [via cycle_failed]');
           try {
-            const saveResult = await completeStoryListening();
-            console.log('[12] Frontend recebeu sucesso [via cycle_failed]', saveResult);
+            await completeStoryListening();
             setCompletionSaveError(false);
             onComplete?.();
-          } catch (err) {
-            console.error('[12] Frontend recebeu erro [via cycle_failed]', err);
+          } catch {
             setCompletionSaveError(true);
           }
           setPhase('done');
@@ -1555,6 +1550,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     try {
       await completeStoryListening();
       setCompletionSaveError(false);
+      setCompletionSaved(true);
     } catch {
       // keep error shown
     }
@@ -1572,6 +1568,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         >
           Tentar novamente
         </button>
+      </div>
+    );
+  }
+
+  function renderCompletionSuccessBanner() {
+    if (!completionSaved || completionSaveError) return null;
+    return (
+      <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-900/20 border border-emerald-700/30">
+        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <p className="text-sm text-emerald-300">Registrado no calendário.</p>
       </div>
     );
   }
@@ -1594,6 +1600,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
           </div>
 
           {renderCompletionErrorBanner()}
+          {renderCompletionSuccessBanner()}
 
           <button
             onClick={handleStartGeneration}
@@ -1636,6 +1643,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         </div>
 
         {renderCompletionErrorBanner()}
+        {renderCompletionSuccessBanner()}
 
         {transcriptLines.length > 0 && (
           <button
