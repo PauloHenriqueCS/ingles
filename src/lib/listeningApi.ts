@@ -20,6 +20,8 @@ export class ListeningApiError extends Error {
     public code: string,
     message: string,
     public status: number,
+    /** Full parsed response body — may contain extra fields like storyPackage */
+    public data?: unknown,
   ) {
     super(message);
     this.name = 'ListeningApiError';
@@ -36,12 +38,25 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...(init.headers as Record<string, string> | undefined ?? {}),
     },
   });
-  const json = await res.json();
+
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    // Non-JSON response (e.g. Vercel timeout HTML)
+    throw new ListeningApiError(
+      'NON_JSON_RESPONSE',
+      `Erro inesperado do servidor (status ${res.status}).`,
+      res.status,
+    );
+  }
+
   if (!res.ok) {
     throw new ListeningApiError(
       (json as any).code ?? 'UNKNOWN',
       (json as any).message ?? 'Erro desconhecido',
       res.status,
+      json,
     );
   }
   return json as T;
@@ -155,10 +170,10 @@ export type ListeningStoryData = {
   parts: [StoryPart, StoryPart];
 };
 
-export function generateListeningStory(): Promise<ListeningStoryData> {
+export function generateListeningStory(storyPackage?: string | null): Promise<ListeningStoryData> {
   return apiFetch<ListeningStoryData>('/api/listening/generate', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(storyPackage ? { storyPackage } : {}),
   });
 }
 

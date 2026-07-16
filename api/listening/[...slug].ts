@@ -27,7 +27,7 @@ import {
   generateStorySession,
   decodeAnswerToken,
 } from '../../src/services/listening/story-session/generate-story-session';
-import { generateListeningStory as generateListeningStoryService } from '../../src/services/listening/story-session/generate-listening-story';
+import { generateListeningStory as generateListeningStoryService, StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
@@ -426,7 +426,8 @@ async function handleStoryVerify(req: any, res: any) {
 
 async function handleListeningGenerate(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
-  if (!sizeGuard(req, res, 64)) return;
+  // Up to 64 KB body — needed to accept storyPackage on TTS retry
+  if (!sizeGuard(req, res, 65_536)) return;
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId } = auth;
@@ -436,23 +437,46 @@ async function handleListeningGenerate(req: any, res: any) {
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
   const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
+  // Log env-var presence without exposing values
+  safeLog('listening/generate', 'config_check', 0, {
+    hasOpenaiKey: !!openaiKey,
+    hasAzureKey: !!azureKey,
+    azureRegion: (azureRegion || 'NOT_SET') as string,
+    hasSecret: !!secret,
+  });
+
   if (!openaiKey || !azureKey || !azureRegion || !secret) {
     safeLog('listening/generate', 'misconfigured', 503, {});
     return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço temporariamente indisponível.');
   }
 
+  // Optional: storyPackage from a previous call (skips OpenAI, retries TTS only)
+  const storyPackage: string | undefined =
+    typeof req.body?.storyPackage === 'string' ? req.body.storyPackage : undefined;
+
   try {
     const serviceClient = getListeningServiceClient();
     const result = await generateListeningStoryService(
       userId, serviceClient, openaiKey, azureKey, azureRegion, secret,
+      storyPackage ?? null,
     );
     res.setHeader('Cache-Control', 'private, no-store');
     safeLog('listening/generate', 'generated', 200, { level: result.level });
     return res.status(200).json(result);
   } catch (err) {
-    console.error('[listening] generation failed', err);
     const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
     safeLog('listening/generate', 'failed', 500, { step });
+
+    if (err instanceof StoryTtsError) {
+      // Story was generated successfully — only audio/upload failed.
+      // Return storyPackage so the client can retry TTS without re-calling OpenAI.
+      return jsonError(
+        res, 500, 'TTS_FAILED',
+        'Não conseguimos gerar o áudio. A história está preservada — tente novamente.',
+        { storyPackage: err.storyPackage, step: err.step },
+      );
+    }
+
     return jsonError(res, 500, 'GENERATION_FAILED', 'Não conseguimos preparar sua história. Tente novamente.');
   }
 }

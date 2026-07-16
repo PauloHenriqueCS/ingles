@@ -24,16 +24,27 @@ export interface ListeningStoryResult {
   parts: [StoryPartResult, StoryPartResult];
 }
 
-// ── Word ranges per level (per PART) ─────────────────────────────────────────
-// Target: ~5 min per part at ~130 wpm English TTS
+// Thrown when OpenAI succeeded but TTS/upload failed — carries packed story for retry
+export class StoryTtsError extends Error {
+  constructor(
+    message: string,
+    public readonly storyPackage: string,
+    public readonly step: string,
+  ) {
+    super(message);
+    this.name = 'StoryTtsError';
+  }
+}
+
+// ── Word ranges per level (per PART, ~5 min at 130 wpm) ──────────────────────
 
 const PART_WORD_RANGES: Record<string, { min: number; max: number }> = {
-  A1: { min: 500,  max: 650  }, // total ~1000–1300
-  A2: { min: 650,  max: 850  }, // total ~1300–1700
-  B1: { min: 800,  max: 1050 }, // total ~1600–2100
-  B2: { min: 950,  max: 1250 }, // total ~1900–2500
-  C1: { min: 1050, max: 1450 }, // total ~2100–2900
-  C2: { min: 1200, max: 1600 }, // total ~2400–3200
+  A1: { min: 500,  max: 650  },
+  A2: { min: 650,  max: 850  },
+  B1: { min: 800,  max: 1050 },
+  B2: { min: 950,  max: 1250 },
+  C1: { min: 1050, max: 1450 },
+  C2: { min: 1200, max: 1600 },
 };
 
 // ── AI response structure ─────────────────────────────────────────────────────
@@ -56,6 +67,50 @@ interface AIStory {
   parts: AIPart[];
 }
 
+// ── Story package (HMAC-signed blob, used for TTS-only retry) ─────────────────
+
+interface PackedStory {
+  title: string;
+  level: string;
+  summary: string;
+  parts: AIPart[];
+  x: number; // expiry timestamp
+}
+
+function packStory(ai: AIStory, secret: string): string {
+  const pkg: PackedStory = {
+    title: ai.title,
+    level: ai.level,
+    summary: ai.summary,
+    parts: ai.parts,
+    x: Date.now() + 60 * 60 * 1000, // 1 hour
+  };
+  const payload = JSON.stringify(pkg);
+  const sig = createHmac('sha256', secret).update(payload).digest('base64url');
+  return Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
+}
+
+export function unpackStory(token: string, secret: string): AIStory {
+  let decoded: { p: string; s: string };
+  try {
+    decoded = JSON.parse(Buffer.from(token, 'base64url').toString());
+  } catch {
+    throw new Error('INVALID_STORY_PACKAGE');
+  }
+  const expectedSig = createHmac('sha256', secret).update(decoded.p).digest('base64url');
+  if (decoded.s !== expectedSig) throw new Error('INVALID_STORY_PACKAGE');
+  const data = JSON.parse(decoded.p) as PackedStory;
+  if (data.x < Date.now()) throw new Error('STORY_PACKAGE_EXPIRED');
+  return { title: data.title, level: data.level, summary: data.summary, parts: data.parts };
+}
+
+// ── Structured step logger ────────────────────────────────────────────────────
+
+function stepLog(requestId: string, step: string, extra: Record<string, unknown> = {}) {
+  // console.error so it appears in Vercel's error log stream even on info events
+  console.error(JSON.stringify({ src: 'listening/generate', requestId, step, t: Date.now(), ...extra }));
+}
+
 // ── Prompt ────────────────────────────────────────────────────────────────────
 
 function buildPrompt(level: string): string {
@@ -72,43 +127,46 @@ Return ONLY a JSON object — no markdown fences, no extra text:
   "parts": [
     {
       "id": 1,
-      "text": "First half of the story in English (${range.min}–${range.max} words). Must end at a natural point — the story is NOT finished yet.",
+      "text": "First half of the story (${range.min}–${range.max} words). Must end at a natural pause — story is NOT finished.",
       "question": {
-        "text": "Comprehension question about Part 1 ONLY (not about Part 2)",
+        "text": "Comprehension question about Part 1 ONLY",
         "options": ["Option A", "Option B", "Option C", "Option D", "Option E"],
         "correctIndex": 0,
-        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese of why the correct answer is right"
+        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese"
       }
     },
     {
       "id": 2,
-      "text": "Second half of the story, continuing directly from Part 1 (${range.min}–${range.max} words). Must complete the story with a clear resolution.",
+      "text": "Second half continuing directly from Part 1 (${range.min}–${range.max} words). Must resolve the story.",
       "question": {
-        "text": "Comprehension question about Part 2 ONLY (not about Part 1)",
+        "text": "Comprehension question about Part 2 ONLY",
         "options": ["Option A", "Option B", "Option C", "Option D", "Option E"],
         "correctIndex": 0,
-        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese of why the correct answer is right"
+        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese"
       }
     }
   ]
 }
 
 Rules:
-- Story: natural narrative, vocabulary and grammar appropriate for ${level}
-- Part 1 must end mid-story (a cliffhanger or natural pause), Part 2 must resolve it
-- Parts must be real continuations — Part 2 begins exactly where Part 1 ended
-- Question 1: tests comprehension of Part 1 ONLY — must be answerable without Part 2
-- Question 2: tests comprehension of Part 2 ONLY — must be answerable without Part 1
-- Each question: exactly 5 options, exactly one clearly correct, all distractors plausible
+- Vocabulary and grammar appropriate for ${level}
+- Part 2 must continue naturally where Part 1 ended
+- Each question tests only the part just heard — do not cross-reference parts
+- Exactly 5 options per question, exactly one correct, all distractors plausible
 - correctIndex: integer 0–4
-- Do NOT include translations, summaries, or Portuguese text of the story`;
+- Do NOT include Portuguese translations of the story text`;
 }
 
 // ── OpenAI call ───────────────────────────────────────────────────────────────
 
-async function callAI(level: string, openaiKey: string): Promise<AIStory> {
+async function callAI(
+  level: string,
+  openaiKey: string,
+  requestId: string,
+): Promise<AIStory> {
   const client = new OpenAI({ apiKey: openaiKey, timeout: 120_000, maxRetries: 1 });
 
+  const t0 = Date.now();
   const resp = await client.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
@@ -119,9 +177,17 @@ async function callAI(level: string, openaiKey: string): Promise<AIStory> {
     temperature: 0.8,
     max_tokens: 6000,
   });
+  const aiMs = Date.now() - t0;
 
   const raw = resp.choices[0]?.message?.content ?? '';
+  const finishReason = resp.choices[0]?.finish_reason ?? 'unknown';
+  const inputTokens = resp.usage?.prompt_tokens ?? 0;
+  const outputTokens = resp.usage?.completion_tokens ?? 0;
+
+  stepLog(requestId, 'ai_done', { aiMs, finishReason, inputTokens, outputTokens, rawLen: raw.length });
+
   if (!raw) throw new Error('AI_EMPTY_RESPONSE');
+  if (finishReason === 'length') throw new Error('AI_OUTPUT_TRUNCATED');
 
   let parsed: AIStory;
   try {
@@ -152,7 +218,6 @@ async function callAI(level: string, openaiKey: string): Promise<AIStory> {
 }
 
 // ── Azure TTS ─────────────────────────────────────────────────────────────────
-// Reuses the same voice/format/endpoint pattern as generate-story-session.ts
 
 function escapeXml(t: string): string {
   return t
@@ -168,6 +233,7 @@ async function synthesizeAudio(
   azureKey: string,
   azureRegion: string,
   partLabel: string,
+  requestId: string,
 ): Promise<Buffer> {
   const ssml =
     `<speak version="1.0" xml:lang="en-US">` +
@@ -175,13 +241,14 @@ async function synthesizeAudio(
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`;
 
-  const url = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  const endpoint = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000);
 
+  const t0 = Date.now();
   let resp: Response;
   try {
-    resp = await fetch(url, {
+    resp = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Ocp-Apim-Subscription-Key': azureKey,
@@ -194,10 +261,15 @@ async function synthesizeAudio(
     });
   } catch (err: unknown) {
     const isAbort = err instanceof Error && err.name === 'AbortError';
-    throw new Error(isAbort ? `AZURE_TTS_TIMEOUT_${partLabel}` : `AZURE_TTS_NETWORK_ERROR_${partLabel}`);
+    const code = isAbort ? `AZURE_TTS_TIMEOUT_${partLabel}` : `AZURE_TTS_NETWORK_ERROR_${partLabel}`;
+    stepLog(requestId, 'tts_fetch_error', { partLabel, code, region: azureRegion });
+    throw new Error(code);
   } finally {
     clearTimeout(timer);
   }
+
+  const ttsMs = Date.now() - t0;
+  stepLog(requestId, 'tts_response', { partLabel, httpStatus: resp.status, ttsMs, region: azureRegion });
 
   if (resp.status === 429) throw new Error(`AZURE_TTS_RATE_LIMITED_${partLabel}`);
   if (resp.status === 401 || resp.status === 403) throw new Error(`AZURE_TTS_AUTH_FAILED_${partLabel}`);
@@ -206,6 +278,7 @@ async function synthesizeAudio(
   const buf = await resp.arrayBuffer();
   if (!buf.byteLength) throw new Error(`AZURE_TTS_EMPTY_AUDIO_${partLabel}`);
 
+  stepLog(requestId, 'tts_audio_received', { partLabel, bytes: buf.byteLength });
   return Buffer.from(buf);
 }
 
@@ -219,22 +292,30 @@ async function uploadAndSign(
   userId: string,
   partId: 1 | 2,
   supabase: SupabaseClient,
+  requestId: string,
 ): Promise<{ url: string; expiresAt: string }> {
   const path = `story-sessions/${userId}/${crypto.randomUUID()}-part${partId}.mp3`;
 
+  const t0 = Date.now();
   const { error: upErr } = await supabase.storage
     .from(BUCKET)
     .upload(path, audio, { contentType: 'audio/mpeg', upsert: false });
 
-  if (upErr) throw new Error(`STORAGE_UPLOAD_PART${partId}: ${upErr.message}`);
+  if (upErr) {
+    stepLog(requestId, 'upload_error', { partId, msg: upErr.message.slice(0, 120) });
+    throw new Error(`STORAGE_UPLOAD_PART${partId}: ${upErr.message}`);
+  }
 
   const { data: signed, error: signErr } = await supabase.storage
     .from(BUCKET)
     .createSignedUrl(path, SIGNED_URL_SECONDS);
 
-  if (signErr || !signed?.signedUrl)
+  if (signErr || !signed?.signedUrl) {
+    stepLog(requestId, 'sign_error', { partId, msg: (signErr?.message ?? 'no URL').slice(0, 120) });
     throw new Error(`STORAGE_SIGN_PART${partId}: ${signErr?.message ?? 'no URL'}`);
+  }
 
+  stepLog(requestId, 'upload_done', { partId, uploadMs: Date.now() - t0 });
   return {
     url: signed.signedUrl,
     expiresAt: new Date(Date.now() + SIGNED_URL_SECONDS * 1000).toISOString(),
@@ -242,7 +323,6 @@ async function uploadAndSign(
 }
 
 // ── HMAC answer token ─────────────────────────────────────────────────────────
-// Reuses same signing logic as generate-story-session.ts
 
 function signToken(correctIndex: number, explanationPt: string, secret: string): string {
   const payload = JSON.stringify({
@@ -254,6 +334,64 @@ function signToken(correctIndex: number, explanationPt: string, secret: string):
   return Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
 }
 
+// ── TTS + upload (shared between first call and retry) ────────────────────────
+
+async function synthesizeAndUpload(
+  ai: AIStory,
+  userId: string,
+  serviceClient: SupabaseClient,
+  azureKey: string,
+  azureRegion: string,
+  secret: string,
+  requestId: string,
+): Promise<ListeningStoryResult> {
+  // Synthesize both parts in parallel
+  const t0 = Date.now();
+  stepLog(requestId, 'tts_start', { region: azureRegion, part1Words: ai.parts[0].text.split(' ').length, part2Words: ai.parts[1].text.split(' ').length });
+
+  const [audio1, audio2] = await Promise.all([
+    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, 'part1', requestId),
+    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, 'part2', requestId),
+  ]);
+  stepLog(requestId, 'tts_all_done', { ttsMs: Date.now() - t0 });
+
+  // Upload both in parallel
+  const t1 = Date.now();
+  const [stored1, stored2] = await Promise.all([
+    uploadAndSign(audio1, userId, 1, serviceClient, requestId),
+    uploadAndSign(audio2, userId, 2, serviceClient, requestId),
+  ]);
+  stepLog(requestId, 'upload_all_done', { uploadMs: Date.now() - t1 });
+
+  // Sign answer tokens
+  const token1 = signToken(ai.parts[0].question.correctIndex, ai.parts[0].question.explanationPt, secret);
+  const token2 = signToken(ai.parts[1].question.correctIndex, ai.parts[1].question.explanationPt, secret);
+
+  return {
+    title: ai.title,
+    level: ai.level,
+    summary: ai.summary,
+    parts: [
+      {
+        id: 1,
+        text: ai.parts[0].text,
+        audioUrl: stored1.url,
+        audioExpiresAt: stored1.expiresAt,
+        question: { prompt: ai.parts[0].question.text, options: ai.parts[0].question.options },
+        answerToken: token1,
+      },
+      {
+        id: 2,
+        text: ai.parts[1].text,
+        audioUrl: stored2.url,
+        audioExpiresAt: stored2.expiresAt,
+        question: { prompt: ai.parts[1].question.text, options: ai.parts[1].question.options },
+        answerToken: token2,
+      },
+    ],
+  };
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export async function generateListeningStory(
@@ -263,64 +401,51 @@ export async function generateListeningStory(
   azureKey: string,
   azureRegion: string,
   secret: string,
+  /** Optional: packed story from a previous call. Skips OpenAI if provided. */
+  storyPackage?: string | null,
 ): Promise<ListeningStoryResult> {
+  const requestId = crypto.randomUUID().slice(0, 8);
+  const totalStart = Date.now();
+
+  stepLog(requestId, 'start', {
+    hasStoryPackage: !!storyPackage,
+    hasOpenaiKey: !!openaiKey,
+    hasAzureKey: !!azureKey,
+    azureRegion: azureRegion || 'NOT_SET',
+    hasSecret: !!secret,
+  });
+
   // 1. Resolve CEFR level from DB
   const level = await resolveUserListeningLevel(serviceClient, userId);
+  stepLog(requestId, 'level_resolved', { level });
 
-  // 2. AI: generate 2-part story with questions
-  const ai = await callAI(level, openaiKey);
+  // 2. Get story content — either from retry package or fresh OpenAI call
+  let ai: AIStory;
+  if (storyPackage) {
+    stepLog(requestId, 'using_story_package');
+    try {
+      ai = unpackStory(storyPackage, secret);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      stepLog(requestId, 'story_package_invalid', { msg });
+      throw new Error(`STORY_PACKAGE_INVALID: ${msg}`);
+    }
+  } else {
+    stepLog(requestId, 'ai_start', { level });
+    ai = await callAI(level, openaiKey, requestId);
+  }
 
-  // 3. Synthesize both audio parts in parallel
-  const [audio1, audio2] = await Promise.all([
-    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, 'part1'),
-    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, 'part2'),
-  ]);
+  // Pack the story now — before TTS — so we can return it on audio failure
+  const packed = packStory(ai, secret);
 
-  // 4. Upload both to Supabase Storage in parallel
-  const [stored1, stored2] = await Promise.all([
-    uploadAndSign(audio1, userId, 1, serviceClient),
-    uploadAndSign(audio2, userId, 2, serviceClient),
-  ]);
-
-  // 5. Sign HMAC answer tokens (correctIndex stays server-side)
-  const token1 = signToken(
-    ai.parts[0].question.correctIndex,
-    ai.parts[0].question.explanationPt,
-    secret,
-  );
-  const token2 = signToken(
-    ai.parts[1].question.correctIndex,
-    ai.parts[1].question.explanationPt,
-    secret,
-  );
-
-  return {
-    title: ai.title,
-    level,
-    summary: ai.summary,
-    parts: [
-      {
-        id: 1,
-        text: ai.parts[0].text,
-        audioUrl: stored1.url,
-        audioExpiresAt: stored1.expiresAt,
-        question: {
-          prompt: ai.parts[0].question.text,
-          options: ai.parts[0].question.options,
-        },
-        answerToken: token1,
-      },
-      {
-        id: 2,
-        text: ai.parts[1].text,
-        audioUrl: stored2.url,
-        audioExpiresAt: stored2.expiresAt,
-        question: {
-          prompt: ai.parts[1].question.text,
-          options: ai.parts[1].question.options,
-        },
-        answerToken: token2,
-      },
-    ],
-  };
+  // 3. TTS + Upload (throws StoryTtsError on failure, carrying the packed story)
+  try {
+    const result = await synthesizeAndUpload(ai, userId, serviceClient, azureKey, azureRegion, secret, requestId);
+    stepLog(requestId, 'complete', { totalMs: Date.now() - totalStart });
+    return result;
+  } catch (err) {
+    const step = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120);
+    stepLog(requestId, 'tts_or_upload_failed', { step, totalMs: Date.now() - totalStart });
+    throw new StoryTtsError(step, packed, step);
+  }
 }

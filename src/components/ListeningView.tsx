@@ -164,6 +164,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
   const [transcriptUnlocked, setTranscriptUnlocked] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [storyData, setStoryData] = useState<ListeningStoryData | null>(null);
+  const [storyPackage, setStoryPackage] = useState<string | null>(null);
   const [currentPartIdx, setCurrentPartIdx] = useState<0 | 1>(0);
   const [attemptsByPart, setAttemptsByPart] = useState<[number, number]>([0, 0]);
   const [showPartTranscript, setShowPartTranscript] = useState(false);
@@ -347,18 +348,28 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId }: Prop
     setStorySelectedOption(null);
     setPhase('generating');
     try {
-      const data = await generateListeningStory();
+      // Pass cached storyPackage on retry — skips OpenAI, re-generates only audio
+      const data = await generateListeningStory(storyPackage);
       setStoryData(data);
+      setStoryPackage(null);
       player.load(data.parts[0].audioUrl);
       player.setOnEnded(() => setPhase('question'));
       setPhase('intro');
     } catch (err) {
       if (err instanceof ListeningApiError) {
         console.error('[listening] generation failed', { status: err.status, code: err.code });
+        if (err.code === 'TTS_FAILED') {
+          const pkg = (err.data as any)?.storyPackage;
+          if (typeof pkg === 'string') setStoryPackage(pkg);
+          setErrorMsg('Não conseguimos gerar o áudio. A história está preservada — clique em "Tentar novamente".');
+          setPhase('error');
+          return;
+        }
+        setErrorMsg(err.message || 'Não conseguimos preparar sua história. Tente novamente.');
       } else {
         console.error('[listening] generation failed', err);
+        setErrorMsg('Não conseguimos preparar sua história. Tente novamente.');
       }
-      setErrorMsg('Não conseguimos preparar sua história. Tente novamente.');
       setPhase('error');
     } finally {
       setStoryGenerating(false);
