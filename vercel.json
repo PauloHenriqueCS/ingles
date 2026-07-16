@@ -7,18 +7,6 @@
   ],
   "crons": [
     {
-      "path": "/api/internal/listening/jobs/dispatch",
-      "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/internal/listening/repair",
-      "schedule": "*/10 * * * *"
-    },
-    {
-      "path": "/api/internal/listening/inventory/ensure",
-      "schedule": "0 6 * * *"
-    },
-    {
       "path": "/api/internal/listening/audit",
       "schedule": "0 7 * * *"
     },
