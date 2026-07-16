@@ -252,6 +252,7 @@ export default async function handler(req: any, res: any): Promise<void> {
   const slug = resolveSlug(req, '/api/internal/listening');
 
   switch (slug) {
+    case 'dispatch':
     case 'jobs/dispatch':      return handleJobsDispatch(req, res);
     case 'repair':             return handleRepair(req, res);
     case 'inventory/ensure':   return handleInventoryEnsure(req, res);
