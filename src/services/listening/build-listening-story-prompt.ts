@@ -77,6 +77,23 @@ JSON schema:
   ]
 }`;
 
+function wordCountHeader(cefrLevel: string): string[] {
+  const range = WORD_COUNT_RANGES[cefrLevel as keyof typeof WORD_COUNT_RANGES];
+  const target = Math.round((range.min + range.max) / 2);
+  return [
+    '',
+    'IMPORTANT — WORD COUNT RULES:',
+    `• Target: approximately ${target} words per text_en block.`,
+    `• Minimum absolute: ${range.min} words — fewer than ${range.min} words is INVALID.`,
+    `• Maximum absolute: ${range.max} words.`,
+    '• Both blocks must independently satisfy this range.',
+    '• Only the words in text_en count — translation_pt and sentences do NOT count.',
+    '• Before returning the JSON, verify the word count of each text_en block.',
+    '• Do not summarize the story to save tokens. Write the full narrative.',
+    `• Do not return the JSON until BOTH blocks contain between ${range.min} and ${range.max} words.`,
+  ];
+}
+
 export function buildStoryUserPrompt(opts: StoryPromptOptions): string {
   const range = WORD_COUNT_RANGES[opts.cefrLevel];
   const lines: string[] = [
@@ -85,6 +102,33 @@ export function buildStoryUserPrompt(opts: StoryPromptOptions): string {
   ];
   if (opts.theme) lines.push(`Theme: ${opts.theme}`);
   if (opts.seed) lines.push(`Seed / additional context: ${opts.seed}`);
-  lines.push('', 'Generate the JSON story now.');
+  lines.push(...wordCountHeader(opts.cefrLevel), '', 'Generate the JSON story now.');
+  return lines.join('\n');
+}
+
+export function buildRetryUserPrompt(
+  opts: StoryPromptOptions,
+  attempt: number,
+  previousError: string,
+): string {
+  const range = WORD_COUNT_RANGES[opts.cefrLevel];
+  const lines: string[] = [
+    `CEFR Level: ${opts.cefrLevel}`,
+    `Words per block: ${range.min}–${range.max}`,
+  ];
+  if (opts.theme) lines.push(`Theme: ${opts.theme}`);
+  if (opts.seed) lines.push(`Seed / additional context: ${opts.seed}`);
+  lines.push(
+    ...wordCountHeader(opts.cefrLevel),
+    '',
+    `Previous attempt ${attempt - 1} failed validation:`,
+    `"${previousError}"`,
+    '',
+    'Regenerate the COMPLETE JSON from scratch.',
+    'Do not fix or complete only part of the JSON — generate the entire object again.',
+    `Each text_en must contain between ${range.min} and ${range.max} words independently.`,
+    '',
+    'Generate the JSON story now.',
+  );
   return lines.join('\n');
 }

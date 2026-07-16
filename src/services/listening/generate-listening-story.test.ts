@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { countWords } from './listening-level-config';
-import { buildStoryUserPrompt } from './build-listening-story-prompt';
+import { buildStoryUserPrompt, buildRetryUserPrompt } from './build-listening-story-prompt';
 import {
   parseStoryJson,
   validateListeningStoryResponse,
@@ -104,6 +104,32 @@ describe('buildStoryUserPrompt', () => {
   });
 });
 
+// ── Group 2b: buildRetryUserPrompt ───────────────────────────────────────────
+
+describe('buildRetryUserPrompt', () => {
+  it('includes "Previous attempt" with the attempt number', () => {
+    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'Block 1 word count (233) is below minimum (400)');
+    expect(prompt).toContain('Previous attempt 1');
+  });
+
+  it('includes the exact previous error message', () => {
+    const error = 'Block 1 word count (233) is below minimum (400) for level A1';
+    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, error);
+    expect(prompt).toContain(error);
+  });
+
+  it('includes instruction to regenerate COMPLETE JSON', () => {
+    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'some error');
+    expect(prompt).toContain('Regenerate the COMPLETE JSON');
+  });
+
+  it('includes the min and max word counts', () => {
+    const prompt = buildRetryUserPrompt({ cefrLevel: 'A1' }, 2, 'some error');
+    expect(prompt).toContain('400');
+    expect(prompt).toContain('475');
+  });
+});
+
 // ── Group 3: parseStoryJson ───────────────────────────────────────────────────
 
 describe('parseStoryJson', () => {
@@ -193,6 +219,37 @@ describe('validateListeningStoryResponse — word count', () => {
   });
 });
 
+// ── Group 5b: validateListeningStoryResponse — word count boundaries ──────────
+
+describe('validateListeningStoryResponse — word count boundaries', () => {
+  it('rejects a block with exactly 399 words', () => {
+    const raw = { ...makeValidRawStory(), blocks: [makeRawBlock(1, 399, 1), makeRawBlock(2, 420, 2)] };
+    expect(() => validateListeningStoryResponse(raw, 'A1')).toThrow(StoryValidationError);
+  });
+
+  it('accepts a block with exactly 475 words (A1 maximum)', () => {
+    const raw = { ...makeValidRawStory(), blocks: [makeRawBlock(1, 475, 1), makeRawBlock(2, 420, 2)] };
+    expect(() => validateListeningStoryResponse(raw, 'A1')).not.toThrow();
+  });
+
+  it('rejects a block with exactly 476 words (one above A1 maximum)', () => {
+    const raw = { ...makeValidRawStory(), blocks: [makeRawBlock(1, 476, 1), makeRawBlock(2, 420, 2)] };
+    expect(() => validateListeningStoryResponse(raw, 'A1')).toThrow(StoryValidationError);
+  });
+
+  it('validates both blocks independently — error in block 2 while block 1 is valid', () => {
+    const raw = { ...makeValidRawStory(), blocks: [makeRawBlock(1, 420, 1), makeRawBlock(2, 200, 2)] };
+    let err: StoryValidationError | null = null;
+    try {
+      validateListeningStoryResponse(raw, 'A1');
+    } catch (e) {
+      err = e as StoryValidationError;
+    }
+    expect(err).toBeInstanceOf(StoryValidationError);
+    expect(err!.message).toContain('Block 2');
+  });
+});
+
 // ── Group 6: validateListeningStoryResponse — question validation ─────────────
 
 describe('validateListeningStoryResponse — question', () => {
@@ -277,6 +334,59 @@ describe('generateListeningStory — mocked callAI', () => {
     );
     expect(result.episodeId).toBeNull();
     expect(mockSupabase).not.toHaveBeenCalled();
+  });
+});
+
+// ── Group 7b: generateListeningStory — retry with error feedback ──────────────
+
+describe('generateListeningStory — retry feedback', () => {
+  function makeTooShortStory(block1Words: number, block2Words: number): string {
+    return JSON.stringify({
+      title: 'Test',
+      synopsis: 'Test synopsis.',
+      blocks: [makeRawBlock(1, block1Words, 1), makeRawBlock(2, block2Words, 2)],
+    });
+  }
+
+  it('first attempt receives normal prompt without "Previous attempt"', async () => {
+    const callAI: AICallFn = vi.fn().mockResolvedValue(JSON.stringify(makeValidRawStory('A1')));
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    const [, firstPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    expect(firstPrompt).not.toContain('Previous attempt');
+  });
+
+  it('second attempt includes error from first attempt', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeTooShortStory(200, 420))
+      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondPrompt).toContain('Previous attempt 1');
+    expect(secondPrompt).toContain('below minimum');
+  });
+
+  it('third attempt includes error from second attempt', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeTooShortStory(200, 420))
+      .mockResolvedValueOnce(makeTooShortStory(250, 420))
+      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(3);
+    const [, thirdPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
+    expect(thirdPrompt).toContain('Previous attempt 2');
+    expect(thirdPrompt).toContain('250');
+  });
+
+  it('error in one block forces full regeneration on next attempt', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeTooShortStory(420, 200))
+      .mockResolvedValueOnce(JSON.stringify(makeValidRawStory('A1')));
+    await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    const [, secondPrompt] = (callAI as ReturnType<typeof vi.fn>).mock.calls[1] as [string, string];
+    expect(secondPrompt).toContain('Regenerate the COMPLETE JSON');
+    expect(secondPrompt).toContain('Block 2');
   });
 });
 

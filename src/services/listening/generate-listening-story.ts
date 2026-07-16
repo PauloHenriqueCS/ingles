@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
-import { STORY_SYSTEM_PROMPT, PROMPT_VERSION, CONTENT_VERSION, buildStoryUserPrompt } from './build-listening-story-prompt';
+import { STORY_SYSTEM_PROMPT, PROMPT_VERSION, CONTENT_VERSION, buildStoryUserPrompt, buildRetryUserPrompt } from './build-listening-story-prompt';
 import { parseStoryJson, validateListeningStoryResponse, StoryParseError, StoryValidationError } from './validate-listening-story';
 import { persistListeningStory, StoryPersistError } from './persist-listening-story';
 import type { ValidatedStory } from './listening-story-schema';
@@ -24,7 +24,7 @@ export class StoryAIUnavailableError extends Error {
   }
 }
 
-const AI_MODEL = 'gpt-4o-mini';
+const AI_MODEL = 'gpt-4o';
 const STORY_TIMEOUT_MS = 90_000;
 const MAX_ATTEMPTS = 3;
 
@@ -74,6 +74,7 @@ export function createDefaultAICallFn(apiKey: string): AICallFn {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
+      max_tokens: 4096,
     });
     return resp.choices[0]?.message?.content ?? '';
   };
@@ -92,13 +93,16 @@ export async function generateListeningStory(
   );
 
   let story: ValidatedStory | null = null;
-  let lastParseError: StoryParseError | null = null;
-  let lastValidationError: StoryValidationError | null = null;
+  let lastError: StoryParseError | StoryValidationError | null = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const currentPrompt = attempt === 1 || lastError === null
+      ? userPrompt
+      : buildRetryUserPrompt(opts, attempt, lastError.message);
+
     let rawText: string;
     try {
-      rawText = await aiCallFn(STORY_SYSTEM_PROMPT, userPrompt);
+      rawText = await aiCallFn(STORY_SYSTEM_PROMPT, currentPrompt);
     } catch (err) {
       if (isTimeoutError(err)) throw new StoryAITimeoutError();
       if (isUnavailableError(err)) throw new StoryAIUnavailableError();
@@ -109,18 +113,17 @@ export async function generateListeningStory(
     try {
       parsed = parseStoryJson(rawText);
     } catch (err) {
-      lastParseError = err as StoryParseError;
+      lastError = err as StoryParseError;
       continue;
     }
 
     try {
       story = validateListeningStoryResponse(parsed, opts.cefrLevel);
-      lastParseError = null;
-      lastValidationError = null;
+      lastError = null;
       break;
     } catch (err) {
       if (err instanceof StoryValidationError) {
-        lastValidationError = err;
+        lastError = err;
         continue;
       }
       throw err;
@@ -128,8 +131,7 @@ export async function generateListeningStory(
   }
 
   if (!story) {
-    if (lastParseError) throw lastParseError;
-    if (lastValidationError) throw lastValidationError;
+    if (lastError) throw lastError;
     throw new StoryParseError('Story generation failed after maximum attempts');
   }
 
