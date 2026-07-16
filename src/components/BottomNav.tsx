@@ -1,5 +1,5 @@
 import {
-  LayoutDashboard, CalendarDays, History, TrendingUp, BookOpen,
+  CalendarDays, History, TrendingUp, BookOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -11,7 +11,6 @@ interface Props {
 }
 
 const tabs: { view: View; label: string; icon: LucideIcon }[] = [
-  { view: 'dashboard', label: 'Início',     icon: LayoutDashboard },
   { view: 'month',     label: 'Calendário', icon: CalendarDays },
   { view: 'history',   label: 'Histórico',  icon: History },
   { view: 'evolution', label: 'Evolução',   icon: TrendingUp },

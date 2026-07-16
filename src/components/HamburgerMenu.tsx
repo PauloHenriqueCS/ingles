@@ -1,5 +1,5 @@
 import {
-  House, LayoutDashboard, CalendarDays,
+  House, CalendarDays,
   History, TrendingUp, BookOpen, BotMessageSquare, Volume2, LogOut, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -14,7 +14,6 @@ interface MenuItem {
 
 const MENU_ITEMS: MenuItem[] = [
   { view: 'home',         label: 'Página inicial',   icon: House },
-  { view: 'dashboard',    label: 'Início',           icon: LayoutDashboard },
   { view: 'month',        label: 'Calendário',       icon: CalendarDays },
   { view: 'history',      label: 'Histórico',        icon: History },
   { view: 'evolution',    label: 'Evolução',         icon: TrendingUp },
