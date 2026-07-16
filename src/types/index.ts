@@ -244,6 +244,7 @@ export interface RecurringMistake {
   correct: string;
   explanation: string;
   count: number;
+  lastSeen?: string;
 }
 
 export interface EnglishLearningMemory {

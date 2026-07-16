@@ -128,7 +128,8 @@ async function runSynthesisOnce(
   let bookmarkOrder = 0;
   let wordOrder = 0;
 
-  synthesizer.bookmarkReached = (_s, e) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  synthesizer.bookmarkReached = (_s: unknown, e: any) => {
     bookmarkEvents.push({
       bookmarkName: e.text,
       audioOffsetTicks: e.audioOffset,
@@ -136,7 +137,8 @@ async function runSynthesisOnce(
     });
   };
 
-  synthesizer.wordBoundary = (_s, e) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  synthesizer.wordBoundary = (_s: unknown, e: any) => {
     wordBoundaryEvents.push({
       text: e.text,
       audioOffsetTicks: e.audioOffset,
@@ -161,7 +163,8 @@ async function runSynthesisOnce(
 
     synthesizer.speakSsmlAsync(
       ssml,
-      result => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (result: any) => {
         clearTimeout(timeoutId);
         if (!synthesizerClosed) {
           synthesizerClosed = true;
@@ -176,7 +179,8 @@ async function runSynthesisOnce(
           _sdkResult: result,
         } as ListeningSynthesisRawResult & { _sdkResult: unknown });
       },
-      error => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (error: any) => {
         clearTimeout(timeoutId);
         if (!synthesizerClosed) {
           synthesizerClosed = true;

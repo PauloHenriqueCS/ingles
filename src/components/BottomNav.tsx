@@ -1,6 +1,5 @@
 import {
-  LayoutDashboard, CalendarDays, ChartSpline, Search,
-  History, TrendingUp, BrainCircuit,
+  LayoutDashboard, CalendarDays, History, TrendingUp, BookOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -12,13 +11,11 @@ interface Props {
 }
 
 const tabs: { view: View; label: string; icon: LucideIcon }[] = [
-  { view: 'dashboard', label: 'Painel',     icon: LayoutDashboard },
+  { view: 'dashboard', label: 'Início',     icon: LayoutDashboard },
   { view: 'month',     label: 'Calendário', icon: CalendarDays },
-  { view: 'year',      label: 'Anual',      icon: ChartSpline },
-  { view: 'filters',   label: 'Filtros',    icon: Search },
   { view: 'history',   label: 'Histórico',  icon: History },
   { view: 'evolution', label: 'Evolução',   icon: TrendingUp },
-  { view: 'memory',    label: 'Memória',    icon: BrainCircuit },
+  { view: 'memory',    label: 'Revisão',    icon: BookOpen },
 ];
 
 export default function BottomNav({ current, onChange }: Props) {

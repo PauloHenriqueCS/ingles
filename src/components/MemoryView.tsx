@@ -1,25 +1,42 @@
-import { useState, useEffect } from 'react';
-import { BrainCircuit, RefreshCw, Loader2, Target, Rocket } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { BookOpen, RefreshCw, Loader2, Search } from 'lucide-react';
 import { EnglishLearningMemory, RecurringMistake, VocabularyItem, View } from '../types';
 import { fetchLearningMemory, updateLearningMemory } from '../lib/learningMemory';
-import { LearningSettings } from '../lib/learningSettings';
+import type { LearningSettings } from '../lib/learningSettings';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 type LoadState = 'loading' | 'done' | 'empty' | 'error';
+type TabKey = 'errors' | 'grammar' | 'vocabulary';
 
 interface Props {
   onNavigate: (v: View) => void;
   onSettingsChange?: (settings: LearningSettings) => void;
 }
 
-export default function MemoryView({ onNavigate }: Props) {
+const TABS: { key: TabKey; label: string }[] = [
+  { key: 'errors',     label: 'Erros' },
+  { key: 'grammar',    label: 'Gramática' },
+  { key: 'vocabulary', label: 'Vocabulário' },
+];
+
+const PAGE_SIZE = 5;
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemoryView({ onNavigate: _nav, onSettingsChange: _onChange }: Props) {
   const [memory, setMemory] = useState<EnglishLearningMemory | null>(null);
   const [loadState, setLoadState] = useState<LoadState>('loading');
-  const [isRecalculating, setIsRecalculating] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>('errors');
+  const [errorsPage, setErrorsPage] = useState(1);
+  const [vocabSearch, setVocabSearch] = useState('');
 
   useEffect(() => { load(); }, []);
 
   async function load() {
     setLoadState('loading');
+    setErrorsPage(1);
     try {
       const m = await fetchLearningMemory();
       if (m) { setMemory(m); setLoadState('done'); }
@@ -29,40 +46,79 @@ export default function MemoryView({ onNavigate }: Props) {
     }
   }
 
-  async function recalculate() {
-    if (isRecalculating) return;
-    setIsRecalculating(true);
+  async function update() {
+    if (isUpdating) return;
+    setIsUpdating(true);
     try {
       const m = await updateLearningMemory();
       setMemory(m);
       setLoadState('done');
+      setErrorsPage(1);
     } catch {
-      /* silent — memory UI stays as-is */
+      /* silent — UI keeps existing data */
     } finally {
-      setIsRecalculating(false);
+      setIsUpdating(false);
     }
   }
 
+  const visibleErrors = useMemo(() => {
+    if (!memory) return [];
+    return memory.recurringMistakes.slice(0, errorsPage * PAGE_SIZE);
+  }, [memory, errorsPage]);
+
+  const hasMoreErrors = memory
+    ? visibleErrors.length < memory.recurringMistakes.length
+    : false;
+
+  const filteredVocab = useMemo(() => {
+    if (!memory) return [];
+    const q = vocabSearch.trim().toLowerCase();
+    if (!q) return memory.vocabularyLearned;
+    return memory.vocabularyLearned.filter(
+      (v) =>
+        v.word.toLowerCase().includes(q) ||
+        v.meaningPtBr.toLowerCase().includes(q) ||
+        (v.example ?? '').toLowerCase().includes(q),
+    );
+  }, [memory, vocabSearch]);
+
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 z-10">
-        <h1 className="text-base font-semibold text-slate-100">Memória de aprendizado</h1>
-        <p className="text-xs text-slate-400 mt-0.5">O app usa seus erros e revisões para personalizar os próximos treinos.</p>
+      <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 z-10 space-y-2.5">
+        <h1 className="text-base font-semibold text-slate-100">Revisão</h1>
+
+        <div className="flex gap-1.5">
+          {TABS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                activeTab === key
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-700 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </header>
 
-      <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-5 pb-20">
-
+      <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full pb-20">
         {loadState === 'loading' && (
           <div className="flex flex-col items-center justify-center py-20 space-y-3">
             <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            <p className="text-slate-400 text-sm">Carregando sua memória de aprendizado...</p>
+            <p className="text-slate-400 text-sm">Carregando revisão…</p>
           </div>
         )}
 
         {loadState === 'error' && (
           <div className="bg-red-900/30 border border-red-800 rounded-xl p-6 text-center space-y-3">
-            <p className="text-red-300 text-sm">Não foi possível carregar sua memória agora.</p>
-            <button onClick={load} className="text-xs text-slate-400 hover:text-slate-200 transition-colors">
+            <p className="text-red-300 text-sm">Não foi possível carregar os dados de revisão.</p>
+            <button
+              onClick={load}
+              className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
               Tentar novamente
             </button>
           </div>
@@ -70,180 +126,130 @@ export default function MemoryView({ onNavigate }: Props) {
 
         {loadState === 'empty' && (
           <div className="flex flex-col items-center justify-center py-16 text-center space-y-4">
-            <BrainCircuit className="w-12 h-12 text-slate-500 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-            <p className="text-slate-300 font-medium">Sua memória ainda está vazia.</p>
-            <p className="text-slate-500 text-sm">Ela será criada automaticamente após suas primeiras revisões, ou clique abaixo para calcular agora.</p>
+            <BookOpen className="w-12 h-12 text-slate-500 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+            <p className="text-slate-300 font-medium">Ainda não há dados de revisão.</p>
+            <p className="text-slate-500 text-sm">
+              Os dados são gerados automaticamente após as suas avaliações.
+            </p>
             <button
-              onClick={recalculate}
-              disabled={isRecalculating}
-              className="mt-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium transition-colors"
+              onClick={update}
+              disabled={isUpdating}
+              className="mt-1 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium transition-colors"
             >
-              {isRecalculating ? 'Calculando...' : 'Calcular memória agora'}
+              {isUpdating ? 'Calculando…' : 'Calcular agora'}
             </button>
           </div>
         )}
 
         {loadState === 'done' && memory && (
-          <>
-            {/* Recalculate button */}
+          <div className="space-y-4">
+            {activeTab === 'errors' && (
+              <ErrorsTab
+                mistakes={visibleErrors}
+                hasMore={hasMoreErrors}
+                onShowMore={() => setErrorsPage((p) => p + 1)}
+              />
+            )}
+
+            {activeTab === 'grammar' && (
+              <GrammarTab topics={memory.grammarFocus} />
+            )}
+
+            {activeTab === 'vocabulary' && (
+              <VocabularyTab
+                items={filteredVocab}
+                total={memory.vocabularyLearned.length}
+                search={vocabSearch}
+                onSearchChange={setVocabSearch}
+              />
+            )}
+
             <button
-              onClick={recalculate}
-              disabled={isRecalculating}
-              className="w-full py-2 rounded-xl text-xs text-slate-500 hover:text-slate-300 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 transition-colors"
+              onClick={update}
+              disabled={isUpdating}
+              className="w-full py-2 rounded-xl text-xs text-slate-600 hover:text-slate-400 disabled:opacity-40 transition-colors flex items-center justify-center gap-1.5"
             >
-              {isRecalculating ? (
-                <span className="flex items-center justify-center gap-1.5">
-                  <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" strokeWidth={2} />
-                  Recalculando...
-                </span>
+              {isUpdating ? (
+                <>
+                  <Loader2 className="w-3 h-3 shrink-0 animate-spin" strokeWidth={2} aria-hidden="true" />
+                  Atualizando…
+                </>
               ) : (
-                <span className="flex items-center justify-center gap-1.5">
-                  <RefreshCw className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-                  Recalcular memória
-                </span>
+                <>
+                  <RefreshCw className="w-3 h-3 shrink-0" strokeWidth={2} aria-hidden="true" />
+                  Atualizar análise
+                </>
               )}
             </button>
-
-            {/* Card 1 — Resumo */}
-            <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-              <SectionTitle>Resumo</SectionTitle>
-              <div className="grid grid-cols-2 gap-3">
-                <MiniCard label="Nível atual" value={memory.currentLevel} highlight="text-blue-400" />
-                <MiniCard label="Média geral" value={`${memory.averageScore}/100`} highlight={scoreColor(memory.averageScore)} />
-                <MiniCard label="Total de revisões" value={String(memory.totalReviews)} />
-                <MiniCard label="Sequência atual" value={`${memory.currentStreak} dias`} />
-              </div>
-            </section>
-
-            {/* Card 2 — Diagnóstico */}
-            <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-              <SectionTitle>Diagnóstico</SectionTitle>
-              <div className="grid grid-cols-2 gap-3">
-                {memory.weakestSkill && (
-                  <div className="bg-red-900/20 border border-red-800/30 rounded-lg p-3">
-                    <p className="text-xs text-slate-500 mb-1">Ponto mais fraco</p>
-                    <p className="text-sm font-semibold text-red-400">{skillLabel(memory.weakestSkill)}</p>
-                  </div>
-                )}
-                {memory.strongestSkill && (
-                  <div className="bg-green-900/20 border border-green-800/30 rounded-lg p-3">
-                    <p className="text-xs text-slate-500 mb-1">Ponto mais forte</p>
-                    <p className="text-sm font-semibold text-green-400">{skillLabel(memory.strongestSkill)}</p>
-                  </div>
-                )}
-              </div>
-              {memory.teacherSummary && (
-                <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-4">
-                  <p className="text-xs text-blue-400 font-medium uppercase tracking-wider mb-1.5">Resumo do professor</p>
-                  <p className="text-sm text-slate-200 leading-relaxed">{memory.teacherSummary}</p>
-                </div>
-              )}
-              {memory.recommendedNextFocus && (
-                <div className="bg-amber-900/20 border border-amber-800/30 rounded-xl p-4">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <Target className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
-                    <p className="text-xs text-amber-400 font-medium uppercase tracking-wider">Foco recomendado</p>
-                  </div>
-                  <p className="text-sm text-slate-200 leading-relaxed">{memory.recommendedNextFocus}</p>
-                </div>
-              )}
-            </section>
-
-            {/* Card 3 — Erros recorrentes */}
-            <section className="bg-slate-800 rounded-xl p-5 space-y-4">
-              <SectionTitle>Erros recorrentes</SectionTitle>
-              {memory.recurringMistakes.length === 0 ? (
-                <p className="text-xs text-slate-500">Ainda não há erros suficientes registrados.</p>
-              ) : (
-                memory.recurringMistakes.slice(0, 5).map((m, i) => (
-                  <MistakeRow key={i} mistake={m} />
-                ))
-              )}
-            </section>
-
-            {/* Card 4 — Gramática para revisar */}
-            {memory.grammarFocus.length > 0 && (
-              <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-                <SectionTitle>Gramática para revisar</SectionTitle>
-                <div className="flex flex-wrap gap-2">
-                  {memory.grammarFocus.map((g, i) => (
-                    <span key={i} className="px-2.5 py-1 bg-purple-900/40 border border-purple-800/40 rounded-lg text-xs text-purple-300 font-medium">
-                      {g}
-                    </span>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {/* Card 5 — Vocabulário aprendido */}
-            <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-              <SectionTitle>Vocabulário aprendido</SectionTitle>
-              {memory.vocabularyLearned.length === 0 ? (
-                <p className="text-xs text-slate-500">Vocabulário aparecerá aqui após suas próximas revisões.</p>
-              ) : (
-                <div className="space-y-3">
-                  {memory.vocabularyLearned.slice(0, 10).map((v, i) => (
-                    <VocabRow key={i} item={v} />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* Card 6 — Próximo treino */}
-            {memory.recommendedNextTheme && (
-              <section className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Rocket className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
-                  <SectionTitle className="text-purple-400">Próximo treino recomendado</SectionTitle>
-                </div>
-                <p className="text-slate-200 text-sm leading-relaxed">{memory.recommendedNextTheme}</p>
-                <button
-                  onClick={() => onNavigate('dashboard')}
-                  className="mt-1 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
-                >
-                  Começar treino
-                </button>
-              </section>
-            )}
-          </>
+          </div>
         )}
-
       </div>
     </div>
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── Errors tab ────────────────────────────────────────────────────────────────
 
-function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <p className={`text-xs font-medium uppercase tracking-wider ${className ?? 'text-slate-400'}`}>
-      {children}
-    </p>
-  );
-}
+function ErrorsTab({
+  mistakes,
+  hasMore,
+  onShowMore,
+}: {
+  mistakes: RecurringMistake[];
+  hasMore: boolean;
+  onShowMore: () => void;
+}) {
+  if (mistakes.length === 0) {
+    return (
+      <div className="bg-slate-800 rounded-xl p-6 text-center">
+        <p className="text-slate-400 text-sm">Nenhum erro registrado ainda.</p>
+        <p className="text-slate-500 text-xs mt-1">
+          Os erros são extraídos das avaliações de IA dos seus textos.
+        </p>
+      </div>
+    );
+  }
 
-function MiniCard({ label, value, highlight }: { label: string; value: string; highlight?: string }) {
   return (
-    <div className="bg-slate-700/50 rounded-lg p-3">
-      <p className="text-xs text-slate-500 mb-1">{label}</p>
-      <p className={`text-xl font-bold tabular-nums ${highlight ?? 'text-slate-100'}`}>{value}</p>
+    <div className="space-y-3">
+      <div className="bg-slate-800 rounded-xl p-4 divide-y divide-slate-700">
+        {mistakes.map((m, i) => (
+          <MistakeCard key={i} mistake={m} />
+        ))}
+      </div>
+      {hasMore && (
+        <button
+          onClick={onShowMore}
+          className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          Ver mais
+        </button>
+      )}
     </div>
   );
 }
 
-function MistakeRow({ mistake }: { mistake: RecurringMistake }) {
+function MistakeCard({ mistake }: { mistake: RecurringMistake }) {
   return (
-    <div className="space-y-1 border-b border-slate-700 last:border-0 pb-3 last:pb-0">
-      <div className="flex gap-2 text-xs">
-        <span className="text-slate-500 shrink-0">Escrito:</span>
-        <span className="text-red-400 italic">"{mistake.original}"</span>
+    <div className="py-4 first:pt-0 last:pb-0 space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
         {mistake.count > 1 && (
-          <span className="ml-auto text-slate-600">×{mistake.count}</span>
+          <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-red-900/40 text-red-400">
+            {mistake.count}× recorrente
+          </span>
+        )}
+        {mistake.lastSeen && (
+          <span className="text-xs text-slate-600 ml-auto">
+            {formatDate(mistake.lastSeen)}
+          </span>
         )}
       </div>
       <div className="flex gap-2 text-xs">
-        <span className="text-slate-500 shrink-0">Correto:</span>
+        <span className="text-slate-500 shrink-0 w-16">Escrito:</span>
+        <span className="text-red-400 italic">"{mistake.original}"</span>
+      </div>
+      <div className="flex gap-2 text-xs">
+        <span className="text-slate-500 shrink-0 w-16">Correto:</span>
         <span className="text-green-400 italic">"{mistake.correct}"</span>
       </div>
       <p className="text-xs text-slate-400 leading-relaxed">{mistake.explanation}</p>
@@ -251,10 +257,99 @@ function MistakeRow({ mistake }: { mistake: RecurringMistake }) {
   );
 }
 
-function VocabRow({ item }: { item: VocabularyItem }) {
+// ── Grammar tab ───────────────────────────────────────────────────────────────
+
+function GrammarTab({ topics }: { topics: string[] }) {
+  if (topics.length === 0) {
+    return (
+      <div className="bg-slate-800 rounded-xl p-6 text-center">
+        <p className="text-slate-400 text-sm">Nenhum tópico identificado ainda.</p>
+        <p className="text-slate-500 text-xs mt-1">
+          Os tópicos gramaticais são detectados automaticamente nos seus erros.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="border-b border-slate-700 last:border-0 pb-3 last:pb-0">
-      <div className="flex items-baseline gap-2">
+    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
+      <p className="text-xs text-slate-500">Tópicos identificados para revisão:</p>
+      <div className="flex flex-wrap gap-2">
+        {topics.map((topic, i) => (
+          <span
+            key={i}
+            className="px-3 py-1.5 bg-purple-900/30 border border-purple-800/40 rounded-lg text-sm text-purple-300 font-medium"
+          >
+            {topic}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Vocabulary tab ────────────────────────────────────────────────────────────
+
+function VocabularyTab({
+  items,
+  total,
+  search,
+  onSearchChange,
+}: {
+  items: VocabularyItem[];
+  total: number;
+  search: string;
+  onSearchChange: (s: string) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="relative">
+        <Search
+          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"
+          strokeWidth={2}
+          aria-hidden="true"
+        />
+        <input
+          type="search"
+          placeholder="Buscar palavra…"
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          className="w-full bg-slate-800 rounded-xl pl-9 pr-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        />
+      </div>
+
+      {items.length === 0 && search.trim() ? (
+        <div className="bg-slate-800 rounded-xl p-6 text-center">
+          <p className="text-slate-400 text-sm">Nenhuma palavra encontrada para "{search}".</p>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="bg-slate-800 rounded-xl p-6 text-center">
+          <p className="text-slate-400 text-sm">
+            Vocabulário aparecerá aqui após suas próximas revisões.
+          </p>
+        </div>
+      ) : (
+        <div className="bg-slate-800 rounded-xl p-4 space-y-1">
+          <p className="text-xs text-slate-500 mb-3">
+            {search.trim()
+              ? `${items.length} de ${total} palavra${total !== 1 ? 's' : ''}`
+              : `${total} palavra${total !== 1 ? 's' : ''}`}
+          </p>
+          <div className="divide-y divide-slate-700">
+            {items.map((v, i) => (
+              <VocabCard key={i} item={v} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VocabCard({ item }: { item: VocabularyItem }) {
+  return (
+    <div className="py-3 first:pt-0 last:pb-0">
+      <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-blue-400 font-semibold text-sm">{item.word}</span>
         <span className="text-slate-500 text-xs">{item.meaningPtBr}</span>
       </div>
@@ -265,18 +360,16 @@ function VocabRow({ item }: { item: VocabularyItem }) {
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helper ────────────────────────────────────────────────────────────────────
 
-function scoreColor(score: number): string {
-  return score >= 75 ? 'text-green-400' : score >= 50 ? 'text-amber-400' : 'text-red-400';
-}
-
-function skillLabel(skill: string): string {
-  const map: Record<string, string> = {
-    grammar: 'Gramática',
-    vocabulary: 'Vocabulário',
-    naturalness: 'Naturalidade',
-    fluency: 'Fluência',
-  };
-  return map[skill] ?? skill;
+function formatDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: '2-digit',
+    });
+  } catch {
+    return '';
+  }
 }

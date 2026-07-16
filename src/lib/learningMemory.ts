@@ -144,7 +144,8 @@ export function buildLearningMemoryFromReviews(
   const weakest = skillValues.reduce((min, cur) => (cur.avg < min.avg ? cur : min));
   const strongest = skillValues.reduce((max, cur) => (cur.avg > max.avg ? cur : max));
 
-  // Recurring mistakes: count duplicates by original+correct, sort by frequency
+  // Recurring mistakes: count duplicates by original+correct, sort by frequency then recency.
+  // sorted is DESC (newest first), so the first time a key is seen is its most recent occurrence.
   const mistakeMap = new Map<string, RecurringMistake>();
   for (const r of sorted) {
     for (const m of r.mainMistakes ?? []) {
@@ -153,12 +154,22 @@ export function buildLearningMemoryFromReviews(
       if (mistakeMap.has(key)) {
         mistakeMap.get(key)!.count++;
       } else {
-        mistakeMap.set(key, { original: m.original, correct: m.correct, explanation: m.explanation, count: 1 });
+        mistakeMap.set(key, {
+          original: m.original,
+          correct: m.correct,
+          explanation: m.explanation,
+          count: 1,
+          lastSeen: r.createdAt,
+        });
       }
     }
   }
   const recurringMistakes = Array.from(mistakeMap.values())
-    .sort((a, b) => b.count - a.count)
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      if (a.lastSeen && b.lastSeen) return b.lastSeen.localeCompare(a.lastSeen);
+      return 0;
+    })
     .slice(0, 10);
 
   const grammarFocus = extractGrammarFocus(sorted);

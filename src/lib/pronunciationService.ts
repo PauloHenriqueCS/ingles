@@ -256,7 +256,8 @@ export function createRecognitionSession(options: PronunciationServiceOptions): 
           );
       }
 
-      recognizer.recognized = (_s, e) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognizer.recognized = (_s: unknown, e: any) => {
         if (e.result.reason !== ResultReason.RecognizedSpeech) return;
         const json = e.result.properties?.getProperty(PropertyId.SpeechServiceResponse_JsonResult);
         if (!json) return;
@@ -267,7 +268,8 @@ export function createRecognitionSession(options: PronunciationServiceOptions): 
         }
       };
 
-      recognizer.canceled = (_s, e) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognizer.canceled = (_s: unknown, e: any) => {
         if (done) return;
         if (e.reason === CancellationReason.EndOfStream) {
           finish();

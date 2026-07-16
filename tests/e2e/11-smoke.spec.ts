@@ -99,7 +99,7 @@ test('smoke: dashboard é acessível via menu', async ({ page }) => {
     await hamburger.click();
     await page.waitForTimeout(300);
 
-    const dashItem = page.getByText('Dashboard').or(page.getByText('dashboard')).first();
+    const dashItem = page.getByText('Início').or(page.getByText('Dashboard')).first();
     if (await dashItem.isVisible({ timeout: 2_000 })) {
       await dashItem.click();
       await page.waitForTimeout(500);
