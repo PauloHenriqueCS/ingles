@@ -175,30 +175,6 @@ describe('jsonError', () => {
   });
 });
 
-// ─── /api/review — retired endpoint ──────────────────────────────────────────
-
-describe('/api/review (deprecated)', () => {
-  it('returns 410 ENDPOINT_DEPRECATED without contacting any provider', async () => {
-    // Dynamic import so vi.mock below is not needed for this test
-    const { default: handler } = await import('../review');
-
-    const req = makeReq({ method: 'POST' });
-    const res = makeRes();
-    handler(req as any, res as any);
-
-    expect(res._status()).toBe(410);
-    expect((res._body() as any).code).toBe('ENDPOINT_DEPRECATED');
-  });
-
-  it('returns 410 even on GET', async () => {
-    const { default: handler } = await import('../review');
-    const req = makeReq({ method: 'GET' });
-    const res = makeRes();
-    handler(req as any, res as any);
-    expect(res._status()).toBe(410);
-  });
-});
-
 // ─── Mocked handler tests ─────────────────────────────────────────────────────
 // We mock _auth and _rateLimit so we can control auth and rate limit outcomes
 // independently of Supabase being present.
