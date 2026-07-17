@@ -210,7 +210,7 @@ async function handleSupply(req: any, res: any): Promise<void> {
         const t0 = Date.now();
         const result = await ensureListeningInventory(supabase, { targetLevel: level as CEFRLevel | undefined, source: 'admin' });
         const durationMs = Date.now() - t0;
-        safeLog('supply', 'generation_triggered', 200, { level: level ?? 'all', ...result, durationMs });
+        safeLog('supply', 'generation_triggered', 200, { level: level ?? 'all', created: result.created, levels: result.levels.join(','), durationMs });
         return res.status(200).json({ success: true, action: 'generate', level: level ?? 'all', pipelinesCreated: result.created, levelsAffected: result.levels, durationMs });
       } catch (err) {
         safeLog('supply', 'generation_error', 500, { level: level ?? 'all', error: String(err) });
