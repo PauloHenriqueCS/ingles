@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && tsc -p tsconfig.gateway.json && vite build",
+    "typecheck:gateway": "tsc -p tsconfig.gateway.json",
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",

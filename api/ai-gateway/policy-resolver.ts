@@ -46,7 +46,7 @@ function mostSpecificMode(
 
 // ── In-memory policy cache ────────────────────────────────────────────────────
 
-const DEFAULT_TTL_MS = 30_000;
+const DEFAULT_TTL_MS = 5_000;
 
 interface CacheEntry {
   policy: GatewayPolicy;
@@ -74,17 +74,19 @@ function createServiceClient(): SupabaseClient | null {
 export class GatewayPolicyResolver implements PolicyResolverInterface {
   private readonly supabase: SupabaseClient | null;
   private readonly ttlMs: number;
+  private readonly clock: () => number;
   private readonly cache = new Map<string, CacheEntry>();
 
-  constructor(supabase?: SupabaseClient | null, ttlMs = DEFAULT_TTL_MS) {
+  constructor(supabase?: SupabaseClient | null, ttlMs = DEFAULT_TTL_MS, clock: () => number = Date.now) {
     this.supabase = supabase !== undefined ? supabase : createServiceClient();
     this.ttlMs = ttlMs;
+    this.clock = clock;
   }
 
   async resolvePolicy(context: GatewayCallContext): Promise<GatewayPolicy> {
     const cacheKey = this.buildCacheKey(context);
     const cached = this.cache.get(cacheKey);
-    if (cached && Date.now() < cached.expiresAt) {
+    if (cached && this.clock() < cached.expiresAt) {
       return cached.policy;
     }
 
@@ -97,7 +99,7 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
       return { gatewayMode: 'legacy', runtimeStatus: 'enabled' };
     }
 
-    this.cache.set(cacheKey, { policy, expiresAt: Date.now() + this.ttlMs });
+    this.cache.set(cacheKey, { policy, expiresAt: this.clock() + this.ttlMs });
     return policy;
   }
 

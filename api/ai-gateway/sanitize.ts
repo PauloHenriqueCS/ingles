@@ -85,6 +85,7 @@ export interface SanitizedError {
   provider?: string;
   model?: string;
   latencyMs?: number;
+  [key: string]: unknown;
 }
 
 const SENSITIVE_MESSAGE_PATTERN = /sk-|bearer|key=|password|token|secret|service_role/i;

@@ -31,6 +31,7 @@ import type {
   CompleteEventParams,
   FailEventParams,
   CreateSessionParams,
+  PolicyResolverInterface,
 } from '../ai-gateway/index';
 
 import {
@@ -113,11 +114,11 @@ function makeMockRepo(overrides: Partial<UsageRepositoryInterface> = {}): UsageR
   };
 }
 
-function makeMockPolicyResolver(policy: GatewayPolicy): { resolvePolicy: ReturnType<typeof vi.fn>; invalidate: ReturnType<typeof vi.fn> } {
+function makeMockPolicyResolver(policy: GatewayPolicy): PolicyResolverInterface {
   return {
     resolvePolicy: vi.fn().mockResolvedValue(policy),
     invalidate: vi.fn(),
-  };
+  } as unknown as PolicyResolverInterface;
 }
 
 function makeDeps(policy: GatewayPolicy, repoOverrides?: Partial<UsageRepositoryInterface>): GatewayDeps & {
@@ -481,18 +482,18 @@ describe('GatewayPolicyResolver', () => {
       })),
     };
 
-    // TTL of 0 so every call fetches
-    const resolver = new GatewayPolicyResolver(mockSupabase as any, 0);
+    let fakeTime = 1000;
+    const fakeClock = () => fakeTime;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 5000, fakeClock);
     const ctx = baseContext();
 
     const first = await resolver.resolvePolicy(ctx);
     expect(first.gatewayMode).toBe('observe');
 
-    // Wait for cache to expire
-    await new Promise(r => setTimeout(r, 1));
+    fakeTime = 7000; // advance clock past TTL (1000 + 5000 + 1000)
 
     const second = await resolver.resolvePolicy(ctx);
-    // Should use last known good policy
+    // Should fall back to last known good policy
     expect(second.gatewayMode).toBe('observe');
   });
 
@@ -924,6 +925,133 @@ describe('SupabaseUsageRepository.completeSession', () => {
 
     await expect(repo.completeSession('id', -5)).rejects.toThrow('negative');
     expect(mockClient.from).not.toHaveBeenCalled();
+  });
+});
+
+// ── TTL and clock injection ───────────────────────────────────────────────────
+
+describe('GatewayPolicyResolver — TTL and clock injection', () => {
+  it('reuses cached policy when clock has not advanced past TTL', async () => {
+    const mockSupabase = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          or: vi.fn().mockResolvedValue({
+            data: [{ scope_type: 'global', gateway_mode: 'observe', runtime_status: 'enabled' }],
+            error: null,
+          }),
+        }),
+      }),
+    };
+
+    let fakeTime = 1000;
+    const fakeClock = () => fakeTime;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 5000, fakeClock);
+    const ctx = baseContext();
+
+    await resolver.resolvePolicy(ctx);
+    fakeTime = 5999; // still within TTL: 1000 + 5000 - 1
+    await resolver.resolvePolicy(ctx);
+
+    expect(mockSupabase.from).toHaveBeenCalledTimes(1); // second call was a cache hit
+  });
+
+  it('re-fetches policy after clock advances past TTL', async () => {
+    const mockSupabase = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          or: vi.fn().mockResolvedValue({
+            data: [{ scope_type: 'global', gateway_mode: 'observe', runtime_status: 'enabled' }],
+            error: null,
+          }),
+        }),
+      }),
+    };
+
+    let fakeTime = 1000;
+    const fakeClock = () => fakeTime;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 5000, fakeClock);
+    const ctx = baseContext();
+
+    await resolver.resolvePolicy(ctx);
+    fakeTime = 6001; // past TTL: 1000 + 5000 + 1
+    await resolver.resolvePolicy(ctx);
+
+    expect(mockSupabase.from).toHaveBeenCalledTimes(2); // second call hit DB
+  });
+
+  it('injected clock determines TTL boundary precisely', async () => {
+    const mockSupabase = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          or: vi.fn().mockResolvedValue({
+            data: [{ scope_type: 'global', gateway_mode: 'legacy', runtime_status: 'enabled' }],
+            error: null,
+          }),
+        }),
+      }),
+    };
+
+    let fakeTime = 0;
+    const fakeClock = () => fakeTime;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 100, fakeClock);
+    const ctx = baseContext();
+
+    await resolver.resolvePolicy(ctx); // fetch at t=0, expiresAt=100
+    fakeTime = 100; // exactly at boundary — clock() < expiresAt is 100 < 100 = false → expired
+    await resolver.resolvePolicy(ctx);
+
+    expect(mockSupabase.from).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidation forces re-fetch even when clock is within TTL', async () => {
+    const mockSupabase = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          or: vi.fn().mockResolvedValue({
+            data: [{ scope_type: 'global', gateway_mode: 'observe', runtime_status: 'enabled' }],
+            error: null,
+          }),
+        }),
+      }),
+    };
+
+    const fakeClock = () => 1000; // clock never advances
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 60_000, fakeClock);
+    const ctx = baseContext();
+
+    await resolver.resolvePolicy(ctx); // fetch #1, cache valid until t=61000
+    resolver.invalidate();             // clear cache while still within TTL
+    await resolver.resolvePolicy(ctx); // must fetch again — not from cache
+
+    expect(mockSupabase.from).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns stale policy when re-fetch fails after TTL expires, no real wait needed', async () => {
+    let callCount = 0;
+    const mockSupabase = {
+      from: vi.fn().mockImplementation(() => ({
+        select: () => ({
+          or: () => {
+            callCount++;
+            return callCount === 1
+              ? Promise.resolve({ data: [{ scope_type: 'global', gateway_mode: 'observe', runtime_status: 'enabled' }], error: null })
+              : Promise.resolve({ data: null, error: { message: 'DB down' } });
+          },
+        }),
+      })),
+    };
+
+    let fakeTime = 1000;
+    const fakeClock = () => fakeTime;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, 5000, fakeClock);
+    const ctx = baseContext();
+
+    const p1 = await resolver.resolvePolicy(ctx);
+    expect(p1.gatewayMode).toBe('observe');
+
+    fakeTime = 7000; // past TTL — no real sleep
+    const p2 = await resolver.resolvePolicy(ctx);
+    expect(p2.gatewayMode).toBe('observe'); // stale cache used as fallback
   });
 });
 
