@@ -21,6 +21,8 @@
     "scripts/ai-gateway-reconcile-event.ts",
     "scripts/ai-gateway-reconcile-day.ts",
     "api/generate-theme.ts",
-    "api/__tests__/generate-theme-gateway.test.ts"
+    "api/__tests__/generate-theme-gateway.test.ts",
+    "api/compare-rewrite.ts",
+    "api/__tests__/compare-rewrite-gateway.test.ts"
   ]
 }

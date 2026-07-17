@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
+import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import type { GatewayUsageMetric } from './_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -133,6 +136,60 @@ ${rewriteText.trim()}
 Produce the final corrected version of Version 2 now:`;
 }
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractCompareMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  // Always record one request per provider call.
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  // Only record when actually provided and non-zero — do not invent values.
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      // Cached tokens are billed at a discounted rate, not free — priced
+      // separately from the non-cached share of input_text_tokens.
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 export default async function handler(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.COMPARE)) return;
@@ -153,16 +210,48 @@ export default async function handler(req: any, res: any) {
     }
     if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
 
+    // ── Gateway context — created only once auth/validation/rate-limit have
+    // passed, so an early rejection never depends on gateway infrastructure
+    // (mirrors review-text.ts / generate-theme.ts). This is its own HTTP
+    // request, so it gets its own fresh correlationId.
+    const gatewayDeps = getProductionDeps();
+    const correlationId = gatewayDeps.uuidGen();
+    let physicalAttempt = 0;
+
     try {
       const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
-      const completion = await openai.chat.completions.create({
-        model: AI_MODEL,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT_CORRECT },
-          { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
-        ],
-      });
+      physicalAttempt += 1;
+      const completion = await executeAiGatewayCall<ChatCompletion>(
+        {
+          featureKey: 'writing.correct_v2_text',
+          provider: 'openai',
+          service: 'chat.completions',
+          model: AI_MODEL,
+          userId,
+          initiatedByUserId: userId,
+          actorType: 'user',
+          executionLocation: 'backend',
+          correlationId,
+          attemptNumber: physicalAttempt,
+          callSequence: 1,
+          technicalMetadata: {
+            endpoint: 'compare-rewrite',
+            operation: 'final_correction',
+            physicalAttempt,
+            flowType: 'final_text_only',
+          },
+        },
+        () => openai.chat.completions.create({
+          model: AI_MODEL,
+          temperature: 0.2,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT_CORRECT },
+            { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
+          ],
+        }),
+        gatewayDeps,
+        extractCompareMetrics,
+      );
       const finalCorrectedText = (completion.choices[0]?.message?.content ?? '').trim();
       if (!finalCorrectedText) throw new Error('Resposta vazia');
       safeLog('compare-rewrite', 'final_only_success', 200);
@@ -189,24 +278,56 @@ export default async function handler(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
 
+  // ── Gateway context — one correlationId per HTTP request, one physical-
+  // attempt counter shared across both physical calls made below (comparison
+  // then, best-effort, final correction). Created only after auth/validation/
+  // rate-limit have passed (mirrors review-text.ts / generate-theme.ts).
+  const gatewayDeps = getProductionDeps();
+  const correlationId = gatewayDeps.uuidGen();
+  let physicalAttempt = 0;
+
   try {
     const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
 
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT_COMPARE },
-        {
-          role: 'user',
-          content: buildUserMessage(
-            originalText,
-            correctedText,
-            rewriteText,
-            Array.isArray(mainMistakes) ? mainMistakes : []
-          ),
+    physicalAttempt += 1;
+    const completion = await executeAiGatewayCall<ChatCompletion>(
+      {
+        featureKey: 'writing.compare_rewrite',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: AI_MODEL,
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId,
+        attemptNumber: physicalAttempt,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'compare-rewrite',
+          operation: 'comparison',
+          physicalAttempt,
+          flowType: 'compare_and_correct',
         },
-      ],
-    });
+      },
+      () => openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT_COMPARE },
+          {
+            role: 'user',
+            content: buildUserMessage(
+              originalText,
+              correctedText,
+              rewriteText,
+              Array.isArray(mainMistakes) ? mainMistakes : []
+            ),
+          },
+        ],
+      }),
+      gatewayDeps,
+      extractCompareMetrics,
+    );
 
     const raw = completion.choices[0]?.message?.content ?? '';
 
@@ -234,14 +355,38 @@ export default async function handler(req: any, res: any) {
     // Generate final corrected text (best-effort — comparison result is returned even if this fails)
     let finalCorrectedText: string | undefined;
     try {
-      const correction = await openai.chat.completions.create({
-        model: AI_MODEL,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT_CORRECT },
-          { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
-        ],
-      });
+      physicalAttempt += 1;
+      const correction = await executeAiGatewayCall<ChatCompletion>(
+        {
+          featureKey: 'writing.correct_v2_text',
+          provider: 'openai',
+          service: 'chat.completions',
+          model: AI_MODEL,
+          userId,
+          initiatedByUserId: userId,
+          actorType: 'user',
+          executionLocation: 'backend',
+          correlationId,
+          attemptNumber: physicalAttempt,
+          callSequence: 1,
+          technicalMetadata: {
+            endpoint: 'compare-rewrite',
+            operation: 'final_correction',
+            physicalAttempt,
+            flowType: 'compare_and_correct',
+          },
+        },
+        () => openai.chat.completions.create({
+          model: AI_MODEL,
+          temperature: 0.2,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT_CORRECT },
+            { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
+          ],
+        }),
+        gatewayDeps,
+        extractCompareMetrics,
+      );
       const corrected = (correction.choices[0]?.message?.content ?? '').trim();
       if (corrected) finalCorrectedText = corrected;
     } catch (corrErr) {
