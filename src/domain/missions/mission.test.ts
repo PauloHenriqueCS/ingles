@@ -554,7 +554,11 @@ describe('Mission Validator — conflict and constraint checks', () => {
       },
     });
     const result = validateMissionAgainstPedagogicalPlan(
-      makeCandidate({ conflict: '', missionSetup: 'Seu amigo quer aprender inglês junto com você.' }),
+      makeCandidate({
+        conflict: '',
+        missionSetup: 'Seu amigo quer aprender inglês junto com você.',
+        missionTask: 'Escreva uma mensagem de apresentação para ele.',
+      }),
       plan,
     );
     const conflictWarning = result.warnings.find(w => w.code === 'MISSING_CONFLICT_OR_DECISION');
@@ -716,9 +720,12 @@ describe('Mission Fallback Templates', () => {
 
 describe('Generator Feature Flags — PEDAGOGICAL_GENERATOR_INTEGRATION_V1', () => {
   let orig: string | undefined;
+  let origEngineVersion: string | undefined;
 
   beforeEach(() => {
     orig = process.env.PEDAGOGICAL_GENERATOR_INTEGRATION_V1;
+    origEngineVersion = process.env.LEARNING_ENGINE_VERSION;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
@@ -726,6 +733,11 @@ describe('Generator Feature Flags — PEDAGOGICAL_GENERATOR_INTEGRATION_V1', () 
       process.env.PEDAGOGICAL_GENERATOR_INTEGRATION_V1 = orig;
     } else {
       delete process.env.PEDAGOGICAL_GENERATOR_INTEGRATION_V1;
+    }
+    if (origEngineVersion === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = origEngineVersion;
     }
   });
 
@@ -791,9 +803,12 @@ describe('Generator Feature Flags — PEDAGOGICAL_GENERATOR_INTEGRATION_V1', () 
 
 describe('Generator Feature Flags — MISSION_VALIDATOR_V1', () => {
   let orig: string | undefined;
+  let origEngineVersion: string | undefined;
 
   beforeEach(() => {
     orig = process.env.MISSION_VALIDATOR_V1;
+    origEngineVersion = process.env.LEARNING_ENGINE_VERSION;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
@@ -801,6 +816,11 @@ describe('Generator Feature Flags — MISSION_VALIDATOR_V1', () => {
       process.env.MISSION_VALIDATOR_V1 = orig;
     } else {
       delete process.env.MISSION_VALIDATOR_V1;
+    }
+    if (origEngineVersion === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = origEngineVersion;
     }
   });
 

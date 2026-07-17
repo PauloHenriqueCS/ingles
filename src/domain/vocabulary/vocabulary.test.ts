@@ -697,9 +697,12 @@ describe('vocabulary-public-dto', () => {
 
 describe('vocabularyFeatureFlags', () => {
   let originalEnv: string | undefined;
+  let originalEngineVersion: string | undefined;
 
   beforeEach(() => {
     originalEnv = process.env.VOCABULARY_ITEM_REVIEW_ENGINE_V1;
+    originalEngineVersion = process.env.LEARNING_ENGINE_VERSION;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
@@ -707,6 +710,11 @@ describe('vocabularyFeatureFlags', () => {
       delete process.env.VOCABULARY_ITEM_REVIEW_ENGINE_V1;
     } else {
       process.env.VOCABULARY_ITEM_REVIEW_ENGINE_V1 = originalEnv;
+    }
+    if (originalEngineVersion === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = originalEngineVersion;
     }
   });
 

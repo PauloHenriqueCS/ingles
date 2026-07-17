@@ -385,10 +385,16 @@ describe('CanonicalMissionStateV1 feature flags', () => {
 
   beforeEach(() => {
     delete process.env.CANONICAL_WRITING_MISSION_STATE_V1;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
     process.env.CANONICAL_WRITING_MISSION_STATE_V1 = originalEnv.CANONICAL_WRITING_MISSION_STATE_V1;
+    if (originalEnv.LEARNING_ENGINE_VERSION === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = originalEnv.LEARNING_ENGINE_VERSION;
+    }
   });
 
   it('getCanonicalMissionStateMode returns off by default', async () => {

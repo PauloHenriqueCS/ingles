@@ -54,10 +54,11 @@ let capturedSynthesizer: {
 
 vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
   const SpeechConfig = {
+    fromSubscription: vi.fn(() => mockSpeechConfigInstance),
     fromSubscriptionKey: vi.fn(() => mockSpeechConfigInstance),
   };
 
-  const SpeechSynthesizer = vi.fn().mockImplementation(() => {
+  const SpeechSynthesizer = vi.fn().mockImplementation(function(this: unknown) {
     const synth = {
       bookmarkReached: null as ((s: null, e: { text: string; audioOffset: number }) => void) | null,
       wordBoundary: null as unknown,
@@ -72,8 +73,15 @@ vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
         if (mockState.throwOnSynthesize) {
           throw mockState.throwOnSynthesize;
         }
-        // Fire registered events before resolving
-        for (const bm of mockState.bookmarkEvents) {
+        // Infer block number from SSML so multi-block episode tests fire correct bookmark names
+        const blockNum = _ssml.includes('block2') ? 2 : 1;
+        const adaptedBookmarks = mockState.bookmarkEvents.map(bm => ({
+          ...bm,
+          text: bm.text
+            .replace(/^block-1-/, `block-${blockNum}-`)
+            .replace(/^b1s/, blockNum === 2 ? 'b2s' : 'b1s'),
+        }));
+        for (const bm of adaptedBookmarks) {
           synth.bookmarkReached?.(null, bm);
         }
         for (const w of mockState.wordEvents) {
@@ -105,7 +113,10 @@ vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
     },
     CancellationReason: { Error: 1, EndOfStream: 0 },
     CancellationErrorCode: {
-      AuthenticationFailure: 1, BadRequest: 4, ServiceError: 5, NoError: 0,
+      AuthenticationFailure: 1, 1: 'AuthenticationFailure',
+      BadRequest: 4, 4: 'BadRequest',
+      ServiceError: 5, 5: 'ServiceError',
+      NoError: 0, 0: 'NoError',
     },
   };
 });

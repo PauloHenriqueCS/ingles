@@ -873,10 +873,13 @@ describe('Public mastery DTO', () => {
 
 describe('Feature flags', () => {
   let savedEnv: string | undefined;
+  let savedEngineVersion: string | undefined;
 
   beforeEach(() => {
     savedEnv = process.env.GRAMMAR_EVIDENCE_ENGINE_V1;
+    savedEngineVersion = process.env.LEARNING_ENGINE_VERSION;
     delete process.env.GRAMMAR_EVIDENCE_ENGINE_V1;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
@@ -884,6 +887,11 @@ describe('Feature flags', () => {
       delete process.env.GRAMMAR_EVIDENCE_ENGINE_V1;
     } else {
       process.env.GRAMMAR_EVIDENCE_ENGINE_V1 = savedEnv;
+    }
+    if (savedEngineVersion === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = savedEngineVersion;
     }
   });
 

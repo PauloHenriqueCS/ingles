@@ -259,8 +259,11 @@ beforeEach(() => {
 
 describe('compare-rewrite handler', () => {
   let handler: (req: any, res: any) => Promise<void>;
+  let savedApiKey: string | undefined;
 
   beforeEach(async () => {
+    savedApiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-key';
     vi.resetModules();
     vi.mock('openai', () => ({
       default: vi.fn().mockImplementation(() => ({
@@ -284,6 +287,11 @@ describe('compare-rewrite handler', () => {
     }));
     const mod = await import('../compare-rewrite');
     handler = mod.default;
+  });
+
+  afterEach(() => {
+    if (savedApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedApiKey;
   });
 
   it('blocks wrong method without calling provider', async () => {
@@ -412,13 +420,8 @@ describe('grammar-explanation handler', () => {
 
 describe('applyRateLimit Retry-After', () => {
   it('sets Retry-After header when rate limited', async () => {
-    // Use real _rateLimit but mock the Supabase client inside it
-    vi.unmock('../_rateLimit');
-    vi.resetModules();
-
-    const { applyRateLimit: realApplyRateLimit } = await import('../_rateLimit');
-
-    // Without SUPABASE_SERVICE_ROLE_KEY, it fails open (allowed = true)
+    // Without SUPABASE_SERVICE_ROLE_KEY the real implementation fails open (allowed = true)
+    const { applyRateLimit: realApplyRateLimit } = await vi.importActual<typeof import('../_rateLimit')>('../_rateLimit');
     const res = makeRes();
     const result = await realApplyRateLimit(res, 'user-1', 'generate-theme');
     expect(result).toBe(true); // fail open because no key configured

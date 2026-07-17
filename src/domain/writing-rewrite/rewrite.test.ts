@@ -614,9 +614,12 @@ describe('Public DTO', () => {
 
 describe('RewriteV2 feature flags', () => {
   let orig: string | undefined;
+  let origEngineVersion: string | undefined;
 
   beforeEach(() => {
     orig = process.env.CANONICAL_WRITING_REWRITE_V2;
+    origEngineVersion = process.env.LEARNING_ENGINE_VERSION;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
   });
 
   afterEach(() => {
@@ -624,6 +627,11 @@ describe('RewriteV2 feature flags', () => {
       process.env.CANONICAL_WRITING_REWRITE_V2 = orig;
     } else {
       delete process.env.CANONICAL_WRITING_REWRITE_V2;
+    }
+    if (origEngineVersion === undefined) {
+      delete process.env.LEARNING_ENGINE_VERSION;
+    } else {
+      process.env.LEARNING_ENGINE_VERSION = origEngineVersion;
     }
   });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+﻿import { describe, it, expect, vi } from 'vitest';
 import { buildEnglishSubtitleCues } from './build-english-subtitle-cues';
 import type { CanonicalSentence } from './build-english-subtitle-cues';
 import { validateEnglishReconstruction, normaliseForReconstruction } from './reconstruct-subtitle-text';
@@ -316,13 +316,13 @@ describe('validateEnglishReconstruction', () => {
   });
 
   // Case 13
-  it(‘normaliseForReconstruction converts curly quotes and apostrophes to straight’, () => {
-    const lq = String.fromCharCode(0x201C); // “ left double quotation mark
-    const rq = String.fromCharCode(0x201D); // “ right double quotation mark
-    const ap = String.fromCharCode(0x2019); // ‘ right single quotation mark
+  it('normaliseForReconstruction converts curly quotes and apostrophes to straight', () => {
+    const lq = String.fromCharCode(0x201C); // " left double quotation mark
+    const rq = String.fromCharCode(0x201D); // " right double quotation mark
+    const ap = String.fromCharCode(0x2019); // ' right single quotation mark
     const withCurly = `He said ${lq}hello${rq} and it${ap}s fine.`;
     const normalised = normaliseForReconstruction(withCurly);
-    expect(normalised).toBe(“He said \”hello\” and it’s fine.”);
+    expect(normalised).toBe("He said \"hello\" and it's fine.");
   });
 });
 

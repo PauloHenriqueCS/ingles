@@ -758,9 +758,13 @@ describe('49. flag off keeps old flow (documented)', () => {
   it('isPlannerEnabled returns false when env var is absent', async () => {
     const { isPlannerEnabled } = await import('../../../../api/_mission-plan-feature-flags');
     const orig = process.env.PEDAGOGICAL_PLANNER_V1;
+    const origVersion = process.env.LEARNING_ENGINE_VERSION;
     delete process.env.PEDAGOGICAL_PLANNER_V1;
+    process.env.LEARNING_ENGINE_VERSION = 'v1';
     expect(isPlannerEnabled()).toBe(false);
     if (orig !== undefined) process.env.PEDAGOGICAL_PLANNER_V1 = orig;
+    if (origVersion === undefined) delete process.env.LEARNING_ENGINE_VERSION;
+    else process.env.LEARNING_ENGINE_VERSION = origVersion;
   });
 });
 
