@@ -382,7 +382,7 @@ export default function EvolutionView({ onNavigate: _onNavigate }: Props) {
                           axisLine={false}
                         />
                         <Tooltip
-                          content={(props: { active?: boolean; payload?: unknown[] }) => (
+                          content={(props: { active?: boolean; payload?: readonly unknown[] }) => (
                             <MetricTooltip
                               active={props.active}
                               payload={props.payload as unknown as TooltipPayloadItem[] | undefined}
