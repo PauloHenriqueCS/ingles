@@ -19,7 +19,7 @@ import {
   sanitizeMetadata,
   sanitizeError,
   GatewayPolicyResolver,
-} from '../ai-gateway/index';
+} from '../_ai-gateway/index';
 
 import type {
   GatewayCallContext,
@@ -32,7 +32,7 @@ import type {
   FailEventParams,
   CreateSessionParams,
   PolicyResolverInterface,
-} from '../ai-gateway/index';
+} from '../_ai-gateway/index';
 
 import {
   authorizeProviderSession,
@@ -40,7 +40,7 @@ import {
   activateProviderSession,
   failProviderSession,
   expireProviderSession,
-} from '../ai-gateway/provider-sessions';
+} from '../_ai-gateway/provider-sessions';
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -912,7 +912,7 @@ describe('session lifecycle transitions', () => {
 
 describe('SupabaseUsageRepository.completeSession', () => {
   it('rejects negative duration before any DB call', async () => {
-    const { SupabaseUsageRepository } = await import('../ai-gateway/usage-repository');
+    const { SupabaseUsageRepository } = await import('../_ai-gateway/usage-repository');
 
     const mockClient = {
       from: vi.fn().mockReturnValue({

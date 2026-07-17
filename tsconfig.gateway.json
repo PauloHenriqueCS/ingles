@@ -12,7 +12,7 @@
     "types": ["node"]
   },
   "include": [
-    "api/ai-gateway/**/*.ts",
+    "api/_ai-gateway/**/*.ts",
     "api/__tests__/ai-gateway.test.ts"
   ]
 }
