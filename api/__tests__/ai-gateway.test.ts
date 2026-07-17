@@ -32,6 +32,7 @@ import type {
   FailEventParams,
   CreateSessionParams,
   PolicyResolverInterface,
+  PricingRepositoryInterface,
 } from '../_ai-gateway/index';
 
 import {
@@ -111,6 +112,28 @@ function makeMockRepo(overrides: Partial<UsageRepositoryInterface> = {}): UsageR
       expireSessions.push(id);
       if (overrides.expireSession) await overrides.expireSession(id);
     },
+    async getEventForCosting(eventId) {
+      if (overrides.getEventForCosting) return overrides.getEventForCosting(eventId);
+      return null;
+    },
+    async getMetricsForEvent(eventId) {
+      if (overrides.getMetricsForEvent) return overrides.getMetricsForEvent(eventId);
+      return [];
+    },
+    async updateMetricCost(metricId, params) {
+      if (overrides.updateMetricCost) await overrides.updateMetricCost(metricId, params);
+    },
+    async updateEventCost(eventId, params) {
+      if (overrides.updateEventCost) await overrides.updateEventCost(eventId, params);
+    },
+  };
+}
+
+function makeMockPricingRepository(
+  findActivePrice?: PricingRepositoryInterface['findActivePrice'],
+): PricingRepositoryInterface {
+  return {
+    findActivePrice: findActivePrice ?? (async () => null),
   };
 }
 
@@ -121,7 +144,11 @@ function makeMockPolicyResolver(policy: GatewayPolicy): PolicyResolverInterface 
   } as unknown as PolicyResolverInterface;
 }
 
-function makeDeps(policy: GatewayPolicy, repoOverrides?: Partial<UsageRepositoryInterface>): GatewayDeps & {
+function makeDeps(
+  policy: GatewayPolicy,
+  repoOverrides?: Partial<UsageRepositoryInterface>,
+  pricingRepository?: PricingRepositoryInterface,
+): GatewayDeps & {
   repo: ReturnType<typeof makeMockRepo>;
   logCalls: Array<{ event: string; data?: Record<string, unknown> }>;
 } {
@@ -133,6 +160,7 @@ function makeDeps(policy: GatewayPolicy, repoOverrides?: Partial<UsageRepository
     logCalls,
     policyResolver: makeMockPolicyResolver(policy),
     usageRepository: repo,
+    pricingRepository: pricingRepository ?? makeMockPricingRepository(),
     clock: vi.fn().mockReturnValue(1000),
     uuidGen: vi.fn().mockReturnValueOnce('req-uuid').mockReturnValueOnce('corr-uuid').mockReturnValue('other-uuid'),
     logger: (event, data) => logCalls.push({ event, data }),
@@ -389,6 +417,86 @@ describe('observe mode', () => {
     await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => []);
 
     expect(deps.repo.metricCalls).toHaveLength(0);
+  });
+});
+
+// ── COST CALCULATION integration ────────────────────────────────────────────
+
+describe('cost calculation integration', () => {
+  const metrics: GatewayUsageMetric[] = [{
+    metricKey: 'output_text_tokens',
+    unitType: 'tokens',
+    quantity: 150,
+    isBillable: true,
+    measurementSource: 'provider_usage',
+  }];
+
+  it('legacy mode never consults provider_pricing', async () => {
+    let findActivePriceCalls = 0;
+    const deps = makeDeps(
+      { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
+      undefined,
+      makeMockPricingRepository(async () => { findActivePriceCalls++; return null; }),
+    );
+
+    await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => metrics);
+
+    expect(findActivePriceCalls).toBe(0);
+    expect(deps.repo.metricCalls).toHaveLength(0); // legacy never touches the repo at all
+  });
+
+  it('a cost-calculation failure (pricing repository throws) never breaks the response in observe mode', async () => {
+    const deps = makeDeps(
+      { gatewayMode: 'observe', runtimeStatus: 'enabled' },
+      { getEventForCosting: async () => { throw new Error('DB down'); } },
+    );
+
+    const result = await executeAiGatewayCall(baseContext(), () => Promise.resolve('success-value'), deps, () => metrics);
+
+    expect(result).toBe('success-value');
+    expect(deps.repo.metricCalls).toHaveLength(1); // metrics were still persisted
+  });
+
+  it('a pricingRepository.findActivePrice throw never breaks the response in observe mode', async () => {
+    const deps = makeDeps(
+      { gatewayMode: 'observe', runtimeStatus: 'enabled' },
+      {
+        getEventForCosting: async () => ({
+          id: 'event-id-1', provider: 'openai', service: 'chat.completions',
+          model: 'gpt-4o-mini', startedAt: new Date(1000).toISOString(), costStatus: 'pending',
+        }),
+        getMetricsForEvent: async () => [{ id: 'metric-1', metricKey: 'output_text_tokens', quantity: 150, isBillable: true }],
+      },
+      makeMockPricingRepository(async () => { throw new Error('pricing lookup exploded'); }),
+    );
+
+    const result = await executeAiGatewayCall(baseContext(), () => Promise.resolve('still-fine'), deps, () => metrics);
+
+    expect(result).toBe('still-fine');
+  });
+
+  it('observe mode with a price available calculates and persists the metric cost', async () => {
+    const updateMetricCalls: unknown[] = [];
+    const updateEventCalls: unknown[] = [];
+    const deps = makeDeps(
+      { gatewayMode: 'observe', runtimeStatus: 'enabled' },
+      {
+        getEventForCosting: async () => ({
+          id: 'event-id-1', provider: 'openai', service: 'chat.completions',
+          model: 'gpt-4o-mini', startedAt: new Date(1000).toISOString(), costStatus: 'pending',
+        }),
+        getMetricsForEvent: async () => [{ id: 'metric-1', metricKey: 'output_text_tokens', quantity: 150, isBillable: true }],
+        updateMetricCost: async (id, params) => { updateMetricCalls.push({ id, params }); },
+        updateEventCost: async (id, params) => { updateEventCalls.push({ id, params }); },
+      },
+      makeMockPricingRepository(async () => ({ id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000', currency: 'USD' })),
+    );
+
+    await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => metrics);
+
+    expect(updateMetricCalls).toHaveLength(1);
+    expect(updateEventCalls).toHaveLength(1);
+    expect((updateEventCalls[0] as any).params.costStatus).toBe('calculated');
   });
 });
 

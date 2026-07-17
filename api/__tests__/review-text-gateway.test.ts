@@ -20,6 +20,11 @@ const {
   mockCompleteEvent,
   mockFailEvent,
   mockInsertMetrics,
+  mockGetEventForCosting,
+  mockGetMetricsForEvent,
+  mockUpdateMetricCost,
+  mockUpdateEventCost,
+  mockFindActivePrice,
   mockPolicyResolvePolicy,
   mockRequireAuth,
   mockApplyRateLimit,
@@ -30,6 +35,11 @@ const {
   const mockCompleteEvent = vi.fn();
   const mockFailEvent = vi.fn();
   const mockInsertMetrics = vi.fn();
+  const mockGetEventForCosting = vi.fn();
+  const mockGetMetricsForEvent = vi.fn();
+  const mockUpdateMetricCost = vi.fn();
+  const mockUpdateEventCost = vi.fn();
+  const mockFindActivePrice = vi.fn();
   const mockPolicyResolvePolicy = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
@@ -47,6 +57,13 @@ const {
       completeSession: vi.fn(),
       failSession: vi.fn(),
       expireSession: vi.fn(),
+      getEventForCosting: mockGetEventForCosting,
+      getMetricsForEvent: mockGetMetricsForEvent,
+      updateMetricCost: mockUpdateMetricCost,
+      updateEventCost: mockUpdateEventCost,
+    },
+    pricingRepository: {
+      findActivePrice: mockFindActivePrice,
     },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),
@@ -59,6 +76,11 @@ const {
     mockCompleteEvent,
     mockFailEvent,
     mockInsertMetrics,
+    mockGetEventForCosting,
+    mockGetMetricsForEvent,
+    mockUpdateMetricCost,
+    mockUpdateEventCost,
+    mockFindActivePrice,
     mockPolicyResolvePolicy,
     mockRequireAuth,
     mockApplyRateLimit,
@@ -225,6 +247,13 @@ beforeEach(() => {
   mockCompleteEvent.mockResolvedValue(undefined);
   mockFailEvent.mockResolvedValue(undefined);
   mockInsertMetrics.mockResolvedValue(undefined);
+  // Default: no event found for costing, so reconcileEventCost no-ops safely.
+  // Tests that specifically exercise cost calculation override these.
+  mockGetEventForCosting.mockResolvedValue(null);
+  mockGetMetricsForEvent.mockResolvedValue([]);
+  mockUpdateMetricCost.mockResolvedValue(undefined);
+  mockUpdateEventCost.mockResolvedValue(undefined);
+  mockFindActivePrice.mockResolvedValue(null);
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeDefaultSupabase() });
   mockApplyRateLimit.mockResolvedValue(true);
   (mockDeps.clock as ReturnType<typeof vi.fn>).mockReturnValue(1000);
@@ -341,6 +370,45 @@ describe('OBSERVE mode — retry loop', () => {
     expect(mockCompleteEvent).toHaveBeenCalledTimes(3);
     expect(mockFailEvent).not.toHaveBeenCalled();
     expect(res._status()).toBe(500);
+  });
+
+  it('each of the three physical attempts gets its own independent cost calculation', async () => {
+    mockCreate
+      .mockImplementationOnce(() => aiOk('not json', { prompt_tokens: 10, completion_tokens: 5 }))
+      .mockImplementationOnce(() => aiOk('still not json', { prompt_tokens: 20, completion_tokens: 8 }))
+      .mockImplementationOnce(() => aiOk(VALID_AI_RESPONSE, { prompt_tokens: 30, completion_tokens: 12 }));
+
+    // Each event's metrics mirror exactly what was inserted for that eventId —
+    // proves the three cost calculations are independent, not shared/merged.
+    mockGetEventForCosting.mockImplementation(async (eventId: string) => ({
+      id: eventId,
+      provider: 'openai',
+      service: 'chat.completions',
+      model: 'gpt-4o-mini',
+      startedAt: new Date(1000).toISOString(),
+      costStatus: 'pending',
+    }));
+    mockGetMetricsForEvent.mockImplementation(async (eventId: string) => {
+      const call = mockInsertMetrics.mock.calls.find((c) => c[0] === eventId);
+      if (!call) return [];
+      const metrics = call[1] as Array<{ metricKey: string; quantity: number; isBillable: boolean }>;
+      return metrics.map((m, i) => ({ id: `${eventId}-metric-${i}`, metricKey: m.metricKey, quantity: m.quantity, isBillable: m.isBillable }));
+    });
+    mockFindActivePrice.mockResolvedValue({ id: 'price-1', pricePerUnit: '0.15', unitSize: '1000000', currency: 'USD' });
+
+    await handler(makeReq(), makeRes());
+
+    expect(mockStartEvent).toHaveBeenCalledTimes(3);
+
+    // updateEventCost was called once per event (not merged into one call).
+    expect(mockUpdateEventCost).toHaveBeenCalledTimes(3);
+    const costedEventIds = mockUpdateEventCost.mock.calls.map((c) => c[0]);
+    expect(new Set(costedEventIds).size).toBe(3);
+
+    // Each event's total reflects only its own attempt's tokens (10/5, 20/8, 30/12),
+    // not a running sum across attempts.
+    const totals = mockUpdateEventCost.mock.calls.map((c) => (c[1] as any).calculatedCostUsd);
+    expect(new Set(totals).size).toBe(3); // three distinct token counts -> three distinct totals
   });
 });
 

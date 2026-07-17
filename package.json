@@ -30,7 +30,8 @@
     "listening:pipeline:repair": "npx tsx scripts/listening-pipeline-repair.ts",
     "listening:inventory:check": "npx tsx scripts/listening-inventory-check.ts",
     "listening:inventory:ensure": "npx tsx scripts/listening-inventory-ensure.ts",
-    "listening:audit": "npx tsx scripts/listening-audit.ts"
+    "listening:audit": "npx tsx scripts/listening-audit.ts",
+    "ai-gateway:reconcile-event": "npx tsx scripts/ai-gateway-reconcile-event.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

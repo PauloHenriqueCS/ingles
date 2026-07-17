@@ -273,7 +273,7 @@ describe('OBSERVE mode — cache miss / success', () => {
     await handler(makeReq(), makeRes());
     const metrics: unknown[] = mockInsertMetrics.mock.calls[0][1];
     expect(metrics).toContainEqual(
-      expect.objectContaining({ metricKey: 'cached_input_tokens', quantity: 40, isBillable: false }),
+      expect.objectContaining({ metricKey: 'cached_input_tokens', quantity: 40, isBillable: true }),
     );
   });
 

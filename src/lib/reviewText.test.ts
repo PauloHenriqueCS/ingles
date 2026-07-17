@@ -27,6 +27,13 @@ const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
       completeSession: vi.fn(),
       failSession: vi.fn(),
       expireSession: vi.fn(),
+      getEventForCosting: vi.fn(),
+      getMetricsForEvent: vi.fn(),
+      updateMetricCost: vi.fn(),
+      updateEventCost: vi.fn(),
+    },
+    pricingRepository: {
+      findActivePrice: vi.fn(),
     },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),

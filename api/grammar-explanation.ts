@@ -116,7 +116,10 @@ function extractGrammarMetrics(completion: ChatCompletion): GatewayUsageMetric[]
       metricKey: 'cached_input_tokens',
       unitType: 'token',
       quantity: cachedTokens,
-      isBillable: false,
+      // Cached tokens are billed at a discounted rate, not free — the cost
+      // calculator prices this separately from the non-cached share of
+      // input_text_tokens (see splitCachedInputTokens in cost-calculator.ts).
+      isBillable: true,
       measurementSource: 'provider_response',
     });
   }

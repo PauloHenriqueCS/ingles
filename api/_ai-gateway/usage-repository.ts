@@ -70,6 +70,40 @@ export interface CreateSessionParams {
   metadata?: Record<string, unknown>;
 }
 
+// ── Cost calculation params ───────────────────────────────────────────────────
+// calculatedCostUsd is always a decimal STRING, never a JS number — this is
+// the exact value produced by the BigInt-rational math in cost-calculator.ts.
+// Passing it as a string all the way to the NUMERIC column avoids any binary
+// floating-point round-trip, which a JS `number` would risk.
+
+export interface UsageEventForCosting {
+  id: string;
+  provider: string;
+  service: string | null;
+  model: string | null;
+  startedAt: string; // ISO timestamp, as stored
+  costStatus: string;
+}
+
+export interface UsageMetricForCosting {
+  id: string;
+  metricKey: string;
+  quantity: number;
+  isBillable: boolean;
+}
+
+export interface UpdateMetricCostParams {
+  billableQuantity?: number;
+  pricingId?: string;
+  calculatedCostUsd: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateEventCostParams {
+  costStatus: string;
+  calculatedCostUsd: string;
+}
+
 // ── Interface ─────────────────────────────────────────────────────────────────
 
 export interface UsageRepositoryInterface {
@@ -83,6 +117,10 @@ export interface UsageRepositoryInterface {
   completeSession(id: string, durationSeconds: number): Promise<void>;
   failSession(id: string): Promise<void>;
   expireSession(id: string): Promise<void>;
+  getEventForCosting(eventId: string): Promise<UsageEventForCosting | null>;
+  getMetricsForEvent(eventId: string): Promise<UsageMetricForCosting[]>;
+  updateMetricCost(metricId: string, params: UpdateMetricCostParams): Promise<void>;
+  updateEventCost(eventId: string, params: UpdateEventCostParams): Promise<void>;
 }
 
 // ── Service role client factory ───────────────────────────────────────────────
@@ -100,7 +138,9 @@ function createServiceClient(): SupabaseClient {
 
 let _sharedClient: SupabaseClient | null = null;
 
-function getSharedServiceClient(): SupabaseClient {
+// Exported so other gateway repositories (e.g. pricing-repository.ts) reuse
+// the same client instance instead of opening a second connection.
+export function getSharedServiceClient(): SupabaseClient {
   if (!_sharedClient) _sharedClient = createServiceClient();
   return _sharedClient;
 }
@@ -296,5 +336,72 @@ export class SupabaseUsageRepository implements UsageRepositoryInterface {
       .eq('id', id);
 
     if (error) throw new Error(`expireSession failed: ${error.message}`);
+  }
+
+  // ── Cost calculation reads/writes ────────────────────────────────────────
+
+  async getEventForCosting(eventId: string): Promise<UsageEventForCosting | null> {
+    const { data, error } = await this.supabase
+      .from('ai_usage_events')
+      .select('id, provider, service, model, started_at, cost_status')
+      .eq('id', eventId)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    const row = data as { id: string; provider: string; service: string | null; model: string | null; started_at: string; cost_status: string };
+    return {
+      id:         row.id,
+      provider:   row.provider,
+      service:    row.service,
+      model:      row.model,
+      startedAt:  row.started_at,
+      costStatus: row.cost_status,
+    };
+  }
+
+  async getMetricsForEvent(eventId: string): Promise<UsageMetricForCosting[]> {
+    const { data, error } = await this.supabase
+      .from('ai_usage_event_metrics')
+      .select('id, metric_key, quantity, is_billable')
+      .eq('usage_event_id', eventId)
+      .eq('is_final', true);
+
+    if (error || !data) return [];
+    return (data as Array<{ id: string; metric_key: string; quantity: number; is_billable: boolean }>).map((r) => ({
+      id:         r.id,
+      metricKey:  r.metric_key,
+      quantity:   r.quantity,
+      isBillable: r.is_billable,
+    }));
+  }
+
+  async updateMetricCost(metricId: string, p: UpdateMetricCostParams): Promise<void> {
+    const payload: Record<string, unknown> = {
+      billable_quantity:   p.billableQuantity ?? null,
+      pricing_id:          p.pricingId ?? null,
+      // Decimal string, not a JS number — preserves exact precision into NUMERIC.
+      calculated_cost_usd: p.calculatedCostUsd,
+    };
+    if (p.metadata) payload.metadata = p.metadata;
+
+    const { error } = await this.supabase
+      .from('ai_usage_event_metrics')
+      .update(payload)
+      .eq('id', metricId);
+
+    if (error) throw new Error(`updateMetricCost failed: ${error.message}`);
+  }
+
+  async updateEventCost(eventId: string, p: UpdateEventCostParams): Promise<void> {
+    const { error } = await this.supabase
+      .from('ai_usage_events')
+      .update({
+        cost_status:         p.costStatus,
+        // Decimal string, not a JS number — preserves exact precision into NUMERIC.
+        calculated_cost_usd: p.calculatedCostUsd,
+      })
+      .eq('id', eventId);
+
+    if (error) throw new Error(`updateEventCost failed: ${error.message}`);
   }
 }

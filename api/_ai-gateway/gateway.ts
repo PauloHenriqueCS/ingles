@@ -22,12 +22,15 @@ import { sanitizeMetadata, sanitizeError } from './sanitize';
 import type { GatewayCallContext, GatewayPolicy, GatewayUsageMetric } from './types';
 import { GatewayPolicyResolver, type PolicyResolverInterface } from './policy-resolver';
 import { SupabaseUsageRepository, type UsageRepositoryInterface, type StartEventParams } from './usage-repository';
+import { SupabasePricingRepository, type PricingRepositoryInterface } from './pricing-repository';
+import { reconcileEventCost } from './cost-calculator';
 
 // ── Dependency injection ──────────────────────────────────────────────────────
 
 export interface GatewayDeps {
   policyResolver: PolicyResolverInterface;
   usageRepository: UsageRepositoryInterface;
+  pricingRepository: PricingRepositoryInterface;
   clock: () => number;
   uuidGen: () => string;
   logger: (event: string, data?: Record<string, unknown>) => void;
@@ -45,11 +48,12 @@ export function getProductionDeps(): GatewayDeps {
   if (_productionDeps) return _productionDeps;
 
   _productionDeps = {
-    policyResolver:  new GatewayPolicyResolver(),
-    usageRepository: new SupabaseUsageRepository(),
-    clock:           () => Date.now(),
-    uuidGen:         () => randomUUID(),
-    logger:          (event, data) => {
+    policyResolver:    new GatewayPolicyResolver(),
+    usageRepository:   new SupabaseUsageRepository(),
+    pricingRepository: new SupabasePricingRepository(),
+    clock:             () => Date.now(),
+    uuidGen:           () => randomUUID(),
+    logger:            (event, data) => {
       console.error(JSON.stringify({ gateway: event, ...data, t: Date.now() }));
     },
   };
@@ -191,6 +195,20 @@ async function executeWithTelemetry<T>(
         }
         if (metrics.length > 0) {
           await deps.usageRepository.insertMetrics(eventId, metrics);
+
+          // Cost calculation runs only after metrics are durably persisted,
+          // and only ever in observe mode (this function is unreachable from
+          // legacy). A failure here must never affect the response already
+          // computed by invoke() above.
+          try {
+            await reconcileEventCost(eventId, {
+              usageRepository:   deps.usageRepository,
+              pricingRepository: deps.pricingRepository,
+              logger:            deps.logger,
+            });
+          } catch (costErr) {
+            deps.logger('gateway.cost.failed', sanitizeError(costErr));
+          }
         }
       }
     } catch (telErr) {
