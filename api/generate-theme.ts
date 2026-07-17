@@ -462,7 +462,8 @@ function buildUserMessage(
   ctx: Record<string, unknown>,
   recentThemes: RecentThemeRow[],
   excludedTheme: ExcludedTheme | null,
-  retryAttempt: number
+  retryAttempt: number,
+  selectedTheme: string | null = null,
 ): string {
   const lines: string[] = [];
 
@@ -551,6 +552,15 @@ function buildUserMessage(
     lines.push(`⚠️ TENTATIVA ${retryAttempt}: As tentativas anteriores foram rejeitadas por semelhança com o histórico.`);
     lines.push('Você DEVE escolher um formato, conflito e contexto completamente diferentes.');
     lines.push('Pense em algo inesperado: uma entrevista, uma carta de reclamação, um tutorial, um debate, um review.');
+  }
+
+  // User-requested theme
+  if (selectedTheme) {
+    lines.push('');
+    lines.push('═══ TEMA SOLICITADO PELO USUÁRIO ═══');
+    lines.push(`O usuário escolheu o tema: "${selectedTheme}"`);
+    lines.push('A missão DEVE ser ambientada neste tema. Adapte o formato, o conflito e o contexto para que estejam naturalmente relacionados a este tema.');
+    lines.push('Mantenha todas as demais restrições pedagógicas e de diversidade de formato.');
   }
 
   lines.push('');
@@ -711,7 +721,8 @@ export default async function handler(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'generate-theme')) return;
 
-  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
+  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, selectedTheme: rawSelectedTheme } = req.body ?? {};
+  const selectedTheme = typeof rawSelectedTheme === 'string' && rawSelectedTheme.trim() ? rawSelectedTheme.trim() : null;
 
   // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {
@@ -841,6 +852,7 @@ export default async function handler(req: any, res: any) {
                   recentThemes,
                   excludedTheme ?? null,
                   attempt,
+                  selectedTheme,
                 ) + diagnosticSection,
               },
             ],
@@ -1144,7 +1156,7 @@ export default async function handler(req: any, res: any) {
     let raw: string;
 
     // Build user message — append plan constraints when integration is fully active
-    let userContent = buildUserMessage(learningContext ?? {}, recentThemes, excludedTheme ?? null, attempt);
+    let userContent = buildUserMessage(learningContext ?? {}, recentThemes, excludedTheme ?? null, attempt, selectedTheme);
     if (activePlan) {
       userContent += lastValidationRejection
         ? buildRepairSection(activePlan, lastValidationRejection)

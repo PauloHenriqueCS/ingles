@@ -16,6 +16,22 @@ interface Props {
   onStartWriting: () => void;
 }
 
+const WRITING_THEMES: { label: string; value: string | null }[] = [
+  { label: 'Tema aleatório', value: null },
+  { label: 'Viagens', value: 'travel' },
+  { label: 'Trabalho e carreira', value: 'work_career' },
+  { label: 'Vida cotidiana', value: 'daily_life' },
+  { label: 'Filmes e séries', value: 'movies_series' },
+  { label: 'Música', value: 'music' },
+  { label: 'Futebol e esportes', value: 'football_sports' },
+  { label: 'Tecnologia', value: 'technology' },
+  { label: 'Comida e restaurantes', value: 'food_restaurants' },
+  { label: 'Relacionamentos e vida social', value: 'relationships_social_life' },
+  { label: 'Saúde e bem-estar', value: 'health_wellbeing' },
+  { label: 'Dinheiro e compras', value: 'money_shopping' },
+  { label: 'Mistério e aventura', value: 'mystery_adventure' },
+];
+
 const FORMAT_LABELS: Record<string, string> = {
   'e-mail': 'E-mail',
   'diário': 'Diário',
@@ -53,6 +69,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
   const [grammarModal, setGrammarModal] = useState<string | null>(null);
+  const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
   const isLoading = genState === 'loading';
 
   async function generate() {
@@ -98,6 +115,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         context = buildLearningContextForTheme(reviews);
       }
 
+      const themeLabel = selectedTheme
+        ? (WRITING_THEMES.find(t => t.value === selectedTheme)?.label ?? null)
+        : null;
+
       const authHeader = await getAuthHeader();
       const res = await fetch('/api/generate-theme', {
         method: 'POST',
@@ -108,6 +129,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
           learningContext: context,
           previousThemeId: currentThemeId,
           excludedTheme,
+          selectedTheme: themeLabel,
         }),
       });
 
@@ -151,6 +173,17 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
               A IA cria uma missão personalizada baseada no seu histórico. Cada missão é uma situação real para resolver.
             </p>
           )}
+          <select
+            value={selectedTheme ?? ''}
+            onChange={(e) => setSelectedTheme(e.target.value || null)}
+            className="w-full px-3 py-2.5 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-blue-500 cursor-pointer"
+          >
+            {WRITING_THEMES.map((t) => (
+              <option key={t.value ?? '__random'} value={t.value ?? ''}>
+                {t.label}
+              </option>
+            ))}
+          </select>
           <button
             onClick={generate}
             disabled={isLoading}

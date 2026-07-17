@@ -131,22 +131,6 @@ function AutoAdvanceBar({ durationMs, onDone }: { durationMs: number; onDone: ()
   );
 }
 
-const STORY_THEMES: { label: string; value: string | null }[] = [
-  { label: 'Tema aleatório', value: null },
-  { label: 'Viagens', value: 'travel' },
-  { label: 'Trabalho e carreira', value: 'work_career' },
-  { label: 'Vida cotidiana', value: 'daily_life' },
-  { label: 'Filmes e séries', value: 'movies_series' },
-  { label: 'Música', value: 'music' },
-  { label: 'Futebol e esportes', value: 'football_sports' },
-  { label: 'Tecnologia', value: 'technology' },
-  { label: 'Comida e restaurantes', value: 'food_restaurants' },
-  { label: 'Relacionamentos e vida social', value: 'relationships_social_life' },
-  { label: 'Saúde e bem-estar', value: 'health_wellbeing' },
-  { label: 'Dinheiro e compras', value: 'money_shopping' },
-  { label: 'Mistério e aventura', value: 'mystery_adventure' },
-];
-
 const GENERATION_PROGRESS = [
   'Criando a história...',
   'Preparando o áudio...',
@@ -191,7 +175,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const [completionSaveError, setCompletionSaveError] = useState(false);
   const [completionSaved, setCompletionSaved] = useState(false);
   const [progressMsgIdx, setProgressMsgIdx] = useState(0);
-  const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
 
   const player = useListeningAudioPlayer();
   const audioRef = player.audioRef;
@@ -379,7 +362,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     setPhase('generating');
     try {
       // Pass cached storyPackage on retry — skips OpenAI, re-generates only TTS
-      const data = await generateListeningStory(storyPackage, selectedTheme);
+      const data = await generateListeningStory(storyPackage);
       // Revoke any blob URLs from a previous story before creating new ones
       revokeAudioUrls();
       const url0 = base64ToBlobUrl(data.parts[0].audioBase64, data.parts[0].audioMimeType);
@@ -698,18 +681,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
               Uma nova história será criada especialmente para o seu nível.
             </p>
           </div>
-          <select
-            value={selectedTheme ?? ''}
-            onChange={(e) => setSelectedTheme(e.target.value || null)}
-            disabled={storyGenerating}
-            className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-purple-500 disabled:opacity-60 cursor-pointer"
-          >
-            {STORY_THEMES.map((t) => (
-              <option key={t.value ?? '__random'} value={t.value ?? ''}>
-                {t.label}
-              </option>
-            ))}
-          </select>
           <button
             onClick={handleStartGeneration}
             disabled={storyGenerating}
@@ -1630,19 +1601,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
 
           {renderCompletionErrorBanner()}
           {renderCompletionSuccessBanner()}
-
-          <select
-            value={selectedTheme ?? ''}
-            onChange={(e) => setSelectedTheme(e.target.value || null)}
-            disabled={storyGenerating}
-            className="w-full px-4 py-3 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-purple-500 disabled:opacity-60 cursor-pointer"
-          >
-            {STORY_THEMES.map((t) => (
-              <option key={t.value ?? '__random'} value={t.value ?? ''}>
-                {t.label}
-              </option>
-            ))}
-          </select>
 
           <button
             onClick={handleStartGeneration}
