@@ -59,7 +59,7 @@ export function computeDailyProgress(
     writing === 'completed' &&
     pronunciation === 'completed' &&
     conversation === 'completed' &&
-    (listening === 'completed' || listening === 'not_started');
+    listening === 'completed';
 
   return { date, writing, pronunciation, conversation, listening, allActiveCompleted };
 }
