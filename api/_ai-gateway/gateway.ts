@@ -24,6 +24,8 @@ import { GatewayPolicyResolver, type PolicyResolverInterface } from './policy-re
 import { SupabaseUsageRepository, type UsageRepositoryInterface, type StartEventParams } from './usage-repository';
 import { SupabasePricingRepository, type PricingRepositoryInterface } from './pricing-repository';
 import { reconcileEventCost } from './cost-calculator';
+import { SupabaseDailyRollupRepository, type DailyRollupRepositoryInterface } from './daily-rollup-repository';
+import { rebuildDailyBucketForEvent } from './daily-rollup';
 
 // ── Dependency injection ──────────────────────────────────────────────────────
 
@@ -31,6 +33,7 @@ export interface GatewayDeps {
   policyResolver: PolicyResolverInterface;
   usageRepository: UsageRepositoryInterface;
   pricingRepository: PricingRepositoryInterface;
+  dailyRollupRepository: DailyRollupRepositoryInterface;
   clock: () => number;
   uuidGen: () => string;
   logger: (event: string, data?: Record<string, unknown>) => void;
@@ -48,12 +51,13 @@ export function getProductionDeps(): GatewayDeps {
   if (_productionDeps) return _productionDeps;
 
   _productionDeps = {
-    policyResolver:    new GatewayPolicyResolver(),
-    usageRepository:   new SupabaseUsageRepository(),
-    pricingRepository: new SupabasePricingRepository(),
-    clock:             () => Date.now(),
-    uuidGen:           () => randomUUID(),
-    logger:            (event, data) => {
+    policyResolver:        new GatewayPolicyResolver(),
+    usageRepository:       new SupabaseUsageRepository(),
+    pricingRepository:     new SupabasePricingRepository(),
+    dailyRollupRepository: new SupabaseDailyRollupRepository(),
+    clock:                 () => Date.now(),
+    uuidGen:               () => randomUUID(),
+    logger:                (event, data) => {
       console.error(JSON.stringify({ gateway: event, ...data, t: Date.now() }));
     },
   };
@@ -208,6 +212,20 @@ async function executeWithTelemetry<T>(
             });
           } catch (costErr) {
             deps.logger('gateway.cost.failed', sanitizeError(costErr));
+          }
+
+          // Independent failure handling from cost calculation above — a
+          // rollup failure must not be attributed to (or block) pricing,
+          // and neither may affect the response already computed by
+          // invoke(). Runs after cost calculation so the bucket reflects
+          // calculated_cost_usd when it was resolved in this same call.
+          try {
+            await rebuildDailyBucketForEvent(eventId, {
+              dailyRollupRepository: deps.dailyRollupRepository,
+              logger:                deps.logger,
+            });
+          } catch (rollupErr) {
+            deps.logger('gateway.dailyRollup.failed', sanitizeError(rollupErr));
           }
         }
       }

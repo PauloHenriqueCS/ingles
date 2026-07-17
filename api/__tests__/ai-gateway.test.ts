@@ -33,6 +33,7 @@ import type {
   CreateSessionParams,
   PolicyResolverInterface,
   PricingRepositoryInterface,
+  DailyRollupRepositoryInterface,
 } from '../_ai-gateway/index';
 
 import {
@@ -137,6 +138,16 @@ function makeMockPricingRepository(
   };
 }
 
+function makeMockDailyRollupRepository(
+  overrides: Partial<DailyRollupRepositoryInterface> = {},
+): DailyRollupRepositoryInterface {
+  return {
+    rebuildBucketForEvent: overrides.rebuildBucketForEvent ?? (async () => null),
+    rebuildBucket: overrides.rebuildBucket ?? (async () => 'bucket-id-1'),
+    listBucketsForDate: overrides.listBucketsForDate ?? (async () => []),
+  };
+}
+
 function makeMockPolicyResolver(policy: GatewayPolicy): PolicyResolverInterface {
   return {
     resolvePolicy: vi.fn().mockResolvedValue(policy),
@@ -148,6 +159,7 @@ function makeDeps(
   policy: GatewayPolicy,
   repoOverrides?: Partial<UsageRepositoryInterface>,
   pricingRepository?: PricingRepositoryInterface,
+  dailyRollupRepository?: DailyRollupRepositoryInterface,
 ): GatewayDeps & {
   repo: ReturnType<typeof makeMockRepo>;
   logCalls: Array<{ event: string; data?: Record<string, unknown> }>;
@@ -161,6 +173,7 @@ function makeDeps(
     policyResolver: makeMockPolicyResolver(policy),
     usageRepository: repo,
     pricingRepository: pricingRepository ?? makeMockPricingRepository(),
+    dailyRollupRepository: dailyRollupRepository ?? makeMockDailyRollupRepository(),
     clock: vi.fn().mockReturnValue(1000),
     uuidGen: vi.fn().mockReturnValueOnce('req-uuid').mockReturnValueOnce('corr-uuid').mockReturnValue('other-uuid'),
     logger: (event, data) => logCalls.push({ event, data }),
@@ -497,6 +510,72 @@ describe('cost calculation integration', () => {
     expect(updateMetricCalls).toHaveLength(1);
     expect(updateEventCalls).toHaveLength(1);
     expect((updateEventCalls[0] as any).params.costStatus).toBe('calculated');
+  });
+});
+
+// ── DAILY ROLLUP integration ────────────────────────────────────────────────
+
+describe('daily rollup integration', () => {
+  const metrics: GatewayUsageMetric[] = [{
+    metricKey: 'output_text_tokens',
+    unitType: 'tokens',
+    quantity: 150,
+    isBillable: true,
+    measurementSource: 'provider_usage',
+  }];
+
+  it('legacy mode never touches the daily rollup repository', async () => {
+    let rebuildCalls = 0;
+    const dailyRollupRepository = makeMockDailyRollupRepository({
+      rebuildBucketForEvent: async () => { rebuildCalls++; return null; },
+    });
+    const deps = makeDeps({ gatewayMode: 'legacy', runtimeStatus: 'enabled' }, undefined, undefined, dailyRollupRepository);
+
+    await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => metrics);
+
+    expect(rebuildCalls).toBe(0);
+  });
+
+  it('observe mode calls rebuildBucketForEvent with the event id after metrics are persisted', async () => {
+    const rebuildCalls: string[] = [];
+    const dailyRollupRepository = makeMockDailyRollupRepository({
+      rebuildBucketForEvent: async (eventId: string) => { rebuildCalls.push(eventId); return 'daily-1'; },
+    });
+    const deps = makeDeps({ gatewayMode: 'observe', runtimeStatus: 'enabled' }, undefined, undefined, dailyRollupRepository);
+
+    await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => metrics);
+
+    expect(rebuildCalls).toEqual(['event-id-1']);
+  });
+
+  it('a rollup failure never affects the response returned to invoke', async () => {
+    const dailyRollupRepository = makeMockDailyRollupRepository({
+      rebuildBucketForEvent: async () => { throw new Error('advisory lock timeout'); },
+    });
+    const deps = makeDeps({ gatewayMode: 'observe', runtimeStatus: 'enabled' }, undefined, undefined, dailyRollupRepository);
+
+    const result = await executeAiGatewayCall(baseContext(), () => Promise.resolve('untouched-value'), deps, () => metrics);
+
+    expect(result).toBe('untouched-value');
+  });
+
+  it('rollup failure and cost-calculation failure are handled independently — one failing does not stop the other from being attempted', async () => {
+    const costCalls: string[] = [];
+    const rollupCalls: string[] = [];
+    const deps = makeDeps(
+      { gatewayMode: 'observe', runtimeStatus: 'enabled' },
+      { getEventForCosting: async (id: string) => { costCalls.push(id); throw new Error('cost DB down'); } },
+      undefined,
+      makeMockDailyRollupRepository({
+        rebuildBucketForEvent: async (id: string) => { rollupCalls.push(id); return 'daily-1'; },
+      }),
+    );
+
+    const result = await executeAiGatewayCall(baseContext(), () => Promise.resolve('ok'), deps, () => metrics);
+
+    expect(result).toBe('ok');
+    expect(costCalls).toHaveLength(1);   // cost calculation was attempted
+    expect(rollupCalls).toHaveLength(1); // rollup still ran despite cost failing
   });
 });
 

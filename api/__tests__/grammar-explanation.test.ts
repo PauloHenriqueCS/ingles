@@ -44,6 +44,18 @@ const {
       completeSession: vi.fn(),
       failSession: vi.fn(),
       expireSession: vi.fn(),
+      getEventForCosting: vi.fn().mockResolvedValue(null),
+      getMetricsForEvent: vi.fn().mockResolvedValue([]),
+      updateMetricCost: vi.fn(),
+      updateEventCost: vi.fn(),
+    },
+    pricingRepository: {
+      findActivePrice: vi.fn().mockResolvedValue(null),
+    },
+    dailyRollupRepository: {
+      rebuildBucketForEvent: vi.fn().mockResolvedValue(null),
+      rebuildBucket: vi.fn(),
+      listBucketsForDate: vi.fn().mockResolvedValue([]),
     },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),

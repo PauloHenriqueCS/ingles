@@ -35,6 +35,11 @@ const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
     pricingRepository: {
       findActivePrice: vi.fn(),
     },
+    dailyRollupRepository: {
+      rebuildBucketForEvent: vi.fn(),
+      rebuildBucket: vi.fn(),
+      listBucketsForDate: vi.fn(),
+    },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),
     logger: vi.fn(),

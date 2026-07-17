@@ -90,6 +90,21 @@ export {
 } from './decimal';
 export type { Rational } from './decimal';
 
+// Daily rollup repository
+export { SupabaseDailyRollupRepository } from './daily-rollup-repository';
+export type {
+  DailyRollupRepositoryInterface,
+  DailyBucketDimensions,
+  DailyBucketKey,
+} from './daily-rollup-repository';
+
+// Daily rollup orchestration
+export {
+  rebuildDailyBucketForEvent,
+  reconcileDailyBucketsForDate,
+} from './daily-rollup';
+export type { DailyRollupDeps, ReconcileDateOutcome } from './daily-rollup';
+
 // Provider sessions
 export {
   authorizeProviderSession,

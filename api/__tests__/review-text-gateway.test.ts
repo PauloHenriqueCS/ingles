@@ -25,6 +25,9 @@ const {
   mockUpdateMetricCost,
   mockUpdateEventCost,
   mockFindActivePrice,
+  mockRebuildBucketForEvent,
+  mockRebuildBucket,
+  mockListBucketsForDate,
   mockPolicyResolvePolicy,
   mockRequireAuth,
   mockApplyRateLimit,
@@ -40,6 +43,9 @@ const {
   const mockUpdateMetricCost = vi.fn();
   const mockUpdateEventCost = vi.fn();
   const mockFindActivePrice = vi.fn();
+  const mockRebuildBucketForEvent = vi.fn();
+  const mockRebuildBucket = vi.fn();
+  const mockListBucketsForDate = vi.fn();
   const mockPolicyResolvePolicy = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
@@ -65,6 +71,11 @@ const {
     pricingRepository: {
       findActivePrice: mockFindActivePrice,
     },
+    dailyRollupRepository: {
+      rebuildBucketForEvent: mockRebuildBucketForEvent,
+      rebuildBucket: mockRebuildBucket,
+      listBucketsForDate: mockListBucketsForDate,
+    },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),
     logger: vi.fn(),
@@ -81,6 +92,9 @@ const {
     mockUpdateMetricCost,
     mockUpdateEventCost,
     mockFindActivePrice,
+    mockRebuildBucketForEvent,
+    mockRebuildBucket,
+    mockListBucketsForDate,
     mockPolicyResolvePolicy,
     mockRequireAuth,
     mockApplyRateLimit,
@@ -254,6 +268,9 @@ beforeEach(() => {
   mockUpdateMetricCost.mockResolvedValue(undefined);
   mockUpdateEventCost.mockResolvedValue(undefined);
   mockFindActivePrice.mockResolvedValue(null);
+  mockRebuildBucketForEvent.mockResolvedValue('daily-bucket-1');
+  mockRebuildBucket.mockResolvedValue('daily-bucket-1');
+  mockListBucketsForDate.mockResolvedValue([]);
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeDefaultSupabase() });
   mockApplyRateLimit.mockResolvedValue(true);
   (mockDeps.clock as ReturnType<typeof vi.fn>).mockReturnValue(1000);
@@ -527,6 +544,64 @@ describe('telemetry failure resilience', () => {
     await handler(makeReq(), res);
     expect(mockCreate).toHaveBeenCalledTimes(1);
     expect(res._status()).toBe(200);
+  });
+});
+
+// ── Daily rollup integration ────────────────────────────────────────────────
+
+describe('daily rollup integration', () => {
+  it('LEGACY mode never touches the daily rollup repository', async () => {
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
+    expect(mockRebuildBucketForEvent).not.toHaveBeenCalled();
+  });
+
+  describe('OBSERVE mode', () => {
+    beforeEach(() => {
+      mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    });
+
+    it('rebuilds the bucket for the event once metrics are persisted', async () => {
+      await handler(makeReq(), makeRes());
+      expect(mockRebuildBucketForEvent).toHaveBeenCalledTimes(1);
+      expect(mockRebuildBucketForEvent).toHaveBeenCalledWith('event-1');
+    });
+
+    it('a rollup failure never affects the response returned to the user', async () => {
+      mockRebuildBucketForEvent.mockRejectedValue(new Error('advisory lock timeout'));
+      const res = makeRes();
+      await handler(makeReq(), res);
+      expect(res._status()).toBe(200);
+      expect((res._body() as any).feedback).toBeTruthy();
+    });
+
+    it('a rollup failure is independent from cost calculation — cost still runs and is not blamed', async () => {
+      mockRebuildBucketForEvent.mockRejectedValue(new Error('rollup exploded'));
+      await handler(makeReq(), makeRes());
+      // getEventForCosting is the first call cost calculation makes — proves
+      // cost calculation still ran despite the rollup failure that follows it.
+      expect(mockGetEventForCosting).toHaveBeenCalledTimes(1);
+    });
+
+    it('a cost-calculation failure does not prevent the daily rollup from running', async () => {
+      mockGetEventForCosting.mockRejectedValue(new Error('pricing DB down'));
+      await handler(makeReq(), makeRes());
+      expect(mockRebuildBucketForEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it('three physical attempts rebuild three independent buckets, one per event', async () => {
+      mockCreate
+        .mockImplementationOnce(() => aiOk('not json'))
+        .mockImplementationOnce(() => aiOk('still not json'))
+        .mockImplementationOnce(() => aiOk(VALID_AI_RESPONSE));
+
+      await handler(makeReq(), makeRes());
+
+      expect(mockRebuildBucketForEvent).toHaveBeenCalledTimes(3);
+      const eventIdsRolledUp = mockRebuildBucketForEvent.mock.calls.map((c) => c[0]);
+      expect(new Set(eventIdsRolledUp).size).toBe(3);
+    });
   });
 });
 

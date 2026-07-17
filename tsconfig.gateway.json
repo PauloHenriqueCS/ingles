@@ -16,6 +16,9 @@
     "api/__tests__/ai-gateway.test.ts",
     "api/review-text.ts",
     "api/__tests__/review-text-gateway.test.ts",
-    "api/__tests__/cost-calculator.test.ts"
+    "api/__tests__/cost-calculator.test.ts",
+    "api/__tests__/daily-rollup.test.ts",
+    "scripts/ai-gateway-reconcile-event.ts",
+    "scripts/ai-gateway-reconcile-day.ts"
   ]
 }
