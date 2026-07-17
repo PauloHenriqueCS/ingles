@@ -13,6 +13,8 @@
   },
   "include": [
     "api/_ai-gateway/**/*.ts",
-    "api/__tests__/ai-gateway.test.ts"
+    "api/__tests__/ai-gateway.test.ts",
+    "api/review-text.ts",
+    "api/__tests__/review-text-gateway.test.ts"
   ]
 }

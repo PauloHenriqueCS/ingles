@@ -2,11 +2,47 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoist mock refs ───────────────────────────────────────────────────────────
 
-const { mockCreate } = vi.hoisted(() => ({ mockCreate: vi.fn() }));
+const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
+  const mockCreate = vi.fn();
+  // AI Gateway stays fully neutral here — this file tests review-text's own
+  // logic (auth, validation, retries, DB writes), not gateway telemetry.
+  // Forcing legacy mode avoids constructing a real Supabase-backed usage
+  // repository (which requires service-role credentials this file never
+  // stubs) and keeps executeAiGatewayCall a pure pass-through, matching
+  // this suite's pre-gateway behavior exactly. Gateway-specific behavior
+  // is covered by api/__tests__/review-text-gateway.test.ts.
+  const mockGatewayDeps = {
+    policyResolver: {
+      resolvePolicy: vi.fn().mockResolvedValue({ gatewayMode: 'legacy', runtimeStatus: 'enabled' }),
+      invalidate: vi.fn(),
+    },
+    usageRepository: {
+      startEvent: vi.fn(),
+      completeEvent: vi.fn(),
+      failEvent: vi.fn(),
+      cancelEvent: vi.fn(),
+      insertMetrics: vi.fn(),
+      createProviderSession: vi.fn(),
+      activateSession: vi.fn(),
+      completeSession: vi.fn(),
+      failSession: vi.fn(),
+      expireSession: vi.fn(),
+    },
+    clock: vi.fn(() => 1000),
+    uuidGen: vi.fn(() => 'test-uuid'),
+    logger: vi.fn(),
+  };
+  return { mockCreate, mockGatewayDeps };
+});
 
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
 }));
+
+vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
+  return { ...actual, getProductionDeps: () => mockGatewayDeps };
+});
 
 vi.mock('openai', () => ({
   default: vi.fn(function () {

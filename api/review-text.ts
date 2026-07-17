@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
+import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import type { GatewayUsageMetric } from './_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -223,6 +226,58 @@ export function calculateOverallResult(evals: RequiredWordEvaluation[]): 'passed
   return evals.every((e) => e.status === 'correct') ? 'passed' : 'failed';
 }
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractReviewMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  // Always record one request per provider call.
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  // Only record when actually provided and non-zero — do not invent values.
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -351,9 +406,40 @@ export default async function handler(req: any, res: any) {
   let feedback: Record<string, unknown> | null = null;
   let lastError = 'Erro desconhecido';
 
+  // ── Gateway context — shared correlationId across retries, attemptNumber ────
+  // per physical call. Each physical OpenAI call is its own usage event.
+  const deps = getProductionDeps();
+  const correlationId = deps.uuidGen();
+  const featureKey = isReviewMode ? 'writing.correct_review' : 'writing.correct';
+
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const completion = await openai.chat.completions.create({ model: AI_MODEL, messages });
+      const completion = await executeAiGatewayCall<ChatCompletion>(
+        {
+          featureKey,
+          provider: 'openai',
+          service: 'chat.completions',
+          model: AI_MODEL,
+          userId,
+          initiatedByUserId: userId,
+          actorType: 'user',
+          executionLocation: 'backend',
+          correlationId,
+          attemptNumber: attempt + 1,
+          callSequence: 1,
+          resourceType: 'writing_entry',
+          resourceId: typeof entryId === 'string' ? entryId : undefined,
+          technicalMetadata: {
+            endpoint: 'review-text',
+            flowType: isReviewMode ? 'review' : 'normal',
+            attempt: attempt + 1,
+            maxAttempts: 3,
+          },
+        },
+        () => openai.chat.completions.create({ model: AI_MODEL, messages }),
+        deps,
+        extractReviewMetrics,
+      );
       const raw = completion.choices[0]?.message?.content ?? '';
       const parsed = parseJsonSafely(raw);
 
