@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type {
   MissionPedagogicalPlan,
   LearnerPlanningSnapshot,
@@ -118,7 +119,7 @@ export function planWritingMission(input: PlanWritingMissionInput): MissionPedag
     .map(t => t.topicId);
 
   const plan: MissionPedagogicalPlan = {
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     version: 1,
     userId,
     skill: 'writing',

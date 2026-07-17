@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
+import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import type { GatewayUsageMetric } from './_ai-gateway/index';
 import {
   getDiagnosticGenerationContext,
   saveDiagnosticMission,
@@ -706,6 +709,60 @@ export function parseRawContent(raw: string): any | null {
   }
 }
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractThemeMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  // Always record one request per provider call.
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  // Only record when actually provided and non-zero — do not invent values.
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      // Cached tokens are billed at a discounted rate, not free — priced
+      // separately from the non-cached share of input_text_tokens.
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -752,6 +809,49 @@ export default async function handler(req: any, res: any) {
   }
 
   const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.LONG, maxRetries: 0 });
+
+  // ── Gateway context — one correlationId per HTTP request, one physical- ────
+  // attempt counter shared across every phase (diagnostic/review/normal),
+  // never reset when the request moves from one phase to another.
+  const gatewayDeps = getProductionDeps();
+  const correlationId = gatewayDeps.uuidGen();
+  let physicalAttempt = 0;
+
+  async function callTheme(
+    phase: 'diagnostic' | 'review' | 'normal',
+    phaseAttempt: number,
+    maxPhysicalAttempts: number,
+    params: ChatCompletionCreateParamsNonStreaming,
+  ): Promise<ChatCompletion> {
+    physicalAttempt += 1;
+    return executeAiGatewayCall<ChatCompletion>(
+      {
+        featureKey: 'writing.generate_topic',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: AI_MODEL,
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId,
+        attemptNumber: physicalAttempt,
+        callSequence: 1,
+        resourceType: 'generated_theme',
+        technicalMetadata: {
+          endpoint: 'generate-theme',
+          phase,
+          phaseAttempt,
+          physicalAttempt,
+          maxPhysicalAttempts,
+          flowType: mode === 'review' ? 'review' : 'normal',
+        },
+      },
+      () => openai.chat.completions.create(params),
+      gatewayDeps,
+      extractThemeMetrics,
+    );
+  }
 
   // ── DIAGNOSTIC MODE (auto-detection, invisible to user) ──────────────────────
   // Ativado automaticamente quando mode='normal', feature flag habilitada e
@@ -840,7 +940,7 @@ export default async function handler(req: any, res: any) {
       for (let attempt = 1; attempt <= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS; attempt++) {
         let raw: string;
         try {
-          const completion = await openai.chat.completions.create({
+          const completion = await callTheme('diagnostic', attempt, MAX_DIAGNOSTIC_GENERATION_ATTEMPTS, {
             model: AI_MODEL,
             temperature: 0.88 + (attempt - 1) * 0.07,
             messages: [
@@ -1011,7 +1111,7 @@ export default async function handler(req: any, res: any) {
     for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
       let raw: string;
       try {
-        const completion = await openai.chat.completions.create({
+        const completion = await callTheme('review', attempt, MAX_REVIEW_ATTEMPTS, {
           model: AI_MODEL,
           temperature: 0.85 + (attempt - 1) * 0.08,
           messages: [
@@ -1164,7 +1264,7 @@ export default async function handler(req: any, res: any) {
     }
 
     try {
-      const completion = await openai.chat.completions.create({
+      const completion = await callTheme('normal', attempt, MAX_ATTEMPTS, {
         model: AI_MODEL,
         temperature: 0.88 + (attempt - 1) * 0.06,
         messages: [
