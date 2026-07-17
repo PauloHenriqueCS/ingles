@@ -39,6 +39,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [listeningEpisodeId] = useState<string | undefined>(undefined);
   const [listeningRefreshKey, setListeningRefreshKey] = useState(0);
+  const [conversationRefreshKey, setConversationRefreshKey] = useState(0);
   const { user, loading: authLoading } = useAuth();
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
@@ -161,6 +162,7 @@ export default function App() {
             onOpenConversation={() => setView('conversation')}
             onOpenListening={() => setView('listening')}
             listeningRefreshKey={listeningRefreshKey}
+            conversationRefreshKey={conversationRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
             onSettingsChange={setLearningSettings}
@@ -178,6 +180,7 @@ export default function App() {
             onOpenConversation={() => setView('conversation')}
             onOpenListening={() => setView('listening')}
             listeningRefreshKey={listeningRefreshKey}
+            conversationRefreshKey={conversationRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
             onSettingsChange={setLearningSettings}
@@ -193,7 +196,7 @@ export default function App() {
           <MemoryView onNavigate={setView} onSettingsChange={setLearningSettings} />
         )}
         {view === 'conversation' && (
-          <ConversationView />
+          <ConversationView onComplete={() => setConversationRefreshKey((k) => k + 1)} />
         )}
         {view === 'listening' && (
           <ListeningView

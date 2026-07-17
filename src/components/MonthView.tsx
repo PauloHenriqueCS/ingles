@@ -20,6 +20,7 @@ interface Props {
   onOpenConversation?: () => void;
   onOpenListening?: () => void;
   listeningRefreshKey?: number;
+  conversationRefreshKey?: number;
   activeWeekdays?: number[];
   overrideDates?: string[];
   onSettingsChange?: (settings: LearningSettings) => void;
@@ -32,7 +33,7 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 export default function MonthView({
   entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
   onOpenWriting, onOpenPronunciation, onOpenConversation, onOpenListening,
-  listeningRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
+  listeningRefreshKey = 0, conversationRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
 }: Props) {
   const today = (() => {
     try {
@@ -69,7 +70,7 @@ export default function MonthView({
         }
       })
       .catch(() => {});
-  }, [currentYear, currentMonth, listeningRefreshKey]);
+  }, [currentYear, currentMonth, listeningRefreshKey, conversationRefreshKey]);
 
   useEffect(() => {
     getConversationGoalMinutes().then((min) => setConvGoalSec(min * 60)).catch(() => {});

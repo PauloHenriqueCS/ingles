@@ -9,6 +9,7 @@ import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
 import { recordConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
+import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 
 function formatTime(ms: number) {
@@ -109,12 +110,12 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 
 // ── Main view ─────────────────────────────────────────────────────────────────
 
-export default function ConversationView() {
+export default function ConversationView({ onComplete }: { onComplete?: () => void } = {}) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
   const session      = useRealtimeSession(playbackRate);
   const { captionsEnabled, toggleCaptions } = useConversationCaptions();
-  const today   = new Date().toISOString().split('T')[0];
+  const today   = getTodaySP();
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
@@ -146,7 +147,10 @@ export default function ConversationView() {
       sessionSavedRef.current = true;
       const durationSec = Math.floor(session.elapsedMs / 1000);
       recordConversationSession(today, durationSec)
-        .then(() => getDayTotalSeconds(today))
+        .then(() => {
+          onComplete?.();
+          return getDayTotalSeconds(today);
+        })
         .then(setTodayTotalSec)
         .catch(() => setTodayTotalSec(durationSec));
     }

@@ -2,7 +2,8 @@ import { supabase } from './supabase';
 
 export async function recordConversationSession(date: string, durationSec: number): Promise<void> {
   if (durationSec < 10) return;
-  await supabase.from('conversation_sessions').insert({ session_date: date, duration_sec: durationSec });
+  const { error } = await supabase.from('conversation_sessions').insert({ session_date: date, duration_sec: durationSec });
+  if (error) console.error('[conversation] failed to save session', { date, durationSec, error: error.message });
 }
 
 export async function getDayTotalSeconds(date: string): Promise<number> {
