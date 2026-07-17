@@ -29,6 +29,12 @@ import {
 } from '../../src/services/listening/story-session/generate-story-session';
 import { generateListeningStory as generateListeningStoryService, StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
 
+const ALLOWED_STORY_THEMES = new Set([
+  'travel', 'work_career', 'daily_life', 'movies_series', 'music',
+  'football_sports', 'technology', 'food_restaurants', 'relationships_social_life',
+  'health_wellbeing', 'money_shopping', 'mystery_adventure',
+]);
+
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
 async function handleEpisode(req: any, res: any) {
@@ -534,11 +540,15 @@ async function handleListeningGenerate(req: any, res: any) {
   const storyPackage: string | undefined =
     typeof req.body?.storyPackage === 'string' ? req.body.storyPackage : undefined;
 
+  // Optional: story theme — validated against allowed list; unknown values fall through to random
+  const rawTheme = typeof req.body?.theme === 'string' ? req.body.theme.trim() : null;
+  const theme = rawTheme && ALLOWED_STORY_THEMES.has(rawTheme) ? rawTheme : null;
+
   try {
     const serviceClient = getListeningServiceClient();
     const result = await generateListeningStoryService(
       userId, serviceClient, openaiKey, azureKey, azureRegion, secret,
-      storyPackage ?? null,
+      storyPackage ?? null, theme,
     );
     res.setHeader('Cache-Control', 'private, no-store');
     safeLog('listening/generate', 'generated', 200, { requestId, level: result.level });

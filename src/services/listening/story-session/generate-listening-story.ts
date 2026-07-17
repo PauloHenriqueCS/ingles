@@ -114,8 +114,11 @@ function stepLog(requestId: string, step: string, extra: Record<string, unknown>
 
 // ── Prompt ────────────────────────────────────────────────────────────────────
 
-function buildPrompt(level: string): string {
+export function buildPrompt(level: string, theme?: string | null): string {
   const range = PART_WORD_RANGES[level] ?? { min: 500, max: 650 };
+  const themeRule = theme
+    ? `\n- The story must be clearly related to the selected theme: ${theme}`
+    : '';
   return `Generate an English listening comprehension activity for a ${level} CEFR learner.
 
 The activity is ONE continuous story divided into exactly 2 parts.
@@ -155,7 +158,7 @@ Rules:
 - Each question tests only the part just heard — do not cross-reference parts
 - Exactly 5 options per question, exactly one correct, all distractors plausible
 - correctIndex: integer 0–4
-- Do NOT include Portuguese translations of the story text`;
+- Do NOT include Portuguese translations of the story text${themeRule}`;
 }
 
 // ── Normalize correctIndex from AI (may return letter, 1-indexed, or text) ────
@@ -181,6 +184,7 @@ async function callAI(
   level: string,
   openaiKey: string,
   requestId: string,
+  theme?: string | null,
 ): Promise<AIStory> {
   const client = new OpenAI({ apiKey: openaiKey, timeout: 120_000, maxRetries: 1 });
 
@@ -188,7 +192,7 @@ async function callAI(
   const resp = await client.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
-      { role: 'system', content: buildPrompt(level) },
+      { role: 'system', content: buildPrompt(level, theme) },
       { role: 'user', content: 'Generate the listening activity now.' },
     ],
     response_format: { type: 'json_object' },
@@ -422,6 +426,8 @@ export async function generateListeningStory(
   secret: string,
   /** Optional: packed story from a previous call. Skips OpenAI if provided. */
   storyPackage?: string | null,
+  /** Optional: story theme identifier (e.g. 'travel', 'music'). null = random. */
+  theme?: string | null,
 ): Promise<ListeningStoryResult> {
   const requestId = crypto.randomUUID().slice(0, 8);
   const totalStart = Date.now();
@@ -432,6 +438,7 @@ export async function generateListeningStory(
     hasAzureKey: !!azureKey,
     azureRegion: azureRegion || 'NOT_SET',
     hasSecret: !!secret,
+    theme: theme ?? 'random',
   });
 
   // 1. Resolve CEFR level and user's preferred voice from DB
@@ -453,8 +460,8 @@ export async function generateListeningStory(
       throw new Error(`STORY_PACKAGE_INVALID: ${msg}`);
     }
   } else {
-    stepLog(requestId, 'ai_start', { level });
-    ai = await callAI(level, openaiKey, requestId);
+    stepLog(requestId, 'ai_start', { level, theme: theme ?? 'random' });
+    ai = await callAI(level, openaiKey, requestId, theme);
   }
 
   // Pack the story now — before TTS — so we can return it on audio failure

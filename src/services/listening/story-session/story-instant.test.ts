@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeCorrectIndex } from './generate-listening-story';
+import { normalizeCorrectIndex, buildPrompt } from './generate-listening-story';
 
 const OPTS = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'];
 
@@ -36,5 +36,36 @@ describe('client-side answer comparison', () => {
       const isCorrect = Number(selected) === Number(correctIdx);
       expect(isCorrect).toBe(selected === correctIdx);
     }
+  });
+});
+
+describe('buildPrompt theme injection', () => {
+  it('omits theme rule when theme is null', () => {
+    const prompt = buildPrompt('B1', null);
+    expect(prompt).not.toContain('The story must be clearly related to the selected theme');
+  });
+
+  it('omits theme rule when theme is undefined', () => {
+    const prompt = buildPrompt('B1');
+    expect(prompt).not.toContain('The story must be clearly related to the selected theme');
+  });
+
+  it('injects theme rule when theme is provided', () => {
+    const prompt = buildPrompt('B1', 'travel');
+    expect(prompt).toContain('The story must be clearly related to the selected theme: travel');
+  });
+
+  it.each([
+    'travel', 'work_career', 'daily_life', 'movies_series', 'music',
+    'football_sports', 'technology', 'food_restaurants', 'relationships_social_life',
+    'health_wellbeing', 'money_shopping', 'mystery_adventure',
+  ])('injects theme rule for %s', (theme) => {
+    const prompt = buildPrompt('A2', theme);
+    expect(prompt).toContain(`The story must be clearly related to the selected theme: ${theme}`);
+  });
+
+  it('includes the level in the prompt', () => {
+    const prompt = buildPrompt('C1', 'music');
+    expect(prompt).toContain('C1 CEFR learner');
   });
 });

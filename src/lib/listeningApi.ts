@@ -176,10 +176,13 @@ export type ListeningStoryData = {
   parts: [StoryPart, StoryPart];
 };
 
-export function generateListeningStory(storyPackage?: string | null): Promise<ListeningStoryData> {
+export function generateListeningStory(storyPackage?: string | null, theme?: string | null): Promise<ListeningStoryData> {
+  const body: Record<string, string> = {};
+  if (storyPackage) body.storyPackage = storyPackage;
+  if (theme) body.theme = theme;
   return apiFetch<ListeningStoryData>('/api/listening/generate', {
     method: 'POST',
-    body: JSON.stringify(storyPackage ? { storyPackage } : {}),
+    body: JSON.stringify(body),
   });
 }
 
