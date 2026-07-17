@@ -175,6 +175,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const [completionSaveError, setCompletionSaveError] = useState(false);
   const [completionSaved, setCompletionSaved] = useState(false);
   const [progressMsgIdx, setProgressMsgIdx] = useState(0);
+  const [replayActive, setReplayActive] = useState(false);
+  const [replayPartIdx, setReplayPartIdx] = useState<0 | 1>(0);
+  const speedRef = useRef<Speed>(1.00);
 
   const player = useListeningAudioPlayer();
   const audioRef = player.audioRef;
@@ -206,7 +209,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
 
   // ── Apply speed ─────────────────────────────────────────────────────────────
   const { setRate: playerSetRate } = player;
-  useEffect(() => { playerSetRate(speed); }, [speed, playerSetRate]);
+  useEffect(() => {
+    speedRef.current = speed;
+    playerSetRate(speed);
+  }, [speed, playerSetRate]);
 
   // ── Progress messages cycling during story generation ────────────────────────
   useEffect(() => {
@@ -359,6 +365,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     setStorySelectedOption(null);
     setCompletionSaveError(false);
     setCompletionSaved(false);
+    setReplayActive(false);
+    setReplayPartIdx(0);
     setPhase('generating');
     try {
       // Pass cached storyPackage on retry — skips OpenAI, re-generates only TTS
@@ -1556,6 +1564,147 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     }
   }
 
+  // ── Replay mode (optional review after story completion) ──────────────────────
+
+  function startReplay() {
+    if (!storyData) return;
+    const url0 = audioUrlsByPart.current[0];
+    if (!url0) return;
+    player.setOnEnded(advanceReplay);
+    setReplayActive(true);
+    setReplayPartIdx(0);
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.src = url0;
+    audio.currentTime = 0;
+    audio.playbackRate = speedRef.current;
+    audio.play().catch(() => {});
+  }
+
+  function advanceReplay() {
+    const url1 = audioUrlsByPart.current[1];
+    if (!url1) return;
+    player.setOnEnded(finishReplay);
+    setReplayPartIdx(1);
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.src = url1;
+    audio.currentTime = 0;
+    audio.playbackRate = speedRef.current;
+    audio.play().catch(() => {});
+  }
+
+  function finishReplay() {
+    setReplayActive(false);
+  }
+
+  function renderReplayMode() {
+    if (!storyData) return null;
+    const part = storyData.parts[replayPartIdx];
+    const playing = player.state.isPlaying;
+
+    return (
+      <div className="p-4 pt-4 max-w-lg mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-500 font-medium">Parte {replayPartIdx + 1} de 2</span>
+          <span className="text-xs text-purple-400 font-medium">Revisão com legenda</span>
+        </div>
+
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4 space-y-3">
+          <Waveform playing={playing} />
+
+          <div>
+            <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-1.5">
+              <div
+                className="h-full bg-purple-500 rounded-full transition-all duration-100"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-xs text-slate-600">
+              <span>{fmtMs(currentTimeMs)}</span>
+              <span>{durationMs > 0 ? fmtMs(durationMs) : '--:--'}</span>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-700 pt-3">
+            <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">
+              Texto — Parte {replayPartIdx + 1}
+            </p>
+            <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-line">
+              {part.text}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-center gap-6">
+          <button
+            onClick={() => player.seekBack(10)}
+            className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+            title="Voltar 10 segundos"
+          >
+            <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors relative">
+              <Rewind className="w-4 h-4" />
+              <span className="absolute bottom-0.5 right-0 text-[9px] font-bold text-slate-400 leading-none">10</span>
+            </div>
+            <span className="text-xs text-slate-600">-10s</span>
+          </button>
+
+          {playing ? (
+            <button
+              onClick={() => player.pause()}
+              className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
+              aria-label="Pausar"
+            >
+              <Pause className="w-7 h-7" />
+            </button>
+          ) : (
+            <button
+              onClick={() => player.play()}
+              className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
+              aria-label="Reproduzir"
+            >
+              <Play className="w-7 h-7 translate-x-0.5" />
+            </button>
+          )}
+
+          <button
+            onClick={startReplay}
+            className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+            title="Reiniciar desde a Parte 1"
+          >
+            <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors">
+              <RotateCcw className="w-4 h-4" />
+            </div>
+            <span className="text-xs text-slate-600">Reiniciar</span>
+          </button>
+        </div>
+
+        <div className="flex items-center justify-center gap-2">
+          {SPEEDS.map(s => (
+            <button
+              key={s}
+              onClick={() => setSpeed(s)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-w-[44px] ${
+                speed === s
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
+              }`}
+            >
+              {s === 1.00 ? '1×' : `${s}×`}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={() => { player.pause(); setReplayActive(false); }}
+          className="w-full py-2.5 text-xs text-slate-600 hover:text-slate-400 transition-colors"
+        >
+          Encerrar revisão
+        </button>
+      </div>
+    );
+  }
+
   function renderCompletionErrorBanner() {
     if (!completionSaveError) return null;
     return (
@@ -1585,6 +1734,8 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   // ── Render: done ──────────────────────────────────────────────────────────────
   function renderDone() {
     if (storyMode) {
+      if (replayActive) return renderReplayMode();
+
       return (
         <div className="p-6 max-w-lg mx-auto text-center pt-10 space-y-5">
           <div className="w-20 h-20 rounded-full bg-purple-600/20 border-2 border-purple-500/40 flex items-center justify-center mx-auto">
@@ -1601,6 +1752,16 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
 
           {renderCompletionErrorBanner()}
           {renderCompletionSuccessBanner()}
+
+          {storyData && (
+            <button
+              onClick={startReplay}
+              className="w-full py-3.5 rounded-xl border border-purple-500/40 bg-purple-600/15 hover:bg-purple-600/25 text-purple-300 font-semibold transition-colors flex items-center justify-center gap-2"
+            >
+              <Headphones className="w-5 h-5" />
+              Ouvir novamente com legenda
+            </button>
+          )}
 
           <button
             onClick={handleStartGeneration}
