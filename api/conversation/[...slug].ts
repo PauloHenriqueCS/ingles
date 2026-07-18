@@ -3,8 +3,26 @@ import { requireAuth } from '../_auth';
 import { ASSISTANT_NAME, REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import { buildTutorInstructionsWithContext, ConversationStartContext } from '../../src/lib/promptBuilder';
 import type { AIPreferences } from '../../src/types';
-import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
+import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
 import { applyRateLimit } from '../_rateLimit';
+import {
+  executeAiGatewayCall,
+  getProductionDeps,
+  getSharedServiceClient,
+  authorizeProviderSession,
+  reconcileEventCost,
+  rebuildDailyBucketForEvent,
+  DuplicateUsageEventError,
+} from '../_ai-gateway/index';
+import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
+import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
+
+// ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(v: unknown): v is string {
+  return typeof v === 'string' && UUID_RE.test(v);
+}
 
 // ─── POST /api/conversation/preview ──────────────────────────────────────────
 
@@ -15,6 +33,43 @@ const PREVIEW_SPEED: Record<AIPreferences['speechPace'], number> = {
   normal:  1.0,
   natural: 1.18,
 };
+
+// ── Gateway wiring — wraps only the physical OpenAI TTS fetch call ───────────
+
+class PreviewTtsTimeoutError extends Error {
+  constructor() { super('OpenAI preview TTS request timed out'); this.name = 'PreviewTtsTimeoutError'; }
+}
+class PreviewTtsNetworkError extends Error {
+  constructor() { super('Could not reach OpenAI preview TTS'); this.name = 'PreviewTtsNetworkError'; }
+}
+class PreviewTtsHttpError extends Error {
+  constructor(public readonly openaiStatus: number) {
+    super(`OpenAI preview TTS returned HTTP ${openaiStatus}`);
+    this.name = 'PreviewTtsHttpError';
+  }
+}
+
+function buildPreviewTtsMetrics(characterCount: number): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+    {
+      metricKey: 'tts_characters',
+      unitType: 'character',
+      quantity: characterCount,
+      isBillable: true,
+      // Deterministic code-point count of the exact plain-text `input` body
+      // sent to OpenAI (no SSML wrapper for this endpoint) — computed from
+      // the request, not confirmed by a usage field in OpenAI's response.
+      measurementSource: 'request_body',
+    },
+  ];
+}
 
 async function handlePreview(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
@@ -45,36 +100,69 @@ async function handlePreview(req: any, res: any) {
   const paceLabel    = PACE_LABELS[pace]?.label ?? pace;
 
   const input = `${VOICE_PREVIEW_PHRASE} I'll be speaking at a ${paceLabel.toLowerCase()} pace during our practice.`;
+  const characterCount = countTtsPlainTextCharacters(input);
 
-  let ttsRes: Response;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
+  const gatewayDeps = getProductionDeps();
+  let audioBuffer: ArrayBuffer;
   try {
-    ttsRes = await fetch(TTS_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tts-1', voice: previewVoice, input, speed, response_format: 'mp3' }),
-      signal: ctrl.signal,
-    });
+    audioBuffer = await executeAiGatewayCall<ArrayBuffer>(
+      {
+        featureKey: 'conversation.preview_tts',
+        provider: 'openai',
+        service: 'audio.speech',
+        model: 'tts-1',
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: { endpoint: 'conversation/preview', voiceId, pace },
+      },
+      async () => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
+        let ttsRes: Response;
+        try {
+          ttsRes = await fetch(TTS_URL, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'tts-1', voice: previewVoice, input, speed, response_format: 'mp3' }),
+            signal: ctrl.signal,
+          });
+        } catch (err) {
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          throw isAbort ? new PreviewTtsTimeoutError() : new PreviewTtsNetworkError();
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (!ttsRes.ok) {
+          throw new PreviewTtsHttpError(ttsRes.status);
+        }
+
+        return ttsRes.arrayBuffer();
+      },
+      gatewayDeps,
+      () => buildPreviewTtsMetrics(characterCount),
+    );
   } catch (err) {
-    clearTimeout(timer);
-    const isAbort = err instanceof Error && err.name === 'AbortError';
-    if (isAbort) {
+    if (err instanceof PreviewTtsTimeoutError) {
       safeLog('conversation/preview', 'timeout', 504);
       return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
     }
-    safeLog('conversation/preview', 'network_error', 502);
-    return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
-  } finally {
-    clearTimeout(timer);
+    if (err instanceof PreviewTtsNetworkError) {
+      safeLog('conversation/preview', 'network_error', 502);
+      return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
+    }
+    if (err instanceof PreviewTtsHttpError) {
+      safeLog('conversation/preview', 'tts_error', err.openaiStatus);
+      return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
+    }
+    throw err;
   }
 
-  if (!ttsRes.ok) {
-    safeLog('conversation/preview', 'tts_error', ttsRes.status);
-    return res.status(502).json({ code: 'PREVIEW_FAILED', message: 'Não foi possível gerar a amostra.' });
-  }
-
-  const audioBuffer = await ttsRes.arrayBuffer();
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).send(Buffer.from(audioBuffer));
@@ -136,6 +224,86 @@ function mapOpenAIStatus(status: number): string {
   if (status === 429) return 'OPENAI_RATE_LIMITED';
   if (status >= 500 && status <= 599) return 'OPENAI_UNAVAILABLE';
   return 'OPENAI_SESSION_FAILED';
+}
+
+// ── Gateway wiring — wraps only the physical client_secrets fetch call ───────
+
+class CreateSessionTimeoutError extends Error {
+  constructor() { super('OpenAI realtime/client_secrets request timed out'); this.name = 'CreateSessionTimeoutError'; }
+}
+class CreateSessionNetworkError extends Error {
+  constructor() { super('Could not reach OpenAI realtime/client_secrets'); this.name = 'CreateSessionNetworkError'; }
+}
+class CreateSessionHttpError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    public readonly rawText: string,
+    public readonly requestId: string | null,
+  ) {
+    super(`OpenAI realtime/client_secrets returned HTTP ${httpStatus}`);
+    this.name = 'CreateSessionHttpError';
+  }
+  // Read by api/_ai-gateway/sanitize.ts:sanitizeError() to populate the
+  // failed event's http_status without needing to touch the raw body.
+  get status(): number { return this.httpStatus; }
+}
+
+function buildCreateSessionMetrics(): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+  ];
+}
+
+// The session's own feature_key is conversation.webrtc_connect (the frontend
+// feature that will actually report activation/usage/completion), even
+// though it is authorized here — the same split used by
+// pronunciation.start_assessment authorizing a pronunciation.assess_text
+// session (see api/pronunciation/[...slug].ts). Gated by webrtc_connect's
+// OWN runtime policy, independent of conversation.create_session's policy:
+// while webrtc_connect stays legacy (this stage), this never runs, no
+// session row is created, and gatewaySessionId is never returned.
+async function maybeAuthorizeWebrtcSession(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  ephemeralToken: string,
+  expiresAt: Date,
+): Promise<string | undefined> {
+  try {
+    const policy = await gatewayDeps.policyResolver.resolvePolicy({
+      featureKey: 'conversation.webrtc_connect',
+      provider: 'openai',
+      userId,
+      actorType: 'user',
+      executionLocation: 'frontend',
+    });
+    if (policy.gatewayMode !== 'observe') return undefined;
+
+    const { sessionId } = await authorizeProviderSession(
+      gatewayDeps.usageRepository,
+      {
+        featureKey: 'conversation.webrtc_connect',
+        provider: 'openai',
+        userId,
+        initiatedByUserId: userId,
+        internalSessionType: 'conversation_realtime',
+        authorizationExpiresAt: expiresAt,
+        // Technical only — REALTIME_MODEL is read back server-side when
+        // resolving cost for relayed usage events; never trust the client.
+        metadata: { endpoint: 'conversation/session', model: REALTIME_MODEL },
+      },
+      ephemeralToken,
+    );
+    return sessionId;
+  } catch (e) {
+    gatewayDeps.logger('gateway.webrtcConnectAuthorize.failed', { message: String(e) });
+    return undefined; // fail-open: token issuance must never be blocked by this
+  }
 }
 
 function rowToPrefs(row: Record<string, unknown>): AIPreferences {
@@ -279,49 +447,82 @@ async function handleSession(req: any, res: any) {
     },
   };
 
+  const gatewayDeps = getProductionDeps();
   let rawText: string;
-  let httpStatus: number;
-  let requestId: string | null;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
   try {
-    const openaiRes = await fetch(CLIENT_SECRETS_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${openaiKey}`,
-        'Content-Type': 'application/json',
-        'OpenAI-Safety-Identifier': safetyIdentifier,
+    const fetchResult = await executeAiGatewayCall<{ httpStatus: number; requestId: string | null; rawText: string }>(
+      {
+        featureKey: 'conversation.create_session',
+        provider: 'openai',
+        service: 'realtime.client_secrets',
+        model: REALTIME_MODEL,
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: { endpoint: 'conversation/session', model: REALTIME_MODEL },
       },
-      body: JSON.stringify(sessionConfig),
-      signal: ctrl.signal,
-    });
-    httpStatus = openaiRes.status;
-    requestId  = openaiRes.headers.get('x-request-id');
-    rawText    = await openaiRes.text();
+      async () => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
+        let openaiRes: Response;
+        try {
+          openaiRes = await fetch(CLIENT_SECRETS_URL, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${openaiKey}`,
+              'Content-Type': 'application/json',
+              'OpenAI-Safety-Identifier': safetyIdentifier,
+            },
+            body: JSON.stringify(sessionConfig),
+            signal: ctrl.signal,
+          });
+        } catch (err) {
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          throw isAbort ? new CreateSessionTimeoutError() : new CreateSessionNetworkError();
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const fetchedStatus = openaiRes.status;
+        const fetchedRequestId = openaiRes.headers.get('x-request-id');
+        const fetchedRawText = await openaiRes.text();
+
+        if (fetchedStatus < 200 || fetchedStatus >= 300) {
+          throw new CreateSessionHttpError(fetchedStatus, fetchedRawText, fetchedRequestId);
+        }
+        return { httpStatus: fetchedStatus, requestId: fetchedRequestId, rawText: fetchedRawText };
+      },
+      gatewayDeps,
+      buildCreateSessionMetrics,
+    );
+    rawText = fetchResult.rawText;
   } catch (err) {
-    const isAbort = err instanceof Error && err.name === 'AbortError';
-    if (isAbort) {
+    if (err instanceof CreateSessionTimeoutError) {
       safeLog('conversation/session', 'timeout', 504);
       return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
     }
-    safeLog('conversation/session', 'network_error', 502);
-    return res.status(502).json({ code: 'OPENAI_UNREACHABLE', message: 'Não foi possível conectar ao serviço de IA.' });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (httpStatus < 200 || httpStatus >= 300) {
-    const errorCode = mapOpenAIStatus(httpStatus);
-    let parsed: { error?: { type?: string; code?: string; param?: string; message?: string } } = {};
-    try { parsed = JSON.parse(rawText); } catch { /* ok */ }
-    const e = parsed.error ?? {};
-    safeLog('conversation/session', 'openai_error', SESSION_ERROR_STATUS[errorCode] ?? 502, {
-      httpStatus, requestId,
-      type: typeof e.type === 'string' ? e.type : null,
-      code: typeof e.code === 'string' ? e.code : null,
-    });
-    return res.status(SESSION_ERROR_STATUS[errorCode] ?? 502)
-      .json({ code: errorCode, message: SESSION_ERROR_MESSAGE[errorCode] });
+    if (err instanceof CreateSessionNetworkError) {
+      safeLog('conversation/session', 'network_error', 502);
+      return res.status(502).json({ code: 'OPENAI_UNREACHABLE', message: 'Não foi possível conectar ao serviço de IA.' });
+    }
+    if (err instanceof CreateSessionHttpError) {
+      const errorCode = mapOpenAIStatus(err.httpStatus);
+      let parsed: { error?: { type?: string; code?: string; param?: string; message?: string } } = {};
+      try { parsed = JSON.parse(err.rawText); } catch { /* ok */ }
+      const e = parsed.error ?? {};
+      safeLog('conversation/session', 'openai_error', SESSION_ERROR_STATUS[errorCode] ?? 502, {
+        httpStatus: err.httpStatus, requestId: err.requestId,
+        type: typeof e.type === 'string' ? e.type : null,
+        code: typeof e.code === 'string' ? e.code : null,
+      });
+      return res.status(SESSION_ERROR_STATUS[errorCode] ?? 502)
+        .json({ code: errorCode, message: SESSION_ERROR_MESSAGE[errorCode] });
+    }
+    throw err;
   }
 
   let data: { value?: unknown; expires_at?: unknown; session?: { id?: string; model?: string } };
@@ -340,6 +541,17 @@ async function handleSession(req: any, res: any) {
     return res.status(502).json({ code: 'OPENAI_SESSION_FAILED', message: SESSION_ERROR_MESSAGE.OPENAI_SESSION_FAILED });
   }
 
+  // Additive, retrocompatible: gatewaySessionId is only present when
+  // conversation.webrtc_connect is in observe mode (this stage: always
+  // absent — legacy). Never blocks token issuance on failure (fail-open,
+  // isolated inside maybeAuthorizeWebrtcSession).
+  const gatewaySessionId = await maybeAuthorizeWebrtcSession(
+    gatewayDeps,
+    userId,
+    data.value,
+    new Date(data.expires_at * 1000),
+  );
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     token:     data.value,
@@ -347,7 +559,450 @@ async function handleSession(req: any, res: any) {
     model:     data.session?.model ?? REALTIME_MODEL,
     voice:     prefs.voice,
     expiresAt: data.expires_at,
+    ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
+}
+
+// ─── POST /api/conversation/session/{active,failed,usage,end} ───────────────
+// Authenticated bridge for conversation.webrtc_connect. The physical WebRTC
+// POST to https://api.openai.com/v1/realtime/calls happens entirely in the
+// browser (src/hooks/useRealtimeSession.ts) and cannot be wrapped by a
+// server-only function, so ai_provider_sessions (authorized above, in
+// maybeAuthorizeWebrtcSession) is the authenticated bridge: the browser
+// reports connection outcome/usage/completion here, and every report is
+// re-validated server-side (ownership, feature, provider, status,
+// expiration) via an atomic UPDATE ... WHERE status IN (...) — never
+// trusting the client's claim beyond "which row to look up." Same pattern
+// as pronunciation.assess_text's /complete and /fail bridge in
+// api/pronunciation/[...slug].ts.
+//
+// All four handlers are fire-and-forget from the browser's perspective
+// (src/lib/realtimeGatewayReporting.ts never awaits their body) and always
+// resolve 200 on the telemetry path — a duplicate/foreign/expired/malformed
+// report is an idempotent no-op, and an internal telemetry failure is
+// caught and logged, never surfaced to the student.
+//
+// Grain: conversation.webrtc_connect records exactly one ai_usage_event per
+// physical connection attempt outcome (call_sequence=1: succeeded via
+// /active or failed via /failed) plus one event for the session's measured
+// duration when it ends normally (call_sequence=2, via /end) — all sharing
+// the session id as correlationId. conversation.realtime_usage (the
+// separate billing key) records one incremental event per Realtime
+// response.done, via /usage, deduplicated by
+// (provider_session_record_id, provider_request_id = response.id).
+
+const WEBRTC_CONNECT_FEATURE_KEY = 'conversation.webrtc_connect';
+const REALTIME_USAGE_FEATURE_KEY = 'conversation.realtime_usage';
+
+const ALLOWED_END_REASONS = new Set([
+  'user_ended', 'dc_closed', 'max_duration_reached', 'unmounted',
+  'connection_lost', 'webrtc_failed', 'webrtc_network', 'session_error', 'unknown',
+]);
+
+// Generous ceiling over MAX_SESSION_MS (30 min, useRealtimeSession.ts) —
+// bounds an implausible client-reported duration without ever rejecting a
+// genuine long session.
+const MAX_REALTIME_SESSION_DURATION_SECONDS = 2400;
+
+// Matches the OpenAI Realtime response id format loosely (e.g. "resp_...")
+// without overfitting to a specific prefix that may change — just a safe,
+// bounded technical identifier charset.
+const PROVIDER_RESPONSE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+function sessionsClient() {
+  return getSharedServiceClient();
+}
+
+// ── /active ───────────────────────────────────────────────────────────────
+
+async function handleSessionActive(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const gatewaySessionId = (req.body ?? {}).gatewaySessionId;
+  if (!isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+
+  try {
+    const nowIso = new Date().toISOString();
+    const { data, error } = await sessionsClient()
+      .from('ai_provider_sessions')
+      .update({ status: 'active', started_at: nowIso })
+      .eq('id', gatewaySessionId)
+      .eq('user_id', userId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .in('status', ['authorized', 'connecting'])
+      .or(`authorization_expires_at.is.null,authorization_expires_at.gt.${nowIso}`)
+      .select('id')
+      .maybeSingle();
+
+    if (error || !data) {
+      // Foreign session, already active/terminal, or expired — idempotent no-op.
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const gatewayDeps = getProductionDeps();
+    const startedAt = gatewayDeps.clock();
+    const eventId = await gatewayDeps.usageRepository.startEvent({
+      requestId: gatewayDeps.uuidGen(),
+      correlationId: gatewaySessionId,
+      providerSessionRecordId: gatewaySessionId,
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      featureKey: WEBRTC_CONNECT_FEATURE_KEY,
+      provider: 'openai',
+      service: 'realtime.webrtc',
+      model: REALTIME_MODEL,
+      executionLocation: 'frontend',
+      isBillable: false,
+      attemptNumber: 1,
+      callSequence: 1,
+      resourceType: 'ai_provider_session',
+      resourceId: gatewaySessionId,
+      metadata: { endpoint: 'conversation/session/active' },
+      startedAt,
+    });
+    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+    await gatewayDeps.usageRepository.insertMetrics(eventId, [
+      { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: 'provider_event_client_relayed' },
+    ]);
+    try {
+      await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
+    } catch (e) {
+      gatewayDeps.logger('gateway.webrtcActiveRollup.failed', { message: String(e) });
+    }
+
+    return res.status(200).json({ status: 'active' });
+  } catch (e) {
+    // console.error, not getProductionDeps().logger — the failure that
+    // landed here may itself be getProductionDeps() throwing (e.g. missing
+    // service-role credentials), and re-calling it here would escape uncaught.
+    console.error('[conversation/session/active] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
+  }
+}
+
+// ── /failed ──────────────────────────────────────────────────────────────
+
+async function handleSessionFailed(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const body = req.body ?? {};
+  const gatewaySessionId = body.gatewaySessionId;
+  const reason = typeof body.reason === 'string' && ALLOWED_END_REASONS.has(body.reason) ? body.reason : 'unknown';
+
+  if (!isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+
+  try {
+    const { data, error } = await sessionsClient()
+      .from('ai_provider_sessions')
+      .update({ status: 'failed', ended_at: new Date().toISOString() })
+      .eq('id', gatewaySessionId)
+      .eq('user_id', userId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .in('status', ['authorized', 'connecting'])
+      .select('id')
+      .maybeSingle();
+
+    if (error || !data) {
+      // Already active/terminal, or foreign — idempotent no-op. An
+      // already-active session is never downgraded to failed by a stale report.
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const gatewayDeps = getProductionDeps();
+    const startedAt = gatewayDeps.clock();
+    const eventId = await gatewayDeps.usageRepository.startEvent({
+      requestId: gatewayDeps.uuidGen(),
+      correlationId: gatewaySessionId,
+      providerSessionRecordId: gatewaySessionId,
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      featureKey: WEBRTC_CONNECT_FEATURE_KEY,
+      provider: 'openai',
+      service: 'realtime.webrtc',
+      model: REALTIME_MODEL,
+      executionLocation: 'frontend',
+      isBillable: false,
+      attemptNumber: 1,
+      callSequence: 1,
+      resourceType: 'ai_provider_session',
+      resourceId: gatewaySessionId,
+      metadata: { endpoint: 'conversation/session/failed' },
+      startedAt,
+    });
+    await gatewayDeps.usageRepository.failEvent(eventId, {
+      latencyMs: gatewayDeps.clock() - startedAt,
+      errorCode: reason,
+      errorCategory: 'client_reported',
+    });
+
+    return res.status(200).json({ status: 'failed' });
+  } catch (e) {
+    console.error('[conversation/session/failed] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    return res.status(200).json({ status: 'ignored' });
+  }
+}
+
+// ── /usage ───────────────────────────────────────────────────────────────
+// Shape mirrors the official OpenAI Realtime response.done `usage` object
+// exactly (per-response, incremental — confirmed against
+// https://developers.openai.com/api/docs/guides/realtime-costs, verified
+// 2026-07-17): total_tokens/input_tokens/output_tokens plus
+// input_token_details.{text_tokens,audio_tokens,cached_tokens,
+// cached_tokens_details.{text_tokens,audio_tokens}} and
+// output_token_details.{text_tokens,audio_tokens}. Only numeric counters are
+// read from it — never text, transcript, or any other field.
+
+interface RealtimeUsagePayload {
+  input_token_details?: {
+    text_tokens?: unknown;
+    audio_tokens?: unknown;
+    cached_tokens_details?: { text_tokens?: unknown; audio_tokens?: unknown };
+  };
+  output_token_details?: { text_tokens?: unknown; audio_tokens?: unknown };
+}
+
+// Generous per-response ceiling — bounds an implausible/corrupted relayed
+// count without rejecting genuine long-context responses.
+const MAX_PLAUSIBLE_TOKENS_PER_RESPONSE = 2_000_000;
+
+function toSafeTokenCount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 0;
+  return Math.min(Math.floor(v), MAX_PLAUSIBLE_TOKENS_PER_RESPONSE);
+}
+
+function buildRealtimeUsageMetrics(usage: RealtimeUsagePayload): GatewayUsageMetric[] {
+  // measurementSource is 'provider_event_client_relayed', never
+  // 'provider_response': the backend never receives this event directly
+  // from OpenAI, only via an already-authenticated browser relay.
+  const src = 'provider_event_client_relayed';
+  return [
+    { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: src },
+    { metricKey: 'input_text_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.input_token_details?.text_tokens), isBillable: true, measurementSource: src },
+    { metricKey: 'cached_input_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.input_token_details?.cached_tokens_details?.text_tokens), isBillable: true, measurementSource: src },
+    { metricKey: 'input_audio_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.input_token_details?.audio_tokens), isBillable: true, measurementSource: src },
+    { metricKey: 'cached_input_audio_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.input_token_details?.cached_tokens_details?.audio_tokens), isBillable: true, measurementSource: src },
+    { metricKey: 'output_text_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.output_token_details?.text_tokens), isBillable: true, measurementSource: src },
+    { metricKey: 'output_audio_tokens', unitType: 'token', quantity: toSafeTokenCount(usage.output_token_details?.audio_tokens), isBillable: true, measurementSource: src },
+  ];
+}
+
+async function handleSessionUsage(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const body = req.body ?? {};
+  const { gatewaySessionId, providerResponseId, usage } = body;
+
+  if (!isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+  if (typeof providerResponseId !== 'string' || !PROVIDER_RESPONSE_ID_RE.test(providerResponseId)) {
+    return jsonError(res, 400, 'INVALID_PROVIDER_RESPONSE_ID', 'providerResponseId inválido.');
+  }
+  if (!usage || typeof usage !== 'object') {
+    return jsonError(res, 400, 'INVALID_USAGE', 'usage inválido.');
+  }
+
+  try {
+    // Must be currently 'active' — rejects usage for a session that was
+    // never activated, already ended, failed, or expired.
+    const { data: session, error } = await sessionsClient()
+      .from('ai_provider_sessions')
+      .select('id, metadata')
+      .eq('id', gatewaySessionId)
+      .eq('user_id', userId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (error || !session) {
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const gatewayDeps = getProductionDeps();
+
+    // conversation.realtime_usage is a distinct accounting key with its own
+    // runtime policy (independent of webrtc_connect's) — re-checked here so
+    // a session existing is never sufficient by itself to record billable
+    // metrics.
+    const policy = await gatewayDeps.policyResolver.resolvePolicy({
+      featureKey: REALTIME_USAGE_FEATURE_KEY,
+      provider: 'openai',
+      userId,
+      actorType: 'user',
+      executionLocation: 'mixed',
+    });
+    if (policy.gatewayMode !== 'observe') {
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    // model resolved server-side from the session authorized at
+    // conversation.create_session time — never trusted from the client.
+    const meta = (session as { metadata?: Record<string, unknown> }).metadata ?? {};
+    const model = typeof meta.model === 'string' && meta.model ? meta.model : REALTIME_MODEL;
+
+    const startedAt = gatewayDeps.clock();
+    let eventId: string;
+    try {
+      eventId = await gatewayDeps.usageRepository.startEvent({
+        requestId: gatewayDeps.uuidGen(),
+        correlationId: gatewaySessionId,
+        providerSessionRecordId: gatewaySessionId,
+        providerRequestId: providerResponseId,
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        featureKey: REALTIME_USAGE_FEATURE_KEY,
+        provider: 'openai',
+        service: 'realtime',
+        model,
+        executionLocation: 'mixed',
+        isBillable: true,
+        attemptNumber: 1,
+        callSequence: 1,
+        resourceType: 'ai_provider_session',
+        resourceId: gatewaySessionId,
+        metadata: { endpoint: 'conversation/session/usage' },
+        startedAt,
+      });
+    } catch (e) {
+      if (e instanceof DuplicateUsageEventError) {
+        // Same response.id relayed twice (retry/StrictMode/race) — already
+        // recorded, never double-counted.
+        return res.status(200).json({ status: 'duplicate_ignored' });
+      }
+      throw e;
+    }
+
+    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+    await gatewayDeps.usageRepository.insertMetrics(eventId, buildRealtimeUsageMetrics(usage as RealtimeUsagePayload));
+
+    try {
+      await reconcileEventCost(eventId, {
+        usageRepository: gatewayDeps.usageRepository,
+        pricingRepository: gatewayDeps.pricingRepository,
+        logger: gatewayDeps.logger,
+      });
+    } catch (e) {
+      gatewayDeps.logger('gateway.realtimeUsageCost.failed', { message: String(e) });
+    }
+    try {
+      await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
+    } catch (e) {
+      gatewayDeps.logger('gateway.realtimeUsageRollup.failed', { message: String(e) });
+    }
+
+    return res.status(200).json({ status: 'recorded' });
+  } catch (e) {
+    console.error('[conversation/session/usage] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
+  }
+}
+
+// ── /end ─────────────────────────────────────────────────────────────────
+
+async function handleSessionEnd(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const body = req.body ?? {};
+  const gatewaySessionId = body.gatewaySessionId;
+  const durationSeconds = body.durationSeconds;
+
+  if (!isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+  if (
+    typeof durationSeconds !== 'number' ||
+    !Number.isFinite(durationSeconds) ||
+    durationSeconds < 0 ||
+    durationSeconds > MAX_REALTIME_SESSION_DURATION_SECONDS
+  ) {
+    return jsonError(res, 400, 'INVALID_DURATION', 'durationSeconds inválido.');
+  }
+
+  try {
+    const { data, error } = await sessionsClient()
+      .from('ai_provider_sessions')
+      .update({ status: 'completed', ended_at: new Date().toISOString(), duration_seconds: durationSeconds })
+      .eq('id', gatewaySessionId)
+      .eq('user_id', userId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .eq('status', 'active')
+      .select('id')
+      .maybeSingle();
+
+    if (error || !data) {
+      // Never activated, already completed, or foreign — idempotent no-op:
+      // a session cannot be completed twice, and only its owner can end it.
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const gatewayDeps = getProductionDeps();
+    const startedAt = gatewayDeps.clock();
+    const eventId = await gatewayDeps.usageRepository.startEvent({
+      requestId: gatewayDeps.uuidGen(),
+      correlationId: gatewaySessionId,
+      providerSessionRecordId: gatewaySessionId,
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      featureKey: WEBRTC_CONNECT_FEATURE_KEY,
+      provider: 'openai',
+      service: 'realtime.webrtc',
+      model: REALTIME_MODEL,
+      executionLocation: 'frontend',
+      isBillable: false,
+      attemptNumber: 1,
+      callSequence: 2,
+      resourceType: 'ai_provider_session',
+      resourceId: gatewaySessionId,
+      metadata: { endpoint: 'conversation/session/end' },
+      startedAt,
+    });
+    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+    await gatewayDeps.usageRepository.insertMetrics(eventId, [
+      {
+        metricKey: 'session_seconds',
+        unitType: 'second',
+        quantity: durationSeconds,
+        isBillable: false,
+        // Server-controlled clock at /active and /end, not the client's
+        // playback rate — see useRealtimeSession.ts cleanup().
+        measurementSource: 'client_report',
+      },
+    ]);
+    try {
+      await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
+    } catch (e) {
+      gatewayDeps.logger('gateway.webrtcEndRollup.failed', { message: String(e) });
+    }
+
+    return res.status(200).json({ status: 'completed' });
+  } catch (e) {
+    console.error('[conversation/session/end] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    return res.status(200).json({ status: 'ignored' });
+  }
 }
 
 // ─── dispatcher ───────────────────────────────────────────────────────────────
@@ -355,8 +1010,12 @@ async function handleSession(req: any, res: any) {
 export default async function handler(req: any, res: any) {
   const slug = resolveSlug(req, '/api/conversation');
   switch (slug) {
-    case 'preview': return handlePreview(req, res);
-    case 'session': return handleSession(req, res);
-    default:        return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
+    case 'preview':        return handlePreview(req, res);
+    case 'session':        return handleSession(req, res);
+    case 'session/active': return handleSessionActive(req, res);
+    case 'session/failed': return handleSessionFailed(req, res);
+    case 'session/usage':  return handleSessionUsage(req, res);
+    case 'session/end':    return handleSessionEnd(req, res);
+    default:                return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

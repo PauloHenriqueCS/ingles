@@ -25,6 +25,14 @@ export interface StartEventParams {
   parentEventId?: string;
   providerSessionRecordId?: string;
   idempotencyKey?: string;
+  // Provider-assigned identifier for the physical unit this event represents
+  // (e.g. a Realtime response.id). When paired with providerSessionRecordId,
+  // this is the dedupe key enforced by the DB unique index
+  // uq_aue_session_provider_request (see migration
+  // 20260717140000_ai_gateway_realtime_dedupe.sql) — a duplicate causes
+  // startEvent() to throw DuplicateUsageEventError instead of inserting a
+  // second row, so a relayed usage event can never be double-counted.
+  providerRequestId?: string;
   userId?: string;
   initiatedByUserId?: string;
   actorType: ActorType;
@@ -41,6 +49,19 @@ export interface StartEventParams {
   resourceId?: string;
   metadata?: Record<string, unknown>;
   startedAt: number;  // Unix timestamp ms
+}
+
+/**
+ * Thrown by startEvent() when providerSessionRecordId + providerRequestId
+ * collide with an existing event (Postgres unique_violation, SQLSTATE
+ * 23505, on uq_aue_session_provider_request). Callers treat this as "already
+ * recorded" — an idempotent no-op, never a hard failure.
+ */
+export class DuplicateUsageEventError extends Error {
+  constructor() {
+    super('Duplicate usage event for this provider session + provider request id');
+    this.name = 'DuplicateUsageEventError';
+  }
 }
 
 export interface CompleteEventParams {
@@ -170,6 +191,7 @@ export class SupabaseUsageRepository implements UsageRepositoryInterface {
         provider:                 p.provider,
         service:                  p.service ?? null,
         model:                    p.model ?? null,
+        provider_request_id:      p.providerRequestId ?? null,
         execution_location:       p.executionLocation,
         status:                   'started',
         attempt_number:           p.attemptNumber,
@@ -186,6 +208,13 @@ export class SupabaseUsageRepository implements UsageRepositoryInterface {
       .single();
 
     if (error || !data) {
+      // 23505 = unique_violation. Only uq_aue_session_provider_request can
+      // fire here (request_id has its own DEFAULT gen_random_uuid() and is
+      // never client-supplied), so this always means "this provider session
+      // + provider request id was already recorded."
+      if (error?.code === '23505' && p.providerSessionRecordId && p.providerRequestId) {
+        throw new DuplicateUsageEventError();
+      }
       throw new Error(`startEvent failed: ${error?.message ?? 'no data'}`);
     }
     return (data as { id: string }).id;

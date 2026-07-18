@@ -73,6 +73,18 @@ export function splitCachedInputTokens(inputTextTokens: number, cachedInputToken
   };
 }
 
+// ── Cached-token split pairs ───────────────────────────────────────────────────
+// Each pair is (total-tokens metric, cached-subset-of-that-total metric). The
+// generic text pair is the original one used by every chat.completions
+// feature; the audio pair exists for conversation.realtime_usage, whose
+// provider event reports text and audio cache hits as separate sub-counters
+// (input_token_details.cached_tokens_details.{text,audio}_tokens). Adding a
+// pair here never changes behavior for metric keys that aren't in it.
+const CACHE_SPLIT_PAIRS: ReadonlyArray<{ totalKey: string; cachedKey: string }> = [
+  { totalKey: 'input_text_tokens', cachedKey: 'cached_input_tokens' },
+  { totalKey: 'input_audio_tokens', cachedKey: 'cached_input_audio_tokens' },
+];
+
 // ── Pure calculation ─────────────────────────────────────────────────────────
 
 export interface MetricCostResult {
@@ -105,18 +117,26 @@ export async function calculateEventCost(
   pricingRepository: PricingRepositoryInterface,
   logAnomaly: (event: string, data?: Record<string, unknown>) => void,
 ): Promise<CostCalculationOutcome> {
-  const inputMetric = metrics.find((m) => m.metricKey === 'input_text_tokens');
-  const cachedMetric = metrics.find((m) => m.metricKey === 'cached_input_tokens');
+  // Build a split for each cache pair actually present on this event (by
+  // total-key), then index the result under both of its metric keys so the
+  // per-metric loop below can look either one up in O(1).
+  const splitsByMetricKey = new Map<string, CachedSplitResult>();
+  for (const pair of CACHE_SPLIT_PAIRS) {
+    const totalMetric = metrics.find((m) => m.metricKey === pair.totalKey);
+    if (!totalMetric) continue;
+    const cachedMetric = metrics.find((m) => m.metricKey === pair.cachedKey);
+    const split = splitCachedInputTokens(totalMetric.quantity, cachedMetric?.quantity ?? 0);
 
-  const split = inputMetric
-    ? splitCachedInputTokens(inputMetric.quantity, cachedMetric?.quantity ?? 0)
-    : null;
+    if (split.anomaly) {
+      logAnomaly('gateway.cost.anomaly', {
+        eventId: event.id,
+        metricKey: pair.totalKey,
+        ...split.anomaly,
+      });
+    }
 
-  if (split?.anomaly) {
-    logAnomaly('gateway.cost.anomaly', {
-      eventId: event.id,
-      ...split.anomaly,
-    });
+    splitsByMetricKey.set(pair.totalKey, split);
+    splitsByMetricKey.set(pair.cachedKey, split);
   }
 
   const metricResults: MetricCostResult[] = [];
@@ -143,9 +163,13 @@ export async function calculateEventCost(
     let billedQuantity = metric.quantity;
     let anomalyMetadata: Record<string, unknown> | null = null;
 
-    if (metric.metricKey === 'input_text_tokens' && split) {
+    const split = splitsByMetricKey.get(metric.metricKey);
+    const pairForMetric = CACHE_SPLIT_PAIRS.find(
+      (p) => p.totalKey === metric.metricKey || p.cachedKey === metric.metricKey,
+    );
+    if (split && pairForMetric?.totalKey === metric.metricKey) {
       billedQuantity = split.regularInputTokens;
-    } else if (metric.metricKey === 'cached_input_tokens' && split) {
+    } else if (split && pairForMetric?.cachedKey === metric.metricKey) {
       billedQuantity = split.billedCachedTokens;
       if (split.anomaly) {
         anomalyMetadata = sanitizeMetadata({ anomaly: split.anomaly.type, cappedTo: split.anomaly.cappedTo });

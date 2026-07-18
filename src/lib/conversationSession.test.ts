@@ -49,8 +49,30 @@ describe('conversationSession — VAD silence tolerance', () => {
 });
 
 // ── Backend handler tests ────────────────────────────────────────────────────
+// Etapa 10 wires conversation.create_session through executeAiGatewayCall,
+// which resolves policy via getProductionDeps() before doing anything else
+// (even in legacy mode). These pre-existing tests never exercise gateway
+// behavior directly, so they get a legacy-mode stub — same pattern as
+// pronunciation-token-gateway.test.ts — keeping every assertion below about
+// the pre-existing OpenAI response mapping unchanged.
 
 vi.mock('../../api/_auth', () => ({ requireAuth: vi.fn() }));
+
+vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
+  return {
+    ...actual,
+    getProductionDeps: () => ({
+      policyResolver: { resolvePolicy: async () => ({ gatewayMode: 'legacy', runtimeStatus: 'enabled' }), invalidate: () => {} },
+      usageRepository: {} as unknown,
+      pricingRepository: {} as unknown,
+      dailyRollupRepository: {} as unknown,
+      clock: () => Date.now(),
+      uuidGen: () => 'test-uuid',
+      logger: () => {},
+    }),
+  };
+});
 
 import { requireAuth } from '../../api/_auth';
 import handler from '../../api/conversation/[...slug]';
@@ -312,5 +334,39 @@ describe('conversationSession handler — assistant identity is fixed', () => {
     const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string>; body: string }];
     const sentBody = JSON.parse(opts.body as unknown as string);
     expect((sentBody.session.instructions as string)).toContain('Your name is Lemon');
+  });
+});
+
+// ── AI Gateway (Etapa 10) — legacy mode preserves current behavior exactly ──
+
+describe('conversationSession handler — AI Gateway legacy mode', () => {
+  it('does not include gatewaySessionId in the response while legacy (the default/current state)', async () => {
+    vi.mocked(requireAuth).mockResolvedValue({
+      userId: MOCK_USER_ID,
+      supabase: makeSupabase() as any,
+    });
+    vi.stubGlobal('fetch', mockFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-x', model: 'gpt-realtime-2.1-mini' } }));
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(200);
+    expect((res._json as any).gatewaySessionId).toBeUndefined();
+    // Every existing response field is still present and unchanged.
+    expect((res._json as any).token).toBe('tok');
+    expect((res._json as any).sessionId).toBe('sess-x');
+  });
+
+  it('the client_secrets call is still made exactly once (gateway wraps, never duplicates, the call)', async () => {
+    vi.mocked(requireAuth).mockResolvedValue({
+      userId: MOCK_USER_ID,
+      supabase: makeSupabase() as any,
+    });
+    const globalFetch = mockFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-y' } });
+    vi.stubGlobal('fetch', globalFetch);
+
+    await handler(makeReq(), makeRes());
+
+    expect(globalFetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,12 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { getAuthHeader } from '../lib/apiAuth';
+import {
+  reportSessionActive,
+  reportSessionFailed,
+  reportSessionUsage,
+  reportSessionEnd,
+  toSessionEndReason,
+} from '../lib/realtimeGatewayReporting';
 
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
 
@@ -71,6 +78,13 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const displayCountRef    = useRef(0);
   const revealTimerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const playbackRateRef    = useRef<number>(playbackRate);
+  // AI Gateway bridge (conversation.webrtc_connect / conversation.realtime_usage):
+  // gatewaySessionId is only ever set when the backend is in observe mode
+  // (see /api/conversation/session's additive gatewaySessionId field). While
+  // legacy (always, at this stage), this stays null and none of the
+  // reporting calls below ever fire — zero behavior change.
+  const gatewaySessionIdRef      = useRef<string | null>(null);
+  const sessionReportedActiveRef = useRef(false);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -103,8 +117,14 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     }
   }, [playbackRate, startRevealTimer]);
 
-  const cleanup = useCallback((nextStatus?: SessionStatus) => {
+  const cleanup = useCallback((nextStatus?: SessionStatus, endReason?: string) => {
     endCalledRef.current = true;
+
+    // Capture before resetting below — needed for the gateway report fired
+    // at the end of this function.
+    const gatewaySessionId = gatewaySessionIdRef.current;
+    const wasActive         = sessionReportedActiveRef.current;
+    const elapsedSeconds    = startTimeRef.current !== null ? (Date.now() - startTimeRef.current) / 1000 : 0;
 
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
@@ -120,12 +140,26 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     setIsSpeaking(false);
     setSessionInfo(null);
     if (nextStatus) setStatus(nextStatus);
+
+    // AI Gateway bridge — fire-and-forget, best-effort. Cleared immediately
+    // so a second cleanup() call (React Strict Mode double-invoke, end()
+    // followed by dc.onclose, etc.) is a client-side no-op even before the
+    // backend's own idempotent status check would catch it.
+    if (gatewaySessionId) {
+      gatewaySessionIdRef.current = null;
+      sessionReportedActiveRef.current = false;
+      if (wasActive) {
+        reportSessionEnd(gatewaySessionId, elapsedSeconds);
+      } else {
+        reportSessionFailed(gatewaySessionId, toSessionEndReason(endReason));
+      }
+    }
   }, []);
 
-  useEffect(() => () => { cleanup(); }, [cleanup]);
+  useEffect(() => () => { cleanup(undefined, 'unmounted'); }, [cleanup]);
 
   const fail = useCallback((code: string, message: string) => {
-    cleanup();
+    cleanup(undefined, code);
     setStatus('error');
     setErrorCode(code);
     setErrorMessage(message);
@@ -180,11 +214,16 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
       const body = await resp.json() as {
         token: string; sessionId: string | null; voice: string; model: string;
+        gatewaySessionId?: string;
       };
       token     = body.token;
       sessionId = body.sessionId;
       voice     = body.voice;
       model     = body.model;
+      // Additive/optional — only present when conversation.webrtc_connect is
+      // in observe mode. Absent (legacy, always at this stage) means every
+      // gateway report below stays a no-op.
+      gatewaySessionIdRef.current = typeof body.gatewaySessionId === 'string' ? body.gatewaySessionId : null;
     } catch {
       fail('NETWORK_ERROR', 'Erro de rede ao iniciar a sessão.');
       stopStream(stream);
@@ -234,8 +273,14 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       timerRef.current = setInterval(() => {
         const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
         setElapsedMs(elapsed);
-        if (elapsed >= MAX_SESSION_MS) cleanup('ended');
+        if (elapsed >= MAX_SESSION_MS) cleanup('ended', 'max_duration_reached');
       }, 1000);
+      // AI Gateway bridge: the physical WebRTC connection is now confirmed
+      // live — report it (no-op if gatewaySessionId is absent, i.e. legacy).
+      if (gatewaySessionIdRef.current) {
+        sessionReportedActiveRef.current = true;
+        reportSessionActive(gatewaySessionIdRef.current);
+      }
       // Trigger AI greeting immediately — it reads context from system prompt
       setTimeout(() => {
         if (!endCalledRef.current && dcRef.current?.readyState === 'open') {
@@ -251,6 +296,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
           delta?: string;
           transcript?: string;
           error?: { type?: string; code?: string; param?: string };
+          response?: { id?: string; usage?: Record<string, unknown> };
         };
 
         // Reset transcript and start paced reveal on new response
@@ -282,6 +328,13 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
           // Stop reveal timer and snap to full text so nothing is cut off
           if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
           setTranscriptText(transcriptAccumRef.current);
+
+          // AI Gateway bridge: relay the official per-response usage object
+          // verbatim (numeric counters only) — no-op if gatewaySessionId is
+          // absent (legacy) or this particular response carries no usage.
+          if (gatewaySessionIdRef.current && ev.response?.id && ev.response?.usage) {
+            reportSessionUsage(gatewaySessionIdRef.current, ev.response.id, ev.response.usage);
+          }
         }
 
         // Error events from the server
@@ -300,7 +353,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     };
 
     dc.onclose = () => {
-      if (!endCalledRef.current) cleanup('ended');
+      if (!endCalledRef.current) cleanup('ended', 'dc_closed');
     };
 
     // ── Step 5: SDP offer → /v1/realtime/calls ───────────────────────────────
@@ -359,7 +412,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   }, [status, cleanup, fail, startRevealTimer]);
 
   const end = useCallback(() => {
-    cleanup('ended');
+    cleanup('ended', 'user_ended');
   }, [cleanup]);
 
   const updateInstructions = useCallback((instructions: string) => {

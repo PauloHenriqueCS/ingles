@@ -42,6 +42,9 @@
     "api/pronunciation/[...slug].ts",
     "api/__tests__/pronunciation-token-gateway.test.ts",
     "api/__tests__/pronunciation-assessment-gateway.test.ts",
-    "src/services/listening/audio/synthesize-listening-block.ts"
+    "src/services/listening/audio/synthesize-listening-block.ts",
+    "api/conversation/[...slug].ts",
+    "api/__tests__/conversation-preview-gateway.test.ts",
+    "api/__tests__/conversation-session-gateway.test.ts"
   ]
 }

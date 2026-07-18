@@ -61,6 +61,11 @@ export type MetricKey =
   | 'cached_input_tokens'
   | 'input_audio_tokens'
   | 'output_audio_tokens'
+  // Realtime reports cached text and cached audio tokens as separate
+  // sub-counters (input_token_details.cached_tokens_details), so the
+  // generic 'cached_input_tokens' key (still used by chat.completions
+  // features) is not enough on its own — this is the audio counterpart.
+  | 'cached_input_audio_tokens'
   | 'tts_characters'
   | 'audio_seconds'
   | 'session_seconds'

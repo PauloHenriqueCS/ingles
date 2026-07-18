@@ -408,3 +408,145 @@ describe('acceptance test — known validated event', () => {
     expect(outcome.totalCostUsd).toBe('0.00050145');
   });
 });
+
+// ── 16. Realtime — audio cache-split pair (conversation.realtime_usage) ────────
+// Regression guard: generalizing the cache split to support
+// (input_audio_tokens, cached_input_audio_tokens) must never change the
+// pre-existing (input_text_tokens, cached_input_tokens) behavior exercised
+// above (tests 1–15 all still pass unmodified against the same code path).
+
+const GPT_REALTIME_MINI_PRICES: PriceRow[] = [
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'input_text_tokens', currency: 'USD', pricePerUnit: '0.60', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'cached_input_tokens', currency: 'USD', pricePerUnit: '0.06', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'output_text_tokens', currency: 'USD', pricePerUnit: '2.40', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'input_audio_tokens', currency: 'USD', pricePerUnit: '10.00', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'cached_input_audio_tokens', currency: 'USD', pricePerUnit: '0.30', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+  { provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini', metricKey: 'output_audio_tokens', currency: 'USD', pricePerUnit: '20.00', unitSize: '1000000', validFrom: '2026-07-17T00:00:00.000Z', validUntil: null },
+];
+
+function realtimeEvent(overrides: Partial<UsageEventForCosting> = {}): UsageEventForCosting {
+  return makeEvent({ service: 'realtime', model: 'gpt-realtime-2.1-mini', ...overrides });
+}
+
+describe('Realtime audio tokens — split with no double charge (same rule as text)', () => {
+  it('splits input_audio_tokens into regular + cached, pricing each once', async () => {
+    const outcome = await calculateEventCost(
+      realtimeEvent(),
+      [
+        metric('m-audio-in', 'input_audio_tokens', 1000), // total, includes cached
+        metric('m-audio-cached', 'cached_input_audio_tokens', 300),
+      ],
+      makeFakePricingRepository(GPT_REALTIME_MINI_PRICES),
+      noopLogger,
+    );
+    const audioIn = outcome.metricResults.find((m) => m.metricKey === 'input_audio_tokens')!;
+    const audioCached = outcome.metricResults.find((m) => m.metricKey === 'cached_input_audio_tokens')!;
+
+    expect(audioIn.billableQuantity).toBe(700); // 1000 - 300, never the full 1000
+    expect(audioCached.billableQuantity).toBe(300);
+    expect(audioIn.calculatedCostUsd).toBe(calculateLineCostUsd(700, '10.00', '1000000'));
+    expect(audioCached.calculatedCostUsd).toBe(calculateLineCostUsd(300, '0.30', '1000000'));
+  });
+
+  it('caps billed audio cache at the input total when cache exceeds input (anomalous), logs one anomaly', async () => {
+    const anomalies: Array<{ event: string; data?: Record<string, unknown> }> = [];
+    const outcome = await calculateEventCost(
+      realtimeEvent(),
+      [
+        metric('m-audio-in', 'input_audio_tokens', 50),
+        metric('m-audio-cached', 'cached_input_audio_tokens', 400),
+      ],
+      makeFakePricingRepository(GPT_REALTIME_MINI_PRICES),
+      (event, data) => anomalies.push({ event, data }),
+    );
+    const audioIn = outcome.metricResults.find((m) => m.metricKey === 'input_audio_tokens')!;
+    const audioCached = outcome.metricResults.find((m) => m.metricKey === 'cached_input_audio_tokens')!;
+
+    expect(audioIn.billableQuantity).toBe(0);
+    expect(audioCached.billableQuantity).toBe(50); // capped, not 400
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].data?.metricKey).toBe('input_audio_tokens');
+    expect(anomalies[0].data?.type).toBe('cached_exceeds_input');
+  });
+
+  it('text and audio cache splits are independent — one anomalous, the other not', async () => {
+    const anomalies: Array<{ event: string; data?: Record<string, unknown> }> = [];
+    const outcome = await calculateEventCost(
+      realtimeEvent(),
+      [
+        metric('m-text-in', 'input_text_tokens', 500),
+        metric('m-text-cached', 'cached_input_tokens', 100), // fine, no anomaly
+        metric('m-audio-in', 'input_audio_tokens', 50),
+        metric('m-audio-cached', 'cached_input_audio_tokens', 400), // anomalous
+      ],
+      makeFakePricingRepository(GPT_REALTIME_MINI_PRICES),
+      (event, data) => anomalies.push({ event, data }),
+    );
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].data?.metricKey).toBe('input_audio_tokens');
+
+    const textIn = outcome.metricResults.find((m) => m.metricKey === 'input_text_tokens')!;
+    expect(textIn.billableQuantity).toBe(400); // 500 - 100, unaffected by the audio anomaly
+  });
+
+  it('tokens in cache are never billed twice as regular tokens (text and audio both)', async () => {
+    const outcome = await calculateEventCost(
+      realtimeEvent(),
+      [
+        metric('m-text-in', 'input_text_tokens', 1000),
+        metric('m-text-cached', 'cached_input_tokens', 1000), // fully cached
+        metric('m-audio-in', 'input_audio_tokens', 2000),
+        metric('m-audio-cached', 'cached_input_audio_tokens', 2000), // fully cached
+      ],
+      makeFakePricingRepository(GPT_REALTIME_MINI_PRICES),
+      noopLogger,
+    );
+    const textIn = outcome.metricResults.find((m) => m.metricKey === 'input_text_tokens')!;
+    const audioIn = outcome.metricResults.find((m) => m.metricKey === 'input_audio_tokens')!;
+    expect(textIn.billableQuantity).toBe(0);
+    expect(textIn.calculatedCostUsd).toBe('0');
+    expect(audioIn.billableQuantity).toBe(0);
+    expect(audioIn.calculatedCostUsd).toBe('0');
+  });
+
+  it('full six-metric Realtime event totals the sum of all six independently priced lines', async () => {
+    const outcome = await calculateEventCost(
+      realtimeEvent(),
+      [
+        metric('m-text-in', 'input_text_tokens', 1000),
+        metric('m-text-cached', 'cached_input_tokens', 200),
+        metric('m-text-out', 'output_text_tokens', 300),
+        metric('m-audio-in', 'input_audio_tokens', 5000),
+        metric('m-audio-cached', 'cached_input_audio_tokens', 1000),
+        metric('m-audio-out', 'output_audio_tokens', 4000),
+        metric('m-requests', 'provider_requests', 1, false),
+      ],
+      makeFakePricingRepository(GPT_REALTIME_MINI_PRICES),
+      noopLogger,
+    );
+
+    expect(outcome.allBillableMetricsPriced).toBe(true);
+    const expectedTotal = sumDecimalStrings([
+      calculateLineCostUsd(800, '0.60', '1000000'),    // text in, minus cached
+      calculateLineCostUsd(200, '0.06', '1000000'),    // cached text in
+      calculateLineCostUsd(300, '2.40', '1000000'),    // text out
+      calculateLineCostUsd(4000, '10.00', '1000000'),  // audio in, minus cached
+      calculateLineCostUsd(1000, '0.30', '1000000'),   // cached audio in
+      calculateLineCostUsd(4000, '20.00', '1000000'),  // audio out
+    ]);
+    expect(outcome.totalCostUsd).toBe(expectedTotal);
+  });
+
+  it('recalculating the same Realtime event twice is idempotent (no accumulation)', async () => {
+    const metrics = [
+      metric('m-text-in', 'input_text_tokens', 1000),
+      metric('m-text-cached', 'cached_input_tokens', 200),
+      metric('m-audio-in', 'input_audio_tokens', 5000),
+      metric('m-audio-cached', 'cached_input_audio_tokens', 1000),
+    ];
+    const repo = makeFakePricingRepository(GPT_REALTIME_MINI_PRICES);
+    const first = await calculateEventCost(realtimeEvent(), metrics, repo, noopLogger);
+    const second = await calculateEventCost(realtimeEvent(), metrics, repo, noopLogger);
+    expect(second.totalCostUsd).toBe(first.totalCostUsd);
+  });
+});

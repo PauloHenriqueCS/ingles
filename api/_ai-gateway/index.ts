@@ -42,7 +42,7 @@ export { GatewayPolicyResolver } from './policy-resolver';
 export type { PolicyResolverInterface } from './policy-resolver';
 
 // Usage repository
-export { SupabaseUsageRepository, getSharedServiceClient } from './usage-repository';
+export { SupabaseUsageRepository, getSharedServiceClient, DuplicateUsageEventError } from './usage-repository';
 export type {
   UsageRepositoryInterface,
   StartEventParams,
