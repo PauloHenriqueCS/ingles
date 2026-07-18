@@ -5,6 +5,8 @@ import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } f
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../_ai-gateway/index';
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
+import { applyRateLimit } from '../_rateLimit';
+import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
@@ -207,13 +209,36 @@ async function handleToken(req: any, res: any) {
   }
 }
 
+// ─── GET /api/pronunciation-training/plan-entitlements ─────────────────────────
+// Unrelated to pronunciation training — nested here purely to stay under
+// Vercel's 12-serverless-function Hobby-plan cap (was its own top-level
+// api/plan-entitlements.ts, which pushed the count to 13). The authenticated
+// user's resolved plan/entitlements snapshot; the plan is always resolved
+// server-side from the authenticated user, never influenced by the request.
+
+async function handlePlanEntitlements(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+  if (!(await applyRateLimit(res, userId, 'plan-entitlements'))) return;
+  try {
+    const snapshot = await getCurrentUserPlanEntitlements(userId);
+    return res.json(snapshot);
+  } catch (err) {
+    safeLog('plan-entitlements', 'resolve_failed', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar as informações do seu plano.');
+  }
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
   const slug = resolveSlug(req, '/api/pronunciation-training');
   switch (slug) {
-    case 'generate-text': return handleGenerateText(req, res);
-    case 'token':          return handleToken(req, res);
-    default:               return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
+    case 'generate-text':     return handleGenerateText(req, res);
+    case 'token':             return handleToken(req, res);
+    case 'plan-entitlements': return handlePlanEntitlements(req, res);
+    default:                  return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }
