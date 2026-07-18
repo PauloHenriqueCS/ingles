@@ -21,7 +21,7 @@ import {
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
-import { checkRecordingDuration } from '../_entitlements/require-feature-access';
+import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
@@ -374,6 +374,10 @@ async function handleSession(req: any, res: any) {
   } catch {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
   }
+  const conversationConfigErrorCheck = checkFeatureConfigError(entitlements.conversation.monthlyTime);
+  if (conversationConfigErrorCheck) {
+    return res.status(500).json({ code: conversationConfigErrorCheck.code, message: conversationConfigErrorCheck.message });
+  }
   if (!entitlements.conversation.enabled) {
     return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.conversationUnavailable });
   }
@@ -590,6 +594,16 @@ async function handleSession(req: any, res: any) {
     new Date(data.expires_at * 1000),
   );
 
+  // Fase 12 — authorized max recording time for the call about to start:
+  // the smallest positive value among the per-recording commercial cap, the
+  // remaining monthly balance (extra credits included), and the technical
+  // session ceiling. The frontend uses this purely for UX (countdown,
+  // auto-stop) — enforcement itself stays server-side via session-control.
+  const sessionStartNowMs = Date.now();
+  const authorizedAtStart = computeAuthorizedRecording(
+    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000, sessionStartNowMs,
+  );
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     token:     data.value,
@@ -603,6 +617,10 @@ async function handleSession(req: any, res: any) {
     // constant. Older cached frontend bundles that don't read this field
     // simply keep using their own hardcoded value — no breaking change.
     maxSessionSeconds: REALTIME_MAX_SESSION_SECONDS,
+    // Fase 12 — commercial-aware authorized recording time (see comment
+    // above). Never inferred client-side.
+    authorizedMaxRecordingSeconds: authorizedAtStart.authorizedMaxRecordingSeconds,
+    recordingLimitReason: authorizedAtStart.recordingLimitReason,
     ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
 }
@@ -1180,6 +1198,57 @@ async function hangupRealtimeCall(callId: string): Promise<{ ok: boolean }> {
   }
 }
 
+// Etapa: per-recording authorized maximum (Fase 12). The frontend must never
+// compute this alone — it always comes from here, as the smallest positive
+// applicable value among: conversation_max_recording_seconds (when not
+// unlimited), the remaining monthly balance (already folds in extra
+// purchased credits — see computeFeatureState), and the technical gateway
+// ceiling still remaining in this session. When both commercial values are
+// unlimited, the result is governed purely by the technical ceiling — which
+// the frontend must never present as if it were a commercial benefit.
+export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'technical';
+
+export interface AuthorizedRecording {
+  authorizedMaxRecordingSeconds: number;
+  recordingLimitReason: RecordingLimitReason;
+}
+
+/**
+ * perTurnCapSeconds/monthlyRemainingSeconds are a TOTAL budget for this call
+ * (not a fresh grant every poll), so each is anchored to the call's own
+ * startedAtMs to get an absolute deadline — never re-based off "now", or a
+ * long-running call would silently ignore time it already spent. The
+ * technical ceiling is already an absolute deadline (startedAtMs +
+ * REALTIME_MAX_SESSION_SECONDS). authorizedMaxRecordingSeconds is then just
+ * "how much time is left from now until the earliest of the three".
+ */
+function computeAuthorizedRecording(
+  entitlements: Awaited<ReturnType<typeof getCurrentUserPlanEntitlements>>,
+  startedAtMs: number,
+  technicalDeadlineMs: number,
+  nowMs: number,
+): AuthorizedRecording {
+  const perTurnCapSeconds = entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds;
+  const monthlyRemainingSeconds = entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining;
+
+  const perTurnDeadlineMs = Number.isFinite(perTurnCapSeconds) ? startedAtMs + perTurnCapSeconds * 1000 : Infinity;
+  const monthlyDeadlineMs = Number.isFinite(monthlyRemainingSeconds) ? startedAtMs + monthlyRemainingSeconds * 1000 : Infinity;
+
+  const effectiveDeadlineMs = Math.min(technicalDeadlineMs, perTurnDeadlineMs, monthlyDeadlineMs);
+  const authorizedMaxRecordingSeconds = Math.max(0, (effectiveDeadlineMs - nowMs) / 1000);
+
+  let recordingLimitReason: RecordingLimitReason;
+  if (effectiveDeadlineMs === perTurnDeadlineMs && Number.isFinite(perTurnDeadlineMs)) {
+    recordingLimitReason = 'per_turn';
+  } else if (effectiveDeadlineMs === monthlyDeadlineMs && Number.isFinite(monthlyDeadlineMs)) {
+    recordingLimitReason = 'monthly_balance';
+  } else {
+    recordingLimitReason = 'technical';
+  }
+
+  return { authorizedMaxRecordingSeconds, recordingLimitReason };
+}
+
 async function handleSessionControl(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
@@ -1261,24 +1330,31 @@ async function handleSessionControl(req: any, res: any) {
     // credits — see computeFeatureState). Fail-open on error, same
     // philosophy as the entitlement check just above: never cut off an
     // otherwise-healthy call over a transient DB hiccup.
+    const controlNowMs = Date.now();
     let effectiveDeadlineMs = deadlineAtMs;
+    let authorized: AuthorizedRecording = {
+      authorizedMaxRecordingSeconds: Math.max(0, (deadlineAtMs - controlNowMs) / 1000),
+      recordingLimitReason: 'technical',
+    };
     try {
       const entitlements = await getCurrentUserPlanEntitlements(userId);
-      const perTurnCapSeconds = entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds;
-      const monthlyRemainingSeconds = entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining;
-      const commercialCapSeconds = Math.min(perTurnCapSeconds, monthlyRemainingSeconds);
-      if (Number.isFinite(commercialCapSeconds)) {
-        effectiveDeadlineMs = Math.min(effectiveDeadlineMs, startedAtMs + commercialCapSeconds * 1000);
-      }
+      authorized = computeAuthorizedRecording(entitlements, startedAtMs, deadlineAtMs, controlNowMs);
+      effectiveDeadlineMs = controlNowMs + authorized.authorizedMaxRecordingSeconds * 1000;
     } catch (e) {
       gatewayDeps.logger('gateway.sessionControl.planLimit.failed', { message: String(e) });
     }
 
     if (Date.now() >= effectiveDeadlineMs) {
-      return terminate('plan_recording_limit_reached');
+      const reason = authorized.recordingLimitReason === 'monthly_balance' ? 'plan_monthly_balance_exhausted' : 'plan_recording_limit_reached';
+      return terminate(reason);
     }
 
-    return res.status(200).json({ terminate: false, deadlineAt: new Date(effectiveDeadlineMs).toISOString() });
+    return res.status(200).json({
+      terminate: false,
+      deadlineAt: new Date(effectiveDeadlineMs).toISOString(),
+      authorizedMaxRecordingSeconds: authorized.authorizedMaxRecordingSeconds,
+      recordingLimitReason: authorized.recordingLimitReason,
+    });
   } catch (e) {
     console.error('[conversation/session-control] check failed', e instanceof Error ? e.message : 'unknown');
     // Fail-open: a telemetry/DB error here must never cut off an active

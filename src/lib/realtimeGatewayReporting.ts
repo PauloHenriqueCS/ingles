@@ -150,10 +150,18 @@ export function reportSessionEnd(gatewaySessionId: string): void {
 // this while gatewaySessionId is set (never in legacy mode) and the session
 // is actively connected.
 
+/** Which constraint is currently authoritative for the recording ceiling — see api/conversation/[...slug].ts's computeAuthorizedRecording. */
+export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'technical';
+
 export interface SessionControlResult {
   terminate: boolean;
   reason?: string;
+  /** Fase 12 — reconciled on every poll; the frontend never computes this alone. */
+  authorizedMaxRecordingSeconds?: number;
+  recordingLimitReason?: RecordingLimitReason;
 }
+
+const RECORDING_LIMIT_REASONS = new Set<RecordingLimitReason>(['per_turn', 'monthly_balance', 'technical']);
 
 export async function checkSessionControl(gatewaySessionId: string): Promise<SessionControlResult> {
   try {
@@ -167,10 +175,17 @@ export async function checkSessionControl(gatewaySessionId: string): Promise<Ses
       logBridgeFailure('/api/conversation/session-control', { gatewaySessionId }, { status: res.status, errorCode: `HTTP_${res.status}` });
       return { terminate: false };
     }
-    const body = await res.json() as { terminate?: unknown; reason?: unknown };
+    const body = await res.json() as {
+      terminate?: unknown; reason?: unknown;
+      authorizedMaxRecordingSeconds?: unknown; recordingLimitReason?: unknown;
+    };
     return {
       terminate: body.terminate === true,
       reason: typeof body.reason === 'string' ? body.reason : undefined,
+      authorizedMaxRecordingSeconds: typeof body.authorizedMaxRecordingSeconds === 'number' && Number.isFinite(body.authorizedMaxRecordingSeconds)
+        ? body.authorizedMaxRecordingSeconds : undefined,
+      recordingLimitReason: RECORDING_LIMIT_REASONS.has(body.recordingLimitReason as RecordingLimitReason)
+        ? (body.recordingLimitReason as RecordingLimitReason) : undefined,
     };
   } catch {
     logBridgeFailure('/api/conversation/session-control', { gatewaySessionId }, { errorCode: 'NETWORK_ERROR' });

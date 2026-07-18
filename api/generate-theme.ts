@@ -33,6 +33,7 @@ import {
   normalizeOptionalExercises,
 } from './_mission-grammar-guide';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
+import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import type { PlanEntitlementsSnapshot } from '../src/domain/entitlements/entitlement-types';
 
@@ -861,6 +862,10 @@ export default async function handler(req: any, res: any) {
   } catch (e) {
     safeLog('generate-theme', 'entitlements_resolve_failed', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  const writingConfigErrorCheck = checkFeatureConfigError(entitlements.writing.themeGenerations);
+  if (writingConfigErrorCheck) {
+    return jsonError(res, 500, writingConfigErrorCheck.code!, writingConfigErrorCheck.message!);
   }
   if (!entitlements.writing.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);

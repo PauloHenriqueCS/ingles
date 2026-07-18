@@ -5,6 +5,7 @@ export async function selectListeningEpisodeForUser(
   supabase: SupabaseClient,
   userId: string,
   cefrLevel: CEFRLevel,
+  excludeEpisodeIds: string[] = [],
 ): Promise<string | null> {
   const { data: episodes } = await supabase
     .from('listening_episodes')
@@ -14,7 +15,9 @@ export async function selectListeningEpisodeForUser(
     .order('created_at', { ascending: true });
 
   if (!episodes || episodes.length === 0) return null;
-  const episodeIds = episodes.map((e: any) => e.id as string);
+  const excludeSet = new Set(excludeEpisodeIds);
+  const episodeIds = episodes.map((e: any) => e.id as string).filter((id: string) => !excludeSet.has(id));
+  if (episodeIds.length === 0) return null;
 
   const { data: assignments } = await supabase
     .from('user_listening_assignments')

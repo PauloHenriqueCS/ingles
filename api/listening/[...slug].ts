@@ -14,6 +14,7 @@ import { getListeningToday } from '../../src/services/listening/daily/get-listen
 import { getListeningByDate } from '../../src/services/listening/daily/get-listening-by-date';
 import { resolveListeningActivityDate } from '../../src/services/listening/daily/resolve-listening-activity-date';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { enqueueListeningJob } from '../../src/services/listening/jobs/enqueue-listening-job';
 import { startListeningGeneration } from '../../src/services/listening/on-demand/start-listening-generation';
@@ -261,20 +262,27 @@ async function handleToday(req: any, res: any) {
   } catch {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
   }
+  const listeningConfigErrorCheck = checkFeatureConfigError(entitlements.listening.stories);
+  if (listeningConfigErrorCheck) {
+    return jsonError(res, 500, listeningConfigErrorCheck.code!, listeningConfigErrorCheck.message!);
+  }
   if (!entitlements.listening.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
   }
   // The daily limit only gates STARTING a new story — continuing or
-  // reopening today's already-assigned story must never be blocked by it.
+  // reopening today's already-active story must never be blocked by it.
+  // Once every story assigned today is completed, getting another one IS a
+  // new start and is subject to the limit like any other.
   if (!entitlements.listening.stories.canStart) {
     const activityDate = resolveListeningActivityDate();
-    const { data: existingAssignment } = await supabase
+    const { count: activeAssignmentCount } = await supabase
       .from('user_listening_assignments')
-      .select('id')
+      .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('activity_date', activityDate)
-      .maybeSingle();
-    if (!existingAssignment) {
+      .not('episode_id', 'is', null)
+      .neq('status', 'completed');
+    if (!activeAssignmentCount) {
       const code = entitlements.listening.stories.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
       return jsonError(res, 403, code, ENTITLEMENT_MESSAGES.listeningStoriesExhausted);
     }
@@ -423,6 +431,7 @@ async function handleStoryComplete(req: any, res: any) {
       .select('id, status')
       .eq('user_id', userId)
       .eq('activity_date', activityDate)
+      .is('episode_id', null)
       .maybeSingle();
 
     console.log('[9] Resultado do select', { existing, selectError });

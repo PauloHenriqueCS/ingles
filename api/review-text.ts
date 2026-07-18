@@ -6,7 +6,7 @@ import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
-import { checkTextLength } from './_entitlements/require-feature-access';
+import { checkTextLength, checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -327,6 +327,10 @@ export default async function handler(req: any, res: any) {
   } catch (e) {
     safeLog('review-text', 'entitlements_resolve_failed', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  const writingConfigErrorCheck = checkFeatureConfigError(entitlements.writing.reviews);
+  if (writingConfigErrorCheck) {
+    return jsonError(res, 500, writingConfigErrorCheck.code!, writingConfigErrorCheck.message!);
   }
   if (!entitlements.writing.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);

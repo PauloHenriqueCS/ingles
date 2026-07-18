@@ -50,10 +50,10 @@ function makeRes() {
   return res;
 }
 
-function makeChain(result: { data: unknown; error: unknown }) {
-  const resolved = Promise.resolve(result);
+function makeChain(result: { data?: unknown; error?: unknown; count?: number | null }) {
+  const resolved = Promise.resolve({ data: null, error: null, count: null, ...result });
   const chain: Record<string, unknown> = {
-    select: () => chain, eq: () => chain,
+    select: () => chain, eq: () => chain, not: () => chain, neq: () => chain, is: () => chain, order: () => chain,
     maybeSingle: () => resolved,
     then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => resolved.then(resolve, reject),
   };
@@ -97,7 +97,7 @@ describe('GET /api/listening/today — plan entitlements', () => {
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
     mockRequireAuth.mockResolvedValue({
       userId: USER_ID,
-      supabase: { from: vi.fn(() => makeChain({ data: null, error: null })) }, // no existing assignment today
+      supabase: { from: vi.fn(() => makeChain({ count: 0 })) }, // no active assignment today
     });
 
     const res = makeRes();
@@ -108,13 +108,13 @@ describe('GET /api/listening/today — plan entitlements', () => {
     expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
   });
 
-  it('still allows continuing when an assignment already exists today, even at the daily limit', async () => {
+  it('still allows continuing when an active assignment already exists today, even at the daily limit', async () => {
     const entitlements = permissiveEntitlements();
     entitlements.listening.stories = { enabled: true, unlimited: false, limit: 1, consumed: 1, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false };
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
     mockRequireAuth.mockResolvedValue({
       userId: USER_ID,
-      supabase: { from: vi.fn(() => makeChain({ data: { id: 'existing-assignment-1' }, error: null })) },
+      supabase: { from: vi.fn(() => makeChain({ count: 1 })) },
     });
 
     const res = makeRes();
@@ -122,5 +122,39 @@ describe('GET /api/listening/today — plan entitlements', () => {
 
     expect(mockGetListeningToday).toHaveBeenCalledTimes(1);
     expect(res._status()).toBe(200);
+  });
+
+  it('scenario 12: returns 500 CONFIGURATION_ERROR with the safe generic message and never calls getListeningToday when the capability is missing on a partially-configured plan', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.listening.stories = { enabled: false, unlimited: false, limit: 0, consumed: 0, remaining: 0, period: 'day', state: 'config_error', canStart: false };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockGetListeningToday).not.toHaveBeenCalled();
+    expect(res._status()).toBe(500);
+    expect((res._body() as any).code).toBe('CONFIGURATION_ERROR');
+    expect((res._body() as any).message).toBe('Este recurso está temporariamente indisponível. Tente novamente mais tarde.');
+    // Never reveals the internal table/capability name to the user.
+    expect((res._body() as any).message).not.toMatch(/listening\.|capability|plan_capability_values/i);
+  });
+
+  it('blocks getting a 4th story once every assigned story today is already completed at the limit', async () => {
+    // limit=3, 3 distinct stories already assigned today but all completed — no active row.
+    const entitlements = permissiveEntitlements();
+    entitlements.listening.stories = { enabled: true, unlimited: false, limit: 3, consumed: 3, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+    mockRequireAuth.mockResolvedValue({
+      userId: USER_ID,
+      supabase: { from: vi.fn(() => makeChain({ count: 0 })) }, // 3 rows exist but none active
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockGetListeningToday).not.toHaveBeenCalled();
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
   });
 });

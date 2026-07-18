@@ -146,6 +146,46 @@ describe('POST /session — conversation.create_session', () => {
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
+  // ── Fase 12: authorized max recording seconds ─────────────────────────────
+
+  it('scenario 25: both per-turn and monthly unlimited — authorized max is governed only by the technical ceiling', async () => {
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const body = res._body() as { authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
+    expect(body.recordingLimitReason).toBe('technical');
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(30 * 60, 0);
+  });
+
+  it('scenario 24: monthly unlimited + finite per-turn cap — authorized max is governed by the per-turn cap', async () => {
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 45;
+    entitlements.conversation.maxRecordingUnlimited = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const body = res._body() as { authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
+    expect(body.recordingLimitReason).toBe('per_turn');
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(45, 0);
+  });
+
+  it('scenario 23: per-turn unlimited + finite monthly balance — authorized max is governed by the remaining monthly balance', async () => {
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 600, consumed: 580, remaining: 20, period: 'month', state: 'available', canStart: true,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const body = res._body() as { authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
+    expect(body.recordingLimitReason).toBe('monthly_balance');
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(20, 0);
+  });
+
   it('returns 403 FEATURE_DISABLED and never calls OpenAI when conversation is disabled by plan', async () => {
     const entitlements = permissiveEntitlements();
     entitlements.conversation.enabled = false;
@@ -965,6 +1005,24 @@ describe('POST /session-control — mid-session control poll', () => {
     expect(typeof body.deadlineAt).toBe('string');
   });
 
+  it('scenario 22: reconciles the authorized max seconds on every poll, accounting for time already elapsed this session', async () => {
+    const startedAt = new Date(Date.now() - 15 * 1000).toISOString(); // 15s already elapsed
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 45; // total budget for this call
+    entitlements.conversation.maxRecordingUnlimited = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    const body = res._body() as { terminate: boolean; authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
+    expect(body.terminate).toBe(false);
+    expect(body.recordingLimitReason).toBe('per_turn');
+    // 45s total budget - 15s already spent = ~30s left, NOT a fresh 45s.
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(30, 0);
+  });
+
   it('fails open (no termination) when a DB/telemetry error occurs', async () => {
     mockSessionsFrom.mockImplementation(() => { throw new Error('db down'); });
     const res = makeRes();
@@ -1024,7 +1082,9 @@ describe('POST /session-control — mid-session control poll', () => {
     const res = makeRes();
     await handler(controlReq(), res);
     expect(res._status()).toBe(200);
-    expect(res._body()).toEqual({ terminate: true, reason: 'plan_recording_limit_reached' });
+    // Monthly balance (10s left) is the binding constraint here, not the
+    // generous 600s per-turn cap — the reason must say so distinctly.
+    expect(res._body()).toEqual({ terminate: true, reason: 'plan_monthly_balance_exhausted' });
   });
 
   it('does not terminate early when comfortably within both the per-turn cap and the monthly balance', async () => {

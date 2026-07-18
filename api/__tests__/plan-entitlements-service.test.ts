@@ -9,6 +9,7 @@ function makeChain(result: { data: unknown; error?: unknown; count?: number }) {
     gte: () => chain,
     lt: () => chain,
     in: () => chain,
+    not: () => chain,
     or: () => chain,
     order: () => chain,
     gt: () => chain,
@@ -54,13 +55,11 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.conversation.enabled).toBe(false);
   });
 
-  it('fails open (enabled + unlimited) for every feature when nothing is configured for the resolved plan version', async () => {
+  it('scenario 9: fails open (enabled + unlimited) for every feature when the plan version has NO entitlements configured at all', async () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,
       tableResults: {
-        // Matches the real remote state today: only the conversation monthly
-        // seconds capability has ever been configured for the free plan.
-        plan_capability_values: { data: [{ capability_key: 'conversation.realtime.seconds.monthly', value: 600 }], error: null },
+        plan_capability_values: { data: [], error: null },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
@@ -77,9 +76,76 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.pronunciation.evaluations.state).toBe('unlimited');
 
     expect(snapshot.conversation.enabled).toBe(true);
-    expect(snapshot.conversation.monthlyTime.state).toBe('available');
-    expect(snapshot.conversation.monthlyTime.limit).toBe(600);
-    expect(snapshot.conversation.monthlyTime.remaining).toBe(600);
+    expect(snapshot.conversation.monthlyTime.state).toBe('unlimited');
+  });
+
+  it('scenario 10: a structured legacy_fallback event is logged for each capability that fails open', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const supabase = makeMockSupabase({ planRow: RESOLVED_PLAN, tableResults: { plan_capability_values: { data: [], error: null } } });
+      await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+      expect(warnSpy).toHaveBeenCalled();
+      const firstLog = JSON.parse(warnSpy.mock.calls[0][0] as string);
+      expect(firstLog.event).toBe('entitlements.legacy_fallback');
+      expect(firstLog.plan_id).toBe('plan-1');
+      expect(firstLog.plan_version_id).toBe('version-1');
+      expect(typeof firstLog.capability_key).toBe('string');
+      // Never leak anything beyond identifiers.
+      expect(Object.keys(firstLog).sort()).toEqual(['capability_key', 'event', 'plan_id', 'plan_version_id']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('scenario 11/15: a plan version with SOME configuration but missing a required key becomes config_error, never unlimited, and blocks that feature', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        // Only conversation's monthly seconds is configured — every other
+        // capability (including conversation.enabled itself) is missing on
+        // an otherwise-configured plan version.
+        plan_capability_values: { data: [{ capability_key: 'conversation.realtime.seconds.monthly', value: 600 }], error: null },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.enabled).toBe(false);
+    expect(snapshot.writing.themeGenerations.state).toBe('config_error');
+    expect(snapshot.writing.themeGenerations.unlimited).toBe(false);
+    expect(snapshot.writing.reviews.state).toBe('config_error');
+
+    expect(snapshot.listening.enabled).toBe(false);
+    expect(snapshot.listening.stories.state).toBe('config_error');
+
+    expect(snapshot.pronunciation.enabled).toBe(false);
+    expect(snapshot.pronunciation.evaluations.state).toBe('config_error');
+
+    // conversation.enabled itself is missing even though the monthly seconds
+    // pair is configured — the whole feature is unresolvable, not just the
+    // sub-limit that happens to be missing.
+    expect(snapshot.conversation.enabled).toBe(false);
+    expect(snapshot.conversation.monthlyTime.state).toBe('config_error');
+  });
+
+  it('scenario 16: config_error is logged as a technical alert distinct from legacy_fallback', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const supabase = makeMockSupabase({
+        planRow: RESOLVED_PLAN,
+        tableResults: { plan_capability_values: { data: [{ capability_key: 'conversation.realtime.seconds.monthly', value: 600 }], error: null } },
+      });
+      await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+      expect(errorSpy).toHaveBeenCalled();
+      const firstLog = JSON.parse(errorSpy.mock.calls[0][0] as string);
+      expect(firstLog.event).toBe('entitlements.config_error');
+      expect(firstLog.plan_id).toBe('plan-1');
+      expect(firstLog.plan_version_id).toBe('version-1');
+      expect(typeof firstLog.capability_key).toBe('string');
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('reflects real consumption counts pulled from the domain tables', async () => {
@@ -88,8 +154,11 @@ describe('getCurrentUserPlanEntitlements', () => {
       tableResults: {
         plan_capability_values: {
           data: [
+            { capability_key: 'writing.enabled', value: true },
             { capability_key: 'writing.theme_generations_per_day', value: 2 },
             { capability_key: 'writing.theme_generations_per_day.unlimited', value: false },
+            { capability_key: 'writing.reviews_per_day.unlimited', value: true },
+            { capability_key: 'writing.max_characters_per_text.unlimited', value: true },
           ],
           error: null,
         },
@@ -111,7 +180,15 @@ describe('getCurrentUserPlanEntitlements', () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,
       tableResults: {
-        plan_capability_values: { data: [{ capability_key: 'conversation.realtime.seconds.monthly', value: 600 }], error: null },
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
         conversation_sessions: { data: [{ duration_sec: 600 }], error: null },
         user_conversation_credits: { data: [{ remaining_seconds: 200 }], error: null },
       },
@@ -127,7 +204,15 @@ describe('getCurrentUserPlanEntitlements', () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,
       tableResults: {
-        plan_capability_values: { data: [{ capability_key: 'conversation.realtime.seconds.monthly', value: 600 }], error: null },
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
         conversation_sessions: { data: [{ duration_sec: 600 }], error: null },
       },
     });
@@ -141,7 +226,15 @@ describe('getCurrentUserPlanEntitlements', () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,
       tableResults: {
-        plan_capability_values: { data: [{ capability_key: 'writing.enabled', value: false }], error: null },
+        plan_capability_values: {
+          data: [
+            { capability_key: 'writing.enabled', value: false },
+            { capability_key: 'writing.theme_generations_per_day.unlimited', value: true },
+            { capability_key: 'writing.reviews_per_day.unlimited', value: true },
+            { capability_key: 'writing.max_characters_per_text.unlimited', value: true },
+          ],
+          error: null,
+        },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
@@ -149,6 +242,52 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.writing.enabled).toBe(false);
     expect(snapshot.writing.themeGenerations.state).toBe('disabled_by_plan');
     expect(snapshot.writing.themeGenerations.canStart).toBe(false);
+  });
+
+  it('counts distinct episode-based stories started today, not just whether any assignment exists', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'listening.enabled', value: true },
+            { capability_key: 'listening.stories_per_day', value: 3 },
+            { capability_key: 'listening.stories_per_day.unlimited', value: false },
+          ],
+          error: null,
+        },
+        // 2 distinct episodes already assigned today (multi-story day).
+        user_listening_assignments: { data: null, error: null, count: 2 },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.listening.stories.consumed).toBe(2);
+    expect(snapshot.listening.stories.limit).toBe(3);
+    expect(snapshot.listening.stories.remaining).toBe(1);
+    expect(snapshot.listening.stories.canStart).toBe(true);
+  });
+
+  it('blocks a 4th story once the configured daily limit of distinct stories is reached', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'listening.enabled', value: true },
+            { capability_key: 'listening.stories_per_day', value: 3 },
+            { capability_key: 'listening.stories_per_day.unlimited', value: false },
+          ],
+          error: null,
+        },
+        user_listening_assignments: { data: null, error: null, count: 3 },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.listening.stories.consumed).toBe(3);
+    expect(snapshot.listening.stories.state).toBe('daily_limit_reached');
+    expect(snapshot.listening.stories.canStart).toBe(false);
   });
 
   it('never trusts a client-supplied plan id — always resolves via the authenticated userId only', async () => {

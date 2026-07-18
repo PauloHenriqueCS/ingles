@@ -515,7 +515,7 @@ async function stepFinalizing(
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'user_id,activity_date', ignoreDuplicates: true },
+      { onConflict: 'user_id,activity_date,episode_id', ignoreDuplicates: true },
     );
 
   await advanceSession(serviceClient, sessionId, 'ready');

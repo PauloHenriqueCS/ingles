@@ -39,13 +39,19 @@ export async function startListeningGeneration(
     return sessionToStartResult(existing);
   }
 
-  // 2. Check if there's already a published episode assigned to the user today
-  const { data: assignment } = await serviceClient
+  // 2. Check if there's already a published episode assigned to the user today.
+  // Multi-story plans can have several rows for the same day; prefer the
+  // active one, else fall back to the most recently created.
+  const { data: todaysAssignments } = await serviceClient
     .from('user_listening_assignments')
-    .select('episode_id, status')
+    .select('episode_id, status, created_at')
     .eq('user_id', userId)
     .eq('activity_date', localDate)
-    .maybeSingle();
+    .not('episode_id', 'is', null)
+    .order('created_at', { ascending: false });
+
+  const assignmentRows = todaysAssignments ?? [];
+  const assignment = assignmentRows.find((row: any) => row.status !== 'completed') ?? assignmentRows[0] ?? null;
 
   if (assignment?.episode_id) {
     // Verify episode is published

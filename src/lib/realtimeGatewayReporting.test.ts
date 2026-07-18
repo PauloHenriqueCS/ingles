@@ -312,6 +312,36 @@ describe('checkSessionControl', () => {
     const result = await checkSessionControl('session-25');
     expect(result.terminate).toBe(false);
   });
+
+  // ── Fase 12: authorized recording ceiling reconciliation ──────────────────
+
+  it('scenario 20/22: relays authorizedMaxRecordingSeconds and recordingLimitReason on every healthy poll', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ terminate: false, deadlineAt: '2026-01-01T00:00:00.000Z', authorizedMaxRecordingSeconds: 42, recordingLimitReason: 'monthly_balance' }),
+    }));
+    const result = await checkSessionControl('session-26');
+    expect(result.authorizedMaxRecordingSeconds).toBe(42);
+    expect(result.recordingLimitReason).toBe('monthly_balance');
+  });
+
+  it('drops an unrecognized recordingLimitReason value rather than trusting it blindly', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ terminate: false, recordingLimitReason: 'something_unexpected' }),
+    }));
+    const result = await checkSessionControl('session-27');
+    expect(result.recordingLimitReason).toBeUndefined();
+  });
+
+  it('drops a non-finite authorizedMaxRecordingSeconds value', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ terminate: false, authorizedMaxRecordingSeconds: 'NaN' }),
+    }));
+    const result = await checkSessionControl('session-28');
+    expect(result.authorizedMaxRecordingSeconds).toBeUndefined();
+  });
 });
 
 // ── No stale nested-path references anywhere in executable code ────────────

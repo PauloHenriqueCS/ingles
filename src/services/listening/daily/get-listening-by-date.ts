@@ -8,21 +8,26 @@ export async function getListeningByDate(
 ): Promise<ByDateListeningResponse> {
   const { data } = await supabase
     .from('user_listening_assignments')
-    .select('id, episode_id, activity_date, status')
+    .select('id, episode_id, activity_date, status, created_at')
     .eq('user_id', userId)
     .eq('activity_date', date)
-    .maybeSingle();
+    .order('created_at', { ascending: false });
 
-  if (!data) return { status: 'no_assignment' };
+  const rows = data ?? [];
+  if (rows.length === 0) return { status: 'no_assignment' };
 
-  const activityDate = typeof data.activity_date === 'string'
-    ? data.activity_date.slice(0, 10)
-    : data.activity_date;
+  // With multi-story plans a day can hold several rows: prefer whichever is
+  // still active, else fall back to the most recently created one.
+  const chosen = rows.find((row: any) => row.status !== 'completed') ?? rows[0];
+
+  const activityDate = typeof chosen.activity_date === 'string'
+    ? chosen.activity_date.slice(0, 10)
+    : chosen.activity_date;
 
   return {
-    status:       data.status,
-    assignmentId: data.id,
-    episodeId:    data.episode_id ?? '',
+    status:       chosen.status,
+    assignmentId: chosen.id,
+    episodeId:    chosen.episode_id ?? '',
     activityDate,
   };
 }

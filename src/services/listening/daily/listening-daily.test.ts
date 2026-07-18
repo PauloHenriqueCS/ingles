@@ -3,6 +3,21 @@ import { resolveListeningActivityDate } from './resolve-listening-activity-date'
 import { calculateListeningPerformance } from '../performance/calculate-listening-performance';
 import { resolveListeningCalendarStatus } from '../calendar/resolve-listening-calendar-status';
 import { getOrCreateListeningAssignment } from './get-or-create-listening-assignment';
+import { getListeningByDate } from './get-listening-by-date';
+import { selectListeningEpisodeForUser } from './select-listening-episode-for-user';
+
+// Chainable Supabase-like mock: every filter method (eq/not/is/order/etc.)
+// returns the same chain object regardless of call count, so tests don't
+// need to hardcode how many .eq()/.not() calls the real query makes.
+function makeChain(result: { data: unknown; error?: unknown }) {
+  const resolved = Promise.resolve({ error: null, ...result });
+  const chain: Record<string, unknown> = {
+    select: () => chain, eq: () => chain, in: () => chain, not: () => chain, is: () => chain, order: () => chain,
+    maybeSingle: () => resolved,
+    then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => resolved.then(resolve, reject),
+  };
+  return chain;
+}
 
 // ── resolveListeningActivityDate ──────────────────────────────────────────────
 
@@ -90,13 +105,7 @@ describe('getOrCreateListeningAssignment', () => {
     const existingRow = makeRow();
     const supabase = {
       from: () => ({
-        select: () => ({
-          eq: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({ data: null, error: null }),
-            }),
-          }),
-        }),
+        ...makeChain({ data: null }),
         insert: () => ({
           select: () => ({
             single: async () => ({ data: existingRow, error: null }),
@@ -118,15 +127,7 @@ describe('getOrCreateListeningAssignment', () => {
   it('returns existing assignment on 2nd call', async () => {
     const existingRow = makeRow({ status: 'in_progress' });
     const supabase = {
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({ data: existingRow, error: null }),
-            }),
-          }),
-        }),
-      }),
+      from: () => makeChain({ data: existingRow }),
     } as any;
 
     const result = await getOrCreateListeningAssignment(supabase, {
@@ -147,12 +148,14 @@ describe('getOrCreateListeningAssignment', () => {
         select: () => ({
           eq: () => ({
             eq: () => ({
-              maybeSingle: async () => {
-                maybeSingleCalls++;
-                // First call returns null (no existing), second returns the row (race winner)
-                if (maybeSingleCalls === 1) return { data: null, error: null };
-                return { data: existingRow, error: null };
-              },
+              eq: () => ({
+                maybeSingle: async () => {
+                  maybeSingleCalls++;
+                  // First call returns null (no existing), second returns the row (race winner)
+                  if (maybeSingleCalls === 1) return { data: null, error: null };
+                  return { data: existingRow, error: null };
+                },
+              }),
             }),
           }),
         }),
@@ -175,5 +178,93 @@ describe('getOrCreateListeningAssignment', () => {
 
     expect(result.created).toBe(false);
     expect(result.assignment.id).toBe('assignment-id-1');
+  });
+
+  it('creating a different episode the same day is a distinct row, not a race', async () => {
+    // limit=3 scenario: story 2 of the day — no existing row for THIS episode.
+    const secondEpisodeRow = makeRow({ id: 'assignment-id-2', episode_id: 'episode-2' });
+    const supabase = {
+      from: () => ({
+        ...makeChain({ data: null }),
+        insert: () => ({
+          select: () => ({
+            single: async () => ({ data: secondEpisodeRow, error: null }),
+          }),
+        }),
+      }),
+    } as any;
+
+    const result = await getOrCreateListeningAssignment(supabase, {
+      userId: 'user-1',
+      episodeId: 'episode-2',
+      activityDate: '2026-07-15',
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.assignment.episodeId).toBe('episode-2');
+  });
+});
+
+// ── selectListeningEpisodeForUser — excludeEpisodeIds ────────────────────────
+
+describe('selectListeningEpisodeForUser', () => {
+  function makeSupabase(episodes: { id: string }[], assignments: { episode_id: string; status: string }[]) {
+    return {
+      from: (table: string) => {
+        if (table === 'listening_episodes') {
+          return { select: () => ({ eq: () => ({ eq: () => ({ order: async () => ({ data: episodes, error: null }) }) }) }) };
+        }
+        return { select: () => ({ eq: () => ({ in: async () => ({ data: assignments, error: null }) }) }) };
+      },
+    } as any;
+  }
+
+  it('never-assigned episode is picked first when nothing is excluded', async () => {
+    const supabase = makeSupabase([{ id: 'ep-1' }, { id: 'ep-2' }], []);
+    const result = await selectListeningEpisodeForUser(supabase, 'user-1', 'A1');
+    expect(result).toBe('ep-1');
+  });
+
+  it("today's already-assigned episodes are excluded so a distinct story is returned", async () => {
+    const supabase = makeSupabase([{ id: 'ep-1' }, { id: 'ep-2' }, { id: 'ep-3' }], []);
+    const result = await selectListeningEpisodeForUser(supabase, 'user-1', 'A1', ['ep-1', 'ep-2']);
+    expect(result).toBe('ep-3');
+  });
+
+  it('returns null when every episode at this level is already excluded (inventory exhausted for today)', async () => {
+    const supabase = makeSupabase([{ id: 'ep-1' }, { id: 'ep-2' }], []);
+    const result = await selectListeningEpisodeForUser(supabase, 'user-1', 'A1', ['ep-1', 'ep-2']);
+    expect(result).toBeNull();
+  });
+});
+
+// ── getListeningByDate — multi-row days ───────────────────────────────────────
+
+describe('getListeningByDate', () => {
+  it('returns no_assignment when nothing exists for the date', async () => {
+    const supabase = { from: () => makeChain({ data: [] }) } as any;
+    const result = await getListeningByDate(supabase, 'user-1', '2026-07-18');
+    expect(result).toEqual({ status: 'no_assignment' });
+  });
+
+  it('prefers the active (non-completed) row when a multi-story day has both', async () => {
+    const rows = [
+      { id: 'a-completed', episode_id: 'ep-1', activity_date: '2026-07-18', status: 'completed', created_at: '2026-07-18T10:00:00Z' },
+      { id: 'a-active', episode_id: 'ep-2', activity_date: '2026-07-18', status: 'in_progress', created_at: '2026-07-18T11:00:00Z' },
+    ];
+    const supabase = { from: () => makeChain({ data: rows }) } as any;
+    const result = await getListeningByDate(supabase, 'user-1', '2026-07-18');
+    expect(result).toEqual({ status: 'in_progress', assignmentId: 'a-active', episodeId: 'ep-2', activityDate: '2026-07-18' });
+  });
+
+  it('falls back to the most recent row when every story that day is completed', async () => {
+    // Rows arrive pre-sorted by created_at desc, as the real query orders them.
+    const rows = [
+      { id: 'a-2', episode_id: 'ep-2', activity_date: '2026-07-18', status: 'completed', created_at: '2026-07-18T12:00:00Z' },
+      { id: 'a-1', episode_id: 'ep-1', activity_date: '2026-07-18', status: 'completed', created_at: '2026-07-18T09:00:00Z' },
+    ];
+    const supabase = { from: () => makeChain({ data: rows }) } as any;
+    const result = await getListeningByDate(supabase, 'user-1', '2026-07-18');
+    expect(result).toEqual({ status: 'completed', assignmentId: 'a-2', episodeId: 'ep-2', activityDate: '2026-07-18' });
   });
 });

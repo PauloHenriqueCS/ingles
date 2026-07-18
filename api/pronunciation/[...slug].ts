@@ -14,7 +14,7 @@ import {
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
-import { checkRecordingDuration } from '../_entitlements/require-feature-access';
+import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 
 // ─── start ────────────────────────────────────────────────────────────────────
@@ -289,6 +289,10 @@ async function handleStart(req: any, res: any) {
     entitlements = await getCurrentUserPlanEntitlements(auth.userId);
   } catch {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
+  }
+  const pronunciationConfigErrorCheck = checkFeatureConfigError(entitlements.pronunciation.evaluations);
+  if (pronunciationConfigErrorCheck) {
+    return res.status(500).json({ code: pronunciationConfigErrorCheck.code, message: pronunciationConfigErrorCheck.message });
   }
   if (!entitlements.pronunciation.enabled) {
     return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable });

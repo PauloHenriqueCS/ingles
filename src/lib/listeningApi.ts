@@ -235,6 +235,7 @@ export async function completeStoryListening(): Promise<{ activityDate: string; 
     .select('id, status')
     .eq('user_id', user.id)
     .eq('activity_date', activityDate)
+    .is('episode_id', null)
     .maybeSingle();
 
   if (existing?.status === 'completed') {
@@ -251,7 +252,7 @@ export async function completeStoryListening(): Promise<{ activityDate: string; 
   } else {
     const { error } = await supabase
       .from('user_listening_assignments')
-      .insert({ user_id: user.id, activity_date: activityDate, status: 'completed', completed_at: now });
+      .insert({ user_id: user.id, episode_id: null, activity_date: activityDate, status: 'completed', completed_at: now });
     if (error) throw error;
   }
 

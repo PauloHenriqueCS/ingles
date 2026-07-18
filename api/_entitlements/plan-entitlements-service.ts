@@ -16,6 +16,19 @@
  *     pronunciation_assessments, user_listening_assignments,
  *     conversation_sessions) as the source of truth for consumption —
  *     no parallel counter table.
+ *
+ * Missing-capability handling (never a blanket fail-open):
+ *   - A plan version with NO entitlements configured at all (a genuine
+ *     legacy plan/version) stays permissive for compatibility, but every
+ *     such fallback is logged as a structured 'entitlements.legacy_fallback'
+ *     event with plan_id/plan_version_id/capability_key.
+ *   - A plan version that DOES have some configuration but is missing a
+ *     specific required key is a configuration bug: the whole feature is
+ *     blocked (state 'config_error'), a structured
+ *     'entitlements.config_error' alert is logged, and the AI provider is
+ *     never reached for it (enforced by requireFeatureAccess).
+ *   - 'unlimited' only ever comes from an explicit plan value or override —
+ *     never inferred from the mere absence of a key.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -23,6 +36,8 @@ import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { computeFeatureState } from '../../src/domain/entitlements/compute-feature-state';
 import type {
   ConversationEntitlements,
+  FeatureLimit,
+  LimitPeriod,
   ListeningEntitlements,
   PlanEntitlementsSnapshot,
   PronunciationEntitlements,
@@ -32,9 +47,10 @@ import { ALL_CAPABILITY_KEYS, CAPABILITY_KEYS } from './capability-keys';
 import {
   resolveEnabledFlag,
   resolveNumericLimit,
-  toNumberOrNull,
   type CapabilityOverrideRow,
   type CapabilityValueRow,
+  type EnabledFlagResolution,
+  type NumericLimitResolution,
 } from './resolve-capability-values';
 
 interface EffectivePlanRow {
@@ -80,6 +96,56 @@ function lockedSnapshot(now: Date): PlanEntitlementsSnapshot {
     monthlyRenewsAt: null,
     resolvedAt: now.toISOString(),
   };
+}
+
+function configErrorLimit(period: LimitPeriod): FeatureLimit {
+  return { enabled: false, unlimited: false, limit: 0, consumed: 0, remaining: 0, period, state: 'config_error', canStart: false };
+}
+
+interface LogContext {
+  planId: string | null;
+  planVersionId: string | null;
+}
+
+/** Structured, alert-friendly log — never includes user content, only identifiers. */
+function logLegacyFallback(ctx: LogContext, capabilityKey: string): void {
+  console.warn(JSON.stringify({
+    event: 'entitlements.legacy_fallback',
+    plan_id: ctx.planId,
+    plan_version_id: ctx.planVersionId,
+    capability_key: capabilityKey,
+  }));
+}
+
+function logConfigError(ctx: LogContext, capabilityKey: string): void {
+  console.error(JSON.stringify({
+    event: 'entitlements.config_error',
+    plan_id: ctx.planId,
+    plan_version_id: ctx.planVersionId,
+    capability_key: capabilityKey,
+  }));
+}
+
+function unwrapEnabled(resolution: EnabledFlagResolution, ctx: LogContext, capabilityKey: string): { enabled: boolean; configError: boolean } {
+  if (resolution.source === 'config_error') {
+    logConfigError(ctx, capabilityKey);
+    return { enabled: false, configError: true };
+  }
+  if (resolution.source === 'legacy_fallback') {
+    logLegacyFallback(ctx, capabilityKey);
+  }
+  return { enabled: resolution.enabled, configError: false };
+}
+
+function unwrapLimit(resolution: NumericLimitResolution, ctx: LogContext, capabilityKey: string): { limit: number; unlimited: boolean; configError: boolean } {
+  if (resolution.source === 'config_error') {
+    logConfigError(ctx, capabilityKey);
+    return { limit: 0, unlimited: false, configError: true };
+  }
+  if (resolution.source === 'legacy_fallback') {
+    logLegacyFallback(ctx, capabilityKey);
+  }
+  return { limit: resolution.limit, unlimited: resolution.unlimited, configError: false };
 }
 
 export async function getCurrentUserPlanEntitlements(
@@ -138,11 +204,13 @@ export async function getCurrentUserPlanEntitlements(
     supabase.from('generated_themes').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
     supabase.from('english_reviews').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('entry_date', todayDate),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
-    supabase.from('user_listening_assignments').select('id').eq('user_id', userId).eq('activity_date', todayDate).maybeSingle(),
+    supabase.from('user_listening_assignments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('activity_date', todayDate).not('episode_id', 'is', null),
     supabase.from('conversation_sessions').select('duration_sec').eq('user_id', userId).gte('session_date', monthStartDate).lt('session_date', monthEndDate),
   ]);
 
   const planRows = (planValuesResult.data ?? []) as CapabilityValueRow[];
+  const hasAnyPlanConfiguration = planRows.length > 0;
+  const logCtx: LogContext = { planId: plan.plan_id, planVersionId: plan.plan_version_id };
 
   // Only the most recent active override per key applies.
   const overrideRowsRaw = (overridesResult.data ?? []) as (CapabilityOverrideRow & { created_at: string })[];
@@ -160,88 +228,85 @@ export async function getCurrentUserPlanEntitlements(
   const themeGenerationsToday = themeCountResult.count ?? 0;
   const reviewsToday = reviewCountResult.count ?? 0;
   const pronunciationEvaluationsToday = pronunciationCountResult.count ?? 0;
-  const listeningStoriesToday = listeningAssignedResult.data ? 1 : 0;
+  const listeningStoriesToday = listeningAssignedResult.count ?? 0;
   const conversationSecondsThisMonth = ((conversationSecondsResult.data ?? []) as { duration_sec: number }[]).reduce(
     (sum, r) => sum + (r.duration_sec ?? 0),
     0,
   );
 
+  const enabledR = (key: string) => unwrapEnabled(resolveEnabledFlag(key, planRows, overrideRows, hasAnyPlanConfiguration), logCtx, key);
+  const limitR = (baseKey: string, unlimitedKey: string) => unwrapLimit(resolveNumericLimit(baseKey, unlimitedKey, planRows, overrideRows, hasAnyPlanConfiguration), logCtx, baseKey);
+
   // ── Writing ───────────────────────────────────────────────────────────────
-  const writingEnabled = resolveEnabledFlag(CAPABILITY_KEYS.writingEnabled, planRows, overrideRows);
-  const themeGenerationsLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.writingThemeGenerationsPerDay, CAPABILITY_KEYS.writingThemeGenerationsPerDayUnlimited, planRows, overrideRows,
-  );
-  const reviewsLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.writingReviewsPerDay, CAPABILITY_KEYS.writingReviewsPerDayUnlimited, planRows, overrideRows,
-  );
-  const maxCharsLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.writingMaxCharactersPerText, CAPABILITY_KEYS.writingMaxCharactersPerTextUnlimited, planRows, overrideRows,
-  );
+  const writingEnabledR = enabledR(CAPABILITY_KEYS.writingEnabled);
+  const themeGenerationsR = limitR(CAPABILITY_KEYS.writingThemeGenerationsPerDay, CAPABILITY_KEYS.writingThemeGenerationsPerDayUnlimited);
+  const writingReviewsR = limitR(CAPABILITY_KEYS.writingReviewsPerDay, CAPABILITY_KEYS.writingReviewsPerDayUnlimited);
+  const maxCharsR = limitR(CAPABILITY_KEYS.writingMaxCharactersPerText, CAPABILITY_KEYS.writingMaxCharactersPerTextUnlimited);
+  const writingConfigError = writingEnabledR.configError || themeGenerationsR.configError || writingReviewsR.configError || maxCharsR.configError;
+  const writingEnabled = writingConfigError ? false : writingEnabledR.enabled;
 
   const writing: WritingEntitlements = {
     enabled: writingEnabled,
-    themeGenerations: computeFeatureState({
-      enabled: writingEnabled, unlimited: themeGenerationsLimit.unlimited, limit: themeGenerationsLimit.limit,
+    themeGenerations: writingConfigError ? configErrorLimit('day') : computeFeatureState({
+      enabled: writingEnabled, unlimited: themeGenerationsR.unlimited, limit: themeGenerationsR.limit,
       consumed: themeGenerationsToday, period: 'day',
     }),
-    reviews: computeFeatureState({
-      enabled: writingEnabled, unlimited: reviewsLimit.unlimited, limit: reviewsLimit.limit,
+    reviews: writingConfigError ? configErrorLimit('day') : computeFeatureState({
+      enabled: writingEnabled, unlimited: writingReviewsR.unlimited, limit: writingReviewsR.limit,
       consumed: reviewsToday, period: 'day',
     }),
-    maxCharactersPerText: maxCharsLimit.limit,
-    maxCharactersUnlimited: maxCharsLimit.unlimited,
+    maxCharactersPerText: writingConfigError ? 0 : maxCharsR.limit,
+    maxCharactersUnlimited: writingConfigError ? false : maxCharsR.unlimited,
   };
 
   // ── Listening ─────────────────────────────────────────────────────────────
-  const listeningEnabled = resolveEnabledFlag(CAPABILITY_KEYS.listeningEnabled, planRows, overrideRows);
-  const storiesLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.listeningStoriesPerDay, CAPABILITY_KEYS.listeningStoriesPerDayUnlimited, planRows, overrideRows,
-  );
+  const listeningEnabledR = enabledR(CAPABILITY_KEYS.listeningEnabled);
+  const storiesR = limitR(CAPABILITY_KEYS.listeningStoriesPerDay, CAPABILITY_KEYS.listeningStoriesPerDayUnlimited);
+  const listeningConfigError = listeningEnabledR.configError || storiesR.configError;
+  const listeningEnabled = listeningConfigError ? false : listeningEnabledR.enabled;
+
   const listening: ListeningEntitlements = {
     enabled: listeningEnabled,
-    stories: computeFeatureState({
-      enabled: listeningEnabled, unlimited: storiesLimit.unlimited, limit: storiesLimit.limit,
+    stories: listeningConfigError ? configErrorLimit('day') : computeFeatureState({
+      enabled: listeningEnabled, unlimited: storiesR.unlimited, limit: storiesR.limit,
       consumed: listeningStoriesToday, period: 'day',
     }),
   };
 
   // ── Pronunciation ─────────────────────────────────────────────────────────
-  const pronunciationEnabled = resolveEnabledFlag(CAPABILITY_KEYS.pronunciationEnabled, planRows, overrideRows);
-  const evaluationsLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.pronunciationEvaluationsPerDay, CAPABILITY_KEYS.pronunciationEvaluationsPerDayUnlimited, planRows, overrideRows,
-  );
-  const pronunciationMaxRecording = resolveNumericLimit(
-    CAPABILITY_KEYS.pronunciationMaxRecordingSeconds, CAPABILITY_KEYS.pronunciationMaxRecordingSecondsUnlimited, planRows, overrideRows,
-  );
+  const pronunciationEnabledR = enabledR(CAPABILITY_KEYS.pronunciationEnabled);
+  const evaluationsR = limitR(CAPABILITY_KEYS.pronunciationEvaluationsPerDay, CAPABILITY_KEYS.pronunciationEvaluationsPerDayUnlimited);
+  const pronunciationMaxRecordingR = limitR(CAPABILITY_KEYS.pronunciationMaxRecordingSeconds, CAPABILITY_KEYS.pronunciationMaxRecordingSecondsUnlimited);
+  const pronunciationConfigError = pronunciationEnabledR.configError || evaluationsR.configError || pronunciationMaxRecordingR.configError;
+  const pronunciationEnabled = pronunciationConfigError ? false : pronunciationEnabledR.enabled;
+
   const pronunciation: PronunciationEntitlements = {
     enabled: pronunciationEnabled,
-    evaluations: computeFeatureState({
-      enabled: pronunciationEnabled, unlimited: evaluationsLimit.unlimited, limit: evaluationsLimit.limit,
+    evaluations: pronunciationConfigError ? configErrorLimit('day') : computeFeatureState({
+      enabled: pronunciationEnabled, unlimited: evaluationsR.unlimited, limit: evaluationsR.limit,
       consumed: pronunciationEvaluationsToday, period: 'day',
     }),
-    maxRecordingSeconds: pronunciationMaxRecording.limit,
-    maxRecordingUnlimited: pronunciationMaxRecording.unlimited,
+    maxRecordingSeconds: pronunciationConfigError ? 0 : pronunciationMaxRecordingR.limit,
+    maxRecordingUnlimited: pronunciationConfigError ? false : pronunciationMaxRecordingR.unlimited,
   };
 
   // ── Conversation ──────────────────────────────────────────────────────────
-  const conversationEnabled = resolveEnabledFlag(CAPABILITY_KEYS.conversationEnabled, planRows, overrideRows);
-  const monthlySecondsLimit = resolveNumericLimit(
-    CAPABILITY_KEYS.conversationIncludedSecondsPerMonth, CAPABILITY_KEYS.conversationIncludedSecondsPerMonthUnlimited, planRows, overrideRows,
-  );
-  const conversationMaxRecording = resolveNumericLimit(
-    CAPABILITY_KEYS.conversationMaxRecordingSeconds, CAPABILITY_KEYS.conversationMaxRecordingSecondsUnlimited, planRows, overrideRows,
-  );
-  const extraPurchaseEnabled = resolveEnabledFlag(CAPABILITY_KEYS.conversationExtraPurchaseEnabled, planRows, overrideRows);
+  const conversationEnabledR = enabledR(CAPABILITY_KEYS.conversationEnabled);
+  const monthlySecondsR = limitR(CAPABILITY_KEYS.conversationIncludedSecondsPerMonth, CAPABILITY_KEYS.conversationIncludedSecondsPerMonthUnlimited);
+  const conversationMaxRecordingR = limitR(CAPABILITY_KEYS.conversationMaxRecordingSeconds, CAPABILITY_KEYS.conversationMaxRecordingSecondsUnlimited);
+  const extraPurchaseR = enabledR(CAPABILITY_KEYS.conversationExtraPurchaseEnabled);
+  const conversationConfigError = conversationEnabledR.configError || monthlySecondsR.configError || conversationMaxRecordingR.configError || extraPurchaseR.configError;
+  const conversationEnabled = conversationConfigError ? false : conversationEnabledR.enabled;
 
   const conversation: ConversationEntitlements = {
     enabled: conversationEnabled,
-    monthlyTime: computeFeatureState({
-      enabled: conversationEnabled, unlimited: monthlySecondsLimit.unlimited, limit: monthlySecondsLimit.limit,
+    monthlyTime: conversationConfigError ? configErrorLimit('month') : computeFeatureState({
+      enabled: conversationEnabled, unlimited: monthlySecondsR.unlimited, limit: monthlySecondsR.limit,
       consumed: conversationSecondsThisMonth, period: 'month', extraAvailable: extraSecondsAvailable,
     }),
-    maxRecordingSeconds: conversationMaxRecording.limit,
-    maxRecordingUnlimited: conversationMaxRecording.unlimited,
-    extraPurchaseEnabled,
+    maxRecordingSeconds: conversationConfigError ? 0 : conversationMaxRecordingR.limit,
+    maxRecordingUnlimited: conversationConfigError ? false : conversationMaxRecordingR.unlimited,
+    extraPurchaseEnabled: conversationConfigError ? false : extraPurchaseR.enabled,
     extraSecondsAvailable,
   };
 
@@ -255,7 +320,7 @@ export async function getCurrentUserPlanEntitlements(
     listening,
     pronunciation,
     conversation,
-    monthlyRenewsAt: monthlySecondsLimit.unlimited ? null : resetAtIso,
+    monthlyRenewsAt: (conversationConfigError || monthlySecondsR.unlimited) ? null : resetAtIso,
     resolvedAt: now.toISOString(),
   };
 }

@@ -23,7 +23,11 @@ function formatTime(ms: number) {
   return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
-const WARNING_MS = 25 * 60 * 1000;
+// Fallback warning threshold only for the rare case authorizedMaxSeconds is
+// still unknown (e.g. right after connecting, before /session responds).
+// Once a real commercial ceiling is known, the warning is computed from it
+// instead — see nearLimit below.
+const FALLBACK_WARNING_MS = 25 * 60 * 1000;
 
 // ── Goal progress bar ─────────────────────────────────────────────────────────
 
@@ -193,6 +197,13 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
       sessionSavedRef.current = false;
       setTodayTotalSec(null);
     }
+    // A failed turn (connection lost, WebRTC error, etc.) never writes
+    // conversation_sessions above — nothing was optimistically deducted.
+    // Still re-fetch so the displayed balance can never be stale after a
+    // failure, even though nothing here actually changed it.
+    if (session.status === 'error') {
+      entitlements.refetch();
+    }
   }, [session.status, session.elapsedMs, today]);
 
   const isActive     = session.status === 'active';
@@ -200,7 +211,15 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
   const isEnded      = session.status === 'ended';
   const isError      = session.status === 'error';
   const canStart     = session.status === 'idle' || isEnded || isError;
-  const nearLimit    = session.elapsedMs >= WARNING_MS;
+
+  // The technical gateway ceiling ('technical') must never be surfaced to
+  // the user as if it were a commercial benefit/countdown — only show a
+  // max/warning when a real commercial limit (per-turn or monthly balance)
+  // is the one actually governing this call.
+  const showCommercialMax = session.authorizedMaxSeconds !== null && session.recordingLimitReason !== 'technical';
+  const nearLimit = showCommercialMax
+    ? session.elapsedMs >= (session.authorizedMaxSeconds as number) * 1000 - 15_000
+    : session.elapsedMs >= FALLBACK_WARNING_MS;
 
   const accumulatedSec = isEnded && todayTotalSec !== null
     ? todayTotalSec
@@ -320,6 +339,7 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
                   <div className="flex items-center justify-center gap-2 mt-1">
                     <p className={`text-sm tabular-nums ${nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
                       {formatTime(session.elapsedMs)}
+                      {showCommercialMax && ` / ${formatTime((session.authorizedMaxSeconds as number) * 1000)}`}
                       {nearLimit && ' — encerrando em breve'}
                     </p>
                     <CaptionToggle enabled={captionsEnabled} onToggle={toggleCaptions} />
@@ -346,6 +366,9 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
                   <p className="text-sm text-slate-400 mt-0.5">
                     Duração: {formatTime(session.elapsedMs)}
                   </p>
+                  {session.stopMessage && (
+                    <p className="text-xs text-amber-400 mt-2 leading-relaxed">{session.stopMessage}</p>
+                  )}
                 </div>
                 {todayTotalSec !== null && (
                   <GoalProgress

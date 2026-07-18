@@ -7,7 +7,9 @@ import {
   reportSessionEnd,
   toSessionEndReason,
   checkSessionControl,
+  type RecordingLimitReason,
 } from '../lib/realtimeGatewayReporting';
+import { shouldAutoStopForCommercialLimit, pickStopMessage, pickStopEndReason, scheduleGracefulFinish } from './realtimeAutoStop';
 
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
 
@@ -26,6 +28,18 @@ export interface UseRealtimeSession {
   isSpeaking: boolean;
   /** Accumulated transcript of the current (or last) AI response, from audio_transcript.delta events. */
   transcriptText: string;
+  /**
+   * Fase 12 — server-authoritative authorized recording ceiling for this
+   * call, reconciled on every session-control poll. null until the first
+   * /session response arrives (older cached bundles that omit the field
+   * also leave this null forever — the UI simply shows elapsed-only, same
+   * as before this feature).
+   */
+  authorizedMaxSeconds: number | null;
+  /** Which constraint currently governs authorizedMaxSeconds — 'technical' must never be shown to the user as a commercial limit. */
+  recordingLimitReason: RecordingLimitReason | null;
+  /** Friendly message shown when the session was auto-stopped by a commercial limit (not a technical error). */
+  stopMessage: string | null;
   start: () => Promise<void>;
   end: () => void;
   updateInstructions: (instructions: string) => void;
@@ -95,6 +109,9 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [transcriptText, setTranscriptText] = useState('');
+  const [authorizedMaxSeconds, setAuthorizedMaxSeconds] = useState<number | null>(null);
+  const [recordingLimitReason, setRecordingLimitReason] = useState<RecordingLimitReason | null>(null);
+  const [stopMessage, setStopMessage] = useState<string | null>(null);
 
   const pcRef              = useRef<RTCPeerConnection | null>(null);
   const dcRef              = useRef<RTCDataChannel | null>(null);
@@ -118,6 +135,12 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const maxSessionMsRef          = useRef<number>(DEFAULT_MAX_SESSION_MS);
   const sessionControlTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const providerCallIdRef        = useRef<string | undefined>(undefined);
+  // Fase 12 — commercial-aware authorized recording ceiling, reconciled from
+  // /session and every session-control poll. null means "unknown yet" —
+  // the auto-stop check below is skipped until a real value arrives.
+  const authorizedMaxSecondsRef  = useRef<number | null>(null);
+  const recordingLimitReasonRef  = useRef<RecordingLimitReason | null>(null);
+  const limitStopTriggeredRef    = useRef(false);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -195,6 +218,30 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
   useEffect(() => () => { cleanup(undefined, 'unmounted'); }, [cleanup]);
 
+  // Fase 12 — auto-stop when the authorized recording ceiling is reached.
+  // Never abruptly kills the WebRTC connection: it stops CAPTURING new
+  // audio immediately (so nothing further is ever submitted), but if the AI
+  // is mid-response it lets that response finish playing before the
+  // conversation actually closes — the student never hears a reply get cut
+  // off mid-sentence. 'technical' never produces a message: the gateway
+  // ceiling is a pure backstop, never presented as a commercial feature.
+  const triggerLimitStop = useCallback((limitReason: 'per_turn' | 'monthly_balance', elapsedSeconds: number) => {
+    if (limitStopTriggeredRef.current || endCalledRef.current) return;
+    limitStopTriggeredRef.current = true;
+
+    if (streamRef.current) {
+      streamRef.current.getAudioTracks().forEach((t) => { t.enabled = false; });
+    }
+
+    setStopMessage(pickStopMessage(limitReason, elapsedSeconds));
+
+    const endReason = pickStopEndReason(limitReason);
+    scheduleGracefulFinish(
+      () => responseActiveRef.current,
+      () => { if (!endCalledRef.current) cleanup('ended', endReason); },
+    );
+  }, [cleanup]);
+
   const fail = useCallback((code: string, message: string) => {
     cleanup(undefined, code);
     setStatus('error');
@@ -210,6 +257,12 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     setErrorMessage(null);
     setErrorCode(null);
     setElapsedMs(0);
+    limitStopTriggeredRef.current = false;
+    authorizedMaxSecondsRef.current = null;
+    recordingLimitReasonRef.current = null;
+    setAuthorizedMaxSeconds(null);
+    setRecordingLimitReason(null);
+    setStopMessage(null);
 
     // ── Step 1: Mic first (must be in user gesture context, especially on Safari/iPhone) ─
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -252,6 +305,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       const body = await resp.json() as {
         token: string; sessionId: string | null; voice: string; model: string;
         gatewaySessionId?: string; maxSessionSeconds?: unknown;
+        authorizedMaxRecordingSeconds?: unknown; recordingLimitReason?: unknown;
       };
       token     = body.token;
       sessionId = body.sessionId;
@@ -266,6 +320,17 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       maxSessionMsRef.current = typeof body.maxSessionSeconds === 'number' && body.maxSessionSeconds > 0
         ? body.maxSessionSeconds * 1000
         : DEFAULT_MAX_SESSION_MS;
+      // Fase 12 — commercial-aware authorized recording ceiling. Absent
+      // (older cached bundle mismatch) simply leaves auto-stop disabled;
+      // the pure technical ceiling above still applies either way.
+      if (typeof body.authorizedMaxRecordingSeconds === 'number' && Number.isFinite(body.authorizedMaxRecordingSeconds)) {
+        authorizedMaxSecondsRef.current = body.authorizedMaxRecordingSeconds;
+        setAuthorizedMaxSeconds(body.authorizedMaxRecordingSeconds);
+      }
+      if (body.recordingLimitReason === 'per_turn' || body.recordingLimitReason === 'monthly_balance' || body.recordingLimitReason === 'technical') {
+        recordingLimitReasonRef.current = body.recordingLimitReason;
+        setRecordingLimitReason(body.recordingLimitReason);
+      }
     } catch {
       fail('NETWORK_ERROR', 'Erro de rede ao iniciar a sessão.');
       stopStream(stream);
@@ -315,6 +380,15 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       timerRef.current = setInterval(() => {
         const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
         setElapsedMs(elapsed);
+
+        // Fase 12 — proactive client-side auto-stop at the commercial
+        // ceiling, instead of waiting for the next (up to 5s later) poll.
+        const reason = recordingLimitReasonRef.current;
+        if (shouldAutoStopForCommercialLimit(elapsed, authorizedMaxSecondsRef.current, reason)) {
+          triggerLimitStop(reason as 'per_turn' | 'monthly_balance', elapsed / 1000);
+          return;
+        }
+
         if (elapsed >= maxSessionMsRef.current) cleanup('ended', 'max_duration_reached');
       }, 1000);
       // AI Gateway bridge: the physical WebRTC connection is now confirmed
@@ -331,6 +405,18 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         sessionControlTimerRef.current = setInterval(() => {
           if (endCalledRef.current) return;
           void checkSessionControl(polledGatewaySessionId).then((result) => {
+            // Fase 12 — reconcile the authorized ceiling with the server on
+            // every poll (balance may have changed since session start).
+            // Never optimistic: this only ever reflects what the server
+            // just returned, never a locally-guessed decrement.
+            if (typeof result.authorizedMaxRecordingSeconds === 'number') {
+              authorizedMaxSecondsRef.current = result.authorizedMaxRecordingSeconds;
+              setAuthorizedMaxSeconds(result.authorizedMaxRecordingSeconds);
+            }
+            if (result.recordingLimitReason) {
+              recordingLimitReasonRef.current = result.recordingLimitReason;
+              setRecordingLimitReason(result.recordingLimitReason);
+            }
             if (result.terminate && !endCalledRef.current) {
               cleanup('ended', result.reason ?? 'server_terminated');
             }
@@ -472,7 +558,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     } catch {
       fail('WEBRTC_FAILED', 'Não foi possível estabelecer a conexão WebRTC.');
     }
-  }, [status, cleanup, fail, startRevealTimer]);
+  }, [status, cleanup, fail, startRevealTimer, triggerLimitStop]);
 
   const end = useCallback(() => {
     cleanup('ended', 'user_ended');
@@ -489,6 +575,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   return {
     status, errorMessage, errorCode, elapsedMs, sessionInfo, isSpeaking,
     transcriptText,
+    authorizedMaxSeconds, recordingLimitReason, stopMessage,
     start, end, updateInstructions,
   };
 }

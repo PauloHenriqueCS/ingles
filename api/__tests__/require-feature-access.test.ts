@@ -30,6 +30,18 @@ describe('requireFeatureAccess', () => {
     const limit = computeFeatureState({ enabled: true, unlimited: false, limit: 3, consumed: 1, period: 'day' });
     expect(requireFeatureAccess(true, limit, 'x')).toEqual({ allowed: true });
   });
+
+  it('scenario 16: denies with CONFIGURATION_ERROR and the safe generic message when the limit carries a config_error state, even if featureEnabled says true', () => {
+    const limit = { enabled: false, unlimited: false, limit: 0, consumed: 0, remaining: 0, period: 'day' as const, state: 'config_error' as const, canStart: false };
+    const result = requireFeatureAccess(true, limit, 'exhausted message');
+    expect(result).toEqual({ allowed: false, code: 'CONFIGURATION_ERROR', message: 'Este recurso está temporariamente indisponível. Tente novamente mais tarde.' });
+  });
+
+  it('config_error takes priority over featureEnabled=false — never leaks which condition actually failed', () => {
+    const limit = { enabled: false, unlimited: false, limit: 0, consumed: 0, remaining: 0, period: 'day' as const, state: 'config_error' as const, canStart: false };
+    const result = requireFeatureAccess(false, limit, 'exhausted message');
+    expect(result.code).toBe('CONFIGURATION_ERROR');
+  });
 });
 
 describe('checkTextLength', () => {

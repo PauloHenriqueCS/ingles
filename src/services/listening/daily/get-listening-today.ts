@@ -13,29 +13,43 @@ export async function getListeningToday(
 ): Promise<TodayListeningResponse> {
   const activityDate = resolveListeningActivityDate();
 
-  // Check for existing assignment today
-  const { data: existing } = await supabase
+  // Fetch every assignment for today — with multi-story plans a user can
+  // have more than one row per day (one per distinct episode).
+  const { data: todaysAssignments } = await supabase
     .from('user_listening_assignments')
     .select('*')
     .eq('user_id', userId)
     .eq('activity_date', activityDate)
-    .maybeSingle();
+    .order('created_at', { ascending: false });
+
+  const rows = todaysAssignments ?? [];
+
+  // Story-mode completion (episode_id null) is a separate, single-per-day
+  // activity that never participates in the multi-story episode limit.
+  const storyModeRow = rows.find((row: any) => !row.episode_id);
+  if (storyModeRow) {
+    return { status: 'story_completed', assignmentId: storyModeRow.id, activityDate };
+  }
 
   let assignmentId: string;
   let episodeId: string;
   let currentStatus: string;
 
-  if (existing) {
-    if (!existing.episode_id) {
-      // Story-mode completion recorded for today — no episode session to load.
-      return { status: 'story_completed', assignmentId: existing.id, activityDate };
-    }
-    assignmentId  = existing.id;
-    episodeId     = existing.episode_id;
-    currentStatus = existing.status;
+  // Continue whatever story is still in progress before offering a new one.
+  const activeRow = rows.find((row: any) => row.status !== 'completed');
+
+  if (activeRow) {
+    assignmentId  = activeRow.id;
+    episodeId     = activeRow.episode_id;
+    currentStatus = activeRow.status;
   } else {
+    // Nothing active today: entitlements already gated whether the caller
+    // is allowed to start another one (see api/listening/[...slug].ts).
+    const excludeEpisodeIds = rows
+      .map((row: any) => row.episode_id as string | null)
+      .filter((id: string | null): id is string => !!id);
     const cefrLevel = await resolveUserListeningLevel(supabase, userId);
-    const selectedId = await selectListeningEpisodeForUser(supabase, userId, cefrLevel);
+    const selectedId = await selectListeningEpisodeForUser(supabase, userId, cefrLevel, excludeEpisodeIds);
     if (!selectedId) return { status: 'empty_inventory' };
 
     const { assignment } = await getOrCreateListeningAssignment(supabase, {

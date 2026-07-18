@@ -27,6 +27,7 @@ export async function getOrCreateListeningAssignment(
     .select('*')
     .eq('user_id', userId)
     .eq('activity_date', activityDate)
+    .eq('episode_id', episodeId)
     .maybeSingle();
 
   if (existing) return { assignment: rowToAssignment(existing), created: false };
@@ -44,6 +45,7 @@ export async function getOrCreateListeningAssignment(
         .select('*')
         .eq('user_id', userId)
         .eq('activity_date', activityDate)
+        .eq('episode_id', episodeId)
         .maybeSingle();
       if (race) return { assignment: rowToAssignment(race), created: false };
     }

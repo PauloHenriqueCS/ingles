@@ -25,6 +25,10 @@ export const ENTITLEMENT_MESSAGES = {
     'Você já usou todas as atividades disponíveis para hoje. Seu limite será renovado amanhã.',
   technicalFailure:
     'Não foi possível concluir esta atividade. Nenhum uso foi descontado. Tente novamente.',
+  /** Internal configuration error (e.g. a plan version missing a required
+   *  capability key). Never mention table/capability names to the user. */
+  configurationError:
+    'Este recurso está temporariamente indisponível. Tente novamente mais tarde.',
 
   characterLimitReached: (limit: number) =>
     `Você atingiu o máximo de ${limit.toLocaleString('pt-BR')} caracteres permitido pelo seu plano.`,

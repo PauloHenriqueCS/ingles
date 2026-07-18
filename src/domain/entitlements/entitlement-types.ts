@@ -11,7 +11,11 @@ export type FeatureAccessState =
   | 'daily_limit_reached'
   | 'monthly_limit_reached'
   | 'available_with_extra_credits'
-  | 'unlimited';
+  | 'unlimited'
+  /** The plan version has some entitlements configured but is missing a
+   *  required capability key — a configuration bug, not a business rule.
+   *  Never surfaced to the user as "not included in your plan". */
+  | 'config_error';
 
 export type LimitPeriod = 'day' | 'month' | 'request' | 'none';
 

@@ -2,6 +2,8 @@ import { supabase as clientSupabase } from '../../../lib/supabase';
 
 type ListeningCalendarStatus = 'not_started' | 'in_progress' | 'completed';
 
+const STATUS_RANK: Record<ListeningCalendarStatus, number> = { not_started: 0, in_progress: 1, completed: 2 };
+
 export async function getListeningDatesForMonth(
   year: number,
   month: number,
@@ -34,15 +36,19 @@ export async function getListeningDatesForMonth(
 
     console.log('[CALENDAR_DATE_NORMALIZED]', { raw: row.activity_date, normalized: dateStr, status: row.status });
 
-    if (row.status === 'completed') {
-      console.log('[CALENDAR_LISTENING_FOUND]', { date: dateStr });
-    } else {
-      console.log('[CALENDAR_LISTENING_IGNORED]', { date: dateStr, status: row.status, reason: 'status_not_completed' });
-    }
-
-    result[dateStr] = row.status === 'completed' ? 'completed'
-      : row.status === 'in_progress'             ? 'in_progress'
+    const rowStatus: ListeningCalendarStatus = row.status === 'completed' ? 'completed'
+      : row.status === 'in_progress'                                     ? 'in_progress'
       : 'not_started';
+
+    // A day can hold several rows on multi-story plans — keep whichever
+    // status ranks highest instead of letting the last row win arbitrarily.
+    const current = result[dateStr];
+    if (!current || STATUS_RANK[rowStatus] > STATUS_RANK[current]) {
+      console.log('[CALENDAR_LISTENING_FOUND]', { date: dateStr, status: rowStatus });
+      result[dateStr] = rowStatus;
+    } else {
+      console.log('[CALENDAR_LISTENING_IGNORED]', { date: dateStr, status: rowStatus, reason: 'lower_rank_than_existing' });
+    }
   }
 
   console.log('[CALENDAR_ACTIVITY_TYPES]', { completedDates: Object.entries(result).filter(([, s]) => s === 'completed').map(([d]) => d) });

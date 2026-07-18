@@ -12,7 +12,8 @@ export type FeatureAccessDenialCode =
   | 'DAILY_LIMIT_REACHED'
   | 'MONTHLY_LIMIT_REACHED'
   | 'CHARACTER_LIMIT_EXCEEDED'
-  | 'RECORDING_TOO_LONG';
+  | 'RECORDING_TOO_LONG'
+  | 'CONFIGURATION_ERROR';
 
 export interface FeatureAccessCheck {
   allowed: boolean;
@@ -22,12 +23,33 @@ export interface FeatureAccessCheck {
 
 const ALLOWED: FeatureAccessCheck = { allowed: true };
 
+/**
+ * Checks ONLY for the config_error state, independent of enabled/canStart —
+ * call this FIRST in every route, before any enabled/limit business-rule
+ * check, so a missing capability on a partially-configured plan never falls
+ * through and gets reported as "not included in your plan" or a normal
+ * exhausted-limit message. Never calls the AI provider when this returns
+ * non-null.
+ */
+export function checkFeatureConfigError(limit: FeatureLimit): FeatureAccessCheck | null {
+  if (limit.state === 'config_error') {
+    return { allowed: false, code: 'CONFIGURATION_ERROR', message: ENTITLEMENT_MESSAGES.configurationError };
+  }
+  return null;
+}
+
 /** Checks a feature's on/off flag plus its per-period limit (daily or monthly). */
 export function requireFeatureAccess(
   featureEnabled: boolean,
   limit: FeatureLimit,
   exhaustedMessage: string,
 ): FeatureAccessCheck {
+  // A missing capability on an otherwise-configured plan version is a
+  // config bug, not a "not included in this plan" business rule — never
+  // call the AI provider, never leak internals, always the safe message.
+  if (limit.state === 'config_error') {
+    return { allowed: false, code: 'CONFIGURATION_ERROR', message: ENTITLEMENT_MESSAGES.configurationError };
+  }
   if (!featureEnabled) {
     return { allowed: false, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
   }
