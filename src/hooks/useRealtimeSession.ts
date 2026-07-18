@@ -121,10 +121,12 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     endCalledRef.current = true;
 
     // Capture before resetting below — needed for the gateway report fired
-    // at the end of this function.
+    // at the end of this function. No duration is computed or sent here:
+    // the backend derives session_seconds itself from its own
+    // server-controlled timestamps (ai_provider_sessions.started_at through
+    // /session/end's own clock) — a client-reported duration is never trusted.
     const gatewaySessionId = gatewaySessionIdRef.current;
     const wasActive         = sessionReportedActiveRef.current;
-    const elapsedSeconds    = startTimeRef.current !== null ? (Date.now() - startTimeRef.current) / 1000 : 0;
 
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
@@ -149,7 +151,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       gatewaySessionIdRef.current = null;
       sessionReportedActiveRef.current = false;
       if (wasActive) {
-        reportSessionEnd(gatewaySessionId, elapsedSeconds);
+        reportSessionEnd(gatewaySessionId);
       } else {
         reportSessionFailed(gatewaySessionId, toSessionEndReason(endReason));
       }

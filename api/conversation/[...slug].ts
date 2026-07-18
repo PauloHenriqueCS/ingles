@@ -582,11 +582,17 @@ async function handleSession(req: any, res: any) {
 // report is an idempotent no-op, and an internal telemetry failure is
 // caught and logged, never surfaced to the student.
 //
-// Grain: conversation.webrtc_connect records exactly one ai_usage_event per
-// physical connection attempt outcome (call_sequence=1: succeeded via
-// /active or failed via /failed) plus one event for the session's measured
-// duration when it ends normally (call_sequence=2, via /end) — all sharing
-// the session id as correlationId. conversation.realtime_usage (the
+// Grain: conversation.webrtc_connect records AT MOST ONE ai_usage_event per
+// physical POST to /v1/realtime/calls — one event for that connection
+// attempt's entire lifecycle, never one-per-endpoint-call. /session/active
+// creates it (status='succeeded', provider_requests=1) or /session/failed
+// creates it (status='failed', no metrics — a failure before the physical
+// call was ever attempted must never fabricate provider_requests).
+// /session/end never creates a second event: it locates the SAME event by
+// (provider_session_record_id, feature_key, status='succeeded') and attaches
+// session_seconds to it, then rebuilds that event's daily bucket — it never
+// invents a replacement event if the original cannot be found. All three
+// share the session id as correlationId. conversation.realtime_usage (the
 // separate billing key) records one incremental event per Realtime
 // response.done, via /usage, deduplicated by
 // (provider_session_record_id, provider_request_id = response.id).
@@ -598,11 +604,6 @@ const ALLOWED_END_REASONS = new Set([
   'user_ended', 'dc_closed', 'max_duration_reached', 'unmounted',
   'connection_lost', 'webrtc_failed', 'webrtc_network', 'session_error', 'unknown',
 ]);
-
-// Generous ceiling over MAX_SESSION_MS (30 min, useRealtimeSession.ts) —
-// bounds an implausible client-reported duration without ever rejecting a
-// genuine long session.
-const MAX_REALTIME_SESSION_DURATION_SECONDS = 2400;
 
 // Matches the OpenAI Realtime response id format loosely (e.g. "resp_...")
 // without overfitting to a specific prefix that may change — just a safe,
@@ -627,7 +628,13 @@ async function handleSessionActive(req: any, res: any) {
   }
 
   try {
-    const nowIso = new Date().toISOString();
+    const gatewayDeps = getProductionDeps();
+    // Server-controlled clock — never the client's. This is the single
+    // authoritative "session started" instant: /session/end later computes
+    // session_seconds as (server ended_at − this started_at), never from a
+    // client-reported duration.
+    const startedAtMs = gatewayDeps.clock();
+    const nowIso = new Date(startedAtMs).toISOString();
     const { data, error } = await sessionsClient()
       .from('ai_provider_sessions')
       .update({ status: 'active', started_at: nowIso })
@@ -645,8 +652,10 @@ async function handleSessionActive(req: any, res: any) {
       return res.status(200).json({ status: 'ignored' });
     }
 
-    const gatewayDeps = getProductionDeps();
-    const startedAt = gatewayDeps.clock();
+    // Exactly one ai_usage_event represents this physical connection
+    // attempt for its entire lifecycle — /session/end below locates and
+    // updates THIS SAME event (by provider_session_record_id) rather than
+    // creating a second one when the session later ends.
     const eventId = await gatewayDeps.usageRepository.startEvent({
       requestId: gatewayDeps.uuidGen(),
       correlationId: gatewaySessionId,
@@ -665,11 +674,15 @@ async function handleSessionActive(req: any, res: any) {
       resourceType: 'ai_provider_session',
       resourceId: gatewaySessionId,
       metadata: { endpoint: 'conversation/session/active' },
-      startedAt,
+      startedAt: startedAtMs,
     });
-    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAtMs });
     await gatewayDeps.usageRepository.insertMetrics(eventId, [
-      { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: 'provider_event_client_relayed' },
+      // The browser itself is asserting "I made this physical call and it
+      // succeeded" — distinct from provider_event_client_relayed, which
+      // relays literal fields copied from an OpenAI-emitted event object
+      // (used for conversation.realtime_usage's token metrics below).
+      { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: 'client_provider_call_reported' },
     ]);
     try {
       await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
@@ -743,6 +756,11 @@ async function handleSessionFailed(req: any, res: any) {
       metadata: { endpoint: 'conversation/session/failed' },
       startedAt,
     });
+    // No provider_requests metric here: failEvent alone marks the event
+    // 'failed' (cost_status auto 'not_applicable') without asserting a
+    // metric we cannot prove — a failure reported before the physical POST
+    // to /v1/realtime/calls ever went out must never fabricate
+    // provider_requests=1.
     await gatewayDeps.usageRepository.failEvent(eventId, {
       latencyMs: gatewayDeps.clock() - startedAt,
       errorCode: reason,
@@ -918,38 +936,40 @@ async function handleSessionUsage(req: any, res: any) {
 
 // ── /end ─────────────────────────────────────────────────────────────────
 
+// The client never supplies a duration — /session/end computes
+// session_seconds itself from server-controlled timestamps only:
+// ai_provider_sessions.started_at (written at /session/active, from
+// gatewayDeps.clock()) through this handler's own gatewayDeps.clock() call.
+// This also means /session/end attaches session_seconds to the SAME
+// ai_usage_event /session/active created (located by
+// provider_session_record_id + feature_key + status='succeeded') instead of
+// creating a second event — one physical connection attempt, one event, for
+// its entire lifecycle from connect through disconnect.
 async function handleSessionEnd(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId } = auth;
 
-  const body = req.body ?? {};
-  const gatewaySessionId = body.gatewaySessionId;
-  const durationSeconds = body.durationSeconds;
-
+  const gatewaySessionId = (req.body ?? {}).gatewaySessionId;
   if (!isValidUuid(gatewaySessionId)) {
     return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
   }
-  if (
-    typeof durationSeconds !== 'number' ||
-    !Number.isFinite(durationSeconds) ||
-    durationSeconds < 0 ||
-    durationSeconds > MAX_REALTIME_SESSION_DURATION_SECONDS
-  ) {
-    return jsonError(res, 400, 'INVALID_DURATION', 'durationSeconds inválido.');
-  }
 
   try {
+    const gatewayDeps = getProductionDeps();
+    const endedAtMs = gatewayDeps.clock();
+    const endedAtIso = new Date(endedAtMs).toISOString();
+
     const { data, error } = await sessionsClient()
       .from('ai_provider_sessions')
-      .update({ status: 'completed', ended_at: new Date().toISOString(), duration_seconds: durationSeconds })
+      .update({ status: 'completed', ended_at: endedAtIso })
       .eq('id', gatewaySessionId)
       .eq('user_id', userId)
       .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
       .eq('provider', 'openai')
       .eq('status', 'active')
-      .select('id')
+      .select('id, started_at')
       .maybeSingle();
 
     if (error || !data) {
@@ -958,44 +978,44 @@ async function handleSessionEnd(req: any, res: any) {
       return res.status(200).json({ status: 'ignored' });
     }
 
-    const gatewayDeps = getProductionDeps();
-    const startedAt = gatewayDeps.clock();
-    const eventId = await gatewayDeps.usageRepository.startEvent({
-      requestId: gatewayDeps.uuidGen(),
-      correlationId: gatewaySessionId,
-      providerSessionRecordId: gatewaySessionId,
-      userId,
-      initiatedByUserId: userId,
-      actorType: 'user',
-      featureKey: WEBRTC_CONNECT_FEATURE_KEY,
-      provider: 'openai',
-      service: 'realtime.webrtc',
-      model: REALTIME_MODEL,
-      executionLocation: 'frontend',
-      isBillable: false,
-      attemptNumber: 1,
-      callSequence: 2,
-      resourceType: 'ai_provider_session',
-      resourceId: gatewaySessionId,
-      metadata: { endpoint: 'conversation/session/end' },
-      startedAt,
-    });
-    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
-    await gatewayDeps.usageRepository.insertMetrics(eventId, [
-      {
-        metricKey: 'session_seconds',
-        unitType: 'second',
-        quantity: durationSeconds,
-        isBillable: false,
-        // Server-controlled clock at /active and /end, not the client's
-        // playback rate — see useRealtimeSession.ts cleanup().
-        measurementSource: 'client_report',
-      },
-    ]);
-    try {
-      await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
-    } catch (e) {
-      gatewayDeps.logger('gateway.webrtcEndRollup.failed', { message: String(e) });
+    const startedAtIso = (data as { started_at: string | null }).started_at;
+    const durationSeconds = startedAtIso
+      ? Math.max(0, (endedAtMs - new Date(startedAtIso).getTime()) / 1000)
+      : 0;
+
+    // Locate the single ai_usage_event /session/active created for this
+    // physical connection attempt. Never fabricate a new one here: a
+    // session can only ever reach 'active' (and thus 'completed') once, so
+    // exactly one 'succeeded' conversation.webrtc_connect event can exist
+    // for this provider_session_record_id — but if it is somehow missing
+    // (never created, already purged, etc.), skip the metric silently
+    // rather than inventing a replacement event.
+    const { data: eventRow, error: eventLookupError } = await sessionsClient()
+      .from('ai_usage_events')
+      .select('id')
+      .eq('provider_session_record_id', gatewaySessionId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('status', 'succeeded')
+      .maybeSingle();
+
+    if (!eventLookupError && eventRow) {
+      const eventId = (eventRow as { id: string }).id;
+      try {
+        await gatewayDeps.usageRepository.insertMetrics(eventId, [
+          {
+            metricKey: 'session_seconds',
+            unitType: 'second',
+            quantity: durationSeconds,
+            isBillable: false, // Realtime cost comes from tokens, not duration.
+            measurementSource: 'server_session_timestamps',
+          },
+        ]);
+        await rebuildDailyBucketForEvent(eventId, { dailyRollupRepository: gatewayDeps.dailyRollupRepository, logger: gatewayDeps.logger });
+      } catch (e) {
+        // Duration-write/rollup failure is fail-open — the session is still
+        // correctly marked completed above regardless of this outcome.
+        gatewayDeps.logger('gateway.webrtcEndDuration.failed', { message: String(e) });
+      }
     }
 
     return res.status(200).json({ status: 'completed' });

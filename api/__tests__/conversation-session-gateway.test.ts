@@ -230,7 +230,7 @@ describe('POST /session/active — conversation.webrtc_connect', () => {
       }),
     );
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
-    expect(metrics).toEqual([expect.objectContaining({ metricKey: 'provider_requests', isBillable: false, measurementSource: 'provider_event_client_relayed' })]);
+    expect(metrics).toEqual([expect.objectContaining({ metricKey: 'provider_requests', isBillable: false, measurementSource: 'client_provider_call_reported' })]);
   });
 
   it('a session belonging to another user is a no-op — no event, 200 response', async () => {
@@ -414,25 +414,95 @@ describe('POST /session/usage — conversation.realtime_usage', () => {
 });
 
 // ── conversation.webrtc_connect — /session/end ──────────────────────────────
+// /session/end never creates a new ai_usage_event: it locates the ONE event
+// /session/active already created (by provider_session_record_id +
+// feature_key + status='succeeded') and attaches session_seconds to it —
+// computed entirely from server-controlled timestamps
+// (ai_provider_sessions.started_at, through this handler's own
+// gatewayDeps.clock()), never from a client-supplied duration.
 
 describe('POST /session/end — conversation.webrtc_connect', () => {
-  function endReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 187.5 }) {
+  const ORIGINAL_EVENT_ID = 'dddddddd-0000-0000-0000-000000000001';
+
+  function endReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID }) {
     return makeReq({ url: '/api/conversation/session/end', body });
   }
 
-  it('completes the session and records a session_seconds metric (non-billable, call_sequence=2)', async () => {
+  /** Wires the two sequential sessionsClient().from(...) calls /end makes: the
+   *  ai_provider_sessions UPDATE, then the ai_usage_events lookup. */
+  function mockEndFlow(opts: {
+    startedAtIso: string | null;
+    endedAtMs: number;
+    updateData?: { id: string; started_at: string | null } | null;
+    eventLookupData?: { id: string } | null;
+  }) {
+    gw.mockClock.mockReturnValue(opts.endedAtMs);
+    mockSessionsFrom
+      .mockReturnValueOnce(makeUpdateChain({
+        data: opts.updateData !== undefined ? opts.updateData : { id: GATEWAY_SESSION_ID, started_at: opts.startedAtIso },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeSelectChain({
+        data: opts.eventLookupData !== undefined ? opts.eventLookupData : { id: ORIGINAL_EVENT_ID },
+        error: null,
+      }));
+  }
+
+  it('completes the session and attaches session_seconds to the ORIGINAL event — never creates a new ai_usage_event', async () => {
+    mockEndFlow({ startedAtIso: new Date(100_000 - 42_000).toISOString(), endedAtMs: 100_000 });
     const res = makeRes();
     await handler(endReq(), res);
     expect(res._status()).toBe(200);
 
-    const chain = mockSessionsFrom.mock.results[0].value;
-    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', duration_seconds: 187.5 }));
+    const updateChain = mockSessionsFrom.mock.results[0].value;
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
 
-    expect(gw.mockStartEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ featureKey: 'conversation.webrtc_connect', callSequence: 2, isBillable: false }),
+    // No startEvent call — /end never fabricates a second ai_usage_event.
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+
+    expect(gw.mockInsertMetrics).toHaveBeenCalledWith(
+      ORIGINAL_EVENT_ID,
+      [expect.objectContaining({
+        metricKey: 'session_seconds', quantity: 42, isBillable: false, measurementSource: 'server_session_timestamps',
+      })],
     );
+  });
+
+  it('provider_requests (from /active) and session_seconds (from /end) share the same usage_event_id', async () => {
+    // /active creates the one event.
+    mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+    const activeEventId = gw.mockInsertMetrics.mock.calls[0][0] as string;
+
+    // /end locates that SAME event id (as the real DB lookup would).
+    mockEndFlow({ startedAtIso: new Date(150_000).toISOString(), endedAtMs: 200_000, eventLookupData: { id: activeEventId } });
+    await handler(endReq(), makeRes());
+
+    const endEventId = gw.mockInsertMetrics.mock.calls[1][0] as string;
+    expect(endEventId).toBe(activeEventId);
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1); // exactly one event for the whole lifecycle
+  });
+
+  it('one connect + one end together produce exactly one conversation.webrtc_connect event', async () => {
+    mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+
+    mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 10_000 });
+    await handler(endReq(), makeRes());
+
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('duration is computed server-side from ai_provider_sessions.started_at, never from a client-sent value', async () => {
+    // The request body carries no duration field at all — reportSessionEnd
+    // (src/lib/realtimeGatewayReporting.ts) never sends one, and even if a
+    // client attempted to smuggle one in, the handler never reads req.body
+    // for it.
+    mockEndFlow({ startedAtIso: new Date(1_000_000).toISOString(), endedAtMs: 1_007_500 }); // 7.5s later
+    await handler(makeReq({ url: '/api/conversation/session/end', body: { gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 999_999 } }), makeRes());
+
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
-    expect(metrics).toEqual([expect.objectContaining({ metricKey: 'session_seconds', quantity: 187.5, isBillable: false })]);
+    expect(metrics[0].quantity).toBe(7.5); // computed value, ignoring the smuggled 999_999
   });
 
   it('a session that was never activated (still authorized/connecting) cannot be completed — no-op', async () => {
@@ -440,39 +510,28 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
     const res = makeRes();
     await handler(endReq(), res);
     expect(res._status()).toBe(200);
-    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    expect(gw.mockInsertMetrics).not.toHaveBeenCalled();
   });
 
-  it('a duplicate /end call for an already-completed session is a no-op — completes exactly once', async () => {
-    // First call succeeds (status IN ('active') matches).
+  it('a duplicate /end call for an already-completed session is a no-op — no duplicate metric', async () => {
+    mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 5_000 });
     await handler(endReq(), makeRes());
-    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1);
 
     // Second call: the atomic UPDATE...WHERE status='active' now matches
-    // nothing (already 'completed').
+    // nothing (already 'completed') — never reaches the event lookup at all.
     mockSessionsFrom.mockReturnValue(makeUpdateChain({ data: null, error: null }));
     await handler(endReq(), makeRes());
-    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1); // unchanged — no second event
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1); // unchanged
   });
 
-  it('rejects a negative duration', async () => {
+  it('does not fabricate a replacement event when the original cannot be found', async () => {
+    mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 5_000, eventLookupData: null });
     const res = makeRes();
-    await handler(endReq({ gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: -5 }), res);
-    expect(res._status()).toBe(400);
-    expect(mockSessionsFrom).not.toHaveBeenCalled();
-  });
-
-  it('rejects an implausibly large duration (well above MAX_SESSION_MS)', async () => {
-    const res = makeRes();
-    await handler(endReq({ gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 999_999 }), res);
-    expect(res._status()).toBe(400);
-    expect(mockSessionsFrom).not.toHaveBeenCalled();
-  });
-
-  it('duration does not depend on playback speed — it is the raw seconds value reported, stored verbatim', async () => {
-    await handler(endReq({ gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 42 }), makeRes());
-    const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
-    expect(metrics[0].quantity).toBe(42);
+    await handler(endReq(), res);
+    expect(res._status()).toBe(200); // session still marked completed
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    expect(gw.mockInsertMetrics).not.toHaveBeenCalled();
   });
 
   it('another user cannot end this session', async () => {
@@ -481,13 +540,36 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
     const res = makeRes();
     await handler(endReq(), res);
     expect(res._status()).toBe(200);
-    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    expect(gw.mockInsertMetrics).not.toHaveBeenCalled();
   });
 
-  it('a telemetry failure never surfaces as an error to the browser (fail-open)', async () => {
-    gw.mockStartEvent.mockRejectedValue(new Error('db down'));
+  it('a duration-write failure is fail-open — the browser still gets 200', async () => {
+    mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 5_000 });
+    gw.mockInsertMetrics.mockRejectedValueOnce(new Error('db down'));
     const res = makeRes();
     await handler(endReq(), res);
     expect(res._status()).toBe(200);
+  });
+
+  it('rejects an invalid gatewaySessionId before touching the database', async () => {
+    const res = makeRes();
+    await handler(endReq({ gatewaySessionId: 'not-a-uuid' }), res);
+    expect(res._status()).toBe(400);
+    expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+
+  it('reconstructs the SAME daily bucket the original event belongs to (rebuild keyed by the original event id)', async () => {
+    mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 5_000, eventLookupData: { id: ORIGINAL_EVENT_ID } });
+    await handler(endReq(), makeRes());
+    expect(gw.mockRebuildBucketForEvent).toHaveBeenCalledWith(ORIGINAL_EVENT_ID);
+  });
+});
+
+describe('duration starts at /session/active, never at token issuance', () => {
+  it('/session/active writes ai_provider_sessions.started_at — /session (create_session) never does', async () => {
+    mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+    const updateChain = mockSessionsFrom.mock.results[0].value;
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ started_at: expect.any(String) }));
   });
 });

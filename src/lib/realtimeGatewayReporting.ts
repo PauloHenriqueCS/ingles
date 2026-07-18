@@ -90,7 +90,12 @@ export function reportSessionUsage(
   void post('/api/conversation/session/usage', { gatewaySessionId, providerResponseId, usage });
 }
 
-/** Reports normal session completion with its measured duration in seconds. */
-export function reportSessionEnd(gatewaySessionId: string, durationSeconds: number): void {
-  void post('/api/conversation/session/end', { gatewaySessionId, durationSeconds });
+/**
+ * Reports normal session completion. Carries no duration — the backend
+ * computes session_seconds itself from server-controlled timestamps
+ * (ai_provider_sessions.started_at, set at /session/active, through its own
+ * clock at /session/end). A client-reported duration is never trusted.
+ */
+export function reportSessionEnd(gatewaySessionId: string): void {
+  void post('/api/conversation/session/end', { gatewaySessionId });
 }

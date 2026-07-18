@@ -95,15 +95,17 @@ describe('reporting calls — fire-and-forget transport', () => {
     });
   });
 
-  it('reportSessionEnd POSTs gatewaySessionId and durationSeconds', async () => {
+  it('reportSessionEnd POSTs only gatewaySessionId — never a client-computed duration', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 
-    reportSessionEnd('session-4', 123.45);
+    reportSessionEnd('session-4');
     await new Promise((r) => setTimeout(r, 0));
 
     const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-4', durationSeconds: 123.45 });
+    const sent = JSON.parse(opts.body as string);
+    expect(sent).toEqual({ gatewaySessionId: 'session-4' });
+    expect(sent.durationSeconds).toBeUndefined();
   });
 
   it('a network failure never throws or rejects — telemetry must never affect the conversation', async () => {
@@ -112,7 +114,7 @@ describe('reporting calls — fire-and-forget transport', () => {
     expect(() => reportSessionActive('session-5')).not.toThrow();
     expect(() => reportSessionFailed('session-5', 'unknown')).not.toThrow();
     expect(() => reportSessionUsage('session-5', 'resp_x', {})).not.toThrow();
-    expect(() => reportSessionEnd('session-5', 10)).not.toThrow();
+    expect(() => reportSessionEnd('session-5')).not.toThrow();
 
     // Give the swallowed rejections a turn to (not) surface as unhandled.
     await new Promise((r) => setTimeout(r, 0));
