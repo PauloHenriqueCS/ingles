@@ -135,3 +135,93 @@ describe('reporting calls — fire-and-forget transport', () => {
     expect(sent).not.toMatch(/transcript|prompt|\bsdp\b|bearer|ephemeral/i);
   });
 });
+
+// ── Failure observability — a non-2xx response must never vanish silently ──
+// fetch() only rejects on a network error; it resolves normally for 401,
+// 404, 500, etc. Before this fix, post() never checked response.ok, so a
+// rejected bridge call (auth failure, route mismatch, server error) left
+// zero trace anywhere — this is what let /session/active fail invisibly in
+// production while the conversation itself kept working normally.
+
+describe('bridge call failures are observable, sanitized, and never break the conversation', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('a 401 response logs a sanitized technical error — never throws', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+
+    expect(() => reportSessionActive('session-7')).not.toThrow();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[realtimeGatewayReporting] bridge call failed',
+      expect.objectContaining({ endpoint: '/api/conversation/session/active', status: 401, errorCode: 'HTTP_401', hasGatewaySessionId: true }),
+    );
+  });
+
+  it('a 404 response is logged with its real status — proves route-mismatch would be visible', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    reportSessionUsage('session-8', 'resp_z', { input_token_details: { text_tokens: 1 } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[realtimeGatewayReporting] bridge call failed',
+      expect.objectContaining({ endpoint: '/api/conversation/session/usage', status: 404, errorCode: 'HTTP_404' }),
+    );
+  });
+
+  it('a 500 response is logged distinctly from a network error', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    reportSessionEnd('session-9');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[realtimeGatewayReporting] bridge call failed',
+      expect.objectContaining({ status: 500, errorCode: 'HTTP_500' }),
+    );
+  });
+
+  it('a network-level failure (fetch rejects) is logged with errorCode NETWORK_ERROR and no HTTP status', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+    reportSessionFailed('session-10', 'webrtc_failed');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[realtimeGatewayReporting] bridge call failed',
+      expect.objectContaining({ endpoint: '/api/conversation/session/failed', status: null, errorCode: 'NETWORK_ERROR' }),
+    );
+  });
+
+  it('a successful (200) call never logs anything', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+
+    reportSessionActive('session-11');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consoleSpy).not.toHaveBeenCalled();
+  });
+
+  it('the failure log never contains the token, transcript, audio, or SDP — only sanitized technical fields', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+
+    reportSessionUsage('session-12', 'resp_secret', { input_token_details: { text_tokens: 3 } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const loggedPayload = JSON.stringify(consoleSpy.mock.calls[0]);
+    expect(loggedPayload).not.toMatch(/transcript|prompt|\bsdp\b|bearer|ephemeral/i);
+    // Only the boolean presence of gatewaySessionId is logged, never the
+    // gatewaySessionId, providerResponseId, or usage values themselves.
+    expect(loggedPayload).not.toContain('session-12');
+    expect(loggedPayload).not.toContain('resp_secret');
+  });
+});

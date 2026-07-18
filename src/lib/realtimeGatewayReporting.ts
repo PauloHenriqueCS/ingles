@@ -55,17 +55,40 @@ export function toSessionEndReason(code: string | null | undefined): SessionEndR
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
+// fetch() only REJECTS on a network failure — it resolves normally for any
+// HTTP status, including 401/404/500. Without checking response.ok, a
+// rejected/broken bridge call is invisible everywhere: no console output,
+// no way to ever notice it in production. This still never throws and never
+// blocks the conversation (fail-open) — it only makes a real failure
+// observable instead of silently vanishing.
+
+function logBridgeFailure(path: string, body: Record<string, unknown>, detail: { status?: number; errorCode: string }): void {
+  // Sanitized only: logical endpoint, HTTP status, technical error code, and
+  // whether a gatewaySessionId was present — never the token, transcript,
+  // audio, SDP, or any other request/response content.
+  console.error('[realtimeGatewayReporting] bridge call failed', {
+    endpoint: path,
+    status: detail.status ?? null,
+    errorCode: detail.errorCode,
+    hasGatewaySessionId: typeof body.gatewaySessionId === 'string' && body.gatewaySessionId.length > 0,
+  });
+}
 
 async function post(path: string, body: Record<string, unknown>): Promise<void> {
   try {
     const headers = await getAuthHeader();
-    await fetch(path, {
+    const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      logBridgeFailure(path, body, { status: res.status, errorCode: `HTTP_${res.status}` });
+    }
   } catch {
-    // Telemetry must never affect the conversation — swallow every failure.
+    // Network failure, or getAuthHeader() itself threw — telemetry must
+    // never affect the conversation, but the failure is still observable.
+    logBridgeFailure(path, body, { errorCode: 'NETWORK_ERROR' });
   }
 }
 

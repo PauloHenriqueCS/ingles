@@ -370,3 +370,101 @@ describe('conversationSession handler — AI Gateway legacy mode', () => {
     expect(globalFetch).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── Client-side chain: gatewaySessionId → useRealtimeSession → bridge calls ──
+// Proves the full wiring the production incident exposed: the backend can
+// authorize a session and return gatewaySessionId correctly (proven
+// separately in api/__tests__/conversation-session-gateway.test.ts, "observe
+// for both create_session and webrtc_connect" describe block) — but that
+// alone is worthless if the frontend hook never reads, stores, or acts on
+// the field. No jsdom/RTL is set up in this project (see
+// useConversationCaptions.test.ts for the established convention), so these
+// are precise raw-source assertions on the exact call sites, not merely
+// "the string exists somewhere."
+
+describe('client-side gatewaySessionId chain (useRealtimeSession.ts)', () => {
+  async function hookSource(): Promise<string> {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    // Normalize CRLF → LF so multi-line substring assertions below are
+    // agnostic to the file's on-disk line-ending style.
+    return (src as unknown as { default: string }).default.replace(/\r\n/g, '\n');
+  }
+
+  it('parses gatewaySessionId from the /api/conversation/session response body and stores it in a ref', async () => {
+    const code = await hookSource();
+    expect(code).toMatch(/gatewaySessionId\?:\s*string/); // typed as optional on the parsed body
+    expect(code).toContain("gatewaySessionIdRef.current = typeof body.gatewaySessionId === 'string' ? body.gatewaySessionId : null;");
+  });
+
+  it('reportSessionActive is called from dc.onopen — after the data channel actually opens, not at token issuance or SDP send', async () => {
+    const code = await hookSource();
+    const onopenBlock = code.slice(code.indexOf('dc.onopen = () => {'), code.indexOf('dc.onmessage = (e) => {'));
+    expect(onopenBlock).toContain('reportSessionActive(gatewaySessionIdRef.current)');
+    // Guarded — never called unconditionally (legacy: ref stays null, no-op).
+    expect(onopenBlock).toMatch(/if \(gatewaySessionIdRef\.current\) \{\s*sessionReportedActiveRef\.current = true;\s*reportSessionActive/);
+  });
+
+  it('reportSessionActive is not called anywhere in the start() body before dc.onopen (not at Step 2 token fetch, not at Step 5 SDP POST)', async () => {
+    const code = await hookSource();
+    // Scoped to inside start()'s body, after the import statement (which
+    // legitimately names reportSessionActive) and up to dc.onopen's own definition.
+    const startBodyStart = code.indexOf('const start = useCallback(async () => {');
+    const dataChannelIdx = code.indexOf("const dc = pc.createDataChannel('oai-events');");
+    expect(startBodyStart).toBeGreaterThan(-1);
+    expect(dataChannelIdx).toBeGreaterThan(startBodyStart);
+    const beforeDataChannel = code.slice(startBodyStart, dataChannelIdx);
+    expect(beforeDataChannel).not.toContain('reportSessionActive');
+  });
+
+  it('reportSessionUsage is called from response.done, reading the official response.id and response.usage fields', async () => {
+    const code = await hookSource();
+    const doneBlock = code.slice(code.indexOf("if (ev.type === 'response.done')"), code.indexOf("// Error events from the server"));
+    expect(doneBlock).toContain('reportSessionUsage(gatewaySessionIdRef.current, ev.response.id, ev.response.usage)');
+  });
+
+  it('end() (the "Encerrar conversa" button) and dc.onclose both route through cleanup(), which calls reportSessionEnd when the session was active', async () => {
+    const code = await hookSource();
+    expect(code).toContain("const end = useCallback(() => {\n    cleanup('ended', 'user_ended');");
+    expect(code).toContain("dc.onclose = () => {\n      if (!endCalledRef.current) cleanup('ended', 'dc_closed');");
+    expect(code).toContain('reportSessionEnd(gatewaySessionId)');
+  });
+
+  it('gatewaySessionIdRef is cleared immediately inside cleanup() before firing the report — a second cleanup() call (Strict Mode double-invoke, end() then dc.onclose) is a client-side no-op', async () => {
+    const code = await hookSource();
+    const cleanupBody = code.slice(code.indexOf('const cleanup = useCallback'), code.indexOf('useEffect(() => () => { cleanup(undefined'));
+    // gatewaySessionIdRef.current is nulled out INSIDE the `if (gatewaySessionId)` guard,
+    // before either report call — so a second invocation reads null and skips entirely.
+    expect(cleanupBody).toMatch(/if \(gatewaySessionId\) \{\s*gatewaySessionIdRef\.current = null;\s*sessionReportedActiveRef\.current = false;/);
+  });
+
+  it('when gatewaySessionId is absent (legacy — the current production state), no bridge report is ever fired', async () => {
+    const code = await hookSource();
+    // Every call site is guarded by `if (gatewaySessionIdRef.current)` / `if (gatewaySessionId)` —
+    // never an unconditional call.
+    const reportCalls = [...code.matchAll(/report(Session\w+)\(/g)];
+    expect(reportCalls.length).toBeGreaterThan(0);
+    for (const call of reportCalls) {
+      const before = code.slice(0, call.index);
+      const lastGuard = before.lastIndexOf('if (gatewaySessionId');
+      const lastBrace = before.lastIndexOf('\n  }, []);'); // end of a previous, unrelated useCallback
+      expect(lastGuard).toBeGreaterThan(-1);
+      expect(lastGuard).toBeGreaterThan(lastBrace - 200); // guard is the nearest preceding conditional
+    }
+  });
+
+  it('no test, source file, or log statement in the bridge chain contains the ephemeral token, transcript, or SDP content', async () => {
+    const hookCode = await hookSource();
+    const reportingSrc = await import('../lib/realtimeGatewayReporting?raw');
+    const reportingCode = (reportingSrc as unknown as { default: string }).default;
+    // The reporting calls themselves only ever pass gatewaySessionId, a
+    // provider response id, numeric usage counters, or a small reason enum —
+    // never `token`, `answerSdp`, or `transcriptAccumRef`.
+    const activeCallLine = hookCode.match(/reportSessionActive\([^)]*\)/)?.[0] ?? '';
+    const usageCallLine = hookCode.match(/reportSessionUsage\([^)]*\)/)?.[0] ?? '';
+    const endCallLine = hookCode.match(/reportSessionEnd\([^)]*\)/)?.[0] ?? '';
+    for (const line of [activeCallLine, usageCallLine, endCallLine]) {
+      expect(line).not.toMatch(/token|answerSdp|transcriptAccumRef/);
+    }
+    expect(reportingCode).not.toMatch(/console\.(log|error)\([^)]*\btoken\b/i);
+  });
+});
