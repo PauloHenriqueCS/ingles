@@ -70,6 +70,28 @@ describe('reporting calls — fire-and-forget transport', () => {
     expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-1' });
   });
 
+  it('reportSessionActive includes callId in the body when a call_id was captured (Etapa 11 correction)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    reportSessionActive('session-1b', 'call_abc123');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-1b', callId: 'call_abc123' });
+  });
+
+  it('reportSessionActive omits callId entirely when absent — never sends callId: undefined', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    reportSessionActive('session-1c');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(opts.body as string)).not.toHaveProperty('callId');
+  });
+
   it('reportSessionFailed POSTs to the flat /api/conversation/session-failed route with gatewaySessionId and a validated reason', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);

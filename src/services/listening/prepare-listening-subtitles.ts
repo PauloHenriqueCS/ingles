@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { AICallWithUsageFn, AICallResult } from './validate-questions-with-ai';
-import { executeAiGatewayCall, getProductionDeps } from '../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from '../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../api/_ai-gateway/index';
 import { buildEnglishSubtitleCues } from './build-english-subtitle-cues';
 import type { CanonicalSentence } from './build-english-subtitle-cues';
@@ -216,6 +216,7 @@ export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
           flowType: 'prepare_subtitles',
           physicalAttempt,
         },
+        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
       },
       () => client.chat.completions.create({
         model: AI_MODEL,

@@ -19,6 +19,7 @@ import {
   sanitizeMetadata,
   sanitizeError,
   GatewayPolicyResolver,
+  evaluateKillSwitch,
 } from '../_ai-gateway/index';
 
 import type {
@@ -692,6 +693,52 @@ describe('GatewayPolicyResolver', () => {
     const second = await resolver.resolvePolicy(ctx);
     // Should fall back to last known good policy
     expect(second.gatewayMode).toBe('observe');
+  });
+
+  // Etapa 11 correction §8: prove real cache invalidation/resolution over
+  // time, not just evaluateKillSwitch(status) applied to a hand-built
+  // object. DEFAULT_TTL_MS (policy-resolver.ts) is 5000ms — the same value
+  // getProductionDeps() uses (no ttlMs override passed to `new
+  // GatewayPolicyResolver()`), so this test's resolver construction (no
+  // explicit ttlMs) exercises the actual production default, not a
+  // convenient test-only value.
+  it('kill-switch propagates within the real cache TTL (≤5s), not instantly and not indefinitely stale', async () => {
+    let dbRuntimeStatus = 'enabled';
+    const mockSupabase = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          or: vi.fn().mockImplementation(() =>
+            Promise.resolve({
+              data: [{ scope_type: 'global', gateway_mode: 'legacy', runtime_status: dbRuntimeStatus }],
+              error: null,
+            }),
+          ),
+        }),
+      }),
+    };
+
+    let fakeTime = 0;
+    const resolver = new GatewayPolicyResolver(mockSupabase as any, undefined, () => fakeTime);
+    const ctx = baseContext();
+
+    // t=0: resolves fresh, not blocked.
+    const initial = await resolver.resolvePolicy(ctx);
+    expect(evaluateKillSwitch(initial.runtimeStatus).blocked).toBe(false);
+
+    // An admin disables the feature in the authoring table at t=0, but the
+    // resolver's cache (populated at t=0) is still within its TTL window —
+    // a stale-but-recent read is expected and correct, not a bug.
+    dbRuntimeStatus = 'disabled';
+
+    fakeTime = 4999; // still inside the 5000ms TTL window
+    const stillCached = await resolver.resolvePolicy(ctx);
+    expect(evaluateKillSwitch(stillCached.runtimeStatus).blocked).toBe(false);
+    expect(mockSupabase.from).toHaveBeenCalledTimes(1); // no second DB round trip yet
+
+    fakeTime = 5000; // TTL elapsed — next resolution must be a real re-fetch
+    const propagated = await resolver.resolvePolicy(ctx);
+    expect(evaluateKillSwitch(propagated.runtimeStatus).blocked).toBe(true);
+    expect(mockSupabase.from).toHaveBeenCalledTimes(2); // proves this was a genuine re-fetch, not a stale hit
   });
 
   it('returns legacy+enabled when no prior policy exists and Supabase fails', async () => {

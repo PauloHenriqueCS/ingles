@@ -30,6 +30,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from './usage-repository';
+import { resolvePeriodBounds } from './periods';
 import type { ActorType, AiFeatureKey, EffectiveEntitlement, EntitlementLimit } from './types';
 
 // Maps this Gateway's feature/metric vocabulary to the dashboard's
@@ -68,27 +69,23 @@ interface EffectivePlanRow {
   is_suspended: boolean;
 }
 
-const PERIOD_VALUES = new Set(['none', 'request', 'day', 'week', 'month', 'lifetime']);
+const PERIOD_VALUES = new Set(['none', 'request', 'day', 'week', 'month', 'lifetime', 'assignment_cycle']);
 
 function toPeriod(v: unknown): EntitlementLimit['period'] {
   return typeof v === 'string' && PERIOD_VALUES.has(v) ? (v as EntitlementLimit['period']) : 'none';
 }
 
-function computeResetAt(period: EntitlementLimit['period'], now: Date): string | null {
-  if (period === 'day') {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-    return d.toISOString();
-  }
-  if (period === 'week') {
-    const daysUntilMonday = (8 - now.getUTCDay()) % 7 || 7;
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday));
-    return d.toISOString();
-  }
-  if (period === 'month') {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-    return d.toISOString();
-  }
-  return null; // 'none' | 'request' | 'lifetime' — no periodic reset
+// periodStart/resetAt(=periodEnd) for a resolved period — delegates to the
+// shared periods.ts so this never diverges from what enforcement.ts passes
+// into reserve_gateway_usage_v1's accumulated-quota bucket. assignmentWindow
+// is only consulted for period='assignment_cycle'.
+function periodBoundsFor(
+  period: EntitlementLimit['period'], now: Date,
+  assignmentWindow: { startsAt: string | null; endsAt: string | null } | null,
+): { periodStart: string | null; resetAt: string | null } {
+  const bounds = resolvePeriodBounds(period, now, assignmentWindow);
+  if (!bounds) return { periodStart: null, resetAt: null };
+  return { periodStart: bounds.periodStart, resetAt: bounds.periodEnd };
 }
 
 /** Extracts a numeric limit from capability_definitions'/overrides' jsonb `value`. Never throws on a malformed value — treats it as unlimited (fail-open, never a surprise block). */
@@ -130,7 +127,7 @@ export class SupabaseEntitlementResolver implements EntitlementResolverInterface
         actorType,
         featureKey,
         effectivePlanId: null,
-        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', resetAt: null })),
+        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', periodStart: null, resetAt: null })),
         source: 'system_actor',
         revision: null,
         resolvedAt: now.toISOString(),
@@ -156,7 +153,7 @@ export class SupabaseEntitlementResolver implements EntitlementResolverInterface
         actorType,
         featureKey,
         effectivePlanId: null,
-        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', resetAt: null })),
+        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', periodStart: null, resetAt: null })),
         source: 'fallback_error',
         revision: null,
         resolvedAt: now.toISOString(),
@@ -184,7 +181,7 @@ export class SupabaseEntitlementResolver implements EntitlementResolverInterface
     if (!plan) {
       return {
         allowed: true, userId, actorType, featureKey, effectivePlanId: null,
-        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', resetAt: null })),
+        limits: metricKeys.map((metricKey) => ({ metricKey, limit: null, period: 'none', periodStart: null, resetAt: null })),
         source: 'no_plan_configured', revision: null, resolvedAt: now.toISOString(),
       };
     }
@@ -199,6 +196,22 @@ export class SupabaseEntitlementResolver implements EntitlementResolverInterface
     const limits: EntitlementLimit[] = [];
     let sawPlanCapability = false;
     let sawOverride = false;
+    // Lazily fetched at most once per resolve() call, only if some
+    // capability's period actually resolves to 'assignment_cycle' — the
+    // common case (day/week/month/lifetime/none) never touches this table.
+    let assignmentWindow: { startsAt: string | null; endsAt: string | null } | null | undefined;
+    const getAssignmentWindow = async (): Promise<{ startsAt: string | null; endsAt: string | null } | null> => {
+      if (assignmentWindow !== undefined) return assignmentWindow;
+      if (!plan.assignment_id) { assignmentWindow = null; return assignmentWindow; }
+      const { data } = await this.supabase
+        .from('user_plan_assignments')
+        .select('starts_at, ends_at')
+        .eq('id', plan.assignment_id)
+        .maybeSingle();
+      const row = data as { starts_at: string | null; ends_at: string | null } | null;
+      assignmentWindow = row ? { startsAt: row.starts_at, endsAt: row.ends_at } : null;
+      return assignmentWindow;
+    };
 
     for (const metricKey of metricKeys) {
       const capabilityKey = capabilityKeyFor(featureKey, metricKey);
@@ -243,7 +256,9 @@ export class SupabaseEntitlementResolver implements EntitlementResolverInterface
         }
       }
 
-      limits.push({ metricKey, limit, period, resetAt: computeResetAt(period, now) });
+      const window = period === 'assignment_cycle' ? await getAssignmentWindow() : null;
+      const { periodStart, resetAt } = periodBoundsFor(period, now, window);
+      limits.push({ metricKey, limit, period, periodStart, resetAt });
     }
 
     return {

@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
-import { executeAiGatewayCall, getProductionDeps } from '../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from '../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../api/_ai-gateway/index';
 import {
   GENERATOR_SYSTEM_PROMPT,
@@ -212,6 +212,7 @@ export function createQuestionAICallFn(apiKey: string): AICallWithUsageFn {
           flowType: 'generate_questions',
           physicalAttempt,
         },
+        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
       },
       () => client.chat.completions.create({
         model: AI_MODEL,

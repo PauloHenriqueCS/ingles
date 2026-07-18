@@ -167,7 +167,7 @@ describe('SupabaseEntitlementResolver', () => {
     expect(rpc).not.toHaveBeenCalled();
     expect(result).toEqual(expect.objectContaining({
       allowed: true, userId: null, source: 'system_actor',
-      limits: [{ metricKey: 'output_text_tokens', limit: null, period: 'none', resetAt: null }],
+      limits: [{ metricKey: 'output_text_tokens', limit: null, period: 'none', periodStart: null, resetAt: null }],
     }));
   });
 
@@ -194,7 +194,7 @@ describe('SupabaseEntitlementResolver', () => {
 
     expect(result.allowed).toBe(true);
     expect(result.source).toBe('no_plan_configured');
-    expect(result.limits).toEqual([{ metricKey: 'output_text_tokens', limit: null, period: 'none', resetAt: null }]);
+    expect(result.limits).toEqual([{ metricKey: 'output_text_tokens', limit: null, period: 'none', periodStart: null, resetAt: null }]);
   });
 
   it('fails open with source=fallback_error when the plan RPC itself errors and there is no cached value', async () => {

@@ -1,21 +1,27 @@
 /**
  * Unit tests for api/_ai-gateway/enforcement.ts — the enforce-mode pipeline
- * (Etapa 11, Fase 5/11/15). Unreachable in production this stage (no
- * feature's gateway_mode is 'enforce'), but must be correct and tested
- * regardless — "não fingir proteção forte" cuts both ways: the code must be
- * real, not just the refusal to activate it.
+ * (Etapa 11, Fase 5/11/15, corrected per the "close enforcement readiness
+ * gaps" follow-up). Unreachable in production this stage (no feature's
+ * gateway_mode is 'enforce'), but must be correct and tested regardless —
+ * "não fingir proteção forte" cuts both ways: the code must be real, not
+ * just the refusal to activate it.
  *
  * Mocks every repository/RPC-wrapper interface directly (no real Postgres —
  * see supabase/manual-validation/ai-gateway-enforcement-concurrency.sql for
  * the concurrency-dependent scenarios that genuinely require a live
  * database and are validated there instead, honestly declared per Fase 15).
+ * The "acceptance scenario" test below uses a stateful mock reservations
+ * repository to prove the TS layer builds/wires the right request — the
+ * underlying atomicity guarantee itself is a SQL-level property (row locks
+ * in reserve_gateway_usage_v1), validated by reasoning + the manual SQL
+ * file, not by this mock.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeEnforcedPipeline } from '../_ai-gateway/enforcement';
 import { GatewayError } from '../_ai-gateway/errors';
 import type { GatewayDeps } from '../_ai-gateway/gateway';
-import type { GatewayCallContext, GatewayPolicy, EffectiveEntitlement } from '../_ai-gateway/types';
+import type { GatewayCallContext, GatewayPolicy, EffectiveEntitlement, ReserveUsageParams, ReservationResult } from '../_ai-gateway/types';
 
 function basePolicy(overrides: Partial<GatewayPolicy> = {}): GatewayPolicy {
   return { gatewayMode: 'enforce', runtimeStatus: 'enabled', ...overrides };
@@ -47,6 +53,7 @@ function makeDeps(): GatewayDeps & {
   failEvent: ReturnType<typeof vi.fn>;
   insertMetrics: ReturnType<typeof vi.fn>;
   entitlementResolve: ReturnType<typeof vi.fn>;
+  getState: ReturnType<typeof vi.fn>;
   rateLimiterCheck: ReturnType<typeof vi.fn>;
   dedupeBegin: ReturnType<typeof vi.fn>;
   dedupeComplete: ReturnType<typeof vi.fn>;
@@ -55,7 +62,6 @@ function makeDeps(): GatewayDeps & {
   commit: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   markReconciliationRequired: ReturnType<typeof vi.fn>;
-  budgetCheck: ReturnType<typeof vi.fn>;
   recordOutcome: ReturnType<typeof vi.fn>;
   decisionsRecord: ReturnType<typeof vi.fn>;
 } {
@@ -64,15 +70,15 @@ function makeDeps(): GatewayDeps & {
   const failEvent = vi.fn().mockResolvedValue(undefined);
   const insertMetrics = vi.fn().mockResolvedValue(undefined);
   const entitlementResolve = vi.fn().mockResolvedValue(allowedEntitlement());
+  const getState = vi.fn().mockResolvedValue({ state: 'closed', probeAllowed: true });
   const rateLimiterCheck = vi.fn().mockResolvedValue({ allowed: true });
   const dedupeBegin = vi.fn().mockResolvedValue({ lockId: 'lock-1', outcome: 'started', resultRef: null });
   const dedupeComplete = vi.fn().mockResolvedValue(undefined);
   const dedupeFail = vi.fn().mockResolvedValue(undefined);
-  const reserve = vi.fn().mockResolvedValue({ reservationId: 'res-1', status: 'pending', expiresAt: new Date(1000).toISOString() });
+  const reserve = vi.fn().mockResolvedValue({ reservationId: 'res-1', status: 'pending', expiresAt: new Date(1000).toISOString(), blockedReason: null, blockedDetail: null });
   const commit = vi.fn().mockResolvedValue(undefined);
   const release = vi.fn().mockResolvedValue(undefined);
   const markReconciliationRequired = vi.fn().mockResolvedValue(undefined);
-  const budgetCheck = vi.fn().mockResolvedValue({ withinBudget: true, limitUsd: null, spentUsd: '0', remainingUsd: null });
   const recordOutcome = vi.fn().mockResolvedValue('closed');
   const decisionsRecord = vi.fn().mockResolvedValue(undefined);
 
@@ -92,14 +98,13 @@ function makeDeps(): GatewayDeps & {
     rateLimiter: { check: rateLimiterCheck },
     dedupeStore: { begin: dedupeBegin, complete: dedupeComplete, fail: dedupeFail },
     reservationsRepository: { reserve, commit, release, markReconciliationRequired },
-    budgetChecker: { check: budgetCheck },
-    circuitBreaker: { getState: vi.fn(), recordOutcome },
+    circuitBreaker: { getState, recordOutcome },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),
     logger: vi.fn(),
     startEvent, completeEvent, failEvent, insertMetrics,
-    entitlementResolve, rateLimiterCheck, dedupeBegin, dedupeComplete, dedupeFail,
-    reserve, commit, release, markReconciliationRequired, budgetCheck, recordOutcome, decisionsRecord,
+    entitlementResolve, getState, rateLimiterCheck, dedupeBegin, dedupeComplete, dedupeFail,
+    reserve, commit, release, markReconciliationRequired, recordOutcome, decisionsRecord,
   };
 }
 
@@ -143,58 +148,33 @@ describe('executeEnforcedPipeline', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('blocks with QUOTA_EXCEEDED when an estimated metric exceeds its resolved limit', async () => {
-    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
-      limits: [{ metricKey: 'session_seconds', limit: 100, period: 'month', resetAt: null }],
-    }));
-    const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 200 }] });
-    await expectGatewayError(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy()), 'QUOTA_EXCEEDED');
+  // ── 2. Circuit breaker gate (moved before rate limit/dedupe/reserve) ────
+
+  it('blocks with CIRCUIT_OPEN before rate limit/dedupe/reserve/provider when the breaker denies a probe', async () => {
+    deps.getState.mockResolvedValue({ state: 'open', probeAllowed: false });
+    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy()), 'CIRCUIT_OPEN');
     expect(invoke).not.toHaveBeenCalled();
+    expect(deps.rateLimiterCheck).not.toHaveBeenCalled();
+    expect(deps.dedupeBegin).not.toHaveBeenCalled();
+    expect(deps.reserve).not.toHaveBeenCalled();
+    expect(deps.startEvent).not.toHaveBeenCalled();
   });
 
-  it('allows when the estimated metric is within its resolved limit', async () => {
-    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
-      limits: [{ metricKey: 'session_seconds', limit: 100, period: 'month', resetAt: null }],
-    }));
-    const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 50 }] });
-    await expect(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy())).resolves.toBe('ok');
+  it('allows a probe through in half_open state', async () => {
+    deps.getState.mockResolvedValue({ state: 'half_open', probeAllowed: true });
+    await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).resolves.toBe('ok');
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it('a null limit (unlimited) never blocks regardless of estimated quantity', async () => {
-    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
-      limits: [{ metricKey: 'session_seconds', limit: null, period: 'month', resetAt: null }],
-    }));
-    const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 999999 }] });
-    await expect(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy())).resolves.toBe('ok');
-  });
-
-  // ── 2. Budget ────────────────────────────────────────────────────────────
-
-  it('skips the budget check entirely when policy has no configured budget (both null)', async () => {
-    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy());
-    expect(deps.budgetCheck).not.toHaveBeenCalled();
-  });
-
-  it('blocks with BUDGET_EXCEEDED when the daily budget is exceeded', async () => {
-    deps.budgetCheck.mockResolvedValue({ withinBudget: false, limitUsd: '1.00', spentUsd: '1.00', remainingUsd: '0' });
-    const policy = basePolicy({ dailyBudgetUsd: '1.00' });
-    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy), 'BUDGET_EXCEEDED');
+  it('fails closed with POLICY_UNAVAILABLE when the breaker state check itself throws', async () => {
+    deps.getState.mockRejectedValue(new Error('rpc missing'));
+    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy()), 'POLICY_UNAVAILABLE');
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('checks both day and month budgets when both are configured', async () => {
-    const policy = basePolicy({ dailyBudgetUsd: '5.00', monthlyBudgetUsd: '100.00' });
-    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy);
-    expect(deps.budgetCheck).toHaveBeenCalledTimes(2);
-    expect(deps.budgetCheck.mock.calls.map((c: any[]) => c[0].period).sort()).toEqual(['day', 'month']);
-  });
-
-  it('fails closed with POLICY_UNAVAILABLE when the budget check itself throws', async () => {
-    deps.budgetCheck.mockRejectedValue(new Error('db down'));
-    const policy = basePolicy({ dailyBudgetUsd: '5.00' });
-    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy), 'POLICY_UNAVAILABLE');
-    expect(invoke).not.toHaveBeenCalled();
+  it('skips the breaker gate entirely when no circuitBreaker is configured (legacy-safe)', async () => {
+    delete (deps as any).circuitBreaker;
+    await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).resolves.toBe('ok');
   });
 
   // ── 3. Rate limit ────────────────────────────────────────────────────────
@@ -273,32 +253,83 @@ describe('executeEnforcedPipeline', () => {
     expect(deps.dedupeFail).toHaveBeenCalledWith('lock-1');
   });
 
-  // ── 5/6. Reservation ─────────────────────────────────────────────────────
+  // ── 5/6. Atomic quota + budget + reserve ──────────────────────────────────
 
-  it('reserves provider_requests=1 by default when no estimatedMetrics is supplied', async () => {
+  it('reserves provider_requests=1 by default when no estimatedMetrics is supplied, with no budget scopes when none configured', async () => {
     await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy());
-    expect(deps.reserve).toHaveBeenCalledWith(
-      expect.objectContaining({ estimatedMetrics: [{ metricKey: 'provider_requests', quantity: 1 }] }),
-    );
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.estimatedMetrics).toEqual([{ metricKey: 'provider_requests', quantity: 1 }]);
+    expect(params.budgetScopes).toEqual([]);
   });
 
   it('respects maxPhysicalAttempts for the default reservation quantity', async () => {
     const ctx = baseContext({ maxPhysicalAttempts: 3 });
     await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy());
-    expect(deps.reserve).toHaveBeenCalledWith(
-      expect.objectContaining({ estimatedMetrics: [{ metricKey: 'provider_requests', quantity: 3 }] }),
-    );
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.estimatedMetrics).toEqual([{ metricKey: 'provider_requests', quantity: 3 }]);
   });
 
-  it('uses the real estimatedMetrics when supplied instead of the default', async () => {
+  it('a metric with no matching entitlement limit is reserved without a quota bucket (limitQuantity/period fields absent)', async () => {
     const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'tts_characters', quantity: 42 }] });
     await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy());
-    expect(deps.reserve).toHaveBeenCalledWith(
-      expect.objectContaining({ estimatedMetrics: [{ metricKey: 'tts_characters', quantity: 42 }] }),
-    );
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.estimatedMetrics).toEqual([{ metricKey: 'tts_characters', quantity: 42 }]);
   });
 
-  it('blocks with RESERVATION_FAILED when reservation itself throws, and fails the dedupe lock too', async () => {
+  it('a metric with a resolved accumulated-period limit carries limitQuantity/periodType/periodStart/periodEnd into the reservation', async () => {
+    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
+      limits: [{ metricKey: 'session_seconds', limit: 600, period: 'month', periodStart: '2026-07-01T00:00:00.000Z', resetAt: '2026-08-01T00:00:00.000Z' }],
+    }));
+    const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 40 }] });
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy());
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.estimatedMetrics).toEqual([{
+      metricKey: 'session_seconds', quantity: 40, limitQuantity: 600, periodType: 'month',
+      periodStart: '2026-07-01T00:00:00.000Z', periodEnd: '2026-08-01T00:00:00.000Z',
+    }]);
+  });
+
+  it('a null (unlimited) entitlement limit is never sent as a quota-bucket constraint', async () => {
+    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
+      limits: [{ metricKey: 'session_seconds', limit: null, period: 'month', periodStart: '2026-07-01T00:00:00.000Z', resetAt: '2026-08-01T00:00:00.000Z' }],
+    }));
+    const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 999999 }] });
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy());
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.estimatedMetrics).toEqual([{ metricKey: 'session_seconds', quantity: 999999 }]);
+  });
+
+  it('builds day and month budget scopes at feature scope from policy.dailyBudgetUsd/monthlyBudgetUsd', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '5.00', monthlyBudgetUsd: '100.00' });
+    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.budgetScopes).toHaveLength(2);
+    expect(params.budgetScopes.map((s) => s.periodType).sort()).toEqual(['day', 'month']);
+    expect(params.budgetScopes.every((s) => s.scopeType === 'feature' && s.scopeKey === 'writing.correct')).toBe(true);
+  });
+
+  it('blocks with QUOTA_EXCEEDED when reserve() reports a blocked quota (atomic check failed server-side)', async () => {
+    deps.reserve.mockResolvedValue({ reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'QUOTA_EXCEEDED', blockedDetail: 'session_seconds' });
+    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy()), 'QUOTA_EXCEEDED');
+    expect(invoke).not.toHaveBeenCalled();
+    expect(deps.startEvent).not.toHaveBeenCalled();
+  });
+
+  it('blocks with BUDGET_EXCEEDED when reserve() reports a blocked budget (atomic check failed server-side)', async () => {
+    deps.reserve.mockResolvedValue({ reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'feature:writing.correct' });
+    const policy = basePolicy({ dailyBudgetUsd: '1.00' });
+    await expectGatewayError(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy), 'BUDGET_EXCEEDED');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('fails the dedupe lock too when a blocked reservation is reported', async () => {
+    deps.reserve.mockResolvedValue({ reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'QUOTA_EXCEEDED', blockedDetail: 'x' });
+    const ctx = baseContext({ idempotencyKey: 'idem-1' });
+    await expect(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy())).rejects.toThrow();
+    expect(deps.dedupeFail).toHaveBeenCalledWith('lock-1');
+  });
+
+  it('blocks with RESERVATION_FAILED when reserve() itself throws, and fails the dedupe lock too', async () => {
     deps.reserve.mockRejectedValue(new Error('reservation rpc failed'));
     const ctx = baseContext({ idempotencyKey: 'idem-1' });
     await expectGatewayError(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy()), 'RESERVATION_FAILED');
@@ -311,9 +342,47 @@ describe('executeEnforcedPipeline', () => {
     await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).resolves.toBe('ok');
   });
 
+  // ── Acceptance scenario (Etapa 11 correction, §1): 600 session_seconds/month ──
+  // Proves the TS layer wires the exact request a real reserve_gateway_usage_v1
+  // would need to enforce this correctly — the atomicity itself is a SQL-level
+  // guarantee (row locks), not something a mock can prove; see the manual SQL
+  // validation file's scenario 1/3 analogues.
+
+  it('acceptance: a stateful mock proves 40+40 concurrent-style calls against a 50-remaining bucket allow only one', async () => {
+    let committed = 300;
+    let reserved = 250; // matches the scenario: 600 limit, 300 committed, 250 reserved => 50 remaining
+    deps.reserve.mockImplementation(async (params: ReserveUsageParams): Promise<ReservationResult> => {
+      const est = params.estimatedMetrics.find((m) => m.metricKey === 'session_seconds')!;
+      const available = (est.limitQuantity ?? Infinity) - committed - reserved;
+      if (est.quantity > available) {
+        return { reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'QUOTA_EXCEEDED', blockedDetail: 'session_seconds' };
+      }
+      reserved += est.quantity;
+      return { reservationId: `res-${reserved}`, status: 'pending', expiresAt: new Date(2000).toISOString() };
+    });
+    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({
+      limits: [{ metricKey: 'session_seconds', limit: 600, period: 'month', periodStart: '2026-07-01T00:00:00.000Z', resetAt: '2026-08-01T00:00:00.000Z' }],
+    }));
+
+    const ctx1 = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 40 }], idempotencyKey: 'attempt-1' });
+    const ctx2 = baseContext({ estimatedMetrics: [{ metricKey: 'session_seconds', quantity: 40 }], idempotencyKey: 'attempt-2' });
+
+    const [r1, r2] = await Promise.allSettled([
+      executeEnforcedPipeline('writing.correct', ctx1, invoke, deps, basePolicy()),
+      executeEnforcedPipeline('writing.correct', ctx2, invoke, deps, basePolicy()),
+    ]);
+
+    const fulfilled = [r1, r2].filter((r) => r.status === 'fulfilled');
+    const rejected = [r1, r2].filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(GatewayError);
+    expect((rejected[0] as PromiseRejectedResult).reason.code).toBe('QUOTA_EXCEEDED');
+  });
+
   // ── 7-13. Invoke, measure, cost, commit/release, rollup, breaker ────────
 
-  it('happy path: invokes once, records the event, commits the reservation, closes the breaker', async () => {
+  it('happy path: invokes once, records the event, commits the reservation with real actual metrics, closes the breaker', async () => {
     const extractMetrics = vi.fn().mockReturnValue([
       { metricKey: 'output_text_tokens', unitType: 'token', quantity: 10, isBillable: true, measurementSource: 'provider_response' },
     ]);
@@ -324,7 +393,7 @@ describe('executeEnforcedPipeline', () => {
     expect(deps.startEvent).toHaveBeenCalledTimes(1);
     expect(deps.completeEvent).toHaveBeenCalledTimes(1);
     expect(deps.insertMetrics).toHaveBeenCalledWith('event-1', expect.any(Array));
-    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', null);
+    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', null, [{ metricKey: 'output_text_tokens', quantity: 10 }]);
     expect(deps.recordOutcome).toHaveBeenCalledWith('openai', null, 'writing.correct', true);
   });
 
@@ -359,7 +428,7 @@ describe('executeEnforcedPipeline', () => {
     await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).resolves.toBe('ok');
   });
 
-  it('never creates a usage event for any blocked decision (entitlement/budget/rate-limit/dedupe/reservation)', async () => {
+  it('never creates a usage event for any blocked decision (entitlement/breaker/rate-limit/dedupe/reservation)', async () => {
     deps.entitlementResolve.mockResolvedValue(allowedEntitlement({ allowed: false }));
     await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).rejects.toThrow();
     expect(deps.startEvent).not.toHaveBeenCalled();
@@ -373,5 +442,17 @@ describe('executeEnforcedPipeline', () => {
     deps.entitlementResolve.mockResolvedValue(allowedEntitlement({ allowed: false }));
     await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).rejects.toThrow();
     expect(deps.decisionsRecord).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'blocked', reasonCode: 'USER_BLOCKED' }));
+  });
+
+  // ── System actor budgets (correction §item 18) ───────────────────────────
+
+  it('a system actor (no userId) still has its estimate checked against configured feature/provider/global budgets', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '10.00' });
+    const ctx = baseContext({ userId: undefined, actorType: 'system' });
+    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({ userId: null, actorType: 'system', source: 'system_actor' }));
+    await executeEnforcedPipeline('listening.episode_generate_story', ctx, invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.budgetScopes).toHaveLength(1);
+    expect(params.budgetScopes[0]).toEqual(expect.objectContaining({ scopeType: 'feature', limitUsd: '10.00' }));
   });
 });

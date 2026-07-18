@@ -270,6 +270,30 @@ describe('POST /session-active — conversation.webrtc_connect', () => {
     await handler(activeReq(), res);
     expect(res._status()).toBe(200);
   });
+
+  it('persists a valid captured callId as provider_session_id in the same atomic update', async () => {
+    const res = makeRes();
+    await handler(activeReq({ gatewaySessionId: GATEWAY_SESSION_ID, callId: 'call_captured_abc123' }), res);
+    expect(res._status()).toBe(200);
+    const chain = mockSessionsFrom.mock.results[0].value;
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_session_id: 'call_captured_abc123' }));
+  });
+
+  it('never persists a malformed callId (allowlist-rejected, e.g. containing unexpected characters)', async () => {
+    const res = makeRes();
+    await handler(activeReq({ gatewaySessionId: GATEWAY_SESSION_ID, callId: 'not valid! id/../etc' }), res);
+    expect(res._status()).toBe(200);
+    const chain = mockSessionsFrom.mock.results[0].value;
+    expect(chain.update).toHaveBeenCalledWith(expect.not.objectContaining({ provider_session_id: expect.anything() }));
+  });
+
+  it('omits provider_session_id from the update entirely when no callId was reported (the normal, CORS-degraded case)', async () => {
+    const res = makeRes();
+    await handler(activeReq(), res);
+    expect(res._status()).toBe(200);
+    const chain = mockSessionsFrom.mock.results[0].value;
+    expect(chain.update).toHaveBeenCalledWith(expect.not.objectContaining({ provider_session_id: expect.anything() }));
+  });
 });
 
 // ── conversation.webrtc_connect — session-failed ───────────────────────────
@@ -736,6 +760,88 @@ describe('POST /session-control — mid-session control poll', () => {
     await handler(controlReq(), res);
     expect(res._status()).toBe(200);
     expect(res._body()).toEqual({ terminate: true, reason: 'kill_switch' });
+  });
+
+  // ── Real server-side hangup (Etapa 11 correction §6) ─────────────────────
+
+  describe('server-side hangup when a provider_session_id (call_id) was captured', () => {
+    beforeEach(() => {
+      process.env.OPENAI_API_KEY = 'sk-test-key';
+    });
+
+    it('calls OpenAI hangup with the real API key on max_duration_reached, before responding terminate:true', async () => {
+      const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: longAgo, provider_session_id: 'call_abc123' }, error: null }));
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const res = makeRes();
+      await handler(controlReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect(res._body()).toEqual({ terminate: true, reason: 'max_duration_reached' });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.openai.com/v1/realtime/calls/call_abc123/hangup',
+        expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer sk-test-key' }) }),
+      );
+    });
+
+    it('calls hangup on kill_switch termination too', async () => {
+      const now = new Date().toISOString();
+      mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now, provider_session_id: 'call_xyz' }, error: null }));
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'disabled' });
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await handler(controlReq(), makeRes());
+
+      expect(mockFetch).toHaveBeenCalledWith('https://api.openai.com/v1/realtime/calls/call_xyz/hangup', expect.anything());
+    });
+
+    it('never calls hangup when no provider_session_id was captured for the session', async () => {
+      const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: longAgo, provider_session_id: null }, error: null }));
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const res = makeRes();
+      await handler(controlReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect(res._body()).toEqual({ terminate: true, reason: 'max_duration_reached' });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('a hangup failure never blocks the terminate response — the client still closes its own connection', async () => {
+      const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: longAgo, provider_session_id: 'call_abc123' }, error: null }));
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+      const res = makeRes();
+      await handler(controlReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect(res._body()).toEqual({ terminate: true, reason: 'max_duration_reached' });
+    });
+
+    it('a hangup call for an already-ended call_id (idempotent) never surfaces as an error', async () => {
+      const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: longAgo, provider_session_id: 'call_already_ended' }, error: null }));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+      const res = makeRes();
+      await handler(controlReq(), res);
+      expect(res._status()).toBe(200);
+      expect(res._body()).toEqual({ terminate: true, reason: 'max_duration_reached' });
+    });
+
+    it('ownership: a session-control poll only ever looks up a session scoped to the authenticated user_id — never another user’s session', async () => {
+      const now = new Date().toISOString();
+      const chain = makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now, provider_session_id: 'call_owner_check' }, error: null });
+      mockSessionsFrom.mockReturnValue(chain);
+      await handler(controlReq(), makeRes());
+      expect(chain.eq).toHaveBeenCalledWith('user_id', USER_ID);
+    });
   });
 
   it('signals terminate when the user has been blocked since the session started', async () => {

@@ -3,7 +3,7 @@ import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from 'ope
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
-import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokensFromMessages, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import {
   getDiagnosticGenerationContext,
@@ -921,6 +921,9 @@ export default async function handler(req: any, res: any) {
           maxPhysicalAttempts,
           flowType: mode === 'review' ? 'review' : 'normal',
         },
+        estimatedMetrics: estimateTextTokensFromMessages(
+          params.messages, typeof params.max_tokens === 'number' ? params.max_tokens : DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+        ),
       },
       () => openai.chat.completions.create(params),
       gatewayDeps,

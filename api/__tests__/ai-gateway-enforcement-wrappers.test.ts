@@ -168,15 +168,17 @@ describe('SupabaseReservationsRepository', () => {
     const result = await repo.reserve({
       idempotencyKey: 'idem-1', userId: 'u1', initiatedByUserId: 'u1', featureKey: 'writing.correct',
       provider: 'openai', model: 'gpt-4o-mini', estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 500 }],
+      budgetScopes: [{ scopeType: 'feature', scopeKey: 'writing.correct', periodType: 'day', periodStart: '2026-01-01T00:00:00Z', periodEnd: '2026-01-02T00:00:00Z', limitUsd: '5.00' }],
       estimatedCostUsd: '0.01', expiresInSeconds: 120,
     });
 
     expect(rpc).toHaveBeenCalledWith('reserve_gateway_usage_v1', expect.objectContaining({
       p_idempotency_key: 'idem-1', p_feature_key: 'writing.correct', p_provider: 'openai', p_model: 'gpt-4o-mini',
-      p_metrics: [{ quota_key: 'output_text_tokens', unit_type: 'unit', reserved_quantity: 500 }],
+      p_metrics: [{ quota_key: 'output_text_tokens', unit_type: 'unit', reserved_quantity: 500, limit_quantity: null, period_type: null, period_start: null, period_end: null }],
+      p_budget_scopes: [{ scope_type: 'feature', scope_key: 'writing.correct', period_type: 'day', period_start: '2026-01-01T00:00:00Z', period_end: '2026-01-02T00:00:00Z', limit_usd: '5.00' }],
       p_estimated_cost_usd: '0.01', p_expires_in_seconds: 120,
     }));
-    expect(result).toEqual({ reservationId: 'res-1', status: 'pending', expiresAt: '2026-01-01T00:00:00Z' });
+    expect(result).toEqual({ reservationId: 'res-1', status: 'pending', expiresAt: '2026-01-01T00:00:00Z', blockedReason: null, blockedDetail: null });
   });
 
   it('commit/release/markReconciliationRequired call their respective RPCs', async () => {
@@ -184,7 +186,13 @@ describe('SupabaseReservationsRepository', () => {
     const repo = new SupabaseReservationsRepository({ rpc } as any);
 
     await repo.commit('res-1', 'event-1', '0.02');
-    expect(rpc).toHaveBeenCalledWith('commit_gateway_reservation_v1', { p_reservation_id: 'res-1', p_usage_event_id: 'event-1', p_actual_cost_usd: '0.02' });
+    expect(rpc).toHaveBeenCalledWith('commit_gateway_reservation_v1', { p_reservation_id: 'res-1', p_usage_event_id: 'event-1', p_actual_cost_usd: '0.02', p_actual_metrics: null });
+
+    await repo.commit('res-2', 'event-2', '0.03', [{ metricKey: 'output_text_tokens', quantity: 15 }]);
+    expect(rpc).toHaveBeenCalledWith('commit_gateway_reservation_v1', {
+      p_reservation_id: 'res-2', p_usage_event_id: 'event-2', p_actual_cost_usd: '0.03',
+      p_actual_metrics: [{ quota_key: 'output_text_tokens', actual_quantity: 15 }],
+    });
 
     await repo.release('res-1', 'provider_error');
     expect(rpc).toHaveBeenCalledWith('release_gateway_reservation_v1', { p_reservation_id: 'res-1', p_reason: 'provider_error' });

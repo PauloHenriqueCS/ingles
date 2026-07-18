@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
-import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../../../../api/_ai-gateway/index';
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
@@ -262,6 +262,7 @@ async function callAI(
         endpoint: 'listening/generate',
         flowType: 'two_part_generate',
       },
+      estimatedMetrics: estimateTextTokens(buildPrompt(level, theme).length + 'Generate the listening activity now.'.length, 6000),
     },
     () => client.chat.completions.create({
       model: 'gpt-4o-mini',

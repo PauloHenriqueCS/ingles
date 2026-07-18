@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
-import { executeAiGatewayCall, getProductionDeps } from '../_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../_ai-gateway/index';
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -130,6 +130,7 @@ async function handleGenerateText(req: any, res: any) {
           endpoint: 'pronunciation-training/generate-text',
           flowType: 'generate_text',
         },
+        estimatedMetrics: estimateTextTokens(buildSystemPrompt(userLevel).length + 'Write the text now.'.length, 400),
       },
       () => openai.chat.completions.create({
         model: AI_MODEL,

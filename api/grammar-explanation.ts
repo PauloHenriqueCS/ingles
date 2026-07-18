@@ -4,10 +4,12 @@ import { createClient } from '@supabase/supabase-js';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
-import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+const SYSTEM_PROMPT = 'Você é um professor particular de inglês para brasileiros adultos. Suas explicações são claras, práticas e focadas nos erros típicos de falantes de português brasileiro.';
 
 // Only letters, digits, spaces, hyphens, and apostrophes — enough for any grammar name.
 // Prevents injection through the cache key.
@@ -191,6 +193,7 @@ export default async function handler(req: any, res: any) {
         attemptNumber: 1,
         callSequence: 1,
         resourceType: 'grammar_explanation',
+        estimatedMetrics: estimateTextTokens(SYSTEM_PROMPT.length + buildPrompt(trimmed).length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
       },
       () => openai.chat.completions.create({
         model: AI_MODEL,
@@ -198,7 +201,7 @@ export default async function handler(req: any, res: any) {
         messages: [
           {
             role: 'system',
-            content: 'Você é um professor particular de inglês para brasileiros adultos. Suas explicações são claras, práticas e focadas nos erros típicos de falantes de português brasileiro.',
+            content: SYSTEM_PROMPT,
           },
           { role: 'user', content: buildPrompt(trimmed) },
         ],

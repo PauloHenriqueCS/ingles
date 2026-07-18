@@ -645,10 +645,20 @@ async function handleSessionActive(req: any, res: any) {
   if (!auth) return;
   const { userId } = auth;
 
-  const gatewaySessionId = (req.body ?? {}).gatewaySessionId;
+  const body = req.body ?? {};
+  const gatewaySessionId = body.gatewaySessionId;
   if (!isValidUuid(gatewaySessionId)) {
     return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
   }
+  // Etapa 11 correction — best-effort OpenAI Realtime call id, captured
+  // browser-side from the Location header of its own POST to
+  // /v1/realtime/calls (see useRealtimeSession.ts's extractCallId). Optional
+  // and allowlist-validated; absent whenever the browser couldn't read the
+  // header (e.g. not CORS-exposed) — the session still works identically,
+  // it just has no server-side hangup capability. Never logged, never
+  // returned to any client — persisted only in this service-role-only
+  // column for handleSessionControl's own use.
+  const callId = typeof body.callId === 'string' && PROVIDER_RESPONSE_ID_RE.test(body.callId) ? body.callId : null;
 
   try {
     const gatewayDeps = getProductionDeps();
@@ -660,7 +670,7 @@ async function handleSessionActive(req: any, res: any) {
     const nowIso = new Date(startedAtMs).toISOString();
     const { data, error } = await sessionsClient()
       .from('ai_provider_sessions')
-      .update({ status: 'active', started_at: nowIso })
+      .update({ status: 'active', started_at: nowIso, ...(callId ? { provider_session_id: callId } : {}) })
       .eq('id', gatewaySessionId)
       .eq('user_id', userId)
       .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
@@ -1109,6 +1119,38 @@ async function handleSessionEnd(req: any, res: any) {
 // regardless of what any client does. Realtime accordingly stays classified
 // blocked_no_hard_session_control in the enforce-readiness preflight and
 // must never move to enforce for duration limits until proven otherwise.
+// Etapa 11 correction — real server-side termination. Documented OpenAI
+// Realtime endpoint (audited against current API reference): a call created
+// via POST /v1/realtime/calls can be forcibly ended via
+// POST /v1/realtime/calls/{call_id}/hangup, authenticated with the real
+// (server-only) API key — never the ephemeral client token. Only reachable
+// when a call_id was actually captured (see handleSessionActive) — when
+// absent, this function is never invoked and the session falls back to the
+// pre-existing client-cooperative signal only (documented, not hidden).
+// Idempotent by construction: hanging up an already-ended call is expected
+// to fail harmlessly on OpenAI's side (4xx), treated the same as success
+// here — there is nothing further to clean up locally either way.
+async function hangupRealtimeCall(callId: string): Promise<{ ok: boolean }> {
+  const openaiKey = (process.env.OPENAI_API_KEY ?? '').trim();
+  if (!openaiKey) return { ok: false };
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
+    try {
+      const resp = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${openaiKey}` },
+        signal: ctrl.signal,
+      });
+      return { ok: resp.ok };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return { ok: false };
+  }
+}
+
 async function handleSessionControl(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
@@ -1123,7 +1165,7 @@ async function handleSessionControl(req: any, res: any) {
   try {
     const { data: session, error } = await sessionsClient()
       .from('ai_provider_sessions')
-      .select('id, started_at')
+      .select('id, started_at, provider_session_id')
       .eq('id', gatewaySessionId)
       .eq('user_id', userId)
       .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
@@ -1137,12 +1179,25 @@ async function handleSessionControl(req: any, res: any) {
       return res.status(200).json({ terminate: true, reason: 'session_not_active' });
     }
 
+    // Ownership is already enforced by the query above (.eq('user_id',
+    // userId)) — a user can never poll control for, and therefore never
+    // trigger a hangup on, a session belonging to someone else.
+    const providerSessionId = (session as { provider_session_id: string | null }).provider_session_id;
+    const terminate = async (reason: string) => {
+      // Best-effort, real server-side termination — see hangupRealtimeCall's
+      // doc comment. A hangup failure (including "no call_id captured for
+      // this session") never blocks the terminate signal itself: the client
+      // still closes its own RTCPeerConnection either way.
+      if (providerSessionId) await hangupRealtimeCall(providerSessionId).catch(() => undefined);
+      return res.status(200).json({ terminate: true, reason });
+    };
+
     const startedAtIso = (session as { started_at: string | null }).started_at;
     const startedAtMs = startedAtIso ? new Date(startedAtIso).getTime() : Date.now();
     const deadlineAtMs = startedAtMs + REALTIME_MAX_SESSION_SECONDS * 1000;
 
     if (Date.now() >= deadlineAtMs) {
-      return res.status(200).json({ terminate: true, reason: 'max_duration_reached' });
+      return terminate('max_duration_reached');
     }
 
     const gatewayDeps = getProductionDeps();
@@ -1155,14 +1210,14 @@ async function handleSessionControl(req: any, res: any) {
       executionLocation: 'frontend',
     });
     if (evaluateKillSwitch(policy.runtimeStatus).blocked) {
-      return res.status(200).json({ terminate: true, reason: 'kill_switch' });
+      return terminate('kill_switch');
     }
 
     if (gatewayDeps.entitlementResolver) {
       try {
         const entitlement = await gatewayDeps.entitlementResolver.resolve(userId, 'user', WEBRTC_CONNECT_FEATURE_KEY, []);
         if (!entitlement.allowed) {
-          return res.status(200).json({ terminate: true, reason: 'user_blocked' });
+          return terminate('user_blocked');
         }
       } catch (e) {
         // Fail-open — an entitlement check failure must never terminate an

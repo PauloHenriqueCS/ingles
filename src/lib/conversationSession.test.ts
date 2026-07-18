@@ -399,7 +399,7 @@ describe('client-side gatewaySessionId chain (useRealtimeSession.ts)', () => {
   it('reportSessionActive is called from dc.onopen — after the data channel actually opens, not at token issuance or SDP send', async () => {
     const code = await hookSource();
     const onopenBlock = code.slice(code.indexOf('dc.onopen = () => {'), code.indexOf('dc.onmessage = (e) => {'));
-    expect(onopenBlock).toContain('reportSessionActive(gatewaySessionIdRef.current)');
+    expect(onopenBlock).toContain('reportSessionActive(gatewaySessionIdRef.current, providerCallIdRef.current)');
     // Guarded — never called unconditionally (legacy: ref stays null, no-op).
     expect(onopenBlock).toMatch(/if \(gatewaySessionIdRef\.current\) \{\s*sessionReportedActiveRef\.current = true;\s*reportSessionActive/);
   });

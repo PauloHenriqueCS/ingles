@@ -43,6 +43,25 @@ const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 // gatewaySessionIdRef below). Fase 9's ceiling is "≤ every 5s".
 const SESSION_CONTROL_POLL_MS = 5000;
 
+// Etapa 11 correction — best-effort call_id capture. OpenAI's Realtime API
+// documents a Location response header on POST /v1/realtime/calls
+// containing the call id, which a server-side hangup endpoint
+// (POST /v1/realtime/calls/{call_id}/hangup) can later use. Whether the
+// browser can actually READ that header depends on OpenAI exposing it via
+// CORS Access-Control-Expose-Headers — NOT verified live in this
+// environment (no way to make a real, billed Realtime connection from this
+// session). If unexposed, response.headers.get('Location') simply returns
+// null and the session proceeds exactly as before this change — this
+// capture is purely additive, never a precondition for the connection to
+// work. Allowlist-validated (technical id charset only) before ever being
+// sent anywhere.
+const CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+function extractCallId(locationHeader: string | null): string | undefined {
+  if (!locationHeader) return undefined;
+  const lastSegment = locationHeader.split('/').filter(Boolean).pop();
+  return lastSegment && CALL_ID_RE.test(lastSegment) ? lastSegment : undefined;
+}
+
 /** Base interval (ms per character) for the paced caption reveal at 1× speed.
  *  Scaled by playbackRate: slower speed → more ms per char → captions stay in sync. */
 const BASE_REVEAL_INTERVAL_MS = 140;
@@ -98,6 +117,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   // Fase 9 — server-authoritative session ceiling + mid-session control poll.
   const maxSessionMsRef          = useRef<number>(DEFAULT_MAX_SESSION_MS);
   const sessionControlTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const providerCallIdRef        = useRef<string | undefined>(undefined);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -164,6 +184,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     if (gatewaySessionId) {
       gatewaySessionIdRef.current = null;
       sessionReportedActiveRef.current = false;
+      providerCallIdRef.current = undefined;
       if (wasActive) {
         reportSessionEnd(gatewaySessionId);
       } else {
@@ -300,7 +321,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       // live — report it (no-op if gatewaySessionId is absent, i.e. legacy).
       if (gatewaySessionIdRef.current) {
         sessionReportedActiveRef.current = true;
-        reportSessionActive(gatewaySessionIdRef.current);
+        reportSessionActive(gatewaySessionIdRef.current, providerCallIdRef.current);
 
         // Fase 9 — best-effort mid-session control poll. Only runs while the
         // gateway bridge is live (never in legacy mode); a failure or
@@ -425,6 +446,13 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         fail('WEBRTC_FAILED', 'Falha na conexão com o serviço de IA. Tente novamente.');
         return;
       }
+
+      // Best-effort — see extractCallId's doc comment. Never blocks or
+      // slows the connection; a missing/unreadable header just means no
+      // server-side hangup capability for this session (the pre-existing
+      // client-side deadline timer and session-control poll remain active
+      // either way).
+      providerCallIdRef.current = extractCallId(sdpResp.headers.get('Location'));
 
       answerSdp = await sdpResp.text();
     } catch {

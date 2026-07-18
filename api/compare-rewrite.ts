@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
-import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -240,6 +240,10 @@ export default async function handler(req: any, res: any) {
             physicalAttempt,
             flowType: 'final_text_only',
           },
+          estimatedMetrics: estimateTextTokens(
+            SYSTEM_PROMPT_CORRECT.length + buildFinalCorrectionPrompt(rewriteText, correctedText).length,
+            DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+          ),
         },
         () => openai.chat.completions.create({
           model: AI_MODEL,
@@ -309,6 +313,12 @@ export default async function handler(req: any, res: any) {
           physicalAttempt,
           flowType: 'compare_and_correct',
         },
+        estimatedMetrics: estimateTextTokens(
+          SYSTEM_PROMPT_COMPARE.length + buildUserMessage(
+            originalText, correctedText, rewriteText, Array.isArray(mainMistakes) ? mainMistakes : [],
+          ).length,
+          DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+        ),
       },
       () => openai.chat.completions.create({
         model: AI_MODEL,
@@ -375,6 +385,10 @@ export default async function handler(req: any, res: any) {
             physicalAttempt,
             flowType: 'compare_and_correct',
           },
+          estimatedMetrics: estimateTextTokens(
+            SYSTEM_PROMPT_CORRECT.length + buildFinalCorrectionPrompt(rewriteText, correctedText).length,
+            DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+          ),
         },
         () => openai.chat.completions.create({
           model: AI_MODEL,

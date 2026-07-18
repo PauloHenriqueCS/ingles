@@ -159,7 +159,9 @@ export {
   estimateAudioSecondsCeiling,
   estimateRealtimeSessionSeconds,
   estimateTextTokens,
+  estimateTextTokensFromMessages,
   estimateProviderRequests,
+  DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
 } from './estimators';
 export type { MetricEstimate } from './estimators';
 

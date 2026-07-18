@@ -1,12 +1,29 @@
 #!/usr/bin/env tsx
 /**
- * CLI: Enforce-readiness preflight (Etapa 11, Fase 16).
+ * CLI: Enforce-readiness preflight (Etapa 11, Fase 16 — corrected).
  *
  * Server-only, READ-ONLY — never writes to any table, and never changes
- * gateway_mode/runtime_status for any scope. This script exists to answer
- * one question honestly, per feature: "if we flipped this feature's
- * gateway_mode to 'enforce' right now, would the pipeline actually protect
- * anything, or would it silently no-op / fail closed for the wrong reason?"
+ * gateway_mode/runtime_status for any scope. This script exists to answer,
+ * honestly and per feature: "if we flipped this feature's gateway_mode to
+ * 'enforce' right now, would the pipeline actually protect anything?"
+ *
+ * Correction to the first version of this script: "missing price" no
+ * longer collapses an entire feature into one "blocked" label. Quota
+ * (characters/seconds/requests/tokens), rate limiting, dedupe, kill-switch,
+ * and breaker protection never need a price at all — only USD BUDGET
+ * enforcement does. So this script reports two independent dimensions per
+ * feature instead of one blended classification:
+ *
+ *   unitEnforcementReady  — quota/rate/dedupe/breaker/kill-switch could all
+ *                            work today (estimator wired, not dead).
+ *   costEnforcementReady  — USD budget enforcement specifically could work
+ *                            (price coverage confirmed, or the feature is
+ *                            non-billable so no price is even needed).
+ *
+ * Both are also reported as `codeReady` (would this be true once the Fase
+ * 14 migration is deployed) vs. the migration's actual live deployment
+ * state — so this script never collapses to "0/25 ready" just because the
+ * migration hasn't been applied remotely yet; it says exactly that instead.
  *
  * No enforce activation is permitted while a feature's `blockers` is
  * non-empty. This script does not enforce that rule itself (it has no way
@@ -21,7 +38,8 @@
  *      CAPABILITY_KEY_BY_METRIC has an entry for this feature's natural
  *      quota metric. Missing != broken: entitlement resolution itself still
  *      works (source='no_plan_configured', unlimited) — it just means no
- *      quota can be enforced yet for that feature specifically.
+ *      accumulated quota can be enforced yet for that feature specifically
+ *      (the atomic reservation still protects a per-call ceiling regardless).
  *   3. Price coverage — an exact (provider, model) match against
  *      provider_pricing for billable features. Coarse in one sense (does
  *      not verify every individual metric_key the feature emits — see
@@ -31,17 +49,18 @@
  *   4. Estimator wiring — NOT "does an estimator function exist in
  *      estimators.ts" (they all do, as a pure library) but "does any real
  *      call site actually populate GatewayCallContext.estimatedMetrics for
- *      this feature" (grep-verified: none do, as of this stage — see the
- *      HAS_WIRED_ESTIMATOR table below and its comment). A billable feature
- *      with no wired estimator has no real reservation sizing beyond the
- *      trivial provider_requests-count default, so it cannot honestly claim
- *      quota/budget protection in enforce mode yet.
- *   5. Hard session control — true only for a feature with a proven,
- *      unconditional server-side termination mechanism. None qualify today
- *      (see api/conversation/[...slug].ts's handleSessionControl doc
- *      comment for the full audit of OpenAI's Realtime hangup endpoint and
- *      why this app's ephemeral-token architecture can't reach it without a
- *      larger proxy redesign).
+ *      this feature" — see WIRED_ESTIMATOR_FEATURES below, kept in sync
+ *      with the actual call sites (grep-verifiable; drift would be a bug).
+ *   5. Hard session control — realtimeHardControlReady is true only once a
+ *      server-side termination path is both implemented AND live-verified
+ *      against production OpenAI. As of this correction, call_id capture +
+ *      backend hangup ARE implemented (see api/conversation/[...slug].ts's
+ *      handleSessionControl / hangupRealtimeCall) but have NOT been
+ *      live-tested against a real OpenAI Realtime session in this
+ *      environment (no way to make a real, billed connection from here) —
+ *      so this still reports false, with a distinct blocker
+ *      (`hard_control_not_live_tested`) rather than the old, less accurate
+ *      "no_hard_session_control" (which implied nothing exists at all).
  *   6. Fase 14 infra (rate limit / dedupe / reservation / breaker RPCs) —
  *      probed live via a deliberately-malformed typed argument (e.g. an
  *      invalid UUID) that forces Postgres to fail the argument cast BEFORE
@@ -108,21 +127,40 @@ const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' | 'azure
 };
 
 // ── Estimator wiring ─────────────────────────────────────────────────────────
-// grep-verified against every handler in api/** and src/services/listening/**
-// as of this stage: no call site sets GatewayCallContext.estimatedMetrics.
-// Non-billable features (provider_requests-only) are the one exception that
-// counts as "wired" — enforcement.ts's own default
-// (`context.estimatedMetrics ?? [{metricKey:'provider_requests', quantity:
-// context.maxPhysicalAttempts ?? 1}]`) already gives them a real, always-
-// available reservation dimension with nothing further to wire.
+// Kept in sync with real call sites (grep for `estimatedMetrics:` under
+// api/** and src/services/listening/**  — drift here is a bug, not a design
+// choice). Non-billable features count as wired unconditionally:
+// enforcement.ts's own default (`context.estimatedMetrics ??
+// [{metricKey:'provider_requests', quantity: context.maxPhysicalAttempts ??
+// 1}]`) already gives them a real, always-available reservation dimension.
+// Realtime features (webrtc_connect/realtime_usage/create_session) are
+// wired via estimateRealtimeSessionSeconds/estimateProviderRequests at
+// their own call sites (api/conversation/[...slug].ts).
+const WIRED_ESTIMATOR_FEATURES = new Set<AiFeatureKey>([
+  'writing.correct', 'writing.correct_review', 'writing.compare_rewrite', 'writing.correct_v2_text',
+  'writing.generate_topic', 'writing.explain_grammar',
+  'pronunciation.generate_text',
+  'listening.story_session_generate', 'listening.two_part_generate', 'listening.episode_generate_story',
+  'listening.episode_generate_questions', 'listening.episode_translate_synopsis', 'listening.episode_translate_subtitles',
+]);
+
 function hasWiredEstimator(featureKey: AiFeatureKey): boolean {
-  return !FEATURE_METADATA[featureKey].isBillable;
+  return !FEATURE_METADATA[featureKey].isBillable || WIRED_ESTIMATOR_FEATURES.has(featureKey);
 }
 
 // ── Dead/unreachable features ────────────────────────────────────────────────
 // grep-verified: no call site anywhere in api/** or src/** references this
 // featureKey outside the catalog itself and its own tests.
 const DEAD_UNREACHABLE_FEATURES = new Set<AiFeatureKey>(['writing.evaluate_rewrite']);
+
+// ── Realtime hard session control ────────────────────────────────────────────
+const REALTIME_SESSION_FEATURES = new Set<AiFeatureKey>(['conversation.webrtc_connect', 'conversation.realtime_usage']);
+// Implemented (call_id capture + backend hangup — see
+// api/conversation/[...slug].ts) but not live-verified against production
+// OpenAI in this environment. Flip to true only after a real smoke test
+// (see the Etapa 11 correction's test list, item "smoke real obrigatório")
+// confirms hangup actually terminates a live session.
+const REALTIME_HARD_CONTROL_LIVE_TESTED = false;
 
 // ── Fase 14 infra probe ──────────────────────────────────────────────────────
 
@@ -149,8 +187,8 @@ async function probeInfra(supabase: ReturnType<typeof getSharedServiceClient>) {
     }),
     probeRpcExists(supabase, 'reserve_gateway_usage_v1', {
       p_idempotency_key: 'preflight:probe', p_user_id: DUMMY_UUID_INVALID, p_initiated_by_user_id: null,
-      p_feature_key: 'preflight:probe', p_provider: 'openai', p_model: null, p_metrics: [], p_estimated_cost_usd: null,
-      p_expires_in_seconds: 1,
+      p_feature_key: 'preflight:probe', p_provider: 'openai', p_model: null, p_metrics: [], p_budget_scopes: [],
+      p_estimated_cost_usd: null, p_expires_in_seconds: 1,
     }),
     // get_gateway_breaker_state_v1 is a genuine read-only getter — called
     // normally (no malformed-arg trick needed) as the proxy for the whole
@@ -163,12 +201,7 @@ async function probeInfra(supabase: ReturnType<typeof getSharedServiceClient>) {
   return { rateLimit, dedupe, reservation, breaker };
 }
 
-// ── Classification ────────────────────────────────────────────────────────
-
-type Classification =
-  | 'legacy_ready' | 'observe_ready' | 'enforce_ready'
-  | 'blocked_missing_price' | 'blocked_missing_estimator'
-  | 'blocked_no_hard_session_control' | 'dead_unreachable';
+// ── Assessment ─────────────────────────────────────────────────────────────
 
 interface FeatureReadiness {
   featureKey: AiFeatureKey;
@@ -176,15 +209,18 @@ interface FeatureReadiness {
   currentRuntimeStatus: string;
   provider: string;
   isBillable: boolean;
+  isDead: boolean;
   hasEntitlementMapping: boolean;
   hasPriceCoverage: boolean | 'not_applicable';
   hasEstimator: boolean;
-  hasHardSessionControl: boolean;
-  classification: Classification;
+  isRealtimeSessionFeature: boolean;
+  // codeReady* = would be true if the Fase 14 migration were deployed —
+  // never conflated with whether it actually is (see infraDeployed below).
+  unitEnforcementCodeReady: boolean;
+  costEnforcementCodeReady: boolean;
+  realtimeHardControlReady: boolean;
   blockers: string[];
 }
-
-const REALTIME_SESSION_FEATURES = new Set<AiFeatureKey>(['conversation.webrtc_connect', 'conversation.realtime_usage']);
 
 async function assessFeature(
   featureKey: AiFeatureKey,
@@ -208,24 +244,20 @@ async function assessFeature(
     query = model != null ? query.eq('model', model) : query.is('model', null);
     const { count } = await query;
     hasPriceCoverage = (count ?? 0) > 0;
-    if (!hasPriceCoverage) blockers.push('missing_price');
   }
 
   const hasEstimator = hasWiredEstimator(featureKey);
-  if (!hasEstimator) blockers.push('missing_estimator');
-
-  const hasHardSessionControl = false; // true for no feature today — see module doc comment
-  if (REALTIME_SESSION_FEATURES.has(featureKey)) blockers.push('no_hard_session_control');
-
   const isDead = DEAD_UNREACHABLE_FEATURES.has(featureKey);
-  if (isDead) blockers.push('dead_unreachable');
+  const isRealtimeSessionFeature = REALTIME_SESSION_FEATURES.has(featureKey);
 
-  let classification: Classification;
-  if (isDead) classification = 'dead_unreachable';
-  else if (REALTIME_SESSION_FEATURES.has(featureKey)) classification = 'blocked_no_hard_session_control';
-  else if (hasPriceCoverage === false) classification = 'blocked_missing_price';
-  else if (!hasEstimator) classification = 'blocked_missing_estimator';
-  else classification = 'enforce_ready';
+  if (isDead) blockers.push('dead_unreachable');
+  if (!hasEstimator) blockers.push('missing_estimator');
+  if (hasPriceCoverage === false) blockers.push('missing_price');
+  if (isRealtimeSessionFeature) blockers.push('hard_control_not_live_tested');
+
+  const unitEnforcementCodeReady = !isDead && hasEstimator;
+  const costEnforcementCodeReady = !isDead && hasPriceCoverage !== false; // true|'not_applicable' both count as ready
+  const realtimeHardControlReady = isRealtimeSessionFeature ? REALTIME_HARD_CONTROL_LIVE_TESTED : true; // n/a features trivially "ready" on this dimension
 
   return {
     featureKey,
@@ -233,11 +265,14 @@ async function assessFeature(
     currentRuntimeStatus: policy.runtimeStatus,
     provider,
     isBillable: meta.isBillable,
+    isDead,
     hasEntitlementMapping,
     hasPriceCoverage,
     hasEstimator,
-    hasHardSessionControl,
-    classification,
+    isRealtimeSessionFeature,
+    unitEnforcementCodeReady,
+    costEnforcementCodeReady,
+    realtimeHardControlReady,
     blockers,
   };
 }
@@ -247,53 +282,53 @@ async function main() {
   const policyResolver = new GatewayPolicyResolver(supabase, 0); // ttlMs=0 — always fresh, this is a one-shot audit
 
   const infra = await probeInfra(supabase);
-  const infraBlockers = Object.entries(infra).filter(([, ok]) => !ok).map(([name]) => `infra_missing:${name}`);
+  const infraDeployed = infra.rateLimit && infra.dedupe && infra.reservation && infra.breaker;
 
   const results: FeatureReadiness[] = [];
   for (const featureKey of AI_FEATURE_KEYS) {
-    const r = await assessFeature(featureKey, policyResolver, supabase);
-    // Infra readiness is a global gate layered on top of the per-feature
-    // structural classification computed above — kept separate rather than
-    // folded into the fixed Fase-13 classification vocabulary, so the report
-    // still shows what WOULD block a feature once infra is deployed.
-    if (infraBlockers.length > 0 && r.classification === 'enforce_ready') {
-      r.blockers.push(...infraBlockers);
-    }
-    results.push(r);
+    results.push(await assessFeature(featureKey, policyResolver, supabase));
   }
 
-  const enforceReadyCount = results.filter((r) => r.classification === 'enforce_ready' && r.blockers.length === 0).length;
+  const unitCodeReadyCount = results.filter((r) => r.unitEnforcementCodeReady).length;
+  const costCodeReadyCount = results.filter((r) => r.costEnforcementCodeReady).length;
+  const fullyDatabaseDeployedReadyCount = infraDeployed
+    ? results.filter((r) => r.unitEnforcementCodeReady && r.costEnforcementCodeReady && r.blockers.length === 0).length
+    : 0;
 
   if (JSON_OUTPUT) {
-    console.log(JSON.stringify({ infra, infraBlockers, features: results, enforceReadyCount }, null, 2));
+    console.log(JSON.stringify({
+      infra, infraDeployed, features: results,
+      summary: { unitCodeReadyCount, costCodeReadyCount, fullyDatabaseDeployedReadyCount, totalFeatures: results.length },
+    }, null, 2));
     return;
   }
 
-  console.log('AI Gateway — enforce-readiness preflight (Etapa 11, Fase 16)');
+  console.log('AI Gateway — enforce-readiness preflight (Etapa 11, Fase 16 — corrected)');
   console.log('Read-only. Never changes gateway_mode or runtime_status.\n');
 
-  console.log('Fase 14 infra (rate limit / dedupe / reservation / breaker RPCs):');
+  console.log('Fase 14 infra (rate limit / dedupe / reservation / breaker RPCs) — DATABASE deployment state:');
   console.log(`  rate_limit:  ${infra.rateLimit ? 'present' : 'MISSING'}`);
   console.log(`  dedupe:      ${infra.dedupe ? 'present' : 'MISSING'}`);
   console.log(`  reservation: ${infra.reservation ? 'present' : 'MISSING'}`);
   console.log(`  breaker:     ${infra.breaker ? 'present' : 'MISSING'}`);
-  if (infraBlockers.length > 0) {
-    console.log('  → migration not yet applied: no feature can safely enter enforce until this is deployed.\n');
-  } else {
-    console.log('');
-  }
+  console.log(`  → infraDeployed=${infraDeployed}. This is independent of each feature's CODE readiness below.\n`);
 
   for (const r of results) {
     console.log(`${r.featureKey}`);
     console.log(`  current: gatewayMode=${r.currentGatewayMode} runtimeStatus=${r.currentRuntimeStatus}`);
     console.log(`  provider=${r.provider} billable=${r.isBillable} entitlementMapping=${r.hasEntitlementMapping} priceCoverage=${r.hasPriceCoverage} estimator=${r.hasEstimator}`);
-    console.log(`  classification: ${r.classification}`);
+    console.log(`  unitEnforcementCodeReady=${r.unitEnforcementCodeReady}  costEnforcementCodeReady=${r.costEnforcementCodeReady}${r.isRealtimeSessionFeature ? `  realtimeHardControlReady=${r.realtimeHardControlReady}` : ''}`);
     console.log(`  blockers: ${r.blockers.length > 0 ? r.blockers.join(', ') : '(none)'}`);
     console.log('');
   }
 
-  console.log(`Summary: ${enforceReadyCount}/${results.length} features have zero blockers (infra deployment pending: ${infraBlockers.length > 0}).`);
-  console.log('No enforce activation is permitted for any feature with a non-empty blockers list.');
+  console.log('Summary (code-level, i.e. "would this work once the migration is deployed"):');
+  console.log(`  unit (quota/rate/dedupe/breaker/kill-switch) code-ready: ${unitCodeReadyCount}/${results.length}`);
+  console.log(`  cost (USD budget) code-ready:                           ${costCodeReadyCount}/${results.length}`);
+  console.log('Summary (database-level, i.e. what actually works in THIS environment right now):');
+  console.log(`  infra deployed: ${infraDeployed}`);
+  console.log(`  fully ready (unit + cost + zero blockers) AND infra deployed: ${fullyDatabaseDeployedReadyCount}/${results.length}`);
+  console.log('\nNo enforce activation is permitted for any feature with a non-empty blockers list.');
 }
 
 main().catch((err) => {

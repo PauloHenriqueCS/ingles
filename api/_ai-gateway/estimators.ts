@@ -64,7 +64,41 @@ export function estimateTextTokens(inputCharacterCount: number, maxOutputTokens:
   ];
 }
 
+/**
+ * Same as estimateTextTokens, but derives inputCharacterCount from a real
+ * OpenAI chat `messages` array already built by the caller — for call sites
+ * where summing individual prompt-string variables is less natural than
+ * reading the array that's about to be sent anyway (e.g. a shared helper
+ * that accepts the full request params). Never reads anything beyond
+ * `.content` string lengths; non-string content (should not occur for this
+ * app's text-only chat completions) is safely treated as zero rather than
+ * throwing.
+ */
+export function estimateTextTokensFromMessages(
+  messages: ReadonlyArray<{ content?: unknown }>,
+  maxOutputTokens: number,
+): MetricEstimate[] {
+  const inputCharacterCount = messages.reduce(
+    (sum, m) => sum + (typeof m.content === 'string' ? m.content.length : 0),
+    0,
+  );
+  return estimateTextTokens(inputCharacterCount, maxOutputTokens);
+}
+
 /** provider_requests: the maximum number of physical attempts the calling flow can make (its own retry ceiling), never an assumption of exactly one. */
 export function estimateProviderRequests(maxPhysicalAttempts: number): MetricEstimate {
   return { metricKey: 'provider_requests', quantity: Math.max(1, maxPhysicalAttempts) };
 }
+
+/**
+ * Ceiling used by call sites (writing.correct/correct_review,
+ * writing.compare_rewrite/correct_v2_text, listening.episode_generate_questions/
+ * episode_translate_subtitles) that never pass an explicit max_tokens/
+ * max_completion_tokens to OpenAI — the model's own default cap applies at
+ * the provider, which is typically higher than this. Matches the ceiling
+ * this app's own other call sites already use explicitly for similarly-
+ * shaped short JSON-feedback responses (see story_session_generate's
+ * max_tokens: 2000) rounded up for safety — a genuine upper bound, not a
+ * claim of precision (Fase 6: "não alegar precisão exata se for upper bound").
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE = 4096;

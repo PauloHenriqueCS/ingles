@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
-import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -438,6 +438,15 @@ export default async function handler(req: any, res: any) {
             attempt: attempt + 1,
             maxAttempts: 3,
           },
+          // Etapa 11 correction — conservative in-memory estimate for
+          // enforce-mode reservation sizing; inert in legacy/observe (the
+          // only modes this feature runs in). No max_tokens is set on this
+          // call, so DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE is used as the
+          // output ceiling — a real upper bound, not a precise prediction.
+          estimatedMetrics: estimateTextTokens(
+            systemPrompt.length + userMessage.length,
+            DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+          ),
         },
         () => openai.chat.completions.create({ model: AI_MODEL, messages }),
         deps,

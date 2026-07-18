@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GenerationStatusResult, GenerationSessionStatus } from './listening-on-demand-types';
-import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 import {
   STEP_LABELS, STEP_PROGRESS, NEXT_STATUS, TERMINAL_STATUSES,
@@ -17,6 +17,8 @@ import { generateListeningSsml } from '../generate-listening-ssml';
 import { synthesizeListeningEpisode } from '../audio/synthesize-listening-episode';
 import { synchronizeListeningEpisode } from '../timing/synchronize-listening-episode';
 import { publishListeningEpisode } from '../publication/publish-listening-episode';
+
+const SYNOPSIS_TRANSLATION_SYSTEM_PROMPT = 'You are a professional translator. Translate the English text to natural Brazilian Portuguese. Preserve the tone and brevity. Return ONLY the translated text, nothing else.';
 
 // Duration thresholds
 const BLOCK_MIN_MS = 270_000; // 4m30s
@@ -330,13 +332,14 @@ async function stepPreparingDescription(
           endpoint: 'listening/on-demand/process-next',
           flowType: 'preparing_description',
         },
+        estimatedMetrics: estimateTextTokens(SYNOPSIS_TRANSLATION_SYSTEM_PROMPT.length + episode.synopsis.length, 200),
       },
       () => client.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
-            content: 'You are a professional translator. Translate the English text to natural Brazilian Portuguese. Preserve the tone and brevity. Return ONLY the translated text, nothing else.',
+            content: SYNOPSIS_TRANSLATION_SYSTEM_PROMPT,
           },
           { role: 'user', content: episode.synopsis },
         ],

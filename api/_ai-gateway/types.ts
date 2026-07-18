@@ -144,8 +144,16 @@ export type EntitlementSource =
 export interface EntitlementLimit {
   metricKey: string;
   limit: number | null;      // null = unlimited
-  period: 'none' | 'request' | 'day' | 'week' | 'month' | 'lifetime';
-  resetAt: string | null;    // ISO timestamp, null when period='none'|'lifetime'
+  period: 'none' | 'request' | 'day' | 'week' | 'month' | 'lifetime' | 'assignment_cycle';
+  // periodStart/resetAt (=periodEnd) are both null exactly when period is
+  // 'none'/'request' (no periodic bucket — per-call ceiling only). Present
+  // together otherwise, resolved server-side (periods.ts) — never trust a
+  // client-supplied period boundary. Correction to Etapa 11: needed so the
+  // enforce pipeline can pass a real [periodStart, periodEnd) window into
+  // reserve_gateway_usage_v1's accumulated-quota bucket, not just a
+  // per-call ceiling.
+  periodStart: string | null; // ISO timestamp
+  resetAt: string | null;     // ISO timestamp — this limit's period end
 }
 
 export interface EffectiveEntitlement {
@@ -193,6 +201,27 @@ export type ReservationStatus = 'pending' | 'committed' | 'released' | 'expired'
 export interface ReservationMetricEstimate {
   metricKey: string;
   quantity: number;
+  // Accumulated-quota fields (correction to Etapa 11's original per-call-only
+  // design). All three are optional and travel together: a metric with no
+  // limitQuantity (or no period) skips the quota-bucket check entirely in
+  // reserve_gateway_usage_v1 — only the per-call estimate is recorded. When
+  // present, limitQuantity/periodStart/periodEnd are ALWAYS resolved
+  // server-side (entitlements.ts + periods.ts), never trusted from a client.
+  limitQuantity?: number | null;
+  periodType?: 'day' | 'week' | 'month' | 'lifetime' | 'assignment_cycle' | null;
+  periodStart?: string | null; // ISO
+  periodEnd?: string | null;   // ISO
+}
+
+// One budget cap the reservation must be validated against, atomically,
+// alongside every quota metric — see reserve_gateway_usage_v1's p_budget_scopes.
+export interface ReservationBudgetScope {
+  scopeType: 'user' | 'plan' | 'feature' | 'provider' | 'global';
+  scopeKey: string;
+  periodType: 'day' | 'month';
+  periodStart: string; // ISO
+  periodEnd: string;   // ISO
+  limitUsd: string | null; // decimal string; null = unlimited, skips the check
 }
 
 export interface ReserveUsageParams {
@@ -203,12 +232,23 @@ export interface ReserveUsageParams {
   provider: string;
   model?: string;
   estimatedMetrics: ReservationMetricEstimate[];
+  budgetScopes: ReservationBudgetScope[];
   estimatedCostUsd: string | null; // decimal string; null = unpriced
   expiresInSeconds: number;
 }
 
+// Real per-metric usage measured after invoke() — passed into commit() so
+// the SQL layer can move the bucket's committed_quantity by the REAL amount
+// (never the estimate) and release the reserved/actual difference.
+export interface ReservationActualMetric {
+  metricKey: string;
+  quantity: number;
+}
+
 export interface ReservationResult {
-  reservationId: string;
-  status: ReservationStatus;
-  expiresAt: string;
+  reservationId: string | null;
+  status: ReservationStatus | 'blocked';
+  expiresAt: string | null;
+  blockedReason?: 'QUOTA_EXCEEDED' | 'BUDGET_EXCEEDED' | null;
+  blockedDetail?: string | null;
 }

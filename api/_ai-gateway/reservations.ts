@@ -1,28 +1,29 @@
 /**
  * SERVER-ONLY — never import from src/ or any client-side code.
  *
- * Atomic consumption reservations (Etapa 11, Fase 5). Reuses the existing
- * usage_reservations / usage_reservation_items tables (foundation
- * migration, BLOCO 7/8 — created empty, unused until now). No new table is
- * added here — only atomic SQL functions (reserve/commit/release/expire)
- * and a unique index on idempotency_key, so two concurrent callers can
- * never both win the same reservation and a retry with the same
- * idempotency key is always safe.
+ * Atomic consumption reservations (Etapa 11, Fase 5 — corrected). Reuses
+ * usage_reservations/usage_reservation_items, and now also
+ * ai_gateway_quota_buckets/ai_gateway_budget_buckets, all touched inside a
+ * SINGLE atomic SQL function (reserve_gateway_usage_v1): quota (accumulated
+ * per-period consumption, not just a per-call ceiling) and budget (USD,
+ * across every applicable scope) are validated AND reserved together, under
+ * deterministically-ordered row locks — closing the last-dollar/last-unit
+ * race that existed when budget and reservation were two separate round
+ * trips.
  *
  * "Reserved" (Fase 5 spec language) is this schema's pre-existing 'pending'
  * status — see types.ts's ReservationStatus comment.
- *
- * Only used by the enforce-mode pipeline (enforcement.ts), which no
- * feature reaches in production at the end of this stage.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from './usage-repository';
-import type { AiFeatureKey, ReservationResult, ReservationStatus, ReserveUsageParams } from './types';
+import type {
+  AiFeatureKey, ReservationActualMetric, ReservationResult, ReservationStatus, ReserveUsageParams,
+} from './types';
 
 export interface ReservationsRepositoryInterface {
   reserve(params: ReserveUsageParams): Promise<ReservationResult>;
-  commit(reservationId: string, usageEventId: string, actualCostUsd: string | null): Promise<void>;
+  commit(reservationId: string, usageEventId: string, actualCostUsd: string | null, actualMetrics?: ReservationActualMetric[]): Promise<void>;
   release(reservationId: string, reason: string): Promise<void>;
   markReconciliationRequired(reservationId: string, reason: string): Promise<void>;
 }
@@ -42,20 +43,42 @@ export class SupabaseReservationsRepository implements ReservationsRepositoryInt
       p_feature_key: params.featureKey,
       p_provider: params.provider,
       p_model: params.model ?? null,
-      p_metrics: params.estimatedMetrics.map((m) => ({ quota_key: m.metricKey, unit_type: 'unit', reserved_quantity: m.quantity })),
+      p_metrics: params.estimatedMetrics.map((m) => ({
+        quota_key: m.metricKey, unit_type: 'unit', reserved_quantity: m.quantity,
+        limit_quantity: m.limitQuantity ?? null,
+        period_type: m.periodType ?? null,
+        period_start: m.periodStart ?? null,
+        period_end: m.periodEnd ?? null,
+      })),
+      p_budget_scopes: params.budgetScopes.map((b) => ({
+        scope_type: b.scopeType, scope_key: b.scopeKey, period_type: b.periodType,
+        period_start: b.periodStart, period_end: b.periodEnd, limit_usd: b.limitUsd,
+      })),
       p_estimated_cost_usd: params.estimatedCostUsd,
       p_expires_in_seconds: params.expiresInSeconds,
     });
     if (error) throw new Error(`reserve_gateway_usage_v1 failed: ${error.message}`);
-    const row = (Array.isArray(data) ? data[0] : data) as { reservation_id: string; status: string; expires_at: string };
-    return { reservationId: row.reservation_id, status: row.status as ReservationStatus, expiresAt: row.expires_at };
+    const row = (Array.isArray(data) ? data[0] : data) as {
+      reservation_id: string | null; status: string; expires_at: string | null;
+      blocked_reason: string | null; blocked_detail: string | null;
+    };
+    return {
+      reservationId: row.reservation_id,
+      status: row.status as ReservationStatus | 'blocked',
+      expiresAt: row.expires_at,
+      blockedReason: (row.blocked_reason as 'QUOTA_EXCEEDED' | 'BUDGET_EXCEEDED' | null) ?? null,
+      blockedDetail: row.blocked_detail ?? null,
+    };
   }
 
-  async commit(reservationId: string, usageEventId: string, actualCostUsd: string | null): Promise<void> {
+  async commit(reservationId: string, usageEventId: string, actualCostUsd: string | null, actualMetrics?: ReservationActualMetric[]): Promise<void> {
     const { error } = await this.supabase.rpc('commit_gateway_reservation_v1', {
       p_reservation_id: reservationId,
       p_usage_event_id: usageEventId,
       p_actual_cost_usd: actualCostUsd,
+      p_actual_metrics: actualMetrics && actualMetrics.length > 0
+        ? actualMetrics.map((m) => ({ quota_key: m.metricKey, actual_quantity: m.quantity }))
+        : null,
     });
     if (error) throw new Error(`commit_gateway_reservation_v1 failed: ${error.message}`);
   }
