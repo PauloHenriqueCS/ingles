@@ -917,7 +917,18 @@ async function handleSessionUsage(req: any, res: any) {
       throw e;
     }
 
-    await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+    // completeEvent()'s UPDATE writes provider_request_id UNCONDITIONALLY
+    // from what's passed here (p.providerRequestId ?? null) — it must be
+    // re-supplied, or it silently overwrites the value startEvent() just
+    // inserted back to NULL. This is exactly what broke deduplication in
+    // production: every other feature's completeEvent() call already omits
+    // providerRequestId (that column was unused before this feature), so
+    // completeEvent's blanket null-write was invisible until this handler
+    // populated it at startEvent() time and then wiped it right back out.
+    await gatewayDeps.usageRepository.completeEvent(eventId, {
+      latencyMs: gatewayDeps.clock() - startedAt,
+      providerRequestId: providerResponseId,
+    });
     await gatewayDeps.usageRepository.insertMetrics(eventId, buildRealtimeUsageMetrics(usage as RealtimeUsagePayload));
 
     try {
@@ -987,9 +998,26 @@ async function handleSessionEnd(req: any, res: any) {
     }
 
     const startedAtIso = (data as { started_at: string | null }).started_at;
-    const durationSeconds = startedAtIso
-      ? Math.max(0, (endedAtMs - new Date(startedAtIso).getTime()) / 1000)
-      : 0;
+    const rawDurationSeconds = startedAtIso ? (endedAtMs - new Date(startedAtIso).getTime()) / 1000 : 0;
+    // Finite and non-negative — never trust a clock/parse anomaly into a
+    // negative or NaN duration on either the session row or the metric below.
+    const durationSeconds = Number.isFinite(rawDurationSeconds) ? Math.max(0, rawDurationSeconds) : 0;
+
+    // Persist the session's own duration immediately — independent of the
+    // metric-write below. If that later fails, the session row's own
+    // duration_seconds/measurement_source are already durably saved. The
+    // status transition above already atomically guaranteed we are the
+    // single owner of this completion (a second /session-end call finds no
+    // row there and returns before ever reaching this point), so this
+    // second UPDATE needs no additional status guard.
+    try {
+      await sessionsClient()
+        .from('ai_provider_sessions')
+        .update({ duration_seconds: durationSeconds, measurement_source: 'server_session_timestamps' })
+        .eq('id', gatewaySessionId);
+    } catch (e) {
+      console.error('[conversation/session-end] failed to persist session duration', e instanceof Error ? e.message : 'unknown');
+    }
 
     // Locate the single ai_usage_event session-active created for this
     // physical connection attempt. Never fabricate a new one here: a

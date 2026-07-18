@@ -336,6 +336,64 @@ describe('POST /session-usage — conversation.realtime_usage', () => {
     );
   });
 
+  it('persists provider_request_id = response.id — completeEvent() re-supplies it so it is never wiped back to NULL', async () => {
+    // This is the exact regression: completeEvent()'s UPDATE writes
+    // provider_request_id unconditionally from what it's given. Passing
+    // only { latencyMs } here silently overwrote the value startEvent()
+    // had just inserted, leaving every conversation.realtime_usage event's
+    // provider_request_id NULL in production despite startEvent() being
+    // called correctly.
+    await handler(usageReq(), makeRes());
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ providerRequestId: 'resp_abc123' }));
+    expect(gw.mockCompleteEvent).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ providerRequestId: 'resp_abc123' }),
+    );
+  });
+
+  it('two different response.id values produce two distinct events, each carrying its own provider_request_id', async () => {
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_test_123', usage: FULL_USAGE }), makeRes());
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_test_456', usage: FULL_USAGE }), makeRes());
+
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(2);
+    expect(gw.mockStartEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({ providerRequestId: 'resp_test_123' }));
+    expect(gw.mockStartEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({ providerRequestId: 'resp_test_456' }));
+    expect(gw.mockCompleteEvent).toHaveBeenNthCalledWith(1, expect.any(String), expect.objectContaining({ providerRequestId: 'resp_test_123' }));
+    expect(gw.mockCompleteEvent).toHaveBeenNthCalledWith(2, expect.any(String), expect.objectContaining({ providerRequestId: 'resp_test_456' }));
+  });
+
+  it('repeating resp_test_123 is idempotent — one event, one cost, no re-inserted metrics on the retry', async () => {
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_test_123', usage: FULL_USAGE }), makeRes());
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1);
+
+    // Simulate the real unique-index collision the repository would raise
+    // on a second insert for the same (session, response.id) pair.
+    gw.mockStartEvent.mockRejectedValueOnce(new DuplicateUsageEventError());
+    const res = makeRes();
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_test_123', usage: FULL_USAGE }), res);
+
+    expect((res._body() as any).status).toBe('duplicate_ignored');
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1); // unchanged — no second metric write, no second cost
+  });
+
+  it('a realistic response.done fixture (event.response.id / event.response.usage) relays correctly end to end', async () => {
+    // Mirrors exactly what useRealtimeSession.ts extracts from the data
+    // channel: const ev = { type: 'response.done', response: { id, usage } }.
+    const fixture = { type: 'response.done', response: { id: 'resp_test_123', usage: FULL_USAGE } };
+    await handler(
+      usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: fixture.response.id, usage: fixture.response.usage }),
+      makeRes(),
+    );
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ providerRequestId: 'resp_test_123' }));
+  });
+
+  it('response.done without a response.id is never a billable event — rejected before any event is created', async () => {
+    const res = makeRes();
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: undefined, usage: FULL_USAGE } as any), res);
+    expect(res._status()).toBe(400);
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+
   it('splits text and audio tokens into separate, correctly-valued metrics; cached tokens are separate from regular', async () => {
     await handler(usageReq(), makeRes());
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
@@ -433,8 +491,13 @@ describe('POST /session-end — conversation.webrtc_connect', () => {
     return makeReq({ url: '/api/conversation/session-end', body });
   }
 
-  /** Wires the two sequential sessionsClient().from(...) calls /end makes: the
-   *  ai_provider_sessions UPDATE, then the ai_usage_events lookup. */
+  /** Wires the three sequential sessionsClient().from(...) calls /end makes:
+   *  (1) the atomic ai_provider_sessions status UPDATE (the idempotency
+   *      gate — only this one is guarded by WHERE status='active');
+   *  (2) the follow-up ai_provider_sessions UPDATE persisting
+   *      duration_seconds + measurement_source, unconditional once (1) has
+   *      already proven single ownership of this completion;
+   *  (3) the ai_usage_events lookup for the original session-active event. */
   function mockEndFlow(opts: {
     startedAtIso: string | null;
     endedAtMs: number;
@@ -447,6 +510,7 @@ describe('POST /session-end — conversation.webrtc_connect', () => {
         data: opts.updateData !== undefined ? opts.updateData : { id: GATEWAY_SESSION_ID, started_at: opts.startedAtIso },
         error: null,
       }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }))
       .mockReturnValueOnce(makeSelectChain({
         data: opts.eventLookupData !== undefined ? opts.eventLookupData : { id: ORIGINAL_EVENT_ID },
         error: null,
@@ -471,6 +535,39 @@ describe('POST /session-end — conversation.webrtc_connect', () => {
         metricKey: 'session_seconds', quantity: 42, isBillable: false, measurementSource: 'server_session_timestamps',
       })],
     );
+  });
+
+  it('atomically persists duration_seconds and measurement_source on the ai_provider_sessions row itself', async () => {
+    mockEndFlow({ startedAtIso: new Date(100_000 - 42_000).toISOString(), endedAtMs: 100_000 });
+    await handler(endReq(), makeRes());
+
+    // Second sessionsClient().from('ai_provider_sessions') call — the
+    // duration/measurement_source follow-up UPDATE.
+    const durationUpdateChain = mockSessionsFrom.mock.results[1].value;
+    expect(durationUpdateChain.update).toHaveBeenCalledWith({
+      duration_seconds: 42,
+      measurement_source: 'server_session_timestamps',
+    });
+    expect(durationUpdateChain.eq).toHaveBeenCalledWith('id', GATEWAY_SESSION_ID);
+  });
+
+  it('the session duration is persisted even when the original event cannot be found (metric skipped, session duration still saved)', async () => {
+    mockEndFlow({ startedAtIso: new Date(100_000 - 42_000).toISOString(), endedAtMs: 100_000, eventLookupData: null });
+    await handler(endReq(), makeRes());
+
+    const durationUpdateChain = mockSessionsFrom.mock.results[1].value;
+    expect(durationUpdateChain.update).toHaveBeenCalledWith(
+      expect.objectContaining({ duration_seconds: 42, measurement_source: 'server_session_timestamps' }),
+    );
+    expect(gw.mockInsertMetrics).not.toHaveBeenCalled(); // no event found → metric skipped, not fabricated
+  });
+
+  it('duration is always finite and non-negative, even under an anomalous clock/timestamp', async () => {
+    // endedAtMs BEFORE startedAtIso — should clamp to 0, never negative.
+    mockEndFlow({ startedAtIso: new Date(500_000).toISOString(), endedAtMs: 100_000 });
+    await handler(endReq(), makeRes());
+    const durationUpdateChain = mockSessionsFrom.mock.results[1].value;
+    expect(durationUpdateChain.update).toHaveBeenCalledWith(expect.objectContaining({ duration_seconds: 0 }));
   });
 
   it('provider_requests (from /active) and session_seconds (from /end) share the same usage_event_id', async () => {
@@ -508,6 +605,8 @@ describe('POST /session-end — conversation.webrtc_connect', () => {
 
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
     expect(metrics[0].quantity).toBe(7.5); // computed value, ignoring the smuggled 999_999
+    const durationUpdateChain = mockSessionsFrom.mock.results[1].value;
+    expect(durationUpdateChain.update).toHaveBeenCalledWith(expect.objectContaining({ duration_seconds: 7.5 }));
   });
 
   it('a session that was never activated (still authorized/connecting) cannot be completed — no-op', async () => {
@@ -548,12 +647,28 @@ describe('POST /session-end — conversation.webrtc_connect', () => {
     expect(gw.mockInsertMetrics).not.toHaveBeenCalled();
   });
 
-  it('a duration-write failure is fail-open — the browser still gets 200', async () => {
+  it('a metric-write failure is fail-open — the browser still gets 200 (session duration was already saved before this point)', async () => {
     mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 5_000 });
     gw.mockInsertMetrics.mockRejectedValueOnce(new Error('db down'));
     const res = makeRes();
     await handler(endReq(), res);
     expect(res._status()).toBe(200);
+  });
+
+  it('a failure writing the session\'s own duration_seconds is fail-open — never surfaces as an error, and the metric write still proceeds', async () => {
+    gw.mockClock.mockReturnValue(5_000);
+    const failingDurationChain: any = { update: vi.fn(() => { throw new Error('db down'); }) };
+    mockSessionsFrom
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID, started_at: new Date(0).toISOString() }, error: null }))
+      .mockReturnValueOnce(failingDurationChain)
+      .mockReturnValueOnce(makeSelectChain({ data: { id: ORIGINAL_EVENT_ID }, error: null }));
+    const res = makeRes();
+    await handler(endReq(), res);
+    expect(res._status()).toBe(200);
+    // The session row itself is already marked completed regardless (call #1
+    // above succeeded) — only the supplementary duration/measurement_source
+    // write failed, and that failure never blocks the rest of the flow.
+    expect(gw.mockInsertMetrics).toHaveBeenCalledWith(ORIGINAL_EVENT_ID, expect.any(Array));
   });
 
   it('rejects an invalid gatewaySessionId before touching the database', async () => {
@@ -662,6 +777,7 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
   it('routes "session-end" to handleSessionEnd', async () => {
     mockSessionsFrom
       .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID, started_at: new Date(0).toISOString() }, error: null }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null })) // duration/measurement_source follow-up UPDATE
       .mockReturnValueOnce(makeSelectChain({ data: { id: 'eeeeeeee-0000-0000-0000-000000000009' }, error: null }));
     const res = makeRes();
     await handler(vercelReq('session-end', { gatewaySessionId: GATEWAY_SESSION_ID }), res);
@@ -675,6 +791,7 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
   it('routes ["session-end"] (array) to handleSessionEnd too', async () => {
     mockSessionsFrom
       .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID, started_at: new Date(0).toISOString() }, error: null }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null })) // duration/measurement_source follow-up UPDATE
       .mockReturnValueOnce(makeSelectChain({ data: { id: 'eeeeeeee-0000-0000-0000-00000000000a' }, error: null }));
     const res = makeRes();
     await handler(vercelReq(['session-end'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
