@@ -583,9 +583,11 @@ describe('existing-mission shortcut (no physical call)', () => {
           select: vi.fn().mockReturnValue({
             eq: vi.fn().mockReturnValue({
               order: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) }),
-              maybeSingle: vi.fn().mockResolvedValue({
-                data: { id: 'existing-theme-1', title: 'Old', description: 'desc', activity_type: 'e-mail', context: 'trabalho', semantic_summary: '', difficulty: 'easy', vocabulary: [], grammar_focus: [] },
-                error: null,
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({
+                  data: { id: 'existing-theme-1', title: 'Old', description: 'desc', activity_type: 'e-mail', context: 'trabalho', semantic_summary: '', difficulty: 'easy', vocabulary: [], grammar_focus: [] },
+                  error: null,
+                }),
               }),
             }),
           }),

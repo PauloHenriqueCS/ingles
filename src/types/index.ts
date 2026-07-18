@@ -176,6 +176,43 @@ export interface ResponseExample {
   note?: string;
 }
 
+export interface GrammarGuideExample {
+  english: string;
+  portuguese: string;
+}
+
+export interface GrammarGuideStructures {
+  affirmative: string;
+  negative: string;
+  interrogative: string;
+}
+
+export interface GrammarGuide {
+  title: string;
+  explanationPtBr: string;
+  usagePtBr: string[];
+  structures: GrammarGuideStructures;
+  examples: GrammarGuideExample[];
+  commonMistakes: string[];
+}
+
+export type OptionalExerciseType =
+  | 'fill_blank'
+  | 'multiple_choice'
+  | 'transform_sentence'
+  | 'correct_error'
+  | 'translate';
+
+export interface OptionalExercise {
+  id: string;
+  type: OptionalExerciseType;
+  instructionPtBr: string;
+  question: string;
+  options?: string[];
+  correctAnswer: string;
+  explanationPtBr: string;
+}
+
 export interface EnglishDailyTheme {
   // legacy fields (maintained for backward compat)
   title: string;
@@ -211,6 +248,12 @@ export interface EnglishDailyTheme {
   reviewGroupId?: string;
   requiredWords?: string[];
   pedagogicalReason?: string;
+  // "Antes de escrever" — grammar guide + optional exercises, generated in
+  // the same AI call as the mission. Absent/null when the AI omitted or
+  // malformed them; the mission and writing field work normally either way.
+  verbTense?: string;
+  grammarGuide?: GrammarGuide | null;
+  optionalExercises?: OptionalExercise[] | null;
 }
 
 export interface GeneratedTheme {

@@ -60,6 +60,24 @@ export interface PublicMissionDTO {
   grammarTips?: Record<string, string>;
   responseExamples?: Array<{ level: string; text: string; note?: string }>;
   mode?: 'normal' | 'review';
+  verbTense?: string;
+  grammarGuide?: {
+    title: string;
+    explanationPtBr: string;
+    usagePtBr: string[];
+    structures: { affirmative: string; negative: string; interrogative: string };
+    examples: Array<{ english: string; portuguese: string }>;
+    commonMistakes: string[];
+  } | null;
+  optionalExercises?: Array<{
+    id: string;
+    type: 'fill_blank' | 'multiple_choice' | 'transform_sentence' | 'correct_error' | 'translate';
+    instructionPtBr: string;
+    question: string;
+    options?: string[];
+    correctAnswer: string;
+    explanationPtBr: string;
+  }> | null;
 }
 
 /**

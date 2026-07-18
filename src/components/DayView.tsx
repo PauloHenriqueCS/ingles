@@ -13,6 +13,7 @@ import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
 import CollapsibleBlock from './CollapsibleBlock';
 import DailyThemeCard from './DailyThemeCard';
+import MissionGrammarGuide from './MissionGrammarGuide';
 import RewriteSection from './RewriteSection';
 import PronunciationRecorder from './PronunciationRecorder';
 
@@ -240,6 +241,11 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     }
   }
 
+  function scrollToWritingField() {
+    textareaRef.current?.focus();
+    textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
   const words = countWords(originalText);
   const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('pt-BR', {
     weekday: 'long', day: 'numeric', month: 'long',
@@ -283,11 +289,12 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         <DailyThemeCard
           theme={dailyTheme}
           onThemeReady={setDailyTheme}
-          onStartWriting={() => {
-            textareaRef.current?.focus();
-            textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }}
+          onStartWriting={scrollToWritingField}
         />
+
+        {dailyTheme && (
+          <MissionGrammarGuide theme={dailyTheme} onSkipToWriting={scrollToWritingField} />
+        )}
 
         <div>
           <label className="text-xs text-slate-400 mb-2 block">Título</label>

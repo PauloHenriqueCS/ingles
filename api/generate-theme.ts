@@ -26,6 +26,12 @@ import { validateMissionAgainstPedagogicalPlan } from '../src/domain/missions/mi
 import { selectFallbackTemplate, buildFallbackCandidate } from '../src/domain/missions/mission-fallback';
 import type { MissionPedagogicalPlan } from '../src/domain/pedagogy/planner/planner-types';
 import { resolveWritingThemeLabel } from '../src/domain/writing/writing-themes';
+import {
+  GRAMMAR_GUIDE_JSON_FIELDS,
+  GRAMMAR_GUIDE_FILL_RULES,
+  normalizeGrammarGuide,
+  normalizeOptionalExercises,
+} from './_mission-grammar-guide';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -173,7 +179,8 @@ Retorne somente JSON válido. Sem markdown. Sem texto antes ou depois do JSON.
     { "level": "A1", "text": "texto curto em inglês (~3 frases)", "note": "observação curta em português" },
     { "level": "A2", "text": "texto médio em inglês (~5 frases, mais natural)", "note": "observação curta em português" },
     { "level": "B1", "text": "texto longo em inglês (7-10 frases, com conectores)", "note": "observação curta em português" }
-  ]
+  ],
+${GRAMMAR_GUIDE_JSON_FIELDS}
 }
 
 Regras de preenchimento:
@@ -205,7 +212,8 @@ Regras de preenchimento:
   level A2: ~5 frases, mais natural, com um conector.
   level B1: 7-10 frases, fluente, com conectores variados (however, although, therefore, in addition).
   note: observação curta em português sobre o que torna o exemplo bom (ex: "Observe o uso de 'however' para contraste.")
-  Nunca use o mesmo personagem, empresa, situação ou cidade da missão original.`;
+  Nunca use o mesmo personagem, empresa, situação ou cidade da missão original.
+${GRAMMAR_GUIDE_FILL_RULES}`;
 
 // ── Review mode ───────────────────────────────────────────────────────────────
 
@@ -273,8 +281,12 @@ FORMATO DE RESPOSTA — somente JSON válido, sem markdown:
   "grammarTips": {},
   "responseExamples": [],
   "mode": "review",
-  "reviewGroupId": "string"
-}`;
+  "reviewGroupId": "string",
+${GRAMMAR_GUIDE_JSON_FIELDS}
+}
+
+REGRAS PARA verbTense/grammarGuide/optionalExercises (mesmos campos da missão normal, sempre preenchidos):
+${GRAMMAR_GUIDE_FILL_RULES}`;
 
 interface ReviewItemPayload {
   originalValue: string;
@@ -424,6 +436,9 @@ export function normalizeReviewTheme(
     responseExamples: [],
     mode: 'review',
     reviewGroupId,
+    verbTense: String(parsed.verbTense || ''),
+    grammarGuide: normalizeGrammarGuide(parsed.grammarGuide),
+    optionalExercises: normalizeOptionalExercises(parsed.optionalExercises),
   };
 }
 
@@ -725,6 +740,9 @@ export function normalizeTheme(parsed: any): Record<string, unknown> {
         ? parsed.grammarTips
         : {},
     responseExamples: Array.isArray(parsed.responseExamples) ? parsed.responseExamples : [],
+    verbTense: String(parsed.verbTense || ''),
+    grammarGuide: normalizeGrammarGuide(parsed.grammarGuide),
+    optionalExercises: normalizeOptionalExercises(parsed.optionalExercises),
   };
 }
 
