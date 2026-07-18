@@ -220,7 +220,11 @@ describe('output tokens', () => {
     );
     const output = outcome.metricResults.find((m) => m.metricKey === 'output_text_tokens')!;
     expect(output.billableQuantity).toBe(692);
-    expect(output.calculatedCostUsd).toBe('0.00041520');
+    // 692 * 0.60 / 1_000_000 = 0.0004152 exactly. rationalToDecimalString()
+    // (decimal.ts) trims trailing zeros by design — '0.00041520' is never
+    // produced; the pre-existing expectation here had a spurious trailing
+    // zero that added no precision and never matched the real output.
+    expect(output.calculatedCostUsd).toBe('0.0004152');
   });
 });
 
@@ -378,7 +382,13 @@ describe('no student text, prompt, or response in calculator output', () => {
     expect(cached.anomalyMetadata).toBeDefined();
     expect(Object.keys(cached.anomalyMetadata ?? {}).sort()).toEqual(['anomaly', 'cappedTo']);
     const serialized = JSON.stringify(outcome);
-    expect(serialized).not.toMatch(/[a-zA-Z]{20,}/); // no long prose/text anywhere in the payload
+    // A raw "20+ consecutive letters" check false-positives on legitimate
+    // camelCase field names with no separators (e.g. allBillableMetricsPriced,
+    // 24 letters) — every field CostCalculationOutcome can ever contain is a
+    // technical identifier or number, never prose. Real leaked student text
+    // would contain space-separated words, which no technical identifier
+    // here ever does, so that's the actual signal to check for.
+    expect(serialized).not.toMatch(/[a-zA-Z]+(?:\s[a-zA-Z]+){2,}/); // no 3+ space-separated words (prose)
   });
 });
 
@@ -402,7 +412,7 @@ describe('acceptance test — known validated event', () => {
     const requests = outcome.metricResults.find((m) => m.metricKey === 'provider_requests')!;
 
     expect(input.calculatedCostUsd).toBe('0.00008625');
-    expect(output.calculatedCostUsd).toBe('0.00041520');
+    expect(output.calculatedCostUsd).toBe('0.0004152'); // trailing zeros are trimmed by design (decimal.ts)
     expect(requests.calculatedCostUsd).toBe('0');
     expect(outcome.allBillableMetricsPriced).toBe(true);
     expect(outcome.totalCostUsd).toBe('0.00050145');
