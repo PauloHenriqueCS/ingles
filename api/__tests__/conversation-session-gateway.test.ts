@@ -3,10 +3,15 @@
  * integration (Etapa 10):
  *   - conversation.create_session: backend-wrapped client_secrets call, plus
  *     the ai_provider_sessions bridge authorized for conversation.webrtc_connect.
- *   - conversation.webrtc_connect: session/active, session/failed, session/end
+ *   - conversation.webrtc_connect: session-active, session-failed, session-end
  *     — the authenticated bridge the browser reports connection outcome to.
- *   - conversation.realtime_usage: session/usage — idempotent per-response
+ *   - conversation.realtime_usage: session-usage — idempotent per-response
  *     token relay, deduplicated by (provider_session_record_id, providerRequestId).
+ *
+ * Routes are flat, single-segment slugs (session-active, not session/active):
+ * the nested shape 404'd in production — Vercel never routed the extra path
+ * segment into this function at all. See the "dispatcher — Vercel-shaped..."
+ * describe block below for the routing-contract proof.
  *
  * Scope: requireAuth and the existing /session pedagogical response shape
  * (instructions, prefs, etc.) are unaffected — this file only asserts
@@ -22,8 +27,8 @@ const { mockRequireAuth, gw } = vi.hoisted(() => {
 });
 
 // Separate mock Supabase client standing in for getSharedServiceClient() —
-// used only by the session-transition bridge code (session/active, /failed,
-// /usage, /end), distinct from the per-request `supabase` (requireAuth) used
+// used only by the session-transition bridge code (session-active, -failed,
+// -usage, -end), distinct from the per-request `supabase` (requireAuth) used
 // by the existing /session pedagogical-context queries.
 const { mockSessionsFrom, sessionsClient } = vi.hoisted(() => {
   const mockSessionsFrom = vi.fn();
@@ -202,11 +207,11 @@ describe('POST /session — conversation.create_session', () => {
   });
 });
 
-// ── conversation.webrtc_connect — /session/active ───────────────────────────
+// ── conversation.webrtc_connect — session-active ───────────────────────────
 
-describe('POST /session/active — conversation.webrtc_connect', () => {
+describe('POST /session-active — conversation.webrtc_connect', () => {
   function activeReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID }) {
-    return makeReq({ url: '/api/conversation/session/active', body });
+    return makeReq({ url: '/api/conversation/session-active', body });
   }
 
   it('activates the session and records one succeeded event, provider_requests only, not billable', async () => {
@@ -264,11 +269,11 @@ describe('POST /session/active — conversation.webrtc_connect', () => {
   });
 });
 
-// ── conversation.webrtc_connect — /session/failed ───────────────────────────
+// ── conversation.webrtc_connect — session-failed ───────────────────────────
 
-describe('POST /session/failed — conversation.webrtc_connect', () => {
+describe('POST /session-failed — conversation.webrtc_connect', () => {
   function failedReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID, reason: 'webrtc_failed' }) {
-    return makeReq({ url: '/api/conversation/session/failed', body });
+    return makeReq({ url: '/api/conversation/session-failed', body });
   }
 
   it('fails the session and records one failed event with the reported reason', async () => {
@@ -297,7 +302,7 @@ describe('POST /session/failed — conversation.webrtc_connect', () => {
   });
 });
 
-// ── conversation.realtime_usage — /session/usage ────────────────────────────
+// ── conversation.realtime_usage — session-usage ────────────────────────────
 
 const FULL_USAGE = {
   input_token_details: { text_tokens: 100, audio_tokens: 5000, cached_tokens_details: { text_tokens: 20, audio_tokens: 1000 } },
@@ -305,10 +310,10 @@ const FULL_USAGE = {
 };
 
 function usageReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_abc123', usage: FULL_USAGE }) {
-  return makeReq({ url: '/api/conversation/session/usage', body });
+  return makeReq({ url: '/api/conversation/session-usage', body });
 }
 
-describe('POST /session/usage — conversation.realtime_usage', () => {
+describe('POST /session-usage — conversation.realtime_usage', () => {
   beforeEach(() => {
     mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, metadata: { model: 'gpt-realtime-2.1-mini' } }, error: null }));
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
@@ -413,19 +418,19 @@ describe('POST /session/usage — conversation.realtime_usage', () => {
   });
 });
 
-// ── conversation.webrtc_connect — /session/end ──────────────────────────────
-// /session/end never creates a new ai_usage_event: it locates the ONE event
-// /session/active already created (by provider_session_record_id +
+// ── conversation.webrtc_connect — session-end ──────────────────────────────
+// session-end never creates a new ai_usage_event: it locates the ONE event
+// session-active already created (by provider_session_record_id +
 // feature_key + status='succeeded') and attaches session_seconds to it —
 // computed entirely from server-controlled timestamps
 // (ai_provider_sessions.started_at, through this handler's own
 // gatewayDeps.clock()), never from a client-supplied duration.
 
-describe('POST /session/end — conversation.webrtc_connect', () => {
+describe('POST /session-end — conversation.webrtc_connect', () => {
   const ORIGINAL_EVENT_ID = 'dddddddd-0000-0000-0000-000000000001';
 
   function endReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID }) {
-    return makeReq({ url: '/api/conversation/session/end', body });
+    return makeReq({ url: '/api/conversation/session-end', body });
   }
 
   /** Wires the two sequential sessionsClient().from(...) calls /end makes: the
@@ -471,7 +476,7 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
   it('provider_requests (from /active) and session_seconds (from /end) share the same usage_event_id', async () => {
     // /active creates the one event.
     mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
-    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+    await handler(makeReq({ url: '/api/conversation/session-active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
     const activeEventId = gw.mockInsertMetrics.mock.calls[0][0] as string;
 
     // /end locates that SAME event id (as the real DB lookup would).
@@ -485,7 +490,7 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
 
   it('one connect + one end together produce exactly one conversation.webrtc_connect event', async () => {
     mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
-    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+    await handler(makeReq({ url: '/api/conversation/session-active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
 
     mockEndFlow({ startedAtIso: new Date(0).toISOString(), endedAtMs: 10_000 });
     await handler(endReq(), makeRes());
@@ -499,7 +504,7 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
     // client attempted to smuggle one in, the handler never reads req.body
     // for it.
     mockEndFlow({ startedAtIso: new Date(1_000_000).toISOString(), endedAtMs: 1_007_500 }); // 7.5s later
-    await handler(makeReq({ url: '/api/conversation/session/end', body: { gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 999_999 } }), makeRes());
+    await handler(makeReq({ url: '/api/conversation/session-end', body: { gatewaySessionId: GATEWAY_SESSION_ID, durationSeconds: 999_999 } }), makeRes());
 
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
     expect(metrics[0].quantity).toBe(7.5); // computed value, ignoring the smuggled 999_999
@@ -565,71 +570,101 @@ describe('POST /session/end — conversation.webrtc_connect', () => {
   });
 });
 
-describe('duration starts at /session/active, never at token issuance', () => {
-  it('/session/active writes ai_provider_sessions.started_at — /session (create_session) never does', async () => {
+describe('duration starts at session-active, never at token issuance', () => {
+  it('session-active writes ai_provider_sessions.started_at — /session (create_session) never does', async () => {
     mockSessionsFrom.mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
-    await handler(makeReq({ url: '/api/conversation/session/active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
+    await handler(makeReq({ url: '/api/conversation/session-active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), makeRes());
     const updateChain = mockSessionsFrom.mock.results[0].value;
     expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ started_at: expect.any(String) }));
   });
 });
 
-// ── Vercel's REAL catch-all shape — req.query.slug as an array ─────────────
-// Every test above builds `req` with only `url: '/api/conversation/...'`,
-// which exercises resolveSlug()'s URL-parsing FALLBACK path only. In actual
-// Vercel deployments, a `[...slug].ts` catch-all route receives the path
-// segments in `req.query.slug` as an array (e.g. ['session', 'active']) —
-// resolveSlug() checks that branch FIRST. This suite proves the dispatcher
-// correctly routes every bridge endpoint under that real shape too, closing
-// a blind spot where all previous tests could pass even if the array branch
-// were broken.
+// ── Vercel's REAL catch-all shape — req.query.slug, string AND array ───────
+// A previous round of this suite proved the dispatcher routes a *nested*
+// two-segment slug (['session', 'active']) correctly — but that was a false
+// green: in the actual Vercel deployment, POST /api/conversation/session/active
+// 404'd, because Vercel never delivered the second path segment to this
+// function's req.query.slug at all (confirmed with real curl requests
+// against production). Testing the dispatcher's own switch/resolveSlug
+// logic in isolation cannot detect that — it's a platform routing
+// contract, not something this file's mocks control. The routes were
+// therefore changed to be FLAT, single-segment slugs (session-active, not
+// session/active), matching the already-deployed-and-working 'preview' and
+// 'session' cases. This suite now proves the flat shape resolves correctly
+// under BOTH forms Vercel is documented to use for a single dynamic
+// segment: a bare string and a one-element array.
 
-describe('dispatcher — Vercel-shaped req.query.slug (array), not just the URL fallback', () => {
-  function vercelReq(slug: string[], body: Record<string, unknown> = {}) {
+describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat routes only', () => {
+  function vercelReq(slug: string | string[], body: Record<string, unknown> = {}) {
     return { method: 'POST', query: { slug }, headers: { authorization: 'Bearer test-token' }, body };
   }
 
-  it('routes ["session"] to conversation.create_session, not the webrtc bridge', async () => {
+  it('routes "session" (string) to conversation.create_session, not the webrtc bridge', async () => {
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
     vi.stubGlobal('fetch', mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } }));
     const res = makeRes();
-    await handler(vercelReq(['session']), res);
+    await handler(vercelReq('session'), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('tok');
     expect(mockSessionsFrom).not.toHaveBeenCalled(); // never touches the bridge tables
   });
 
-  it('routes ["session", "active"] to handleSessionActive — the exact path that failed silently in production', async () => {
+  it('routes "session-active" (string) to handleSessionActive', async () => {
     const res = makeRes();
-    await handler(vercelReq(['session', 'active'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+    await handler(vercelReq('session-active', { gatewaySessionId: GATEWAY_SESSION_ID }), res);
     expect(res._status()).toBe(200);
     expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.webrtc_connect' }));
   });
 
-  it('routes ["session", "failed"] to handleSessionFailed', async () => {
+  it('routes ["session-active"] (single-element array) to handleSessionActive — the exact shape that 404\'d in production', async () => {
     const res = makeRes();
-    await handler(vercelReq(['session', 'failed'], { gatewaySessionId: GATEWAY_SESSION_ID, reason: 'webrtc_failed' }), res);
+    await handler(vercelReq(['session-active'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+    expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.webrtc_connect' }));
+  });
+
+  it('routes "session-failed" to handleSessionFailed', async () => {
+    const res = makeRes();
+    await handler(vercelReq('session-failed', { gatewaySessionId: GATEWAY_SESSION_ID, reason: 'webrtc_failed' }), res);
     expect(res._status()).toBe(200);
     expect(gw.mockFailEvent).toHaveBeenCalledTimes(1);
   });
 
-  it('routes ["session", "usage"] to handleSessionUsage', async () => {
+  it('routes ["session-failed"] (array) to handleSessionFailed too', async () => {
+    const res = makeRes();
+    await handler(vercelReq(['session-failed'], { gatewaySessionId: GATEWAY_SESSION_ID, reason: 'webrtc_failed' }), res);
+    expect(res._status()).toBe(200);
+    expect(gw.mockFailEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes "session-usage" to handleSessionUsage', async () => {
     mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, metadata: { model: 'gpt-realtime-2.1-mini' } }, error: null }));
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
     const res = makeRes();
-    await handler(vercelReq(['session', 'usage'], {
+    await handler(vercelReq('session-usage', {
       gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_abc', usage: { input_token_details: { text_tokens: 5 } },
     }), res);
     expect(res._status()).toBe(200);
     expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage' }));
   });
 
-  it('routes ["session", "end"] to handleSessionEnd', async () => {
+  it('routes ["session-usage"] (array) to handleSessionUsage too', async () => {
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, metadata: { model: 'gpt-realtime-2.1-mini' } }, error: null }));
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    const res = makeRes();
+    await handler(vercelReq(['session-usage'], {
+      gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_abc2', usage: { input_token_details: { text_tokens: 5 } },
+    }), res);
+    expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage' }));
+  });
+
+  it('routes "session-end" to handleSessionEnd', async () => {
     mockSessionsFrom
       .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID, started_at: new Date(0).toISOString() }, error: null }))
       .mockReturnValueOnce(makeSelectChain({ data: { id: 'eeeeeeee-0000-0000-0000-000000000009' }, error: null }));
     const res = makeRes();
-    await handler(vercelReq(['session', 'end'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+    await handler(vercelReq('session-end', { gatewaySessionId: GATEWAY_SESSION_ID }), res);
     expect(res._status()).toBe(200);
     expect(gw.mockInsertMetrics).toHaveBeenCalledWith(
       'eeeeeeee-0000-0000-0000-000000000009',
@@ -637,14 +672,36 @@ describe('dispatcher — Vercel-shaped req.query.slug (array), not just the URL 
     );
   });
 
-  it('an unauthenticated request (requireAuth rejects) never reaches the bridge logic — no silent success', async () => {
+  it('routes ["session-end"] (array) to handleSessionEnd too', async () => {
+    mockSessionsFrom
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID, started_at: new Date(0).toISOString() }, error: null }))
+      .mockReturnValueOnce(makeSelectChain({ data: { id: 'eeeeeeee-0000-0000-0000-00000000000a' }, error: null }));
+    const res = makeRes();
+    await handler(vercelReq(['session-end'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+    expect(res._status()).toBe(200);
+    expect(gw.mockInsertMetrics).toHaveBeenCalledWith(
+      'eeeeeeee-0000-0000-0000-00000000000a',
+      [expect.objectContaining({ metricKey: 'session_seconds' })],
+    );
+  });
+
+  it('the nested two-segment shape is no longer routable at all — proves the old paths are truly gone, not just unused', async () => {
+    const res = makeRes();
+    await handler(vercelReq(['session', 'active'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+    expect(res._status()).toBe(404);
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+
+  it('all four bridge routes require authentication — an unauthenticated request never reaches the bridge logic', async () => {
     mockRequireAuth.mockImplementation(async (_req: any, res: any) => {
       res.status(401).json({ error: 'Não autenticado' });
       return null;
     });
-    const res = makeRes();
-    await handler(vercelReq(['session', 'active'], { gatewaySessionId: GATEWAY_SESSION_ID }), res);
-    expect(res._status()).toBe(401);
+    for (const slug of ['session-active', 'session-failed', 'session-usage', 'session-end']) {
+      const res = makeRes();
+      await handler(vercelReq(slug, { gatewaySessionId: GATEWAY_SESSION_ID }), res);
+      expect(res._status()).toBe(401);
+    }
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
     expect(mockSessionsFrom).not.toHaveBeenCalled();
   });

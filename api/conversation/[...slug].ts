@@ -563,7 +563,7 @@ async function handleSession(req: any, res: any) {
   });
 }
 
-// ─── POST /api/conversation/session/{active,failed,usage,end} ───────────────
+// ─── POST /api/conversation/session-{active,failed,usage,end} ───────────────
 // Authenticated bridge for conversation.webrtc_connect. The physical WebRTC
 // POST to https://api.openai.com/v1/realtime/calls happens entirely in the
 // browser (src/hooks/useRealtimeSession.ts) and cannot be wrapped by a
@@ -576,6 +576,14 @@ async function handleSession(req: any, res: any) {
 // as pronunciation.assess_text's /complete and /fail bridge in
 // api/pronunciation/[...slug].ts.
 //
+// Single-segment slugs (session-active, not session/active): a nested
+// sub-path 404'd in production — Vercel never routed the extra path segment
+// into this function at all (confirmed by real HTTP 404s with
+// gatewaySessionId present and requireAuth never reached), even though a
+// hand-built req.query.slug array in tests made the dispatcher itself look
+// correct. 'preview' and 'session' above are flat and already deploy
+// correctly, so every bridge route uses that same proven shape.
+//
 // All four handlers are fire-and-forget from the browser's perspective
 // (src/lib/realtimeGatewayReporting.ts never awaits their body) and always
 // resolve 200 on the telemetry path — a duplicate/foreign/expired/malformed
@@ -584,17 +592,17 @@ async function handleSession(req: any, res: any) {
 //
 // Grain: conversation.webrtc_connect records AT MOST ONE ai_usage_event per
 // physical POST to /v1/realtime/calls — one event for that connection
-// attempt's entire lifecycle, never one-per-endpoint-call. /session/active
-// creates it (status='succeeded', provider_requests=1) or /session/failed
+// attempt's entire lifecycle, never one-per-endpoint-call. session-active
+// creates it (status='succeeded', provider_requests=1) or session-failed
 // creates it (status='failed', no metrics — a failure before the physical
 // call was ever attempted must never fabricate provider_requests).
-// /session/end never creates a second event: it locates the SAME event by
+// session-end never creates a second event: it locates the SAME event by
 // (provider_session_record_id, feature_key, status='succeeded') and attaches
 // session_seconds to it, then rebuilds that event's daily bucket — it never
 // invents a replacement event if the original cannot be found. All three
 // share the session id as correlationId. conversation.realtime_usage (the
 // separate billing key) records one incremental event per Realtime
-// response.done, via /usage, deduplicated by
+// response.done, via session-usage, deduplicated by
 // (provider_session_record_id, provider_request_id = response.id).
 
 const WEBRTC_CONNECT_FEATURE_KEY = 'conversation.webrtc_connect';
@@ -630,7 +638,7 @@ async function handleSessionActive(req: any, res: any) {
   try {
     const gatewayDeps = getProductionDeps();
     // Server-controlled clock — never the client's. This is the single
-    // authoritative "session started" instant: /session/end later computes
+    // authoritative "session started" instant: session-end later computes
     // session_seconds as (server ended_at − this started_at), never from a
     // client-reported duration.
     const startedAtMs = gatewayDeps.clock();
@@ -653,7 +661,7 @@ async function handleSessionActive(req: any, res: any) {
     }
 
     // Exactly one ai_usage_event represents this physical connection
-    // attempt for its entire lifecycle — /session/end below locates and
+    // attempt for its entire lifecycle — session-end below locates and
     // updates THIS SAME event (by provider_session_record_id) rather than
     // creating a second one when the session later ends.
     const eventId = await gatewayDeps.usageRepository.startEvent({
@@ -673,7 +681,7 @@ async function handleSessionActive(req: any, res: any) {
       callSequence: 1,
       resourceType: 'ai_provider_session',
       resourceId: gatewaySessionId,
-      metadata: { endpoint: 'conversation/session/active' },
+      metadata: { endpoint: 'conversation/session-active' },
       startedAt: startedAtMs,
     });
     await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAtMs });
@@ -695,7 +703,7 @@ async function handleSessionActive(req: any, res: any) {
     // console.error, not getProductionDeps().logger — the failure that
     // landed here may itself be getProductionDeps() throwing (e.g. missing
     // service-role credentials), and re-calling it here would escape uncaught.
-    console.error('[conversation/session/active] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    console.error('[conversation/session-active] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
     return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
   }
 }
@@ -753,7 +761,7 @@ async function handleSessionFailed(req: any, res: any) {
       callSequence: 1,
       resourceType: 'ai_provider_session',
       resourceId: gatewaySessionId,
-      metadata: { endpoint: 'conversation/session/failed' },
+      metadata: { endpoint: 'conversation/session-failed' },
       startedAt,
     });
     // No provider_requests metric here: failEvent alone marks the event
@@ -769,7 +777,7 @@ async function handleSessionFailed(req: any, res: any) {
 
     return res.status(200).json({ status: 'failed' });
   } catch (e) {
-    console.error('[conversation/session/failed] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    console.error('[conversation/session-failed] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
     return res.status(200).json({ status: 'ignored' });
   }
 }
@@ -897,7 +905,7 @@ async function handleSessionUsage(req: any, res: any) {
         callSequence: 1,
         resourceType: 'ai_provider_session',
         resourceId: gatewaySessionId,
-        metadata: { endpoint: 'conversation/session/usage' },
+        metadata: { endpoint: 'conversation/session-usage' },
         startedAt,
       });
     } catch (e) {
@@ -929,19 +937,19 @@ async function handleSessionUsage(req: any, res: any) {
 
     return res.status(200).json({ status: 'recorded' });
   } catch (e) {
-    console.error('[conversation/session/usage] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    console.error('[conversation/session-usage] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
     return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
   }
 }
 
 // ── /end ─────────────────────────────────────────────────────────────────
 
-// The client never supplies a duration — /session/end computes
+// The client never supplies a duration — session-end computes
 // session_seconds itself from server-controlled timestamps only:
-// ai_provider_sessions.started_at (written at /session/active, from
+// ai_provider_sessions.started_at (written at session-active, from
 // gatewayDeps.clock()) through this handler's own gatewayDeps.clock() call.
-// This also means /session/end attaches session_seconds to the SAME
-// ai_usage_event /session/active created (located by
+// This also means session-end attaches session_seconds to the SAME
+// ai_usage_event session-active created (located by
 // provider_session_record_id + feature_key + status='succeeded') instead of
 // creating a second event — one physical connection attempt, one event, for
 // its entire lifecycle from connect through disconnect.
@@ -983,7 +991,7 @@ async function handleSessionEnd(req: any, res: any) {
       ? Math.max(0, (endedAtMs - new Date(startedAtIso).getTime()) / 1000)
       : 0;
 
-    // Locate the single ai_usage_event /session/active created for this
+    // Locate the single ai_usage_event session-active created for this
     // physical connection attempt. Never fabricate a new one here: a
     // session can only ever reach 'active' (and thus 'completed') once, so
     // exactly one 'succeeded' conversation.webrtc_connect event can exist
@@ -1020,7 +1028,7 @@ async function handleSessionEnd(req: any, res: any) {
 
     return res.status(200).json({ status: 'completed' });
   } catch (e) {
-    console.error('[conversation/session/end] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
+    console.error('[conversation/session-end] gateway telemetry failed', e instanceof Error ? e.message : 'unknown');
     return res.status(200).json({ status: 'ignored' });
   }
 }
@@ -1032,10 +1040,17 @@ export default async function handler(req: any, res: any) {
   switch (slug) {
     case 'preview':        return handlePreview(req, res);
     case 'session':        return handleSession(req, res);
-    case 'session/active': return handleSessionActive(req, res);
-    case 'session/failed': return handleSessionFailed(req, res);
-    case 'session/usage':  return handleSessionUsage(req, res);
-    case 'session/end':    return handleSessionEnd(req, res);
+    // Flat, single-segment routes — NOT nested (session/active etc.). A
+    // nested sub-path under this catch-all 404'd in production: Vercel
+    // never routed the extra path segment to this function at all, so
+    // requireAuth was never even reached (see the module comment above the
+    // bridge handlers for the full account). Single-segment slugs are the
+    // same shape as the already-deployed, working 'preview' and 'session'
+    // cases above, so this is the proven-safe shape.
+    case 'session-active': return handleSessionActive(req, res);
+    case 'session-failed': return handleSessionFailed(req, res);
+    case 'session-usage':  return handleSessionUsage(req, res);
+    case 'session-end':    return handleSessionEnd(req, res);
     default:                return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

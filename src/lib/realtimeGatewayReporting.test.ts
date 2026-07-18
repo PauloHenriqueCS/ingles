@@ -53,7 +53,7 @@ describe('reporting calls — fire-and-forget transport', () => {
     vi.restoreAllMocks();
   });
 
-  it('reportSessionActive POSTs to /api/conversation/session/active with only gatewaySessionId', async () => {
+  it('reportSessionActive POSTs to the flat /api/conversation/session-active route with only gatewaySessionId', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -62,23 +62,26 @@ describe('reporting calls — fire-and-forget transport', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/conversation/session/active');
+    // Exact flat path — NOT the nested /session/active shape that 404'd in
+    // production (Vercel never routed the extra path segment to the function).
+    expect(url).toBe('/api/conversation/session-active');
     expect(opts.method).toBe('POST');
     expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-1' });
   });
 
-  it('reportSessionFailed POSTs gatewaySessionId and a validated reason', async () => {
+  it('reportSessionFailed POSTs to the flat /api/conversation/session-failed route with gatewaySessionId and a validated reason', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 
     reportSessionFailed('session-2', 'webrtc_failed');
     await new Promise((r) => setTimeout(r, 0));
 
-    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/conversation/session-failed');
     expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-2', reason: 'webrtc_failed' });
   });
 
-  it('reportSessionUsage POSTs gatewaySessionId, providerResponseId, and the usage object verbatim', async () => {
+  it('reportSessionUsage POSTs to the flat /api/conversation/session-usage route with gatewaySessionId, providerResponseId, and the usage object verbatim', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -87,7 +90,7 @@ describe('reporting calls — fire-and-forget transport', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/conversation/session/usage');
+    expect(url).toBe('/api/conversation/session-usage');
     expect(JSON.parse(opts.body as string)).toEqual({
       gatewaySessionId: 'session-3',
       providerResponseId: 'resp_abc123',
@@ -95,14 +98,15 @@ describe('reporting calls — fire-and-forget transport', () => {
     });
   });
 
-  it('reportSessionEnd POSTs only gatewaySessionId — never a client-computed duration', async () => {
+  it('reportSessionEnd POSTs to the flat /api/conversation/session-end route with only gatewaySessionId — never a client-computed duration', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 
     reportSessionEnd('session-4');
     await new Promise((r) => setTimeout(r, 0));
 
-    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/conversation/session-end');
     const sent = JSON.parse(opts.body as string);
     expect(sent).toEqual({ gatewaySessionId: 'session-4' });
     expect(sent.durationSeconds).toBeUndefined();
@@ -140,8 +144,11 @@ describe('reporting calls — fire-and-forget transport', () => {
 // fetch() only rejects on a network error; it resolves normally for 401,
 // 404, 500, etc. Before this fix, post() never checked response.ok, so a
 // rejected bridge call (auth failure, route mismatch, server error) left
-// zero trace anywhere — this is what let /session/active fail invisibly in
-// production while the conversation itself kept working normally.
+// zero trace anywhere — this is what let session-active fail invisibly in
+// production while the conversation itself kept working normally (the
+// actual root cause turned out to be a 404: the nested /session/active
+// shape was never routed by Vercel to this function at all — fixed by
+// moving to flat, single-segment routes).
 
 describe('bridge call failures are observable, sanitized, and never break the conversation', () => {
   beforeEach(() => {
@@ -157,7 +164,7 @@ describe('bridge call failures are observable, sanitized, and never break the co
 
     expect(consoleSpy).toHaveBeenCalledWith(
       '[realtimeGatewayReporting] bridge call failed',
-      expect.objectContaining({ endpoint: '/api/conversation/session/active', status: 401, errorCode: 'HTTP_401', hasGatewaySessionId: true }),
+      expect.objectContaining({ endpoint: '/api/conversation/session-active', status: 401, errorCode: 'HTTP_401', hasGatewaySessionId: true }),
     );
   });
 
@@ -170,7 +177,7 @@ describe('bridge call failures are observable, sanitized, and never break the co
 
     expect(consoleSpy).toHaveBeenCalledWith(
       '[realtimeGatewayReporting] bridge call failed',
-      expect.objectContaining({ endpoint: '/api/conversation/session/usage', status: 404, errorCode: 'HTTP_404' }),
+      expect.objectContaining({ endpoint: '/api/conversation/session-usage', status: 404, errorCode: 'HTTP_404' }),
     );
   });
 
@@ -196,7 +203,7 @@ describe('bridge call failures are observable, sanitized, and never break the co
 
     expect(consoleSpy).toHaveBeenCalledWith(
       '[realtimeGatewayReporting] bridge call failed',
-      expect.objectContaining({ endpoint: '/api/conversation/session/failed', status: null, errorCode: 'NETWORK_ERROR' }),
+      expect.objectContaining({ endpoint: '/api/conversation/session-failed', status: null, errorCode: 'NETWORK_ERROR' }),
     );
   });
 
@@ -223,5 +230,30 @@ describe('bridge call failures are observable, sanitized, and never break the co
     // gatewaySessionId, providerResponseId, or usage values themselves.
     expect(loggedPayload).not.toContain('session-12');
     expect(loggedPayload).not.toContain('resp_secret');
+  });
+});
+
+// ── No stale nested-path references anywhere in executable code ────────────
+// The old /session/active, /session/usage, /session/end, /session/failed
+// shapes 404'd in production. Grep-proves none of them remain reachable
+// from this module — not just that the four functions above happen to POST
+// the right URL right now.
+
+describe('no old nested bridge URLs remain in this module', () => {
+  it('the compiled source contains none of the four old /session/<verb> path strings', async () => {
+    const src = await import('./realtimeGatewayReporting?raw');
+    const code = (src as unknown as { default: string }).default;
+    // Full URL strings (what an actual fetch() call would use) — not the
+    // bare "/session/active" substring, which legitimately still appears in
+    // an explanatory code comment about why it was replaced.
+    for (const stale of [
+      '/api/conversation/session/active', '/api/conversation/session/usage',
+      '/api/conversation/session/end', '/api/conversation/session/failed',
+    ]) {
+      expect(code).not.toContain(stale);
+    }
+    for (const flat of ['/api/conversation/session-active', '/api/conversation/session-usage', '/api/conversation/session-end', '/api/conversation/session-failed']) {
+      expect(code).toContain(flat);
+    }
   });
 });

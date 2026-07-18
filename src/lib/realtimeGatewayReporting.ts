@@ -94,14 +94,21 @@ async function post(path: string, body: Record<string, unknown>): Promise<void> 
 
 // ── Public reporting calls ────────────────────────────────────────────────────
 
+// Flat, single-segment routes — NOT /session/active etc. A nested sub-path
+// under api/conversation/[...slug].ts 404'd in production: Vercel never
+// routed the extra path segment into the function at all (confirmed by
+// real HTTP 404s with gatewaySessionId present, before requireAuth was ever
+// reached). /api/conversation/session already deploys correctly as a flat
+// segment, so every bridge route uses that same proven shape.
+
 /** Reports that the physical WebRTC connection succeeded and the session is live. */
 export function reportSessionActive(gatewaySessionId: string): void {
-  void post('/api/conversation/session/active', { gatewaySessionId });
+  void post('/api/conversation/session-active', { gatewaySessionId });
 }
 
 /** Reports that the connection attempt failed (before or during establishment). */
 export function reportSessionFailed(gatewaySessionId: string, reason: SessionEndReason): void {
-  void post('/api/conversation/session/failed', { gatewaySessionId, reason });
+  void post('/api/conversation/session-failed', { gatewaySessionId, reason });
 }
 
 /** Relays one Realtime response.done usage event, verbatim numeric counters only. */
@@ -110,15 +117,15 @@ export function reportSessionUsage(
   providerResponseId: string,
   usage: Record<string, unknown>,
 ): void {
-  void post('/api/conversation/session/usage', { gatewaySessionId, providerResponseId, usage });
+  void post('/api/conversation/session-usage', { gatewaySessionId, providerResponseId, usage });
 }
 
 /**
  * Reports normal session completion. Carries no duration — the backend
  * computes session_seconds itself from server-controlled timestamps
- * (ai_provider_sessions.started_at, set at /session/active, through its own
- * clock at /session/end). A client-reported duration is never trusted.
+ * (ai_provider_sessions.started_at, set at session-active, through its own
+ * clock at session-end). A client-reported duration is never trusted.
  */
 export function reportSessionEnd(gatewaySessionId: string): void {
-  void post('/api/conversation/session/end', { gatewaySessionId });
+  void post('/api/conversation/session-end', { gatewaySessionId });
 }
