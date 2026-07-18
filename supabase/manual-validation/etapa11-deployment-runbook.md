@@ -3,16 +3,31 @@
 Procedimento manual exato para aplicar `supabase/migrations/20260718000000_ai_gateway_enforcement.sql`,
 a migration corretiva de segurança `supabase/migrations/20260718010000_ai_gateway_enforcement_security_fix.sql`
 (Passo 6 — fecha um gap de privilégio descoberto no postcheck do Passo 5, obrigatória antes de
-prosseguir), e homologar os 7 cenários de `supabase/manual-validation/ai-gateway-enforcement-concurrency.sql`.
+prosseguir), as duas migrations corretivas de ambiguidade de coluna — Passo 7
+(`20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql`) e Passo 8
+(`20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix.sql`), ambas obrigatórias antes
+do Passo 9 — e homologar os 7 cenários de
+`supabase/manual-validation/ai-gateway-enforcement-concurrency.sql`.
 
-**HEAD do repositório neste procedimento:** `ddd0dbd` (migration e script de validação manual
-idênticos, byte a byte, desde `f183e28` — nenhuma mudança de código entre este commit e aquele
-alterou qualquer um dos dois arquivos SQL referenciados aqui).
+**Status:** homologado em 2026-07-18. Os 7 cenários foram executados de ponta a ponta contra o
+Primary Database com as quatro migrations acima já aplicadas, com PASS em todos — ver o Passo 9 e a
+seção SUMMARY no fim do arquivo de validação para as evidências numéricas completas.
 
-**Hash SHA-256 atual do script de validação manual** (recalcule antes do Passo 8 — se este arquivo
-mudar um único byte, este número muda):
+**HEAD do repositório neste procedimento:** o commit que introduz esta atualização de documentação
+(migration `20260718030000` e o script de validação manual estão byte a byte como estavam nesse
+commit — rode `git log -1 --oneline -- supabase/manual-validation/ai-gateway-enforcement-concurrency.sql
+supabase/migrations/20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix.sql` no seu
+checkout para o hash exato; um valor fixado aqui ficaria desatualizado assim que qualquer um dos dois
+arquivos mudasse de novo).
+
+**Hash SHA-256 atual do script de validação manual** (recalcule antes do Passo 9 — se este arquivo
+mudar um único byte, este número muda; o valor abaixo já é o real, pós-homologação, calculado com
+`sha256sum supabase/manual-validation/ai-gateway-enforcement-concurrency.sql` — nunca reutilize o
+valor antigo `4561ba5e9f85f6b3fa4fba3d623f6722f1619795bccb8bc51ddc7e750c72a4ff`, que era de uma versão
+anterior do arquivo, antes do modelo de lock-hold determinístico de 25s e da reconciliação com os
+resultados reais):
 ```
-4561ba5e9f85f6b3fa4fba3d623f6722f1619795bccb8bc51ddc7e750c72a4ff
+122d4aa5442c24a88b35fce74e8e654f5da36d337e358ea7422915b754580bec
 ```
 
 Nenhum passo abaixo ativa `enforce` em nenhuma feature, altera `ai_runtime_controls` fora do que a
@@ -348,7 +363,53 @@ Só prossiga para o Passo 8 depois deste sucesso — sem esta migration aplicada
 
 ---
 
-## PASSO 8 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
+## PASSO 8 — Segunda migration corretiva de ambiguidade de coluna (OBRIGATÓRIA antes do Passo 9)
+
+Com o Passo 7 aplicado, uma re-execução dos 7 cenários (ainda em 2026-07-18) avançou até o Cenário 5
+— o único que passa `p_budget_scopes` não vazio para `reserve_gateway_usage_v1` — e encontrou um
+segundo `ERROR: 42702: column reference "reservation_id" is ambiguous`, desta vez na cláusula
+`ON CONFLICT (reservation_id, budget_bucket_id)` do `INSERT INTO ai_gateway_reservation_budget_links`
+dentro de `reserve_gateway_usage_v1`. Mesma classe de causa do Passo 7 (`RETURNS TABLE(...)` injeta
+uma variável PL/pgSQL por coluna de saída — aqui, a saída `reservation_id` da própria função colide
+com a coluna de mesmo nome referenciada no `ON CONFLICT`), mas uma ocorrência distinta, só alcançável
+pelo caminho de código do budget scope — por isso não foi pega pelo self-test do Passo 7, que não
+exercita `p_budget_scopes` não vazio.
+
+Aplica `supabase/migrations/20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix.sql`
+— substitui `reserve_gateway_usage_v1` via `CREATE OR REPLACE FUNCTION`, trocando
+`ON CONFLICT (reservation_id, budget_bucket_id)` por `ON CONFLICT ON CONSTRAINT
+uq_agrbl_reservation_bucket` (o nome real da constraint UNIQUE por trás desse índice — nunca inventado,
+nunca `#variable_conflict`, que mascararia a causa em vez de eliminá-la). Assinatura pública, tipo de
+retorno, todas as regras de quota/orçamento/dedupe/circuit breaker/reserva, ordem de lock,
+idempotência, `SECURITY DEFINER`, `search_path` e ownership preservados exatamente. Reafirma
+`REVOKE`/`GRANT` de privilégio na função. Auditoria completa (execução real, não só leitura) das
+outras 4 funções `RETURNS TABLE(...)` da Etapa 11 —
+`_gateway_audit_database_privileges_v1`, `begin_gateway_idempotent_op_v1`, `get_gateway_breaker_state_v1`,
+`record_gateway_breaker_outcome_v1` — confirmou que nenhuma compartilha essa ambiguidade. A própria
+migration roda um self-test funcional **dentro de uma transação com `p_budget_scopes` não vazio**
+(exatamente o caminho que antes falhava) antes do `COMMIT`, limpando os dados sintéticos do self-test
+antes de confirmar — se a ambiguidade não estiver realmente corrigida, a migration inteira falha e
+reverte, nunca fica em estado parcial.
+
+### Aplicar
+1. SQL Editor → New query.
+2. Cole `supabase/migrations/20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix.sql`
+   inteiro.
+3. Run.
+4. Esperado: uma mensagem `NOTICE` confirmando que o self-test com budget scope passou sem
+   ambiguidade e sem linhas residuais, e que a auditoria das outras 4 funções `RETURNS TABLE(...)`
+   não encontrou o mesmo padrão.
+5. Se vier `ERROR: VALIDATION FAILED: ...`, a transação reverteu automaticamente (nada foi
+   persistido) — pare, copie a mensagem de erro exata e reporte antes de tentar de novo.
+
+Só prossiga para o Passo 9 depois deste sucesso — sem esta migration aplicada, qualquer chamada a
+`reserve_gateway_usage_v1` com `p_budget_scopes` não vazio (Cenário 5, e qualquer uso real que
+associe a reserva a um orçamento) continua lançando "column reference \"reservation_id\" is
+ambiguous".
+
+---
+
+## PASSO 9 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
 
 Execução no **Primary Database** (não há projeto de staging/scratch separado neste momento) — a
 segurança vem do desenho do próprio script, não de isolar o projeto:
@@ -362,7 +423,13 @@ segurança vem do desenho do próprio script, não de isolar o projeto:
   `auth.users` antes de qualquer escrita, com abort automático se não existir.
 - Cenários 4 e 5 continuam exigindo duas conexões reais (a prova de concorrência depende de duas
   transações independentes correndo ao mesmo tempo — não cabe em um único `DO`), com limpeza
-  explícita própria (não há `ROLLBACK` os cobrindo).
+  explícita própria (não há `ROLLBACK` os cobrindo). Desde a homologação de 2026-07-18, os dois usam
+  um protocolo determinístico: a Sessão A abre uma transação, adquire `SELECT ... FOR UPDATE` na
+  mesma linha (bucket de quota no Cenário 4, bucket de orçamento no Cenário 5) que
+  `reserve_gateway_usage_v1` vai travar internamente, e segura essa trava por 25 segundos reais
+  (`SELECT pg_sleep(25)`) antes de chamar a função e dar `COMMIT` — isso garante que a Sessão B
+  bloqueia de verdade, não depende mais de disparar as duas "na mesma respiração" e torcer para os
+  timestamps se sobreporem.
 
 **Antes de tudo:**
 1. Crie um usuário descartável em Authentication → Add user, copie o UUID dele.
@@ -389,48 +456,64 @@ tabela, PASS ou FAIL, sempre.
 
 ### Cenários 4 e 5 — OBRIGATÓRIO duas abas reais (execução sequencial NÃO conta)
 
-Siga exatamente o protocolo "PROOF OF CONCURRENCY" já documentado no topo do arquivo (SETUP item 4).
-Passo a passo prático:
+Siga exatamente o protocolo determinístico "PROOF OF CONCURRENCY" já documentado no topo do arquivo
+(SETUP item 4). Passo a passo prático:
 
 1. Abra **duas abas separadas** do SQL Editor (não reutilize a mesma aba/conexão — isso serializa
    trivialmente e não prova nada).
-2. Rode o `INSERT` de setup do cenário (o que popula `ai_gateway_quota_buckets` no cenário 4, ou
-   `ai_gateway_budget_buckets` no cenário 5) em **qualquer uma** das duas abas, uma única vez.
-3. Na **Aba A**, cole o bloco `SESSION A` do cenário — **não rode ainda**.
-4. Na **Aba B**, cole o bloco `SESSION B` do mesmo cenário — **não rode ainda**.
+2. Rode o setup do cenário (os `INSERT`s que populam o bucket — no cenário 5, também a reserva e o
+   link pré-existentes que simulam os `$0.30` já reservados) em **qualquer uma** das duas abas, uma
+   única vez.
+3. Na **Aba A**, cole o bloco `SESSION A` inteiro do cenário — `BEGIN;`, o `SELECT ... FOR UPDATE`,
+   o `SELECT pg_sleep(25)`, a chamada a `reserve_gateway_usage_v1`, e o `COMMIT;` — **não rode ainda**.
+4. Na **Aba B**, cole o bloco `SESSION B` do mesmo cenário (uma única chamada a
+   `reserve_gateway_usage_v1`) — **não rode ainda**.
 5. Execute a Aba A.
-6. **Sem olhar o resultado da Aba A**, execute imediatamente a Aba B (a "mesma respiração" — não
-   espere o resultado de A aparecer na tela antes de disparar B).
-7. Só depois de ambas retornarem, leia os dois resultados e confira contra o `EXPECTED` do arquivo.
-8. Confirme sobreposição real de tempo: no Supabase Studio, cada resultado mostra "Query took Xms" —
-   anote o horário de início/fim de cada uma (ou rode `SELECT statement_timestamp();` em cada aba
-   logo antes do passo 5/6) e confirme que as janelas se sobrepõem. Se a Aba B começou claramente
-   depois que a Aba A já tinha terminado, isso foi sequencial, não concorrente — repita com timing
-   mais apertado antes de considerar o cenário válido.
+6. A qualquer momento **enquanto a Aba A ainda está rodando** (os 25 segundos de `pg_sleep` dão uma
+   margem folgada — não precisa mais ser instantâneo nem "na mesma respiração"), execute a Aba B.
+7. Confirme o bloqueio real: o tempo que a Aba B reporta (`Query took Xms` no Supabase Studio) deve
+   ficar próximo de quanto restava do `pg_sleep(25)` da Aba A quando você disparou B — nunca
+   quase-instantâneo. Só um tempo de espera não-trivial confirma que a Aba B ficou genuinamente presa
+   na trava de linha da Aba A.
+8. Só depois de ambas retornarem, leia os dois resultados e confira contra o `EXPECTED` do arquivo.
 9. Rode a query `SELECT reserved_quantity, committed_quantity FROM ai_gateway_quota_buckets ...`
    logo depois das duas SESSIONs (cenário 4) — ou `SELECT reserved_cost_usd FROM
-   ai_gateway_budget_buckets ...` (cenário 5) — para confirmar o estado final do bucket contra o
-   `EXPECTED` no comentário logo acima dela no arquivo.
+   ai_gateway_budget_buckets ...` e a query de `link_count`/`link_reserved_total` (cenário 5) — para
+   confirmar o estado final do bucket contra o `EXPECTED` no comentário logo acima de cada uma no
+   arquivo.
 10. Rode o `Cleanup` do cenário.
 
 **Resultado esperado do cenário 4:** exatamente uma das duas chamadas retorna `status='pending'`; a
 outra retorna `status='blocked', blocked_reason='QUOTA_EXCEEDED'`.
 **Resultado esperado do cenário 5:** exatamente uma das duas chamadas retorna `status='pending'`; a
-outra retorna `status='blocked', blocked_reason='BUDGET_EXCEEDED'`.
+outra retorna `status='blocked', blocked_reason='BUDGET_EXCEEDED'`. O bucket não faz backfill
+automático de `committed_cost_usd` (diferente do bucket de quota do Cenário 7) — os `$0.60` de
+committed e os `$0.30` previamente reservados do setup são inteiramente sintéticos, preparados à mão.
 
 Se qualquer cenário retornar `status='pending'` para **ambas** as chamadas, a claim de atomicidade
-daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 9, e reporte o resultado
+daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 10, e reporte o resultado
 real (inclusive se for uma falha).
+
+**Resultado real da homologação de 2026-07-18** (Primary Database, com as quatro migrations
+aplicadas): todos os 7 cenários PASS. Cenário 4 — limite=600s, committed=300, previamente
+reservado=250, duas tentativas concorrentes de 40s, exatamente uma pending e uma
+`QUOTA_EXCEEDED`, reserved final=290, contender_count=1. Cenário 5 — limite=USD 1.00, committed
+sintético=USD 0.60, previamente reservado=USD 0.30, duas tentativas concorrentes de USD 0.08,
+exatamente uma pending e uma `BUDGET_EXCEEDED`, reserved final=USD 0.38, contender_count=1,
+link_count=2, link_reserved_total=USD 0.38. Bloco A (Cenários 1/2/3/6/7) terminou com o `ROLLBACK`
+intencional e esperado, sem persistir dados — ver a seção SUMMARY em
+`ai-gateway-enforcement-concurrency.sql` para o texto completo.
 
 ---
 
-## PASSO 9 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
+## PASSO 10 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
 
-Eu não vou (e não posso, à distância) rodar os 7 cenários por você — a instrução do arquivo é
-explícita: `record_gateway_concurrency_validation_v1` só deve ser chamada **depois** que você
-observou pessoalmente os 7 resultados reais.
+Eu não rodei (e não posso, à distância) o `INSERT`/`SELECT` de registro por você — a instrução do
+arquivo é explícita: `record_gateway_concurrency_validation_v1` só deve ser chamada **depois** que
+você observou pessoalmente os 7 resultados reais. Ela **não foi executada remotamente** como parte
+desta atualização de documentação.
 
-Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omita uma falha):
+Com os 7 resultados reais já em mãos (passou ou falhou — registre a verdade, nunca omita uma falha):
 
 1. Recalcule o hash do arquivo **no estado em que ele está no seu disco agora** (não confie no valor
    fixo no topo deste runbook — ele pode ter mudado se o arquivo foi editado depois):
@@ -438,28 +521,42 @@ Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omi
    Get-FileHash supabase\manual-validation\ai-gateway-enforcement-concurrency.sql -Algorithm SHA256
    ```
    ou rode `npx tsx scripts/ai-gateway-enforce-preflight.ts | grep "validation script hash"`.
+   No momento desta homologação (2026-07-18), esse hash é
+   `122d4aa5442c24a88b35fce74e8e654f5da36d337e358ea7422915b754580bec`.
 
 2. No SQL Editor (mesma conexão service-role usada para aplicar a migration):
    ```sql
    SELECT public.record_gateway_concurrency_validation_v1(
-     '20260718020000_ai_gateway_enforcement_function_ambiguity_fix',
+     '20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix',
      'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',
-     '<cole aqui o hash do Passo 9.1>',
+     '<cole aqui o hash do Passo 10.1>',
      'passed',  -- ou 'failed' se qualquer cenário divergiu do EXPECTED
      '<seu nome/identificador técnico>',
-     'Rodei os 7 cenários em <data> contra o Primary Database. Cenários 1/2/3/6/7 via único DO+ROLLBACK. Cenários 4/5 confirmados com sobreposição real via timestamps de duas abas.'
+     'Rodei os 7 cenários em 2026-07-18 contra o Primary Database. Cenários 1/2/3/6/7 via único DO+ROLLBACK (rollback intencional e esperado, Bloco A nunca persistiu dados). Cenários 4/5 confirmados com bloqueio real via lock-hold determinístico de 25s (Sessão A) — não uma sobreposição de timing por sorte.'
    );
    ```
    Essa função é `REVOKE`d de `anon`/`authenticated` — só é alcançável com acesso direto
    service-role ao banco, nunca por uma rota HTTP da aplicação.
 
-3. Qualquer edição futura no arquivo `.sql` de validação (mesmo um byte) muda o hash e invalida essa
+3. Verifique com uma query de acompanhamento que existe exatamente um registro válido para essa
+   versão/hash:
+   ```sql
+   SELECT migration_version, validation_script_sha256, status, executed_at, executed_by, notes
+   FROM public.ai_gateway_concurrency_validations
+   WHERE migration_version = '20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix'
+     AND validation_script_sha256 = '122d4aa5442c24a88b35fce74e8e654f5da36d337e358ea7422915b754580bec'
+     AND status = 'passed'
+   ORDER BY executed_at DESC;
+   -- EXPECTED: exatamente 1 linha.
+   ```
+
+4. Qualquer edição futura no arquivo `.sql` de validação (mesmo um byte) muda o hash e invalida essa
    aprovação automaticamente — o preflight volta a reportar `concurrencyValidated=false` sem
    nenhum passo manual de "invalidar".
 
 ---
 
-## PASSO 10 — Depois da validação real: preflight e tabela das 25 features
+## PASSO 11 — Depois da validação real: preflight e tabela das 25 features
 
 Comando exato (requer `VITE_SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no `.env`, ambiente
 somente-leitura — o script nunca escreve):
@@ -482,8 +579,8 @@ privilégios (Passo 6, via `_gateway_audit_database_privileges_v1()`) — se ess
 qualquer privilégio residual de anon/authenticated, `infraDeployed=false` para toda feature e o
 blocker `unsafe_database_privileges` aparece separado de `infra_not_deployed` em `blockersUnit`/
 `blockersCost`, para nunca esconder qual das duas causas é a real. `concurrencyValidated` lido da
-tabela `ai_gateway_concurrency_validations` (Passo 9), comparado contra o `MIGRATION_VERSION` atual
-(`20260718020000_ai_gateway_enforcement_function_ambiguity_fix` — ver Passo 7).
+tabela `ai_gateway_concurrency_validations` (Passo 10), comparado contra o `MIGRATION_VERSION` atual
+(`20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix` — ver Passo 8).
 
 Resultados ainda aceitáveis nesta fase (não são defeitos):
 - Azure/TTS sem preço: `pricingReady=false` e `costEnforcementCodeReady` não bloqueado por isso —
@@ -494,6 +591,6 @@ Resultados ainda aceitáveis nesta fase (não são defeitos):
 
 Eu não tenho `SUPABASE_SERVICE_ROLE_KEY` neste ambiente de desenvolvimento — não consigo rodar este
 comando nem produzir a tabela final de 25 linhas agora. Depois que você aplicar a migration original
-(Passo 4), a correção de segurança (Passo 6), a correção de ambiguidade (Passo 7) e rodar os
-cenários (Passo 8/9), me envie a saída do comando acima (ou rode você mesmo e leia diretamente) e eu
-reviso/explico o resultado.
+(Passo 4), a correção de segurança (Passo 6), as duas correções de ambiguidade (Passos 7 e 8), rodar
+os cenários (Passo 9) e registrar a validação (Passo 10), me envie a saída do comando acima (ou rode
+você mesmo e leia diretamente) e eu reviso/explico o resultado.

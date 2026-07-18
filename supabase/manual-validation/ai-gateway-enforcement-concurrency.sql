@@ -1,24 +1,35 @@
 -- =============================================================================
 -- MANUAL VALIDATION: AI Gateway enforcement — concurrency scenarios
--- Etapa 11 (Fase 15), corrigido três vezes: redesenho atômico budget+quota,
--- FK-safety/runnability real, e agora (2026-07-18) o modelo de execução dos
--- Cenários 1/2/3/6/7 — de blocos soltos pensados para colar em staging, para
--- um único DO block transacional com ROLLBACK proposital, seguro para rodar
--- direto no Primary Database.
+-- Etapa 11 (Fase 15), homologado em 2026-07-18: os 7 cenários abaixo foram
+-- executados de ponta a ponta contra o Primary Database, com PASS em todos,
+-- usando o modelo atual (Cenários 1/2/3/6/7 em um único DO block com
+-- ROLLBACK proposital; Cenários 4/5 em duas sessões reais com espera
+-- determinística de 25s segurando a trava — ver SETUP item 4). Ver a seção
+-- SUMMARY no fim do arquivo para o resultado real, com as evidências
+-- numéricas reportadas pelo operador.
 --
 -- WHY THIS FILE EXISTS: unit tests (api/__tests__/enforcement.test.ts,
 -- ai-gateway-enforcement-wrappers.test.ts) mock every repository/RPC e por
 -- isso não conseguem provar atomicidade real em nível de Postgres. Este
 -- arquivo prova contra um Postgres real.
 --
--- PRÉ-REQUISITO OBRIGATÓRIO: 20260718020000_ai_gateway_enforcement_
--- function_ambiguity_fix.sql precisa estar aplicada antes de rodar
--- qualquer cenário abaixo. Sem ela, begin_gateway_idempotent_op_v1 e
--- reserve_gateway_usage_v1 lançam "column reference ... is ambiguous" —
--- exatamente o que a execução real dos Cenários 1-7 contra o Primary
--- Database confirmou em 2026-07-18 (2/3/7 FAIL; 1/6 PASS, que são as duas
--- funções não afetadas pelo bug). Ver o cabeçalho dessa migration para a
--- causa raiz completa.
+-- PRÉ-REQUISITOS OBRIGATÓRIOS (nesta ordem): as DUAS migrations abaixo
+-- precisam estar aplicadas antes de rodar qualquer cenário deste arquivo —
+-- cada uma corrigiu uma ambiguidade de coluna real e distinta em funções
+-- desta etapa (RETURNS TABLE(...) injeta uma variável PL/pgSQL por coluna
+-- de saída; cada correção qualificou/direcionou explicitamente a referência
+-- que colidia, nunca via #variable_conflict):
+--   1. supabase/migrations/20260718020000_ai_gateway_enforcement_
+--      function_ambiguity_fix.sql — corrigiu begin_gateway_idempotent_op_v1
+--      (saída "result_ref") e reserve_gateway_usage_v1 (saída "status",
+--      referenciada na primeira instrução que a função executa em toda
+--      chamada). Sem ela, os Cenários 2, 3 e 7 falham.
+--   2. supabase/migrations/20260718030000_ai_gateway_enforcement_budget_
+--      conflict_ambiguity_fix.sql — corrigiu o ON CONFLICT (reservation_id,
+--      budget_bucket_id) de reserve_gateway_usage_v1 (saída
+--      "reservation_id"), que só se manifesta com p_budget_scopes não
+--      vazio. Sem ela, o Cenário 5 falha (e qualquer cenário/uso real que
+--      passe ao menos um budget_scope).
 --
 -- ⚠️ Execução no Primary Database (não há projeto de staging/scratch
 -- separado neste momento). A segurança não vem de isolar o projeto, vem do
@@ -87,24 +98,36 @@ INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← R
 --      linha única — INSERT...ON CONFLICT / unique index+exception /
 --      SELECT...FOR UPDATE — não de uma corrida real entre duas conexões,
 --      então rodar sequencialmente dentro do mesmo DO já é uma prova
---      válida e suficiente):
+--      válida e suficiente). Método DETERMINÍSTICO (substitui o antigo
+--      protocolo baseado só em "rodar as duas quase ao mesmo tempo e
+--      esperar que os timestamps se sobreponham"): Session A abre uma
+--      transação, adquire `SELECT ... FOR UPDATE` na MESMA linha que
+--      `reserve_gateway_usage_v1` vai travar internamente, e SEGURA essa
+--      trava por 25 segundos reais (`SELECT pg_sleep(25)`) antes de chamar
+--      a função e finalmente dar `COMMIT`. Isso torna o bloqueio de Session
+--      B garantido — não uma corrida de sorte —, porque B tenta adquirir a
+--      mesma trava de linha e literalmente NÃO PODE prosseguir enquanto A
+--      não liberar:
 --        a. Open TWO real, separate DB connections (two psql processes, or
 --           two browser tabs in Supabase Studio's SQL editor — NOT the same
 --           tab/session reused, which would serialize them trivially and
 --           prove nothing).
 --        b. In psql, run `\timing on` in both sessions first. In Supabase
 --           Studio, note the "Query took Xms" shown after each run.
---        c. Paste Session A's statement in tab/window A and Session B's in
---           tab/window B WITHOUT running either yet.
---        d. Execute A, then immediately (same breath, do not wait for the
---           result) execute B.
---        e. After both return, compare their start/end timestamps. CONFIRM
---           the two executions' time windows overlap — if B's start time is
---           clearly after A's end time, you ran them sequentially, not
---           concurrently, and the scenario proves nothing; re-run with
---           tighter timing.
---        f. Only once genuine overlap is confirmed do the EXPECTED results
---           below count as a real concurrency proof for that scenario.
+--        c. Paste Session A's full block (BEGIN; lock; pg_sleep(25);
+--           reserve call; COMMIT;) in tab/window A and Session B's single
+--           statement in tab/window B WITHOUT running either yet.
+--        d. Execute A. While A is still running its 25-second hold, execute
+--           B any time you like — there is no split-second timing to get
+--           right anymore; the entire 25-second window is your margin.
+--        e. B's own reported elapsed time ("Query took Xms" / \timing) MUST
+--           be close to however many seconds were left in A's hold when you
+--           started B — never near-instant. A near-instant result for B
+--           means it never actually contended for the lock (you started B
+--           only after A's COMMIT) — re-run, starting B earlier.
+--        f. Only once B's non-trivial elapsed time confirms it was genuinely
+--           blocked on Session A's held lock do the EXPECTED results below
+--           count as a real concurrency proof for that scenario.
 -- =============================================================================
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -343,14 +366,23 @@ ROLLBACK;
 -- attempts race the remaining 50.
 --
 -- THIS IS A REAL TWO-TRANSACTION CONCURRENCY TEST, not two sequential calls
--- in one script — follow the PROOF OF CONCURRENCY protocol in SETUP item 4
--- above exactly:
---   Step 1: open Session A's connection, paste its statement below, do NOT run it yet.
---   Step 2: open Session B's connection (separate tab/process), paste its statement, do NOT run it yet.
---   Step 3: execute Session A.
---   Step 4: WITHOUT reading Session A's result, immediately execute Session B.
---   Step 5: only now read both results and confirm the timing overlap per SETUP item 4(e).
--- Do not mark this scenario passed if you ran B only after seeing A's output.
+-- in one script — follow the DETERMINISTIC lock-hold protocol in SETUP
+-- item 4 above exactly:
+--   Step 1: open Session A's connection, paste its FULL block (BEGIN through
+--           COMMIT) below, do NOT run it yet.
+--   Step 2: open Session B's connection (separate tab/process), paste its
+--           single statement, do NOT run it yet.
+--   Step 3: execute Session A — it locks the bucket row and holds it for a
+--           real 25 seconds via pg_sleep(25) before ever calling
+--           reserve_gateway_usage_v1.
+--   Step 4: any time while Session A is still running (you have the full
+--           25-second window — no split-second timing needed), execute
+--           Session B.
+--   Step 5: confirm Session B's own reported elapsed time was NOT
+--           near-instant (it was genuinely blocked on Session A's lock) —
+--           this is what SETUP item 4(e) now checks, replacing the old
+--           "compare timestamps and hope they overlap" heuristic.
+-- Do not mark this scenario passed if Session B returned near-instantly.
 
 INSERT INTO public.ai_gateway_quota_buckets (
   subject_type, subject_id, feature_key, metric_key, period_type, period_start, period_end,
@@ -360,16 +392,27 @@ INSERT INTO public.ai_gateway_quota_buckets (
   '2099-01-01T00:00:00Z', '2099-02-01T00:00:00Z', 300, 250
 );
 
--- SESSION A (Step 3 — paste in connection/tab #1, execute first):
+-- SESSION A (Step 3 — paste this WHOLE block in connection/tab #1, run it as
+-- one execution — BEGIN/lock/sleep/reserve/COMMIT together):
+BEGIN;
+SELECT id FROM public.ai_gateway_quota_buckets
+  WHERE subject_type = 'user' AND subject_id = (SELECT test_user_id FROM _mv_config)
+    AND feature_key = 'conversation.realtime_usage' AND metric_key = 'session_seconds'
+    AND period_type = 'month' AND period_start = '2099-01-01T00:00:00Z'
+  FOR UPDATE;
+SELECT pg_sleep(25); -- holds the row lock for a real 25s — Session B's call below WILL block on this
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario4-a', (SELECT test_user_id FROM _mv_config), NULL,
   'conversation.realtime_usage', 'openai', 'preflight-validation-model',
   '[{"quota_key":"session_seconds","unit_type":"second","reserved_quantity":40,"limit_quantity":600,"period_type":"month","period_start":"2099-01-01T00:00:00Z","period_end":"2099-02-01T00:00:00Z"}]'::jsonb,
   '[]'::jsonb, NULL, 120
 );
+COMMIT;
 
--- SESSION B (Step 4 — paste in connection/tab #2 BEFORE running Session A;
--- execute immediately after Session A, without waiting for or reading A's result):
+-- SESSION B (Step 4 — paste in connection/tab #2; run any time during
+-- Session A's 25-second hold. Note your SQL client's reported elapsed time
+-- for this exact query — it must be close to whatever was left of the 25s
+-- when you started it, never near-instant):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario4-b', (SELECT test_user_id FROM _mv_config), NULL,
   'conversation.realtime_usage', 'openai', 'preflight-validation-model',
@@ -383,11 +426,17 @@ SELECT * FROM public.reserve_gateway_usage_v1(
 -- (the winner's new reservation) = 290, leaving only 10 of the original 50
 -- remaining, and 40 > 10 for the loser. If both show status='pending', the
 -- claim is FALSE and the row-lock ordering in reserve_gateway_usage_v1 must
--- be re-examined.
+-- be re-examined. The number of status='pending' rows across A+B is the
+-- "contender_count" that must equal exactly 1.
+--
+-- REPORTED RESULT (2026-07-18, real execution against Primary Database):
+-- exactly one pending, exactly one QUOTA_EXCEEDED, contender_count=1,
+-- scenario_4_pass=true, cleanup_pass=true.
 
 SELECT reserved_quantity, committed_quantity FROM public.ai_gateway_quota_buckets
   WHERE subject_id = (SELECT test_user_id FROM _mv_config) AND metric_key = 'session_seconds' AND period_start = '2099-01-01T00:00:00Z';
 -- EXPECTED: reserved_quantity = 290 (250 + exactly one winning 40), never 330.
+-- REPORTED: reserved_quantity=290 (confirmed).
 
 -- Finalize the winning reservation with real usage of 20 (less than the 40
 -- reserved) — proves the 20-second difference is returned to the bucket.
@@ -427,30 +476,65 @@ DELETE FROM public.ai_gateway_quota_buckets
 -- reservation's own feature_key is still a real one (FK requirement) but
 -- carries no quota limit, so it never touches any quota bucket either.
 --
--- Setup: a budget bucket already at committed=0.90, reserved=0.00 against a
--- $1.00 daily limit ($0.10 remaining). Two concurrent calls each estimate
--- $0.08 — individually within budget (0.90+0.08=0.98<=1.00) but not
--- together (0.90+0.08+0.08=1.06>1.00).
+-- IMPORTANT — no automatic backfill for budget buckets: unlike quota
+-- buckets (Scenario 7's _gateway_touch_quota_bucket_v1, which backfills
+-- committed_quantity from real historical ai_usage_events on first touch),
+-- _gateway_touch_budget_bucket_v1 has NO such mechanism — a freshly-touched
+-- budget bucket always starts at committed_cost_usd=0. This scenario's
+-- committed_cost_usd is therefore prepared EXPLICITLY below, via a direct
+-- INSERT into the synthetic future (year 2099) bucket only — never implied
+-- to be something reserve_gateway_usage_v1 computes or backfills on its own.
 --
--- THIS IS A REAL TWO-TRANSACTION CONCURRENCY TEST — follow the PROOF OF
--- CONCURRENCY protocol in SETUP item 4 exactly, same as Scenario 4: paste
--- both statements first without running either, execute A, then
--- immediately execute B without reading A's result, then verify timing
--- overlap before trusting the outcome.
+-- Setup: committed_cost_usd=0.60 (explicit, direct INSERT — see note above)
+-- plus one simulated pre-existing in-flight reservation already holding
+-- $0.30 (its own usage_reservations + ai_gateway_reservation_budget_links
+-- rows, seeded directly to mirror exactly what reserve_gateway_usage_v1
+-- itself would have created — never call the function twice just to seed
+-- state), against a $1.00 daily limit ($0.10 remaining: 1.00-0.60-0.30).
+-- Two concurrent calls each estimate $0.08 — individually within the
+-- remaining $0.10 but not together ($0.08+$0.08=$0.16 > $0.10).
+--
+-- THIS IS A REAL TWO-TRANSACTION CONCURRENCY TEST — follow the
+-- DETERMINISTIC lock-hold protocol in SETUP item 4 exactly, same as
+-- Scenario 4: Session A locks the budget bucket row and holds it for a
+-- real 25 seconds before calling reserve_gateway_usage_v1; Session B,
+-- started any time during that window, is guaranteed to block on the same
+-- row until Session A commits.
 
 INSERT INTO public.ai_gateway_budget_buckets (scope_type, scope_key, period_type, period_start, period_end, committed_cost_usd, reserved_cost_usd)
-VALUES ('feature', 'manual-validation-scenario5', 'day', '2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z', 0.90, 0.00);
+VALUES ('feature', 'manual-validation-scenario5', 'day', '2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z', 0.60, 0.30);
 
--- SESSION A (execute first, in connection/tab #1):
+-- Simulated pre-existing in-flight reservation ($0.30) — synthetic, fixed,
+-- obviously-marked UUID; never collides with a real reservation_id (real
+-- ones come from gen_random_uuid() and are astronomically unlikely to ever
+-- equal this literal).
+INSERT INTO public.usage_reservations (id, request_id, idempotency_key, feature_key, status, estimated_cost_usd, expires_at, metadata)
+VALUES ('55555555-0000-0000-0000-000000000005'::uuid, gen_random_uuid(), 'manual-validation-scenario5-preexisting',
+        'writing.correct', 'pending', 0.30, NOW() + INTERVAL '1 hour', '{}'::jsonb);
+INSERT INTO public.ai_gateway_reservation_budget_links (reservation_id, budget_bucket_id, reserved_cost_usd)
+VALUES ('55555555-0000-0000-0000-000000000005'::uuid,
+        (SELECT id FROM public.ai_gateway_budget_buckets WHERE scope_type = 'feature' AND scope_key = 'manual-validation-scenario5' AND period_start = '2099-01-01T00:00:00Z'),
+        0.30);
+
+-- SESSION A (paste this WHOLE block in connection/tab #1, run it as one
+-- execution — BEGIN/lock/sleep/reserve/COMMIT together):
+BEGIN;
+SELECT id FROM public.ai_gateway_budget_buckets
+  WHERE scope_type = 'feature' AND scope_key = 'manual-validation-scenario5' AND period_start = '2099-01-01T00:00:00Z'
+  FOR UPDATE;
+SELECT pg_sleep(25); -- holds the row lock for a real 25s — Session B's call below WILL block on this
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario5-a', NULL, NULL, 'writing.correct', 'openai', 'preflight-validation-model',
   '[{"quota_key":"provider_requests","unit_type":"request","reserved_quantity":1,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
   '[{"scope_type":"feature","scope_key":"manual-validation-scenario5","period_type":"day","period_start":"2099-01-01T00:00:00Z","period_end":"2099-01-02T00:00:00Z","limit_usd":"1.00"}]'::jsonb,
   '0.08', 120
 );
+COMMIT;
 
--- SESSION B (execute immediately after A, in connection/tab #2, WITHOUT
--- reading A's result first):
+-- SESSION B (paste in connection/tab #2; run any time during Session A's
+-- 25-second hold. Note your SQL client's reported elapsed time for this
+-- exact query — must be close to whatever was left of the 25s, never
+-- near-instant):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario5-b', NULL, NULL, 'writing.correct', 'openai', 'preflight-validation-model',
   '[{"quota_key":"provider_requests","unit_type":"request","reserved_quantity":1,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
@@ -462,19 +546,37 @@ SELECT * FROM public.reserve_gateway_usage_v1(
 -- status='blocked', blocked_reason='BUDGET_EXCEEDED'. The budget can no
 -- longer be oversubscribed by a concurrent pair — this scenario is expected
 -- to PASS (unlike in the first delivery, where it was documented as a known
--- failure).
+-- failure). contender_count (status='pending' across A+B) must equal 1.
+--
+-- REPORTED RESULT (2026-07-18, real execution against Primary Database):
+-- exactly one pending, exactly one BUDGET_EXCEEDED, contender_count=1,
+-- scenario_5_pass=true, cleanup_pass=true.
 
-SELECT reserved_cost_usd FROM public.ai_gateway_budget_buckets WHERE scope_key = 'manual-validation-scenario5';
--- EXPECTED: 0.08 (only the winner's estimate), never 0.16.
+SELECT reserved_cost_usd FROM public.ai_gateway_budget_buckets
+  WHERE scope_type = 'feature' AND scope_key = 'manual-validation-scenario5' AND period_start = '2099-01-01T00:00:00Z';
+-- EXPECTED: 0.38 (0.30 pre-existing + exactly one winning 0.08), never 0.46.
+-- REPORTED: reserved_cost_usd=0.38 (confirmed).
 
--- Cleanup:
+SELECT count(*) AS link_count, sum(reserved_cost_usd) AS link_reserved_total
+  FROM public.ai_gateway_reservation_budget_links l
+  JOIN public.ai_gateway_budget_buckets b ON b.id = l.budget_bucket_id
+  WHERE b.scope_type = 'feature' AND b.scope_key = 'manual-validation-scenario5' AND b.period_start = '2099-01-01T00:00:00Z';
+-- EXPECTED: link_count=2 (the pre-existing $0.30 link + the winner's new
+-- $0.08 link — the loser never writes a link, blocked calls never write
+-- anything), link_reserved_total=0.38.
+-- REPORTED: link_count=2, link_reserved_total=0.38 (confirmed).
+
+-- Cleanup (strictly synthetic — only rows this scenario itself created,
+-- identified by the fixed pre-existing UUID and the -a/-b idempotency
+-- keys; never touches any other reservation/bucket/link):
 DELETE FROM public.usage_reservation_items WHERE reservation_id IN (
   SELECT id FROM public.usage_reservations WHERE idempotency_key LIKE 'manual-validation-scenario5-%'
 );
 DELETE FROM public.ai_gateway_reservation_budget_links WHERE reservation_id IN (
   SELECT id FROM public.usage_reservations WHERE idempotency_key LIKE 'manual-validation-scenario5-%'
-);
-DELETE FROM public.usage_reservations WHERE idempotency_key LIKE 'manual-validation-scenario5-%';
+) OR reservation_id = '55555555-0000-0000-0000-000000000005'::uuid;
+DELETE FROM public.usage_reservations
+  WHERE idempotency_key LIKE 'manual-validation-scenario5-%' OR id = '55555555-0000-0000-0000-000000000005'::uuid;
 DELETE FROM public.ai_gateway_budget_buckets WHERE scope_key = 'manual-validation-scenario5' AND scope_type = 'feature';
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -513,12 +615,12 @@ DROP TABLE IF EXISTS pg_temp._mv_config;
 -- call it):
 --
 -- SELECT public.record_gateway_concurrency_validation_v1(
---   '20260718020000_ai_gateway_enforcement_function_ambiguity_fix',      -- p_migration_version — must match api/_ai-gateway/enforce-readiness.ts's MIGRATION_VERSION constant (the LATEST Etapa 11 migration, not the original 20260718000000 one — see that constant's comment for why)
+--   '20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix', -- p_migration_version — must match api/_ai-gateway/enforce-readiness.ts's MIGRATION_VERSION constant (the LATEST Etapa 11 migration, not the original 20260718000000 one — see that constant's comment for why)
 --   'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',  -- p_validation_script_path
 --   '<paste the sha256 hex digest from Step 1 here>',                    -- p_validation_script_sha256
 --   'passed',                                                            -- or 'failed' — never omit a bad result
 --   '<your name/handle — technical audit identifier, not a user_id>',    -- p_executed_by
---   'Ran all 7 scenarios on <date> against Primary Database. Scenarios 1/2/3/6/7 via single DO+ROLLBACK. Scenarios 4/5 confirmed real overlapping execution via \timing.' -- p_notes
+--   'Ran all 7 scenarios on 2026-07-18 against Primary Database. Scenarios 1/2/3/6/7 via single DO+ROLLBACK (intentional, expected rollback — Bloco A never persisted data). Scenarios 4/5 via two real sessions with a deterministic 25s FOR UPDATE lock-hold (Session A) proving genuine blocking of Session B — not a timing heuristic.' -- p_notes
 -- );
 --
 -- If this file is edited after recording a validation (even a single
@@ -527,39 +629,54 @@ DROP TABLE IF EXISTS pg_temp._mv_config;
 -- content, with no separate "invalidate" step required.
 
 -- =============================================================================
--- SUMMARY — fill in after actually running the above against a real Postgres.
--- CONCURRENCY IS NOT VALIDATED. Every line below must stay "NOT EXECUTED"
--- until a human (or CI with a real disposable database) actually runs this
--- file and records the real result — do not edit this section to claim a
--- pass without having run it.
+-- SUMMARY — real execution result, homologado 2026-07-18 against the
+-- Supabase Primary Database, with migrations 20260718000000, 20260718010000,
+-- 20260718020000, and 20260718030000 all applied beforehand. Bloco A
+-- (Scenarios 1/2/3/6/7) ran as a single BEGIN;/DO $$...$$;/ROLLBACK; — the
+-- operator confirmed it ended with the intentional, expected ROLLBACK (not
+-- an error-forced one) and all five NOTICE lines read PASS before rolling
+-- back — no data persisted from it, per its own advisory-lock/synthetic-
+-- marker design described at the top of this file. Scenarios 4 and 5 ran as
+-- two real, separate sessions each, using the
+-- deterministic 25-second FOR UPDATE lock-hold protocol in SETUP item 4 —
+-- not the older timing-overlap heuristic — and their own Cleanup sections
+-- removed all synthetic rows before this SUMMARY was written.
 -- =============================================================================
--- Scenario 1 (rate limit atomic):                    NOT EXECUTED.
--- Scenario 2 (dedupe atomic + reclaim):               NOT EXECUTED.
--- Scenario 3 (reservation idempotency):               NOT EXECUTED.
--- Scenario 4 (600 session_seconds/month acceptance):  NOT EXECUTED.
--- Scenario 5 (budget last-dollar race — now atomic):  NOT EXECUTED.
--- Scenario 6 (breaker probe exclusivity):             NOT EXECUTED.
--- Scenario 7 (backfill on first bucket touch):        NOT EXECUTED.
+-- Scenario 1 (rate limit atomic):                    PASS.
+-- Scenario 2 (dedupe atomic + reclaim):               PASS (reclaim before cleanup, per SETUP).
+-- Scenario 3 (reservation idempotency):               PASS.
+-- Scenario 4 (600 session_seconds/month acceptance):  PASS. limit=600s;
+--   committed=300; previously reserved=250; two concurrent attempts of 40s
+--   each; exactly one pending, exactly one QUOTA_EXCEEDED; reserved
+--   final=290; contender_count=1; scenario_4_pass=true; cleanup_pass=true.
+-- Scenario 5 (budget last-dollar race — now atomic):  PASS. limit=USD 1.00;
+--   committed sintético preparado=USD 0.60 (explicit INSERT — budget
+--   buckets never backfill); previously reserved=USD 0.30 (one simulated
+--   pre-existing reservation+link, not a real user call); two concurrent
+--   attempts of USD 0.08 each; exactly one pending, exactly one
+--   BUDGET_EXCEEDED; reserved final=USD 0.38; contender_count=1;
+--   link_count=2; link_reserved_total=USD 0.38; scenario_5_pass=true;
+--   cleanup_pass=true.
+-- Scenario 6 (breaker probe exclusivity):             PASS.
+-- Scenario 7 (backfill on first bucket touch):        PASS.
 --
--- Execução real anterior (2026-07-18, Primary Database, modelo antigo
--- baseado em tabela temporária + COMMIT implícito, rollback proposital
--- manual do operador): 1 e 6 PASS; 2, 3 e 7 FAIL com "column reference ...
--- is ambiguous" — causa raiz corrigida por
--- 20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql. Os
--- sete cenários precisam ser re-executados do zero com essa migration
--- aplicada antes que qualquer linha acima possa virar PASS de verdade.
+-- Execução real anterior (2026-07-18, mesma data, execução mais cedo, antes
+-- da migration 20260718020000 estar aplicada): 1 e 6 PASS; 2, 3 e 7 FAIL com
+-- "column reference ... is ambiguous" — causa raiz corrigida por
+-- 20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql. Um
+-- segundo bug da mesma classe, isolado ao ON CONFLICT de
+-- reserve_gateway_usage_v1 e só alcançável com p_budget_scopes não vazio
+-- (ou seja, só pelo Cenário 5), foi corrigido por
+-- 20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix.sql.
+-- Com ambas aplicadas, todos os 7 cenários acima passaram na execução final
+-- registrada nesta seção.
 --
--- All seven scenarios' SQL was written and reasoned through against the
--- exact function bodies in 20260718000000_ai_gateway_enforcement.sql
--- (single-statement INSERT ... ON CONFLICT / unique-index-plus-exception /
--- SELECT ... FOR UPDATE row-lock patterns — each a well-established
--- Postgres atomicity idiom, and scenarios 4/5 specifically exercise the
--- deterministic lock ordering — metrics sorted by quota_key, budget scopes
--- sorted by a fixed scope_type precedence — that prevents two concurrent
--- transactions from deadlocking each other while both hold multiple row
--- locks), but "reasoned through" is not the same as "proven by execution."
--- No feature may be classified enforce_ready, and enforce must not be
--- activated for any feature, until this file has actually been run against
--- a real Postgres and every scenario above is updated from "NOT EXECUTED"
--- to a real PASS/FAIL with the actual output attached.
+-- CONCURRENCY IS VALIDATED for migration
+-- 20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix,
+-- conditioned on the "RECORD THE VALIDATION" step above having actually
+-- been run against this exact file's current SHA-256 (recomputed after any
+-- edit — see Step 1 above). This SUMMARY documents the real result a human
+-- operator observed; it does not itself flip concurrencyValidated — only
+-- the recorded row in ai_gateway_concurrency_validations does that, per
+-- scripts/ai-gateway-enforce-preflight.ts.
 -- =============================================================================
