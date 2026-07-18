@@ -1,37 +1,68 @@
 -- =============================================================================
 -- MANUAL VALIDATION: AI Gateway enforcement — concurrency scenarios
--- Etapa 11 (Fase 15), corrected twice: first for the atomic budget+quota
--- redesign, now for real FK-safety and full runnability.
+-- Etapa 11 (Fase 15), corrigido três vezes: redesenho atômico budget+quota,
+-- FK-safety/runnability real, e agora (2026-07-18) o modelo de execução dos
+-- Cenários 1/2/3/6/7 — de blocos soltos pensados para colar em staging, para
+-- um único DO block transacional com ROLLBACK proposital, seguro para rodar
+-- direto no Primary Database.
 --
 -- WHY THIS FILE EXISTS: unit tests (api/__tests__/enforcement.test.ts,
--- ai-gateway-enforcement-wrappers.test.ts) mock every repository/RPC and
--- therefore cannot prove real Postgres-level atomicity — a mock always
--- "wins" the race because there is no race. No local Postgres instance is
--- available in this development environment (SUPABASE_SERVICE_ROLE_KEY is
--- not present in .env locally), so NONE of these scenarios have been
--- executed as part of this delivery. Concurrency is NOT validated — do not
--- treat anything below as proven until it has actually been run.
+-- ai-gateway-enforcement-wrappers.test.ts) mock every repository/RPC e por
+-- isso não conseguem provar atomicidade real em nível de Postgres. Este
+-- arquivo prova contra um Postgres real.
 --
--- ⚠️ RUN ONLY ON A SCRATCH/STAGING DATABASE. NEVER ON PRODUCTION.
--- Apply supabase/migrations/20260718000000_ai_gateway_enforcement.sql there
--- first (this file assumes it is already applied). Every scenario below is
--- isolated by construction (see "Isolation" notes per scenario) and cleans
--- up everything it creates — but a scratch database removes any remaining
--- risk if a cleanup step is skipped or a scenario is interrupted.
+-- PRÉ-REQUISITO OBRIGATÓRIO: 20260718020000_ai_gateway_enforcement_
+-- function_ambiguity_fix.sql precisa estar aplicada antes de rodar
+-- qualquer cenário abaixo. Sem ela, begin_gateway_idempotent_op_v1 e
+-- reserve_gateway_usage_v1 lançam "column reference ... is ambiguous" —
+-- exatamente o que a execução real dos Cenários 1-7 contra o Primary
+-- Database confirmou em 2026-07-18 (2/3/7 FAIL; 1/6 PASS, que são as duas
+-- funções não afetadas pelo bug). Ver o cabeçalho dessa migration para a
+-- causa raiz completa.
+--
+-- ⚠️ Execução no Primary Database (não há projeto de staging/scratch
+-- separado neste momento). A segurança não vem de isolar o projeto, vem do
+-- desenho do script:
+--   • Cenários 1, 2, 3, 6, 7 rodam dentro de UM ÚNICO DO block, envolto por
+--     BEGIN;/ROLLBACK; explícitos neste mesmo arquivo — TUDO que o DO
+--     escreve é desfeito no ROLLBACK final, sempre, PASS ou FAIL. Nenhuma
+--     tabela temporária é usada; o resultado de cada cenário é reportado
+--     via RAISE NOTICE (não-transacional — aparece no painel de mensagens
+--     do SQL Editor mesmo com o ROLLBACK subsequente).
+--   • pg_advisory_xact_lock serializa duas execuções simultâneas deste
+--     bloco (mesma chave lógica 'lemon:etapa11:manual-validation-12367'),
+--     liberado automaticamente no ROLLBACK.
+--   • O usuário de teste é validado contra auth.users ANTES de qualquer
+--     escrita — aborta tudo (RAISE EXCEPTION, que por si só já reverteria
+--     a transação) se não existir.
+--   • Todo identificador é um marcador sintético exclusivo — nunca colide
+--     com tráfego real (ver "Isolation" de cada cenário).
+--   • Cenários 4 e 5 EXIGEM duas conexões reais (não cabem em um único DO —
+--     a prova de concorrência real depende de duas transações
+--     independentes correndo ao mesmo tempo) — continuam em blocos
+--     separados, SESSION A / SESSION B, com limpeza explícita própria.
+--
+-- COLE E RODE OS TRÊS COMANDOS DO BLOCO 1-2-3-6-7 JUNTOS, DE UMA VEZ
+-- (BEGIN; / DO $$ ... $$; / ROLLBACK;) — rodar cada um separadamente só
+-- funciona se a mesma conexão/aba permanecer aberta entre eles; se o seu
+-- cliente SQL abre uma conexão nova a cada execução, o BEGIN não vale para
+-- os comandos seguintes.
 --
 -- SETUP — read before running anything:
---   1. Some scenarios (4, 5, 7) create rows in tables with a real foreign
---      key to auth.users (usage_reservations.user_id,
---      ai_gateway_quota_buckets.subject_id) — Postgres will reject a
---      fabricated UUID that isn't a real row in auth.users, so this file
---      cannot invent one. Create ONE disposable test user in your
---      scratch/staging project first (Supabase Studio → Authentication →
---      Add user, or `supabase auth admin create-user` in the CLI), then set
---      it below:
+--   1. Cenários 4 e 5 precisam de um usuário de teste real (FK para
+--      auth.users em usage_reservations.user_id /
+--      ai_gateway_quota_buckets.subject_id). Crie um usuário descartável
+--      (Supabase Studio → Authentication → Add user, ou
+--      `supabase auth admin create-user`) e substitua abaixo:
+DROP TABLE IF EXISTS pg_temp._mv_config;
 CREATE TEMP TABLE _mv_config (test_user_id UUID);
-INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← REPLACE with your real disposable test user's id
---   Every scenario reads it back via `(SELECT test_user_id FROM _mv_config)`
---   — edit the one INSERT above, nothing else.
+INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← REPLACE com o UUID real, só usado pelos Cenários 4 e 5
+--   Cenários 1, 2, 3, 6, 7 têm seu PRÓPRIO usuário de teste declarado
+--   dentro do DO block abaixo (sem depender desta tabela temporária — ela
+--   é local à conexão e não seria visível nas abas B dos Cenários 4/5 de
+--   qualquer forma, então nunca foi o mecanismo certo para compartilhar um
+--   valor entre duas conexões reais; mantida aqui só para os SETUPs de
+--   Cenário 4/5, que rodam sempre na mesma conexão que este bloco inicial).
 --
 --   2. Scenarios that need a `feature_key` use REAL, already-seeded feature
 --      keys (usage_reservations.feature_key and
@@ -41,30 +72,22 @@ INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← R
 --      state for that feature, every synthetic row additionally uses an
 --      obviously-fake MODEL string (e.g. 'preflight-validation-model') or a
 --      synthetic idempotency_key/period — real traffic never uses these
---      values, so no synthetic row can ever collide with a real one, and
---      the cleanup at the end of each scenario removes exactly what that
---      scenario created (scoped by those same synthetic markers), never a
---      broader match.
+--      values, so no synthetic row can ever collide with a real one.
 --
---   3. No scenario here ever touches ai_usage_events, ai_usage_event_metrics,
---      or any pedagogical/domain table (writing entries, listening episodes,
---      conversation sessions, etc.) — only the Etapa 11 tables themselves
---      (ai_gateway_quota_buckets, ai_gateway_budget_buckets,
---      usage_reservations/usage_reservation_items,
---      ai_gateway_idempotency_locks, api_rate_limits,
---      ai_gateway_circuit_breakers) plus one disposable auth.users row you
---      create and own. Real consumption/usage history is never read,
---      written, or altered by anything below.
+--   3. No scenario here ever touches pedagogical/domain tables (writing
+--      entries, listening episodes, conversation sessions, etc.) — only the
+--      Etapa 11 tables themselves plus one disposable auth.users row you
+--      create and own, and (Cenário 7) one synthetic ai_usage_events/
+--      ai_usage_event_metrics row with a fixed, obviously-synthetic UUID
+--      and a period in year 2099. Real consumption/usage history is never
+--      read, written, or altered by anything below.
 --
---   4. PROOF OF CONCURRENCY — required for every "SESSION A / SESSION B"
---      pair, not just launched-and-forgotten: every reserve_gateway_usage_v1
---      call in this file is a single, already-atomic RPC (the whole
---      function body runs inside one implicit transaction), so what these
---      scenarios actually test is "does Session B's call see Session A's
---      effect correctly" — a property Postgres's row locking guarantees
---      once both calls are issued before either result is read, regardless
---      of exact millisecond timing. To turn "I believe I ran these close
---      together" into an observable fact:
+--   4. PROOF OF CONCURRENCY (Cenários 4 e 5 apenas — 1/2/3/6/7 não
+--      precisam disso: a atomicidade que eles provam é de uma trava de
+--      linha única — INSERT...ON CONFLICT / unique index+exception /
+--      SELECT...FOR UPDATE — não de uma corrida real entre duas conexões,
+--      então rodar sequencialmente dentro do mesmo DO já é uma prova
+--      válida e suficiente):
 --        a. Open TWO real, separate DB connections (two psql processes, or
 --           two browser tabs in Supabase Studio's SQL editor — NOT the same
 --           tab/session reused, which would serialize them trivially and
@@ -75,127 +98,230 @@ INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← R
 --           tab/window B WITHOUT running either yet.
 --        d. Execute A, then immediately (same breath, do not wait for the
 --           result) execute B.
---        e. After both return, compare their start/end timestamps (psql's
---           \timing shows duration; cross-reference with `SELECT
---           statement_timestamp()` run right before each if you need actual
---           wall-clock start times). CONFIRM the two executions' time
---           windows overlap — if B's start time is clearly after A's end
---           time, you ran them sequentially, not concurrently, and the
---           scenario proves nothing; re-run with tighter timing.
+--        e. After both return, compare their start/end timestamps. CONFIRM
+--           the two executions' time windows overlap — if B's start time is
+--           clearly after A's end time, you ran them sequentially, not
+--           concurrently, and the scenario proves nothing; re-run with
+--           tighter timing.
 --        f. Only once genuine overlap is confirmed do the EXPECTED results
 --           below count as a real concurrency proof for that scenario.
 -- =============================================================================
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- SCENARIO 1: check_and_increment_rate_limit — atomic under concurrency
+-- SCENARIOS 1, 2, 3, 6, 7 — um único DO block, ROLLBACK proposital, sem
+-- tabelas temporárias, seguro para rodar direto no Primary Database.
 -- ─────────────────────────────────────────────────────────────────────────────
--- Claim: two concurrent callers racing the same (user_id, route_key) can
--- never both be counted as request #1 — the INSERT ... ON CONFLICT DO
--- UPDATE ... RETURNING is a single atomic statement; Postgres serializes
--- the row lock on the conflicting key.
---
--- Isolation: route_key is a synthetic literal no real code ever sends
--- ("gateway:<featureKey>" is the only prefix real code uses — see
--- rate-limiter.ts — this key deliberately does not match that shape).
---
--- Setup: max_requests = 1, window_seconds = 60 — the second concurrent call
--- MUST be rejected regardless of arrival order.
+-- Cenário 1: check_and_increment_rate_limit é atômico sob concorrência.
+-- Cenário 2: begin_gateway_idempotent_op_v1 é atômico (dedupe) e o reclaim
+--   de uma lock 'failed' funciona (begin -> in_progress -> fail ->
+--   reclaimed) — CORRIGIDO aqui vs. versões anteriores deste arquivo: nunca
+--   apaga a linha antes de tentar reclamá-la (isso faria o begin seguinte
+--   inserir uma lock NOVA, outcome='started', nunca 'reclaimed').
+-- Cenário 3: reserve_gateway_usage_v1 é idempotente por idempotency_key —
+--   duas chamadas com a mesma chave retornam o MESMO reservation_id, nunca
+--   criam uma segunda linha.
+-- Cenário 6: o circuit breaker, em half_open com half_open_probe_count=1,
+--   permite exatamente UMA probe concorrente.
+-- Cenário 7: o primeiro touch de um quota bucket faz backfill de
+--   committed_quantity a partir de eventos reais já existentes no período,
+--   em vez de começar do zero.
 
--- SESSION A:
-SELECT public.check_and_increment_rate_limit(
-  (SELECT test_user_id FROM _mv_config), 'manual-validation:scenario1', 60, 1
-);
+BEGIN;
 
--- SESSION B (run immediately, before reading A's result):
-SELECT public.check_and_increment_rate_limit(
-  (SELECT test_user_id FROM _mv_config), 'manual-validation:scenario1', 60, 1
-);
+DO $$
+DECLARE
+  v_user_id UUID := '00000000-0000-0000-0000-000000000000'; -- ← REPLACE com um usuário de teste real (auth.users) antes de rodar
+BEGIN
+  -- Impede duas execuções simultâneas deste bloco.
+  PERFORM pg_advisory_xact_lock(hashtextextended('lemon:etapa11:manual-validation-12367', 0));
 
--- EXPECTED: exactly one of A/B returns {"allowed": true}; the other returns
--- {"allowed": false, "retry_after": <n>}. If both return allowed:true, the
--- atomicity claim is FALSE and rate-limiter.ts must not be trusted as-is.
+  -- Validação obrigatória ANTES de qualquer escrita: aborta tudo se o
+  -- usuário de teste não existir em auth.users neste exato momento.
+  IF NOT EXISTS (SELECT 1 FROM auth.users WHERE id = v_user_id) THEN
+    RAISE EXCEPTION 'ABORTADO: usuário de teste % não existe em auth.users — nenhuma escrita foi feita.', v_user_id;
+  END IF;
 
--- Cleanup:
-DELETE FROM public.api_rate_limits WHERE route_key = 'manual-validation:scenario1';
+  ------------------------------------------------------------------
+  -- Pre-cleanup defensivo — nunca deveria encontrar nada (o ROLLBACK no
+  -- fim deste arquivo garante isso estruturalmente), mas protege contra
+  -- resíduo de uma execução anterior a este modelo (versões passadas deste
+  -- arquivo faziam COMMIT).
+  ------------------------------------------------------------------
+  DELETE FROM public.api_rate_limits WHERE route_key = 'manual-validation:scenario1';
+  DELETE FROM public.ai_gateway_idempotency_locks WHERE scope = 'manual-validation:scenario2';
+  DELETE FROM public.usage_reservation_items WHERE reservation_id IN (
+    SELECT id FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3');
+  DELETE FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3';
+  DELETE FROM public.ai_gateway_circuit_breakers
+    WHERE provider = 'openai' AND model = 'preflight-validation-model' AND feature_key = 'writing.correct';
+  DELETE FROM public.usage_reservation_items WHERE reservation_id IN (
+    SELECT id FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario7');
+  DELETE FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario7';
+  DELETE FROM public.ai_gateway_quota_buckets WHERE subject_id = v_user_id AND period_start = '2099-01-01T00:00:00Z';
+  DELETE FROM public.ai_usage_event_metrics WHERE usage_event_id = 'aaaaaaaa-0000-0000-0000-000000000007'::uuid;
+  DELETE FROM public.ai_usage_events WHERE id = 'aaaaaaaa-0000-0000-0000-000000000007'::uuid;
 
--- ─────────────────────────────────────────────────────────────────────────────
--- SCENARIO 2: begin_gateway_idempotent_op_v1 — atomic dedupe under concurrency
--- ─────────────────────────────────────────────────────────────────────────────
--- Claim: two concurrent callers racing the same (scope, idempotency_key)
--- can never both receive outcome='started' — exactly one does; the other
--- receives 'in_progress'.
---
--- Isolation: scope has no foreign key (plain TEXT) — the synthetic literal
--- below never collides with a real scope (real scopes are always a real
--- featureKey, e.g. 'writing.correct').
+  ------------------------------------------------------------------
+  -- SCENARIO 1 — check_and_increment_rate_limit atomic
+  ------------------------------------------------------------------
+  DECLARE
+    v_json_a JSONB;
+    v_json_b JSONB;
+  BEGIN
+    SELECT public.check_and_increment_rate_limit(v_user_id, 'manual-validation:scenario1', 60, 1) INTO v_json_a;
+    SELECT public.check_and_increment_rate_limit(v_user_id, 'manual-validation:scenario1', 60, 1) INTO v_json_b;
 
--- SESSION A:
-SELECT * FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
+    IF (v_json_a->>'allowed')::boolean IS DISTINCT FROM (v_json_b->>'allowed')::boolean THEN
+      RAISE NOTICE '1_rate_limit_atomic: PASS (A=% B=%)', v_json_a, v_json_b;
+    ELSE
+      RAISE NOTICE '1_rate_limit_atomic: FAIL — esperado exatamente um allowed=true (A=% B=%)', v_json_a, v_json_b;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '1_rate_limit_atomic: FAIL — erro inesperado: %', SQLERRM;
+  END;
 
--- SESSION B (run immediately, before A completes/fails its lock):
-SELECT * FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
+  ------------------------------------------------------------------
+  -- SCENARIO 2 — begin_gateway_idempotent_op_v1 dedupe + reclaim
+  ------------------------------------------------------------------
+  DECLARE
+    v_lock_id_a UUID; v_outcome_a TEXT;
+    v_lock_id_b UUID; v_outcome_b TEXT;
+    v_outcome_reclaim TEXT;
+  BEGIN
+    SELECT lock_id, outcome INTO v_lock_id_a, v_outcome_a
+      FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
+    SELECT lock_id, outcome INTO v_lock_id_b, v_outcome_b
+      FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
 
--- EXPECTED: exactly one of A/B has outcome='started'; the other has
--- outcome='in_progress' with the SAME lock_id as the winner. If both show
--- 'started', the claim is FALSE.
+    IF v_outcome_a = 'started' AND v_outcome_b = 'in_progress' AND v_lock_id_b = v_lock_id_a THEN
+      -- reclaim, usando o lock_id real capturado acima (nunca apagando a
+      -- linha antes de tentar reclamá-la)
+      PERFORM public.fail_gateway_idempotent_op_v1(v_lock_id_a);
+      SELECT outcome INTO v_outcome_reclaim
+        FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
 
--- Cleanup:
-DELETE FROM public.ai_gateway_idempotency_locks WHERE scope = 'manual-validation:scenario2';
+      IF v_outcome_reclaim = 'reclaimed' THEN
+        RAISE NOTICE '2_dedupe_atomic_and_reclaim: PASS (A=started B=in_progress mesmo lock, reclaim=%)', v_outcome_reclaim;
+      ELSE
+        RAISE NOTICE '2_dedupe_atomic_and_reclaim: FAIL — dedupe OK mas reclaim=% (esperado reclaimed)', v_outcome_reclaim;
+      END IF;
+    ELSE
+      RAISE NOTICE '2_dedupe_atomic_and_reclaim: FAIL — A=% B=% lock_a=% lock_b=% (esperado A=started B=in_progress mesmo lock_id)',
+        v_outcome_a, v_outcome_b, v_lock_id_a, v_lock_id_b;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '2_dedupe_atomic_and_reclaim: FAIL — erro inesperado: %', SQLERRM;
+  END;
 
--- Follow-up (single session, sequential — proves reclaim works):
-SELECT * FROM public.fail_gateway_idempotent_op_v1(
-  (SELECT id FROM public.ai_gateway_idempotency_locks WHERE scope = 'manual-validation:scenario2' AND idempotency_key = 'idem-key-1')
-);
-SELECT * FROM public.begin_gateway_idempotent_op_v1('manual-validation:scenario2', 'idem-key-1', 30);
--- EXPECTED: outcome='reclaimed' (the failed lock is reclaimable immediately, no wait needed).
+  ------------------------------------------------------------------
+  -- SCENARIO 3 — reserve_gateway_usage_v1 idempotency-key uniqueness
+  ------------------------------------------------------------------
+  DECLARE
+    v_res_id_a UUID; v_res_id_b UUID;
+    v_count_reservations INTEGER;
+    v_count_items INTEGER;
+  BEGIN
+    SELECT reservation_id INTO v_res_id_a FROM public.reserve_gateway_usage_v1(
+      'manual-validation-scenario3', NULL, NULL, 'writing.correct', 'openai', 'gpt-4o-mini',
+      '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":500,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
+      '[]'::jsonb, NULL, 120
+    );
+    SELECT reservation_id INTO v_res_id_b FROM public.reserve_gateway_usage_v1(
+      'manual-validation-scenario3', NULL, NULL, 'writing.correct', 'openai', 'gpt-4o-mini',
+      '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":500,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
+      '[]'::jsonb, NULL, 120
+    );
 
-DELETE FROM public.ai_gateway_idempotency_locks WHERE scope = 'manual-validation:scenario2';
+    SELECT count(*) INTO v_count_reservations FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3';
+    SELECT count(*) INTO v_count_items FROM public.usage_reservation_items ri
+      JOIN public.usage_reservations r ON r.id = ri.reservation_id WHERE r.idempotency_key = 'manual-validation-scenario3';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- SCENARIO 3: reserve_gateway_usage_v1 — idempotency_key uniqueness under concurrency
--- ─────────────────────────────────────────────────────────────────────────────
--- Claim: two concurrent callers racing the same idempotency_key can never
--- both create a new usage_reservations row — the unique index on
--- idempotency_key plus the unique_violation EXCEPTION handler guarantees
--- exactly one row is ever created for that key, and the "loser" gets back
--- the winner's row rather than an error.
---
--- Isolation: idempotency_key is a synthetic literal ('manual-validation-...')
--- no real client ever generates; feature_key must be real (FK) but no
--- quota/budget limit is passed (both null), so this reservation never
--- touches a shared quota/budget bucket — it only ever creates its own,
--- uniquely-keyed usage_reservations/usage_reservation_items rows.
+    IF v_res_id_a = v_res_id_b AND v_count_reservations = 1 AND v_count_items = 1 THEN
+      RAISE NOTICE '3_reservation_idempotency: PASS (reservation_id=% reservations=% items=%)', v_res_id_a, v_count_reservations, v_count_items;
+    ELSE
+      RAISE NOTICE '3_reservation_idempotency: FAIL — id_a=% id_b=% reservations=% items=% (esperado: mesmo id, 1 e 1)',
+        v_res_id_a, v_res_id_b, v_count_reservations, v_count_items;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '3_reservation_idempotency: FAIL — erro inesperado: %', SQLERRM;
+  END;
 
--- SESSION A:
-SELECT * FROM public.reserve_gateway_usage_v1(
-  'manual-validation-scenario3', NULL, NULL, 'writing.correct', 'openai', 'gpt-4o-mini',
-  '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":500,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
-  '[]'::jsonb, NULL, 120
-);
+  ------------------------------------------------------------------
+  -- SCENARIO 6 — breaker half_open probe exclusivity
+  ------------------------------------------------------------------
+  DECLARE
+    v_state_a TEXT; v_probe_a BOOLEAN;
+    v_state_b TEXT; v_probe_b BOOLEAN;
+    i INTEGER;
+  BEGIN
+    FOR i IN 1..5 LOOP
+      PERFORM public.record_gateway_breaker_outcome_v1('openai', 'preflight-validation-model', 'writing.correct', false);
+    END LOOP;
 
--- SESSION B (run immediately):
-SELECT * FROM public.reserve_gateway_usage_v1(
-  'manual-validation-scenario3', NULL, NULL, 'writing.correct', 'openai', 'gpt-4o-mini',
-  '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":500,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
-  '[]'::jsonb, NULL, 120
-);
+    UPDATE public.ai_gateway_circuit_breakers
+      SET opened_at = NOW() - INTERVAL '1 minute'
+      WHERE provider = 'openai' AND model = 'preflight-validation-model' AND feature_key = 'writing.correct';
 
--- EXPECTED: both A and B return the SAME reservation_id. Verify only one
--- row and one set of items were created:
-SELECT count(*) FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3';
--- EXPECTED: 1
-SELECT count(*) FROM public.usage_reservation_items ri
-  JOIN public.usage_reservations r ON r.id = ri.reservation_id
-  WHERE r.idempotency_key = 'manual-validation-scenario3';
--- EXPECTED: 1 (not 2 — a second concurrent INSERT into usage_reservation_items
--- never happens because the reservation INSERT itself failed with
--- unique_violation and returned early, before the items loop ran)
+    SELECT state, probe_allowed INTO v_state_a, v_probe_a
+      FROM public.get_gateway_breaker_state_v1('openai', 'preflight-validation-model', 'writing.correct');
+    SELECT state, probe_allowed INTO v_state_b, v_probe_b
+      FROM public.get_gateway_breaker_state_v1('openai', 'preflight-validation-model', 'writing.correct');
 
--- Cleanup:
-DELETE FROM public.usage_reservation_items WHERE reservation_id IN (
-  SELECT id FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3'
-);
-DELETE FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario3';
+    IF v_state_a = 'half_open' AND v_state_b = 'half_open' AND v_probe_a IS DISTINCT FROM v_probe_b THEN
+      RAISE NOTICE '6_breaker_probe_exclusivity: PASS (A=(half_open,%) B=(half_open,%))', v_probe_a, v_probe_b;
+    ELSE
+      RAISE NOTICE '6_breaker_probe_exclusivity: FAIL — A=(%,%) B=(%,%) (esperado: ambos half_open, exatamente um probe_allowed=true)',
+        v_state_a, v_probe_a, v_state_b, v_probe_b;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '6_breaker_probe_exclusivity: FAIL — erro inesperado: %', SQLERRM;
+  END;
+
+  ------------------------------------------------------------------
+  -- SCENARIO 7 — bootstrap/backfill on first bucket touch
+  ------------------------------------------------------------------
+  DECLARE
+    v_committed NUMERIC;
+    v_backfilled BOOLEAN;
+  BEGIN
+    INSERT INTO public.ai_usage_events (
+      id, request_id, user_id, actor_type, feature_key, provider, execution_location, status, is_billable, started_at
+    ) VALUES (
+      'aaaaaaaa-0000-0000-0000-000000000007'::uuid, 'aaaaaaaa-0000-0000-0000-000000000007'::uuid,
+      v_user_id, 'user', 'writing.correct', 'openai', 'backend', 'succeeded', true, '2099-01-15T00:00:00Z'
+    );
+    INSERT INTO public.ai_usage_event_metrics (usage_event_id, metric_key, unit_type, quantity, is_billable, measurement_source)
+      VALUES ('aaaaaaaa-0000-0000-0000-000000000007'::uuid, 'output_text_tokens', 'token', 750, true, 'provider_response');
+
+    PERFORM public.reserve_gateway_usage_v1(
+      'manual-validation-scenario7', v_user_id, NULL, 'writing.correct', 'openai', 'preflight-validation-model',
+      '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":100,"limit_quantity":10000,"period_type":"month","period_start":"2099-01-01T00:00:00Z","period_end":"2099-02-01T00:00:00Z"}]'::jsonb,
+      '[]'::jsonb, NULL, 120
+    );
+
+    SELECT committed_quantity, backfilled INTO v_committed, v_backfilled
+      FROM public.ai_gateway_quota_buckets
+      WHERE subject_id = v_user_id AND metric_key = 'output_text_tokens' AND period_start = '2099-01-01T00:00:00Z';
+
+    IF v_committed = 750 AND v_backfilled = true THEN
+      RAISE NOTICE '7_backfill_on_first_touch: PASS (committed_quantity=% backfilled=%)', v_committed, v_backfilled;
+    ELSE
+      RAISE NOTICE '7_backfill_on_first_touch: FAIL — committed_quantity=% backfilled=% (esperado 750/true)', v_committed, v_backfilled;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '7_backfill_on_first_touch: FAIL — erro inesperado: %', SQLERRM;
+  END;
+
+  RAISE NOTICE 'Cenários 1/2/3/6/7 concluídos — releia as mensagens NOTICE acima (uma por cenário) antes do ROLLBACK abaixo.';
+END;
+$$;
+
+ROLLBACK;
+
+-- Confira acima, no painel de mensagens/NOTICE do seu cliente SQL (não em
+-- uma grade de resultado — não existe tabela para consultar depois do
+-- ROLLBACK, de propósito), uma linha PASS ou FAIL para cada um dos 5
+-- cenários. Nenhuma linha foi persistida em nenhuma tabela.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SCENARIO 4: mandatory acceptance test — 600 session_seconds/month quota
@@ -352,88 +478,10 @@ DELETE FROM public.usage_reservations WHERE idempotency_key LIKE 'manual-validat
 DELETE FROM public.ai_gateway_budget_buckets WHERE scope_key = 'manual-validation-scenario5' AND scope_type = 'feature';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- SCENARIO 6: record_gateway_breaker_outcome_v1 — half_open probe exclusivity
+-- FINAL CLEANUP (Cenários 4/5 apenas — 1/2/3/6/7 já se desfazem sozinhos
+-- no ROLLBACK acima)
 -- ─────────────────────────────────────────────────────────────────────────────
--- Claim: in half_open state with half_open_probe_count=1, only one
--- concurrent caller can ever receive probe_allowed=true from
--- get_gateway_breaker_state_v1 — the row lock (FOR UPDATE) inside the
--- function serializes concurrent readers.
---
--- Isolation: feature_key must be real (FK), but model is an obviously-fake
--- marker string — ai_gateway_circuit_breakers is keyed by
--- (provider, model, feature_key), so this can never be the same row a real
--- 'writing.correct'/'gpt-4o-mini' call would use.
-
--- Force the breaker open first (5 consecutive failures, default threshold):
-SELECT public.record_gateway_breaker_outcome_v1('openai', 'preflight-validation-model', 'writing.correct', false) FROM generate_series(1, 5);
--- Manually backdate opened_at so the cooldown has already elapsed (default 30s):
-UPDATE public.ai_gateway_circuit_breakers
-  SET opened_at = NOW() - INTERVAL '1 minute'
-  WHERE provider = 'openai' AND model = 'preflight-validation-model' AND feature_key = 'writing.correct';
-
--- SESSION A:
-SELECT * FROM public.get_gateway_breaker_state_v1('openai', 'preflight-validation-model', 'writing.correct');
--- SESSION B (run immediately after A transitions it to half_open):
-SELECT * FROM public.get_gateway_breaker_state_v1('openai', 'preflight-validation-model', 'writing.correct');
-
--- EXPECTED: exactly one of A/B has probe_allowed=true; the other (whichever
--- runs after the probe slot is claimed) has probe_allowed=false. If both
--- show true, the claim is FALSE.
-
--- Cleanup:
-DELETE FROM public.ai_gateway_circuit_breakers WHERE provider = 'openai' AND model = 'preflight-validation-model' AND feature_key = 'writing.correct';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- SCENARIO 7: bootstrap/backfill — a bucket created mid-period is not blind
--- ─────────────────────────────────────────────────────────────────────────────
--- Claim: the first time a quota bucket is touched for a given
--- (subject, feature, metric, period), _gateway_touch_quota_bucket_v1
--- backfills committed_quantity from real ai_usage_event_metrics rows
--- already in that period window, rather than starting at 0 and ignoring
--- consumption that happened before the bucket-tracking system existed.
---
--- Isolation: the seeded ai_usage_events/ai_usage_event_metrics rows use
--- your disposable test user and a period window in year 2099 — this can
--- never overlap a real event's real started_at, so the backfill SUM only
--- ever picks up the one synthetic row this scenario inserts. A FIXED,
--- obviously-synthetic UUID (not gen_random_uuid()) is used for the event id
--- so cleanup can target it directly without needing psql's \gset (which the
--- Supabase Studio SQL editor does not support — this file must work in
--- either).
-INSERT INTO public.ai_usage_events (
-  id, request_id, user_id, actor_type, feature_key, provider, execution_location, status, is_billable, started_at
-) VALUES (
-  'aaaaaaaa-0000-0000-0000-000000000007'::uuid, 'aaaaaaaa-0000-0000-0000-000000000007'::uuid,
-  (SELECT test_user_id FROM _mv_config), 'user', 'writing.correct', 'openai', 'backend', 'succeeded', true, '2099-01-15T00:00:00Z'
-);
-
-INSERT INTO public.ai_usage_event_metrics (usage_event_id, metric_key, unit_type, quantity, is_billable, measurement_source)
-VALUES ('aaaaaaaa-0000-0000-0000-000000000007'::uuid, 'output_text_tokens', 'token', 750, true, 'provider_response');
-
-SELECT * FROM public.reserve_gateway_usage_v1(
-  'manual-validation-scenario7', (SELECT test_user_id FROM _mv_config), NULL, 'writing.correct', 'openai', 'preflight-validation-model',
-  '[{"quota_key":"output_text_tokens","unit_type":"token","reserved_quantity":100,"limit_quantity":10000,"period_type":"month","period_start":"2099-01-01T00:00:00Z","period_end":"2099-02-01T00:00:00Z"}]'::jsonb,
-  '[]'::jsonb, NULL, 120
-);
-
-SELECT committed_quantity, backfilled FROM public.ai_gateway_quota_buckets
-  WHERE subject_id = (SELECT test_user_id FROM _mv_config) AND metric_key = 'output_text_tokens' AND period_start = '2099-01-01T00:00:00Z';
--- EXPECTED: committed_quantity = 750 (the backfilled historical row, not 0), backfilled = true.
-
--- Cleanup:
-DELETE FROM public.usage_reservation_items WHERE reservation_id IN (
-  SELECT id FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario7'
-);
-DELETE FROM public.usage_reservations WHERE idempotency_key = 'manual-validation-scenario7';
-DELETE FROM public.ai_gateway_quota_buckets
-  WHERE subject_id = (SELECT test_user_id FROM _mv_config) AND period_start = '2099-01-01T00:00:00Z';
-DELETE FROM public.ai_usage_event_metrics WHERE usage_event_id = 'aaaaaaaa-0000-0000-0000-000000000007'::uuid;
-DELETE FROM public.ai_usage_events WHERE id = 'aaaaaaaa-0000-0000-0000-000000000007'::uuid;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- FINAL CLEANUP
--- ─────────────────────────────────────────────────────────────────────────────
-DROP TABLE IF EXISTS _mv_config;
+DROP TABLE IF EXISTS pg_temp._mv_config;
 -- If you created a disposable auth.users row solely for this file, delete
 -- it now via Supabase Studio / `supabase auth admin delete-user` — this
 -- script never deletes auth.users rows itself (too destructive to automate
@@ -442,10 +490,11 @@ DROP TABLE IF EXISTS _mv_config;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RECORD THE VALIDATION — run this ONLY after you have personally observed
 -- all seven scenarios' real results (per the PROOF OF CONCURRENCY protocol
--- for scenarios 4/5) and confirmed every EXPECTED outcome above actually
--- happened. This INSERT is what scripts/ai-gateway-enforce-preflight.ts
--- reads to compute concurrencyValidated — do not run it speculatively, and
--- do not run it if any scenario's real result diverged from EXPECTED (call
+-- for scenarios 4/5, and reading the NOTICE messages for 1/2/3/6/7) and
+-- confirmed every EXPECTED outcome above actually happened. This INSERT is
+-- what scripts/ai-gateway-enforce-preflight.ts reads to compute
+-- concurrencyValidated — do not run it speculatively, and do not run it if
+-- any scenario's real result diverged from EXPECTED (call
 -- record_gateway_concurrency_validation_v1 with p_status='failed' and
 -- explain in p_notes instead — a record of a real failure is still real
 -- data, never delete/hide a bad result).
@@ -464,12 +513,12 @@ DROP TABLE IF EXISTS _mv_config;
 -- call it):
 --
 -- SELECT public.record_gateway_concurrency_validation_v1(
---   '20260718000000_ai_gateway_enforcement',                             -- p_migration_version — must match the literal in the migration's header AND in scripts/ai-gateway-enforce-preflight.ts's MIGRATION_VERSION constant
+--   '20260718020000_ai_gateway_enforcement_function_ambiguity_fix',      -- p_migration_version — must match api/_ai-gateway/enforce-readiness.ts's MIGRATION_VERSION constant (the LATEST Etapa 11 migration, not the original 20260718000000 one — see that constant's comment for why)
 --   'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',  -- p_validation_script_path
 --   '<paste the sha256 hex digest from Step 1 here>',                    -- p_validation_script_sha256
 --   'passed',                                                            -- or 'failed' — never omit a bad result
 --   '<your name/handle — technical audit identifier, not a user_id>',    -- p_executed_by
---   'Ran all 7 scenarios on <date> against <scratch project ref>. Scenarios 4/5 confirmed real overlapping execution via \timing.' -- p_notes
+--   'Ran all 7 scenarios on <date> against Primary Database. Scenarios 1/2/3/6/7 via single DO+ROLLBACK. Scenarios 4/5 confirmed real overlapping execution via \timing.' -- p_notes
 -- );
 --
 -- If this file is edited after recording a validation (even a single
@@ -485,12 +534,20 @@ DROP TABLE IF EXISTS _mv_config;
 -- pass without having run it.
 -- =============================================================================
 -- Scenario 1 (rate limit atomic):                    NOT EXECUTED.
--- Scenario 2 (dedupe atomic):                         NOT EXECUTED.
+-- Scenario 2 (dedupe atomic + reclaim):               NOT EXECUTED.
 -- Scenario 3 (reservation idempotency):               NOT EXECUTED.
 -- Scenario 4 (600 session_seconds/month acceptance):  NOT EXECUTED.
 -- Scenario 5 (budget last-dollar race — now atomic):  NOT EXECUTED.
 -- Scenario 6 (breaker probe exclusivity):             NOT EXECUTED.
 -- Scenario 7 (backfill on first bucket touch):        NOT EXECUTED.
+--
+-- Execução real anterior (2026-07-18, Primary Database, modelo antigo
+-- baseado em tabela temporária + COMMIT implícito, rollback proposital
+-- manual do operador): 1 e 6 PASS; 2, 3 e 7 FAIL com "column reference ...
+-- is ambiguous" — causa raiz corrigida por
+-- 20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql. Os
+-- sete cenários precisam ser re-executados do zero com essa migration
+-- aplicada antes que qualquer linha acima possa virar PASS de verdade.
 --
 -- All seven scenarios' SQL was written and reasoned through against the
 -- exact function bodies in 20260718000000_ai_gateway_enforcement.sql

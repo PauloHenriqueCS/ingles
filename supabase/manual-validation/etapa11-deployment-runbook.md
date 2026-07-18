@@ -256,7 +256,8 @@ encontrou dois gaps reais que 5a–5g sozinhos não pegam:
   prático, mas o Supabase security advisor sinaliza EXECUTE concedido a anon/authenticated nas
   duas, expostas em `/rest/v1/rpc/<nome>`).
 
-Por isso o Passo 6 abaixo é obrigatório antes de seguir para os cenários de concorrência (Passo 7).
+Por isso o Passo 6 abaixo é obrigatório antes de seguir para a correção de ambiguidade (Passo 7) e os
+cenários de concorrência (Passo 8).
 
 ---
 
@@ -303,26 +304,88 @@ Só prossiga para o Passo 7 depois que este postcheck vier limpo.
 
 ---
 
-## PASSO 7 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
+## PASSO 7 — Migration corretiva de ambiguidade de colunas (OBRIGATÓRIA antes do Passo 8)
 
-⚠️ **Rode isto só em um projeto de staging/scratch, nunca em produção**, mesmo que a migration em
-si seja segura — os cenários criam e apagam linhas reais (ainda que sintéticas/isoladas) nas tabelas
-novas.
+Execução real dos 7 cenários contra o Primary Database em 2026-07-18 (rollback proposital, nenhum
+dado persistido) encontrou:
+- `1_rate_limit_atomic` PASS
+- `6_breaker_probe_exclusivity` PASS
+- `2_dedupe_atomic_and_reclaim` FAIL — `column reference "result_ref" is ambiguous`
+- `3_reservation_idempotency` FAIL — `column reference "status" is ambiguous`
+- `7_backfill_on_first_touch` FAIL — `column reference "status" is ambiguous`
+
+Causa: `RETURNS TABLE(...)` injeta uma variável PL/pgSQL por coluna de saída; `begin_gateway_idempotent_op_v1`
+(saída `result_ref`) e `reserve_gateway_usage_v1` (saída `status`, referenciada na PRIMEIRA instrução
+que a função executa em toda chamada — por isso quebrou tanto o Cenário 3, que a chama duas vezes,
+quanto o Cenário 7, que a chama uma vez só) referenciavam essas mesmas colunas sem qualificação em
+algumas consultas embutidas. Auditoria linha a linha das 18 funções da Etapa 11 confirmou que só
+estas duas são afetadas — as outras 16 (incluindo as duas por trás dos Cenários 1 e 6, que passaram)
+só tocam a coluna colidente via `SELECT *`/`RETURNING *` ou `record.campo`, nunca de forma nua.
+
+Aplica `supabase/migrations/20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql` —
+substitui as DUAS funções afetadas via `CREATE OR REPLACE FUNCTION`, qualificando as colunas
+ambíguas com alias de tabela (nunca `#variable_conflict`, que mascararia a causa em vez de eliminá-la).
+Assinatura pública, tipo de retorno, comportamento, `SECURITY DEFINER`, `search_path` e ownership
+preservados exatamente — nenhuma regra de quota, orçamento, dedupe, circuit breaker ou reserva muda.
+Reafirma `REVOKE`/`GRANT` de privilégio nas duas funções. A própria migration roda um self-test
+funcional (begin → in_progress → fail → reclaimed, e duas chamadas `reserve_gateway_usage_v1` com a
+mesma `idempotency_key`) **antes do COMMIT** — se a ambiguidade não estiver realmente corrigida, a
+migration inteira falha e reverte, nunca fica em estado parcial.
+
+### Aplicar
+1. SQL Editor → New query.
+2. Cole `supabase/migrations/20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql` inteiro.
+3. Run.
+4. Esperado: `NOTICE: VALIDATION PASSED: begin_gateway_idempotent_op_v1 and reserve_gateway_usage_v1
+   replaced with qualified column references; begin->in_progress->fail->reclaimed and reserve
+   idempotent-retry self-tests both passed with zero ambiguity and zero residual rows; ...`
+5. Se vier `ERROR: VALIDATION FAILED: ...`, a transação reverteu automaticamente (nada foi
+   persistido) — pare, copie a mensagem de erro exata e reporte antes de tentar de novo.
+
+Só prossiga para o Passo 8 depois deste sucesso — sem esta migration aplicada,
+`begin_gateway_idempotent_op_v1` e `reserve_gateway_usage_v1` continuam lançando "column reference
+... is ambiguous" para qualquer chamador, incluindo os Cenários 2, 3, 4, 5 e 7.
+
+---
+
+## PASSO 8 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
+
+Execução no **Primary Database** (não há projeto de staging/scratch separado neste momento) — a
+segurança vem do desenho do próprio script, não de isolar o projeto:
+- Marcadores sintéticos exclusivos em todo identificador, período sempre no ano 2099 — nunca colide
+  com tráfego real.
+- Cenários 1, 2, 3, 6 e 7 rodam dentro de um único `DO` block, envolto por `BEGIN;`/`ROLLBACK;`
+  explícitos no próprio arquivo — tudo que o `DO` escreve é desfeito no `ROLLBACK` final, sempre,
+  PASS ou FAIL, sem depender de limpeza manual linha a linha. Sem tabela temporária: cada resultado é
+  reportado via `RAISE NOTICE` (não-transacional — aparece mesmo com o `ROLLBACK` subsequente).
+  `pg_advisory_xact_lock` impede duas execuções simultâneas. O usuário de teste é validado contra
+  `auth.users` antes de qualquer escrita, com abort automático se não existir.
+- Cenários 4 e 5 continuam exigindo duas conexões reais (a prova de concorrência depende de duas
+  transações independentes correndo ao mesmo tempo — não cabe em um único `DO`), com limpeza
+  explícita própria (não há `ROLLBACK` os cobrindo).
 
 **Antes de tudo:**
-1. Crie um usuário descartável em Authentication → Add user (staging), copie o UUID dele.
-2. Abra `supabase/manual-validation/ai-gateway-enforcement-concurrency.sql`, edite a linha 32
-   (`INSERT INTO _mv_config VALUES ('00000000-...')`) com esse UUID real.
-3. Cole o arquivo inteiro numa aba do SQL Editor — mas **não rode tudo de uma vez**: os cenários 4 e
-   5 exigem duas abas/conexões separadas para a parte de concorrência real.
+1. Crie um usuário descartável em Authentication → Add user, copie o UUID dele.
+2. Abra `supabase/manual-validation/ai-gateway-enforcement-concurrency.sql` e substitua o UUID
+   placeholder em DOIS lugares (busque `00000000-0000-0000-0000-000000000000` — cada ocorrência tem
+   um comentário `← REPLACE` do lado): a linha `INSERT INTO _mv_config VALUES (...)` perto do topo
+   (usada só pelos Cenários 4 e 5) e a linha `v_user_id UUID := ...` dentro do `DO $$` da seção dos
+   Cenários 1/2/3/6/7 (independente de `_mv_config` — não dá para compartilhar uma tabela temporária
+   entre as duas abas separadas que os Cenários 4/5 vão precisar, então essa seção nunca dependeu
+   dela).
+3. Não precisa editar mais nada além desses dois UUIDs.
 
-### Cenários 1, 2, 3, 6, 7 — sequenciais, uma aba só
+### Cenários 1, 2, 3, 6, 7 — um único `DO` block, `BEGIN;`/`ROLLBACK;` explícitos
 
-Cada um já tem SESSION A / SESSION B no arquivo, mas para estes 5 cenários rodar A e B na mesma aba,
-em sequência rápida, é suficiente — a atomicidade que eles provam é de uma trava de linha única
-(`INSERT ... ON CONFLICT`, `SELECT ... FOR UPDATE`), não uma corrida real entre duas transações
-concorrentes. Rode cada bloco (setup → A → B → EXPECTED → cleanup) na ordem em que aparece no
-arquivo, conferindo o resultado de cada `EXPECTED` antes de passar ao próximo cenário.
+Copie os três comandos inteiros — `BEGIN;`, o `DO $$ ... $$;`, e `ROLLBACK;` — e rode-os juntos, de
+uma vez só, na mesma execução. Rodar cada um separadamente só funciona se a mesma
+aba/conexão continuar aberta entre eles; se o seu cliente abre uma conexão nova a cada clique em
+"Run", o `BEGIN` não vale para os comandos seguintes e o `ROLLBACK` no fim reverte uma transação
+diferente (inofensivo, mas os resultados dos `RAISE NOTICE` não terão o efeito de isolamento
+pretendido). Depois de rodar, leia as mensagens `NOTICE` no painel de log/mensagens do SQL Editor
+(não uma grade de resultado — de propósito, não sobra nenhuma tabela para consultar depois do
+`ROLLBACK`) — uma linha `PASS` ou `FAIL` por cenário. Nenhuma linha fica persistida em nenhuma
+tabela, PASS ou FAIL, sempre.
 
 ### Cenários 4 e 5 — OBRIGATÓRIO duas abas reais (execução sequencial NÃO conta)
 
@@ -344,8 +407,10 @@ Passo a passo prático:
    logo antes do passo 5/6) e confirme que as janelas se sobrepõem. Se a Aba B começou claramente
    depois que a Aba A já tinha terminado, isso foi sequencial, não concorrente — repita com timing
    mais apertado antes de considerar o cenário válido.
-9. Rode as queries `SELECT ... EXPECTED: ...` do arquivo (linhas 262–264 para o cenário 4, linha
-   341–342 para o cenário 5) para confirmar o estado final do bucket.
+9. Rode a query `SELECT reserved_quantity, committed_quantity FROM ai_gateway_quota_buckets ...`
+   logo depois das duas SESSIONs (cenário 4) — ou `SELECT reserved_cost_usd FROM
+   ai_gateway_budget_buckets ...` (cenário 5) — para confirmar o estado final do bucket contra o
+   `EXPECTED` no comentário logo acima dela no arquivo.
 10. Rode o `Cleanup` do cenário.
 
 **Resultado esperado do cenário 4:** exatamente uma das duas chamadas retorna `status='pending'`; a
@@ -354,12 +419,12 @@ outra retorna `status='blocked', blocked_reason='QUOTA_EXCEEDED'`.
 outra retorna `status='blocked', blocked_reason='BUDGET_EXCEEDED'`.
 
 Se qualquer cenário retornar `status='pending'` para **ambas** as chamadas, a claim de atomicidade
-daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 8, e reporte o resultado
+daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 9, e reporte o resultado
 real (inclusive se for uma falha).
 
 ---
 
-## PASSO 8 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
+## PASSO 9 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
 
 Eu não vou (e não posso, à distância) rodar os 7 cenários por você — a instrução do arquivo é
 explícita: `record_gateway_concurrency_validation_v1` só deve ser chamada **depois** que você
@@ -377,12 +442,12 @@ Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omi
 2. No SQL Editor (mesma conexão service-role usada para aplicar a migration):
    ```sql
    SELECT public.record_gateway_concurrency_validation_v1(
-     '20260718000000_ai_gateway_enforcement',
+     '20260718020000_ai_gateway_enforcement_function_ambiguity_fix',
      'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',
-     '<cole aqui o hash do Passo 8.1>',
+     '<cole aqui o hash do Passo 9.1>',
      'passed',  -- ou 'failed' se qualquer cenário divergiu do EXPECTED
      '<seu nome/identificador técnico>',
-     'Rodei os 7 cenários em <data> contra <projeto de staging>. Cenários 4/5 confirmados com sobreposição real via timestamps de duas abas.'
+     'Rodei os 7 cenários em <data> contra o Primary Database. Cenários 1/2/3/6/7 via único DO+ROLLBACK. Cenários 4/5 confirmados com sobreposição real via timestamps de duas abas.'
    );
    ```
    Essa função é `REVOKE`d de `anon`/`authenticated` — só é alcançável com acesso direto
@@ -394,7 +459,7 @@ Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omi
 
 ---
 
-## PASSO 9 — Depois da validação real: preflight e tabela das 25 features
+## PASSO 10 — Depois da validação real: preflight e tabela das 25 features
 
 Comando exato (requer `VITE_SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no `.env`, ambiente
 somente-leitura — o script nunca escreve):
@@ -417,7 +482,8 @@ privilégios (Passo 6, via `_gateway_audit_database_privileges_v1()`) — se ess
 qualquer privilégio residual de anon/authenticated, `infraDeployed=false` para toda feature e o
 blocker `unsafe_database_privileges` aparece separado de `infra_not_deployed` em `blockersUnit`/
 `blockersCost`, para nunca esconder qual das duas causas é a real. `concurrencyValidated` lido da
-tabela `ai_gateway_concurrency_validations` (Passo 8).
+tabela `ai_gateway_concurrency_validations` (Passo 9), comparado contra o `MIGRATION_VERSION` atual
+(`20260718020000_ai_gateway_enforcement_function_ambiguity_fix` — ver Passo 7).
 
 Resultados ainda aceitáveis nesta fase (não são defeitos):
 - Azure/TTS sem preço: `pricingReady=false` e `costEnforcementCodeReady` não bloqueado por isso —
@@ -428,5 +494,6 @@ Resultados ainda aceitáveis nesta fase (não são defeitos):
 
 Eu não tenho `SUPABASE_SERVICE_ROLE_KEY` neste ambiente de desenvolvimento — não consigo rodar este
 comando nem produzir a tabela final de 25 linhas agora. Depois que você aplicar a migration original
-(Passo 4), a correção de segurança (Passo 6) e rodar os cenários (Passo 7/8), me envie a saída do
-comando acima (ou rode você mesmo e leia diretamente) e eu reviso/explico o resultado.
+(Passo 4), a correção de segurança (Passo 6), a correção de ambiguidade (Passo 7) e rodar os
+cenários (Passo 8/9), me envie a saída do comando acima (ou rode você mesmo e leia diretamente) e eu
+reviso/explico o resultado.

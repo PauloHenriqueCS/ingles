@@ -18,7 +18,15 @@
 import { createHash } from 'crypto';
 import { FEATURE_METADATA, type AiFeatureKey } from './feature-catalog';
 
-export const MIGRATION_VERSION = '20260718000000_ai_gateway_enforcement';
+// Points at the LATEST Etapa 11 migration whose deployment state this
+// module checks readiness against — advances whenever a later migration in
+// this lineage changes the enforcement function bodies, so a concurrency
+// validation recorded against a stale version can never silently count
+// (the live script-hash pin already guarantees this too, since
+// 20260718020000 rewrote the validation SQL's execution model; this
+// constant keeps the human-facing "which migration am I validating"
+// question equally unambiguous).
+export const MIGRATION_VERSION = '20260718020000_ai_gateway_enforcement_function_ambiguity_fix';
 
 export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' | 'azure'; model: string | null }> = {
   'conversation.preview_tts':              { provider: 'openai', model: 'tts-1' },
