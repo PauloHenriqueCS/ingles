@@ -10,6 +10,7 @@ import {
   reportSessionFailed,
   reportSessionUsage,
   reportSessionEnd,
+  checkSessionControl,
 } from './realtimeGatewayReporting';
 
 // ── toSessionEndReason — small, validated vocabulary ────────────────────────
@@ -233,6 +234,64 @@ describe('bridge call failures are observable, sanitized, and never break the co
   });
 });
 
+// ── checkSessionControl — Etapa 11, Fase 9 mid-session control poll ────────
+// Unlike the fire-and-forget reporters above, this one has a real answer the
+// caller needs, but it must still fail open (terminate: false) on any
+// network/HTTP/parse failure — a poll failure must never cut off an
+// otherwise-healthy conversation.
+
+describe('checkSessionControl', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs to the flat /api/conversation/session-control route with only gatewaySessionId', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ terminate: false, deadlineAt: '2026-01-01T00:00:00.000Z' }) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const result = await checkSessionControl('session-20');
+
+    const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/conversation/session-control');
+    expect(opts.method).toBe('POST');
+    expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-20' });
+    expect(result).toEqual({ terminate: false, reason: undefined });
+  });
+
+  it('returns terminate:true with the server-reported reason', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ terminate: true, reason: 'kill_switch' }) }));
+    const result = await checkSessionControl('session-21');
+    expect(result).toEqual({ terminate: true, reason: 'kill_switch' });
+  });
+
+  it('fails open (terminate:false) on a non-2xx response', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    const result = await checkSessionControl('session-22');
+    expect(result).toEqual({ terminate: false });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[realtimeGatewayReporting] bridge call failed',
+      expect.objectContaining({ endpoint: '/api/conversation/session-control', status: 500, errorCode: 'HTTP_500' }),
+    );
+  });
+
+  it('fails open (terminate:false) on a network failure — never throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+    await expect(checkSessionControl('session-23')).resolves.toEqual({ terminate: false });
+  });
+
+  it('fails open (terminate:false) when the response body is malformed', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => { throw new Error('bad json'); } }));
+    await expect(checkSessionControl('session-24')).resolves.toEqual({ terminate: false });
+  });
+
+  it('ignores a non-boolean terminate field — treated as false', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ terminate: 'yes' }) }));
+    const result = await checkSessionControl('session-25');
+    expect(result.terminate).toBe(false);
+  });
+});
+
 // ── No stale nested-path references anywhere in executable code ────────────
 // The old /session/active, /session/usage, /session/end, /session/failed
 // shapes 404'd in production. Grep-proves none of them remain reachable
@@ -252,7 +311,7 @@ describe('no old nested bridge URLs remain in this module', () => {
     ]) {
       expect(code).not.toContain(stale);
     }
-    for (const flat of ['/api/conversation/session-active', '/api/conversation/session-usage', '/api/conversation/session-end', '/api/conversation/session-failed']) {
+    for (const flat of ['/api/conversation/session-active', '/api/conversation/session-usage', '/api/conversation/session-end', '/api/conversation/session-failed', '/api/conversation/session-control']) {
       expect(code).toContain(flat);
     }
   });

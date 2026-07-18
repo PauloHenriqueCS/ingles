@@ -14,11 +14,18 @@ import type { GatewayCallContext, GatewayPolicy, GatewayMode, RuntimeStatus } fr
 
 // ── Status severity ───────────────────────────────────────────────────────────
 
+// Etapa 11 added circuit_open/maintenance to RuntimeStatus (types.ts).
+// Placed so that an explicit admin action (disabled, maintenance) always
+// outranks an automatic one (circuit_open, paused_automatically) when scopes
+// disagree — a human override should never be silently re-opened by a stale
+// automatic status at a broader scope.
 const STATUS_SEVERITY: Record<RuntimeStatus, number> = {
   enabled:              1,
   cache_only:           2,
-  paused_automatically: 3,
-  disabled:             4,
+  circuit_open:         3,
+  paused_automatically: 4,
+  maintenance:          5,
+  disabled:             6,
 };
 
 function mostRestrictiveStatus(statuses: RuntimeStatus[]): RuntimeStatus {
@@ -130,7 +137,7 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
 
     const { data, error } = await client
       .from('ai_runtime_controls')
-      .select('scope_type, gateway_mode, runtime_status')
+      .select('scope_type, gateway_mode, runtime_status, daily_budget_usd, monthly_budget_usd, max_concurrent_requests, rate_limit_requests, rate_limit_window_seconds')
       .or(
         scopeFilters
           .map(f => `and(scope_type.eq.${f.scope_type},scope_key.eq.${f.scope_key})`)
@@ -145,13 +152,30 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
       scope_type: string;
       gateway_mode: string;
       runtime_status: string;
+      daily_budget_usd: string | number | null;
+      monthly_budget_usd: string | number | null;
+      max_concurrent_requests: number | null;
+      rate_limit_requests: number | null;
+      rate_limit_window_seconds: number | null;
     }>;
 
     const gatewayMode = mostSpecificMode(rows);
     const runtimeStatus = mostRestrictiveStatus(
       rows.map(r => r.runtime_status as RuntimeStatus),
     );
+    // Same most-specific-scope-wins precedence as gatewayMode — a feature-
+    // or user-level budget/rate-limit override takes priority over a
+    // broader provider/global one, rather than being combined with it.
+    const specific = SCOPE_PRIORITY.map(scope => rows.find(r => r.scope_type === scope)).find(Boolean);
 
-    return { gatewayMode, runtimeStatus };
+    return {
+      gatewayMode,
+      runtimeStatus,
+      dailyBudgetUsd:         specific?.daily_budget_usd != null ? String(specific.daily_budget_usd) : null,
+      monthlyBudgetUsd:       specific?.monthly_budget_usd != null ? String(specific.monthly_budget_usd) : null,
+      maxConcurrentRequests:  specific?.max_concurrent_requests ?? null,
+      rateLimitRequests:      specific?.rate_limit_requests ?? null,
+      rateLimitWindowSeconds: specific?.rate_limit_window_seconds ?? null,
+    };
   }
 }

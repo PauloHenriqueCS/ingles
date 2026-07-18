@@ -6,6 +6,7 @@ import {
   reportSessionUsage,
   reportSessionEnd,
   toSessionEndReason,
+  checkSessionControl,
 } from '../lib/realtimeGatewayReporting';
 
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
@@ -30,8 +31,17 @@ export interface UseRealtimeSession {
   updateInstructions: (instructions: string) => void;
 }
 
-const MAX_SESSION_MS = 30 * 60 * 1000;
+// Fallback only — used when the backend response omits maxSessionSeconds
+// (older cached bundle mismatch, or the field failing to parse). The
+// server-provided value (see Step 2 below) is authoritative when present;
+// this constant matches its default so behavior is unchanged either way.
+const DEFAULT_MAX_SESSION_MS = 30 * 60 * 1000;
 const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+
+// How often to poll /api/conversation/session-control while a session is
+// active and the gateway bridge is live (never in legacy mode — see
+// gatewaySessionIdRef below). Fase 9's ceiling is "≤ every 5s".
+const SESSION_CONTROL_POLL_MS = 5000;
 
 /** Base interval (ms per character) for the paced caption reveal at 1× speed.
  *  Scaled by playbackRate: slower speed → more ms per char → captions stay in sync. */
@@ -85,6 +95,9 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   // reporting calls below ever fire — zero behavior change.
   const gatewaySessionIdRef      = useRef<string | null>(null);
   const sessionReportedActiveRef = useRef(false);
+  // Fase 9 — server-authoritative session ceiling + mid-session control poll.
+  const maxSessionMsRef          = useRef<number>(DEFAULT_MAX_SESSION_MS);
+  const sessionControlTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -130,6 +143,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+    if (sessionControlTimerRef.current) { clearInterval(sessionControlTimerRef.current); sessionControlTimerRef.current = null; }
     if (dcRef.current) { try { dcRef.current.close(); } catch { /* ignore */ } dcRef.current = null; }
     if (pcRef.current) { try { pcRef.current.close(); } catch { /* ignore */ } pcRef.current = null; }
     stopStream(streamRef.current);
@@ -216,7 +230,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
       const body = await resp.json() as {
         token: string; sessionId: string | null; voice: string; model: string;
-        gatewaySessionId?: string;
+        gatewaySessionId?: string; maxSessionSeconds?: unknown;
       };
       token     = body.token;
       sessionId = body.sessionId;
@@ -226,6 +240,11 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       // in observe mode. Absent (legacy, always at this stage) means every
       // gateway report below stays a no-op.
       gatewaySessionIdRef.current = typeof body.gatewaySessionId === 'string' ? body.gatewaySessionId : null;
+      // Server-authoritative session ceiling (Fase 9) — falls back to the
+      // module default if absent/malformed, never blocking session start.
+      maxSessionMsRef.current = typeof body.maxSessionSeconds === 'number' && body.maxSessionSeconds > 0
+        ? body.maxSessionSeconds * 1000
+        : DEFAULT_MAX_SESSION_MS;
     } catch {
       fail('NETWORK_ERROR', 'Erro de rede ao iniciar a sessão.');
       stopStream(stream);
@@ -275,13 +294,27 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       timerRef.current = setInterval(() => {
         const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
         setElapsedMs(elapsed);
-        if (elapsed >= MAX_SESSION_MS) cleanup('ended', 'max_duration_reached');
+        if (elapsed >= maxSessionMsRef.current) cleanup('ended', 'max_duration_reached');
       }, 1000);
       // AI Gateway bridge: the physical WebRTC connection is now confirmed
       // live — report it (no-op if gatewaySessionId is absent, i.e. legacy).
       if (gatewaySessionIdRef.current) {
         sessionReportedActiveRef.current = true;
         reportSessionActive(gatewaySessionIdRef.current);
+
+        // Fase 9 — best-effort mid-session control poll. Only runs while the
+        // gateway bridge is live (never in legacy mode); a failure or
+        // "don't terminate" response is a no-op (see checkSessionControl's
+        // own fail-open contract).
+        const polledGatewaySessionId = gatewaySessionIdRef.current;
+        sessionControlTimerRef.current = setInterval(() => {
+          if (endCalledRef.current) return;
+          void checkSessionControl(polledGatewaySessionId).then((result) => {
+            if (result.terminate && !endCalledRef.current) {
+              cleanup('ended', result.reason ?? 'server_terminated');
+            }
+          });
+        }, SESSION_CONTROL_POLL_MS);
       }
       // Trigger AI greeting immediately — it reads context from system prompt
       setTimeout(() => {

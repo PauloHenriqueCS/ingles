@@ -129,3 +129,40 @@ export function reportSessionUsage(
 export function reportSessionEnd(gatewaySessionId: string): void {
   void post('/api/conversation/session-end', { gatewaySessionId });
 }
+
+// ── Session control poll (Etapa 11, Fase 9) ──────────────────────────────────
+// Unlike the reports above, this one has a real answer the caller needs
+// (terminate: true/false), so it can't reuse the fire-and-forget post()
+// helper. Still best-effort: any failure (network, non-2xx, malformed body)
+// resolves to "don't terminate" — a telemetry/poll failure must never cut
+// off an otherwise-healthy conversation. useRealtimeSession.ts only calls
+// this while gatewaySessionId is set (never in legacy mode) and the session
+// is actively connected.
+
+export interface SessionControlResult {
+  terminate: boolean;
+  reason?: string;
+}
+
+export async function checkSessionControl(gatewaySessionId: string): Promise<SessionControlResult> {
+  try {
+    const headers = await getAuthHeader();
+    const res = await fetch('/api/conversation/session-control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ gatewaySessionId }),
+    });
+    if (!res.ok) {
+      logBridgeFailure('/api/conversation/session-control', { gatewaySessionId }, { status: res.status, errorCode: `HTTP_${res.status}` });
+      return { terminate: false };
+    }
+    const body = await res.json() as { terminate?: unknown; reason?: unknown };
+    return {
+      terminate: body.terminate === true,
+      reason: typeof body.reason === 'string' ? body.reason : undefined,
+    };
+  } catch {
+    logBridgeFailure('/api/conversation/session-control', { gatewaySessionId }, { errorCode: 'NETWORK_ERROR' });
+    return { terminate: false };
+  }
+}

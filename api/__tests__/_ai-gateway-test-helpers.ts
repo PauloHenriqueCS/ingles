@@ -30,9 +30,11 @@ export function createMockGatewayDeps() {
   const mockCompleteSession = vi.fn();
   const mockFailSession = vi.fn();
   const mockExpireSession = vi.fn();
+  const mockEntitlementResolve = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
+    entitlementResolver: { resolve: mockEntitlementResolve },
     usageRepository: {
       startEvent: mockStartEvent,
       completeEvent: mockCompleteEvent,
@@ -86,6 +88,11 @@ export function createMockGatewayDeps() {
     mockCompleteSession.mockResolvedValue(undefined);
     mockFailSession.mockResolvedValue(undefined);
     mockExpireSession.mockResolvedValue(undefined);
+    mockEntitlementResolve.mockResolvedValue({
+      allowed: true, userId: null, actorType: 'user', featureKey: 'conversation.webrtc_connect',
+      effectivePlanId: null, limits: [], source: 'no_plan_configured', revision: null,
+      resolvedAt: new Date(0).toISOString(),
+    });
   }
 
   return {
@@ -111,6 +118,7 @@ export function createMockGatewayDeps() {
     mockCompleteSession,
     mockFailSession,
     mockExpireSession,
+    mockEntitlementResolve,
     resetDefaults,
   };
 }

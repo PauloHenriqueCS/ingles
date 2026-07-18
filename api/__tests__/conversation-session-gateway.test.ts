@@ -41,7 +41,7 @@ function makeUpdateChain(result: { data: { id: string; started_at?: string | nul
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
   return chain;
 }
-function makeSelectChain(result: { data: { id: string; metadata?: Record<string, unknown> } | null; error: unknown }) {
+function makeSelectChain(result: { data: Record<string, unknown> | null; error: unknown }) {
   const chain: any = {};
   for (const m of ['select', 'eq']) chain[m] = vi.fn().mockReturnValue(chain);
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
@@ -119,6 +119,9 @@ describe('POST /session — conversation.create_session', () => {
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('ephemeral-token-xyz');
     expect((res._body() as any).gatewaySessionId).toBeUndefined();
+    // Fase 9 — always present, independent of gatewaySessionId/observe mode,
+    // so the client can source its self-termination timer from the server.
+    expect((res._body() as any).maxSessionSeconds).toBe(30 * 60);
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
@@ -694,6 +697,101 @@ describe('duration starts at session-active, never at token issuance', () => {
   });
 });
 
+// ── conversation.webrtc_connect — session-control (Etapa 11, Fase 9) ───────
+
+describe('POST /session-control — mid-session control poll', () => {
+  function controlReq(body: Record<string, unknown> = { gatewaySessionId: GATEWAY_SESSION_ID }) {
+    return makeReq({ url: '/api/conversation/session-control', body });
+  }
+
+  it('rejects an invalid gatewaySessionId before touching the database', async () => {
+    const res = makeRes();
+    await handler(controlReq({ gatewaySessionId: 'not-a-uuid' }), res);
+    expect(res._status()).toBe(400);
+    expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+
+  it('signals terminate when the session is not active (foreign, never started, or already ended)', async () => {
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: null, error: null }));
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'session_not_active' });
+  });
+
+  it('signals terminate once the server-authorized deadline has passed', async () => {
+    const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago > the 30min ceiling
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: longAgo }, error: null }));
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'max_duration_reached' });
+  });
+
+  it('signals terminate when the kill-switch is engaged for conversation.webrtc_connect', async () => {
+    const now = new Date().toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now }, error: null }));
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'disabled' });
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'kill_switch' });
+  });
+
+  it('signals terminate when the user has been blocked since the session started', async () => {
+    const now = new Date().toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now }, error: null }));
+    gw.mockEntitlementResolve.mockResolvedValue({
+      allowed: false, userId: USER_ID, actorType: 'user', featureKey: 'conversation.webrtc_connect',
+      effectivePlanId: null, limits: [], source: 'plan', revision: null, resolvedAt: now,
+    });
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'user_blocked' });
+  });
+
+  it('signals no termination and returns the deadline when everything is healthy', async () => {
+    const now = new Date().toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now }, error: null }));
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    const body = res._body() as { terminate: boolean; deadlineAt: string };
+    expect(body.terminate).toBe(false);
+    expect(typeof body.deadlineAt).toBe('string');
+  });
+
+  it('fails open (no termination) when a DB/telemetry error occurs', async () => {
+    mockSessionsFrom.mockImplementation(() => { throw new Error('db down'); });
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: false });
+  });
+
+  it('an entitlement-resolver failure fails open rather than terminating a healthy session', async () => {
+    const now = new Date().toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now }, error: null }));
+    gw.mockEntitlementResolve.mockRejectedValue(new Error('entitlement service down'));
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as { terminate: boolean }).terminate).toBe(false);
+  });
+
+  it('requires authentication like every other bridge route', async () => {
+    mockRequireAuth.mockImplementation(async (_req: any, res: any) => {
+      res.status(401).json({ error: 'Não autenticado' });
+      return null;
+    });
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(401);
+    expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+});
+
 // ── Vercel's REAL catch-all shape — req.query.slug, string AND array ───────
 // A previous round of this suite proved the dispatcher routes a *nested*
 // two-segment slug (['session', 'active']) correctly — but that was a false
@@ -814,7 +912,7 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
       res.status(401).json({ error: 'Não autenticado' });
       return null;
     });
-    for (const slug of ['session-active', 'session-failed', 'session-usage', 'session-end']) {
+    for (const slug of ['session-active', 'session-failed', 'session-usage', 'session-end', 'session-control']) {
       const res = makeRes();
       await handler(vercelReq(slug, { gatewaySessionId: GATEWAY_SESSION_ID }), res);
       expect(res._status()).toBe(401);

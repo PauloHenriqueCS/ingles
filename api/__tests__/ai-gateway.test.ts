@@ -581,6 +581,16 @@ describe('daily rollup integration', () => {
 
 // ── ENFORCE mode ──────────────────────────────────────────────────────────────
 
+// Etapa 11: enforce mode now runs the real pipeline (enforcement.ts), but no
+// feature is ever switched to 'enforce' in this delivery, and makeDeps()
+// here (predating Etapa 11) sets none of the new optional deps
+// (entitlementResolver, rateLimiter, dedupeStore, reservationsRepository,
+// budgetChecker, circuitBreaker) — so every one of these tests exercises the
+// pipeline's fail-closed path: with no entitlement resolver configured, it
+// can never positively confirm policy, so it throws POLICY_UNAVAILABLE
+// before ever calling invoke() or writing an event — the same "never fake
+// protection" contract the full enforcement.ts suite (enforcement.test.ts)
+// covers in depth with all deps present.
 describe('enforce mode', () => {
   it('does not call invoke', async () => {
     const deps = makeDeps({ gatewayMode: 'enforce', runtimeStatus: 'enabled' });
@@ -591,7 +601,7 @@ describe('enforce mode', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('throws a GatewayError with code AI_GATEWAY_ENFORCEMENT_NOT_READY', async () => {
+  it('throws a GatewayError with code POLICY_UNAVAILABLE when no entitlement resolver is configured — fails closed rather than assuming allowed', async () => {
     const deps = makeDeps({ gatewayMode: 'enforce', runtimeStatus: 'enabled' });
 
     try {
@@ -599,7 +609,7 @@ describe('enforce mode', () => {
       expect.fail('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(GatewayError);
-      expect((err as GatewayError).code).toBe('AI_GATEWAY_ENFORCEMENT_NOT_READY');
+      expect((err as GatewayError).code).toBe('POLICY_UNAVAILABLE');
     }
   });
 

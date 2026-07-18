@@ -7,8 +7,11 @@
  *   legacy  — invoke once, no telemetry, no DB dependency on critical path.
  *   observe — invoke once, record events and metrics; telemetry failures
  *             never break the call.
- *   enforce — NOT YET IMPLEMENTED. Fails closed with a controlled error.
- *             No provider call is made.
+ *   enforce — the full pipeline (entitlements, budget, rate limit, dedupe,
+ *             reservation — see enforcement.ts) runs before invoke(); fails
+ *             closed (no provider call) whenever policy can't be positively
+ *             confirmed. Unreachable in production this stage: no feature's
+ *             gateway_mode is 'enforce', and nothing here flips one.
  */
 
 import { randomUUID } from 'crypto';
@@ -26,6 +29,15 @@ import { SupabasePricingRepository, type PricingRepositoryInterface } from './pr
 import { reconcileEventCost } from './cost-calculator';
 import { SupabaseDailyRollupRepository, type DailyRollupRepositoryInterface } from './daily-rollup-repository';
 import { rebuildDailyBucketForEvent } from './daily-rollup';
+import { evaluateKillSwitch } from './kill-switch';
+import { SupabaseDecisionsRepository, recordDecisionSafely, type DecisionsRepositoryInterface } from './decisions';
+import { SupabaseEntitlementResolver, type EntitlementResolverInterface } from './entitlements';
+import { SupabaseRateLimiter, type RateLimiterInterface } from './rate-limiter';
+import { SupabaseDedupeStore, type DedupeStoreInterface } from './dedupe';
+import { SupabaseReservationsRepository, type ReservationsRepositoryInterface } from './reservations';
+import { SupabaseBudgetChecker, type BudgetCheckerInterface } from './budgets';
+import { SupabaseCircuitBreaker, type CircuitBreakerInterface } from './circuit-breaker';
+import { executeEnforcedPipeline } from './enforcement';
 
 // ── Dependency injection ──────────────────────────────────────────────────────
 
@@ -34,6 +46,19 @@ export interface GatewayDeps {
   usageRepository: UsageRepositoryInterface;
   pricingRepository: PricingRepositoryInterface;
   dailyRollupRepository: DailyRollupRepositoryInterface;
+  // All of the below are optional so every pre-existing GatewayDeps mock
+  // (constructed before Etapa 11) keeps compiling and working unchanged.
+  // legacy/observe never read any of them. enforce mode (unreachable this
+  // stage — see enforcement.ts) fails closed (POLICY_UNAVAILABLE) on
+  // whichever of these it needs but doesn't find, rather than assuming
+  // "missing dependency" means "allow."
+  decisionsRepository?: DecisionsRepositoryInterface;
+  entitlementResolver?: EntitlementResolverInterface;
+  rateLimiter?: RateLimiterInterface;
+  dedupeStore?: DedupeStoreInterface;
+  reservationsRepository?: ReservationsRepositoryInterface;
+  budgetChecker?: BudgetCheckerInterface;
+  circuitBreaker?: CircuitBreakerInterface;
   clock: () => number;
   uuidGen: () => string;
   logger: (event: string, data?: Record<string, unknown>) => void;
@@ -55,6 +80,13 @@ export function getProductionDeps(): GatewayDeps {
     usageRepository:       new SupabaseUsageRepository(),
     pricingRepository:     new SupabasePricingRepository(),
     dailyRollupRepository: new SupabaseDailyRollupRepository(),
+    decisionsRepository:   new SupabaseDecisionsRepository(),
+    entitlementResolver:   new SupabaseEntitlementResolver(),
+    rateLimiter:           new SupabaseRateLimiter(),
+    dedupeStore:           new SupabaseDedupeStore(),
+    reservationsRepository: new SupabaseReservationsRepository(),
+    budgetChecker:         new SupabaseBudgetChecker(),
+    circuitBreaker:        new SupabaseCircuitBreaker(),
     clock:                 () => Date.now(),
     uuidGen:               () => randomUUID(),
     logger:                (event, data) => {
@@ -94,20 +126,46 @@ export async function executeAiGatewayCall<T>(
     policy = { gatewayMode: 'legacy', runtimeStatus: 'enabled' };
   }
 
-  // 3. Enforce mode — fails closed. No provider call is made.
-  if (policy.gatewayMode === 'enforce') {
+  // 3. Kill-switch — checked in EVERY mode (legacy, observe, enforce),
+  // before any provider call, and takes precedence over gateway_mode, plan,
+  // and quota. Inert today: every seeded control defaults to
+  // runtime_status='enabled', so this only ever blocks once an
+  // administrator explicitly disables something. A blocked attempt is
+  // recorded in ai_gateway_decisions, never in ai_usage_events — it never
+  // reached a provider.
+  const killSwitch = evaluateKillSwitch(policy.runtimeStatus);
+  if (killSwitch.blocked) {
+    await recordDecisionSafely(deps.decisionsRepository, {
+      outcome:      'blocked',
+      reasonCode:   killSwitch.reasonCode!,
+      featureKey,
+      provider:     context.provider,
+      userId:       context.userId,
+      actorType:    context.actorType,
+      gatewayMode:  policy.gatewayMode,
+      correlationId: context.correlationId,
+    }, deps.logger);
     throw new GatewayError(
-      'AI_GATEWAY_ENFORCEMENT_NOT_READY',
-      'Gateway enforcement mode is not yet implemented. No provider call was made.',
+      killSwitch.reasonCode!,
+      `AI feature "${featureKey}" is currently unavailable. No provider call was made.`,
     );
   }
 
-  // 4. Legacy mode — pass-through with zero database dependency.
+  // 4. Enforce mode — the full pipeline (entitlements, budget, rate limit,
+  // dedupe, reservation) is implemented in enforcement.ts but is unreachable
+  // in production: no feature's gateway_mode is 'enforce' at the end of
+  // this stage, and executeAiGatewayCall itself never flips a feature into
+  // it.
+  if (policy.gatewayMode === 'enforce') {
+    return executeEnforcedPipeline(featureKey, context, invoke, deps, policy, extractMetrics);
+  }
+
+  // 5. Legacy mode — pass-through with zero database dependency.
   if (policy.gatewayMode === 'legacy') {
     return invoke();
   }
 
-  // 5. Observe mode — record telemetry around the provider call.
+  // 6. Observe mode — record telemetry around the provider call.
   return executeWithTelemetry(featureKey, context, invoke, deps, extractMetrics);
 }
 

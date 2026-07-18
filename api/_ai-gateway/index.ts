@@ -121,3 +121,58 @@ export {
   getProductionDeps,
 } from './gateway';
 export type { GatewayDeps, MetricExtractor } from './gateway';
+
+// ── Etapa 11 — enforcement layer ──────────────────────────────────────────────
+// Unreachable in production this stage (no feature's gateway_mode is
+// 'enforce'), but part of the Gateway's public surface for callers that need
+// to check policy directly (e.g. the Realtime session-control poll route,
+// which reuses evaluateKillSwitch + the entitlement resolver outside the
+// executeAiGatewayCall wrapper — see api/conversation/[...slug].ts's
+// handleSessionControl).
+
+export { evaluateKillSwitch } from './kill-switch';
+export type { KillSwitchDecision } from './kill-switch';
+
+export { SupabaseDecisionsRepository, recordDecisionSafely } from './decisions';
+export type { DecisionsRepositoryInterface } from './decisions';
+
+export { SupabaseEntitlementResolver, CAPABILITY_KEY_BY_METRIC } from './entitlements';
+export type { EntitlementResolverInterface } from './entitlements';
+
+export { SupabaseRateLimiter } from './rate-limiter';
+export type { RateLimiterInterface, RateLimitCheckResult } from './rate-limiter';
+
+export { SupabaseDedupeStore, computeIdempotencyFingerprint } from './dedupe';
+export type { DedupeStoreInterface, DedupeOutcome, DedupeBeginResult } from './dedupe';
+
+export { SupabaseReservationsRepository } from './reservations';
+export type { ReservationsRepositoryInterface } from './reservations';
+
+export { SupabaseBudgetChecker } from './budgets';
+export type { BudgetCheckerInterface, BudgetScope, BudgetPeriod, BudgetCheckParams, BudgetCheckResult } from './budgets';
+
+export { SupabaseCircuitBreaker } from './circuit-breaker';
+export type { CircuitBreakerInterface, BreakerState, BreakerStateResult } from './circuit-breaker';
+
+export {
+  estimateTtsCharacters,
+  estimateAudioSecondsCeiling,
+  estimateRealtimeSessionSeconds,
+  estimateTextTokens,
+  estimateProviderRequests,
+} from './estimators';
+export type { MetricEstimate } from './estimators';
+
+export { executeEnforcedPipeline } from './enforcement';
+
+export type {
+  EntitlementSource,
+  EntitlementLimit,
+  EffectiveEntitlement,
+  GatewayDecisionOutcome,
+  GatewayDecisionRecord,
+  ReservationStatus,
+  ReservationMetricEstimate,
+  ReserveUsageParams,
+  ReservationResult,
+} from './types';

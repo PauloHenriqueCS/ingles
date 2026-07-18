@@ -13,6 +13,7 @@ import {
   reconcileEventCost,
   rebuildDailyBucketForEvent,
   DuplicateUsageEventError,
+  evaluateKillSwitch,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
@@ -174,6 +175,14 @@ const REALTIME_MODEL =
   (process.env.OPENAI_REALTIME_MODEL ?? '').trim() || 'gpt-realtime-2.1-mini';
 
 const CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/client_secrets';
+
+// Server-authoritative Realtime session ceiling (Etapa 11, Fase 9). Same
+// value the client already enforced itself via a hardcoded constant before
+// this stage (src/hooks/useRealtimeSession.ts's old MAX_SESSION_MS) — moving
+// it server-side changes nothing about today's behavior, it only lets
+// /session-control (below) compute the same deadline independently of
+// client-side JS, and gives a single place to change it later.
+const REALTIME_MAX_SESSION_SECONDS = 30 * 60;
 
 const SESSION_ERROR_STATUS: Record<string, number> = {
   OPENAI_INVALID_SESSION: 400,
@@ -559,6 +568,12 @@ async function handleSession(req: any, res: any) {
     model:     data.session?.model ?? REALTIME_MODEL,
     voice:     prefs.voice,
     expiresAt: data.expires_at,
+    // Additive (Etapa 11, Fase 9) — always present, independent of
+    // gatewaySessionId/observe mode, so the client can always source its
+    // self-termination timer from the server instead of a hardcoded
+    // constant. Older cached frontend bundles that don't read this field
+    // simply keep using their own hardcoded value — no breaking change.
+    maxSessionSeconds: REALTIME_MAX_SESSION_SECONDS,
     ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
 }
@@ -1061,6 +1076,110 @@ async function handleSessionEnd(req: any, res: any) {
   }
 }
 
+// ── /control ─────────────────────────────────────────────────────────────
+// Etapa 11, Fase 9 — best-effort mid-session termination signal. Polled by
+// the client (useRealtimeSession.ts) every ~5s while a session is active and
+// the gateway bridge is live (never in legacy mode — see the module comment
+// above the bridge handlers). Tells the client to close its own
+// RTCPeerConnection when: the server-authorized deadline has passed, the
+// feature's kill-switch has been engaged, or the user has been blocked
+// since the session started.
+//
+// Honest limitation (audited against OpenAI's current Realtime API docs,
+// 2026-07-18): OpenAI does expose a server-side "hang up" endpoint —
+// POST /v1/realtime/calls/{call_id}/hangup — that can forcibly terminate an
+// active WebRTC call. But only the browser ever sees that call's call_id:
+// this app's architecture has the browser POST its SDP offer directly to
+// OpenAI with an ephemeral token (src/hooks/useRealtimeSession.ts), never
+// proxied through this backend, so the backend never learns the call_id.
+// Trusting a client-reported call_id would not be a real security boundary
+// either (a malicious client could simply omit or fake it). Adopting the
+// hangup endpoint for a true, unconditional hard-kill would require
+// switching to OpenAI's "unified interface" (the browser posts its SDP
+// offer to THIS backend, which forwards it to OpenAI with the real secret
+// key and gets the call_id back directly) — a larger architectural change,
+// out of scope for this stage and left for a future one.
+//
+// This endpoint is therefore a real, additive safety layer for cooperative
+// clients (the official app), not a defense against a deliberately
+// malicious one. The unconditional protection this stage does guarantee is
+// upstream of this endpoint: kill-switch/blocked-user checks already run at
+// /api/conversation/session (new-session issuance), which fully prevents a
+// blocked/disabled user from ever starting a NEW session server-side,
+// regardless of what any client does. Realtime accordingly stays classified
+// blocked_no_hard_session_control in the enforce-readiness preflight and
+// must never move to enforce for duration limits until proven otherwise.
+async function handleSessionControl(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const gatewaySessionId = (req.body ?? {}).gatewaySessionId;
+  if (!isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+
+  try {
+    const { data: session, error } = await sessionsClient()
+      .from('ai_provider_sessions')
+      .select('id, started_at')
+      .eq('id', gatewaySessionId)
+      .eq('user_id', userId)
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (error || !session) {
+      // Not active (never started, already ended via another path, or
+      // foreign) — tell the client to stop treating this session as live.
+      return res.status(200).json({ terminate: true, reason: 'session_not_active' });
+    }
+
+    const startedAtIso = (session as { started_at: string | null }).started_at;
+    const startedAtMs = startedAtIso ? new Date(startedAtIso).getTime() : Date.now();
+    const deadlineAtMs = startedAtMs + REALTIME_MAX_SESSION_SECONDS * 1000;
+
+    if (Date.now() >= deadlineAtMs) {
+      return res.status(200).json({ terminate: true, reason: 'max_duration_reached' });
+    }
+
+    const gatewayDeps = getProductionDeps();
+
+    const policy = await gatewayDeps.policyResolver.resolvePolicy({
+      featureKey: WEBRTC_CONNECT_FEATURE_KEY,
+      provider: 'openai',
+      userId,
+      actorType: 'user',
+      executionLocation: 'frontend',
+    });
+    if (evaluateKillSwitch(policy.runtimeStatus).blocked) {
+      return res.status(200).json({ terminate: true, reason: 'kill_switch' });
+    }
+
+    if (gatewayDeps.entitlementResolver) {
+      try {
+        const entitlement = await gatewayDeps.entitlementResolver.resolve(userId, 'user', WEBRTC_CONNECT_FEATURE_KEY, []);
+        if (!entitlement.allowed) {
+          return res.status(200).json({ terminate: true, reason: 'user_blocked' });
+        }
+      } catch (e) {
+        // Fail-open — an entitlement check failure must never terminate an
+        // otherwise-healthy conversation the student is actively having.
+        gatewayDeps.logger('gateway.sessionControl.entitlement.failed', { message: String(e) });
+      }
+    }
+
+    return res.status(200).json({ terminate: false, deadlineAt: new Date(deadlineAtMs).toISOString() });
+  } catch (e) {
+    console.error('[conversation/session-control] check failed', e instanceof Error ? e.message : 'unknown');
+    // Fail-open: a telemetry/DB error here must never cut off an active
+    // conversation the student is having.
+    return res.status(200).json({ terminate: false });
+  }
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -1079,6 +1198,7 @@ export default async function handler(req: any, res: any) {
     case 'session-failed': return handleSessionFailed(req, res);
     case 'session-usage':  return handleSessionUsage(req, res);
     case 'session-end':    return handleSessionEnd(req, res);
+    case 'session-control': return handleSessionControl(req, res);
     default:                return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }
