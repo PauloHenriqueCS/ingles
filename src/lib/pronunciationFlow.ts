@@ -29,6 +29,13 @@ export interface FlowRefs {
   assessmentIdRef:       { current: string | null };
   cancelRecognitionRef:  { current: (() => void) | null };
   flowLockRef:           { current: boolean };
+  /**
+   * Optional: opaque Gateway session id returned by /start (only present
+   * when pronunciation.assess_text is in observe mode). Threaded through to
+   * /complete and /fail so the backend can correlate technical completion —
+   * never used for anything else, never required.
+   */
+  gatewaySessionIdRef?:  { current: string | null };
 }
 
 const PHASE_MESSAGES: Partial<Record<AnalysisPhase, string>> = {
@@ -44,12 +51,13 @@ async function reportFail(refs: FlowRefs, code: PronunciationFailCode): Promise<
   const aid  = refs.assessmentIdRef.current;
   const atid = refs.attemptIdRef.current;
   if (!aid || !atid) return;
+  const gatewaySessionId = refs.gatewaySessionIdRef?.current ?? undefined;
   try {
     const headers = await getAuthHeader();
     await fetch('/api/pronunciation/fail', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify({ assessmentId: aid, attemptId: atid, code }),
+      body: JSON.stringify({ assessmentId: aid, attemptId: atid, code, ...(gatewaySessionId ? { gatewaySessionId } : {}) }),
     });
   } catch {
     // best effort
@@ -100,6 +108,7 @@ export async function runAnalysisFlow(
     token: string;
     region: string;
     referenceText: string;
+    gatewaySessionId?: string;
   };
   try {
     const headers = await getAuthHeader();
@@ -126,6 +135,7 @@ export async function runAnalysisFlow(
   }
 
   refs.assessmentIdRef.current = startBody.assessmentId;
+  if (refs.gatewaySessionIdRef) refs.gatewaySessionIdRef.current = startBody.gatewaySessionId ?? null;
 
   // Step 3: Run Azure Pronunciation Assessment (continuous)
   setPhase({ phase: 'analyzing' });
@@ -173,6 +183,7 @@ export async function runAnalysisFlow(
         assessmentId: startBody.assessmentId,
         attemptId:    input.attemptId,
         result,
+        ...(startBody.gatewaySessionId ? { gatewaySessionId: startBody.gatewaySessionId } : {}),
       }),
     });
     if (!resp.ok) {

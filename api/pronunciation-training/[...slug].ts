@@ -157,12 +157,44 @@ const AZURE_ERROR_STATUS: Partial<Record<string, number>> = {
   AZURE_SPEECH_TIMEOUT: 504, AZURE_SPEECH_RATE_LIMITED: 503, AZURE_SPEECH_UNAVAILABLE: 503,
 };
 
+function extractTokenMetrics(): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+  ];
+}
+
 async function handleToken(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
   if (!auth) return;
+  const gatewayDeps = getProductionDeps();
   try {
-    const { token, region, expiresInSeconds } = await issueAzureSpeechToken();
+    const { token, region, expiresInSeconds } = await executeAiGatewayCall(
+      {
+        featureKey: 'pronunciation.get_azure_token',
+        provider: 'azure',
+        service: 'speech_sts',
+        userId: auth.userId,
+        initiatedByUserId: auth.userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'pronunciation-training/token',
+        },
+      },
+      () => issueAzureSpeechToken(),
+      gatewayDeps,
+      extractTokenMetrics,
+    );
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ token, region, expiresInSeconds });
   } catch (err) {

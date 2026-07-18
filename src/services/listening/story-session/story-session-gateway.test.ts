@@ -114,7 +114,7 @@ describe('generateStorySession — OBSERVE mode', () => {
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
   });
 
-  it('records exactly one event with featureKey listening.story_session_generate', async () => {
+  it('records exactly one event with featureKey listening.story_session_generate (plus a separate one for the TTS call)', async () => {
     await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
     expect(mockCreate).toHaveBeenCalledTimes(1);
     expect(gw.mockStartEvent).toHaveBeenCalledWith(
@@ -130,7 +130,11 @@ describe('generateStorySession — OBSERVE mode', () => {
         attemptNumber: 1,
       }),
     );
-    expect(gw.mockCompleteEvent).toHaveBeenCalledTimes(1);
+    // One completed event for OpenAI generation, one for the Azure TTS call
+    // that follows it in the same generateStorySession execution.
+    expect(gw.mockCompleteEvent).toHaveBeenCalledTimes(2);
+    const featureKeys = gw.mockStartEvent.mock.calls.map((c: any) => c[0].featureKey);
+    expect(featureKeys).toEqual(['listening.story_session_generate', 'listening.story_session_tts']);
   });
 
   it('a provider error creates a failed event and the original error still propagates', async () => {
@@ -191,11 +195,12 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
     expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false }));
   });
 
-  it('idempotency: a supplied storyPackage skips OpenAI entirely — no physical call, no event', async () => {
+  it('idempotency: a supplied storyPackage skips OpenAI entirely — no physical call, no event (TTS still runs)', async () => {
     // First call (fresh) to obtain a valid packed storyPackage from a TTS failure path
     // is unnecessary here — we only need to prove that when storyPackage is present,
-    // callAI (and therefore the gateway) is never invoked. Force TTS failure on a
-    // fresh call to capture a real packed storyPackage from StoryTtsError.
+    // callAI (and therefore the listening.two_part_generate gateway event) is never
+    // invoked. Force TTS failure on a fresh call to capture a real packed
+    // storyPackage from StoryTtsError.
     let storyPackage: string | undefined;
     global.fetch = vi.fn().mockRejectedValue(new Error('network down')) as any;
     try {
@@ -213,6 +218,114 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
     await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', storyPackage);
 
     expect(mockCreate).not.toHaveBeenCalled();
-    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    // storyPackage only skips OpenAI generation — the two TTS physical calls
+    // still happen and still create their own listening.two_part_tts events.
+    const featureKeys = gw.mockStartEvent.mock.calls.map((c: any) => c[0].featureKey);
+    expect(featureKeys).not.toContain('listening.two_part_generate');
+    expect(featureKeys.filter((k: string) => k === 'listening.two_part_tts')).toHaveLength(2);
+  });
+});
+
+// ── listening.story_session_tts ─────────────────────────────────────────────
+
+describe('story_session synthesizeAudio — OBSERVE mode', () => {
+  beforeEach(() => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+  });
+
+  it('records exactly one event: featureKey listening.story_session_tts, provider azure, actorType user', async () => {
+    await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const ttsCalls = gw.mockStartEvent.mock.calls.filter((c: any) => c[0].featureKey === 'listening.story_session_tts');
+    expect(ttsCalls).toHaveLength(1);
+    expect(ttsCalls[0][0]).toEqual(
+      expect.objectContaining({
+        provider: 'azure', service: 'tts_rest', userId: USER_ID, initiatedByUserId: USER_ID,
+        actorType: 'user', executionLocation: 'system', attemptNumber: 1, callSequence: 1,
+      }),
+    );
+  });
+
+  it('records tts_characters (deterministic) and a non-billable provider_requests', async () => {
+    await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const eventIdx = gw.mockStartEvent.mock.calls.findIndex((c: any) => c[0].featureKey === 'listening.story_session_tts');
+    const metrics = gw.mockInsertMetrics.mock.calls[eventIdx][1] as Array<Record<string, unknown>>;
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false }));
+    const ttsMetric = metrics.find((m) => m.metricKey === 'tts_characters');
+    expect(ttsMetric?.isBillable).toBe(true);
+    expect((ttsMetric?.quantity as number)).toBeGreaterThan(0);
+  });
+
+  it('an Azure TTS error creates a failed event', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 }) as any;
+    await expect(
+      generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret'),
+    ).rejects.toThrow();
+    const ttsCalls = gw.mockFailEvent.mock.calls;
+    expect(ttsCalls.length).toBeGreaterThan(0);
+  });
+});
+
+// ── listening.two_part_tts — parallel calls ─────────────────────────────────
+
+describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => {
+  beforeEach(() => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    mockCreate.mockImplementation(() => aiOk(VALID_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
+  });
+
+  it('records two events (part1, part2) sharing one correlationId with deterministic attemptNumber 1 and 2', async () => {
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const ttsCalls = gw.mockStartEvent.mock.calls
+      .map((c: any) => c[0])
+      .filter((c: any) => c.featureKey === 'listening.two_part_tts');
+
+    expect(ttsCalls).toHaveLength(2);
+    expect(new Set(ttsCalls.map((c: any) => c.correlationId)).size).toBe(1);
+    expect(ttsCalls.map((c: any) => c.attemptNumber).sort()).toEqual([1, 2]);
+    expect(ttsCalls.map((c: any) => c.operationPart).sort()).toEqual(['part1', 'part2']);
+  });
+
+  it('attemptNumber reservation does not depend on which physical call resolves first', async () => {
+    // part1 resolves slower than part2 — attemptNumber must still be 1/2 by
+    // call order, not by resolution order (reserved synchronously before
+    // Promise.all starts).
+    let callIndex = 0;
+    global.fetch = vi.fn().mockImplementation(() => {
+      const isFirstCall = callIndex === 0;
+      callIndex += 1;
+      const bytes = new ArrayBuffer(10);
+      if (isFirstCall) {
+        return new Promise((resolve) => setTimeout(() => resolve({ ok: true, status: 200, arrayBuffer: async () => bytes }), 20));
+      }
+      return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => bytes });
+    }) as any;
+
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const ttsCalls = gw.mockStartEvent.mock.calls
+      .map((c: any) => c[0])
+      .filter((c: any) => c.featureKey === 'listening.two_part_tts')
+      .sort((a: any, b: any) => a.attemptNumber - b.attemptNumber);
+    expect(ttsCalls[0]).toEqual(expect.objectContaining({ attemptNumber: 1, operationPart: 'part1' }));
+    expect(ttsCalls[1]).toEqual(expect.objectContaining({ attemptNumber: 2, operationPart: 'part2' }));
+  });
+
+  it('each of the two physical TTS calls records its own independent tts_characters metric', async () => {
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    // Correlate by eventId (returned from startEvent, passed unchanged to
+    // insertMetrics) rather than by array index, which is not guaranteed to
+    // match startEvent's call order once two physical calls run concurrently.
+    const ttsCallIndices = gw.mockStartEvent.mock.calls
+      .map((c: any, i: number) => ({ featureKey: c[0].featureKey, i }))
+      .filter((x) => x.featureKey === 'listening.two_part_tts')
+      .map((x) => x.i);
+    expect(ttsCallIndices).toHaveLength(2);
+
+    const ttsEventIds = await Promise.all(ttsCallIndices.map((i) => gw.mockStartEvent.mock.results[i].value));
+    const metricsCalls = gw.mockInsertMetrics.mock.calls.filter((c: any) => ttsEventIds.includes(c[0]));
+    expect(metricsCalls).toHaveLength(2);
+    for (const [, metrics] of metricsCalls) {
+      const ttsMetric = (metrics as Array<Record<string, unknown>>).find((m) => m.metricKey === 'tts_characters');
+      expect((ttsMetric?.quantity as number)).toBeGreaterThan(0);
+    }
   });
 });

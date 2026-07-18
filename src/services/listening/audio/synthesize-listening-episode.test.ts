@@ -8,6 +8,22 @@ import { computeListeningAudioHash } from './hash-listening-audio';
 import { buildStagingAudioPath } from './listening-audio-config';
 import { DURATION_MIN_MS, DURATION_MAX_MS } from './listening-audio-config';
 import type { RawListeningBookmarkEvent, RawListeningWordBoundaryEvent } from './listening-audio-types';
+import { createMockGatewayDeps } from '../../../../api/__tests__/_ai-gateway-test-helpers';
+
+// ─── AI Gateway mock ─────────────────────────────────────────────────────────
+// synthesizeListeningBlock now wraps its physical Azure calls with the AI
+// Gateway (Etapa 9). Gateway behavior itself is covered by
+// synthesize-listening-block-gateway.test.ts — this file only needs
+// getProductionDeps() to resolve to 'legacy' so it never touches Supabase.
+
+const { gw } = vi.hoisted(() => {
+  return { gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps> };
+});
+
+vi.mock('../../../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../api/_ai-gateway/index')>();
+  return { ...actual, getProductionDeps: () => gw.mockDeps };
+});
 
 // ─── Azure SDK mock ──────────────────────────────────────────────────────────
 
@@ -226,6 +242,8 @@ beforeEach(() => {
   mockState.closeCallCount = 0;
   capturedSynthesizer = null;
   vi.clearAllMocks();
+  Object.assign(gw, createMockGatewayDeps());
+  (gw as ReturnType<typeof createMockGatewayDeps>).resetDefaults();
 });
 
 // ─── Group 1: azureTicksToMilliseconds ───────────────────────────────────────
@@ -412,7 +430,7 @@ describe('buildStagingAudioPath', () => {
 
 // ─── Group 7: synthesizeListeningBlock + synthesizeListeningEpisode ───────────
 
-import { synthesizeListeningBlock, ListeningAudioBookmarksMissingError, ListeningAudioEmptyError } from './synthesize-listening-block';
+import { synthesizeListeningBlock, ListeningAudioBookmarksMissingError, ListeningAudioEmptyError, ListeningAzureSynthesisCanceledError } from './synthesize-listening-block';
 import {
   synthesizeListeningEpisode,
   ListeningEpisodeNotFoundError,
@@ -663,4 +681,117 @@ it('case 51: credentials do not appear in result or thrown errors', async () => 
     const errStr = JSON.stringify(err instanceof Error ? { name: err.name, message: err.message } : err);
     expect(errStr).not.toContain('super-secret-key');
   }
+});
+
+// ─── Group: AI Gateway integration (Etapa 9) — listening.episode_synthesize_audio ─
+
+describe('synthesizeListeningBlock — AI Gateway (OBSERVE mode)', () => {
+  beforeEach(() => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+  });
+
+  it('a single successful synthesis records exactly one event: featureKey, provider, service, actorType system, userId undefined', async () => {
+    const { client } = makeSupabase();
+    await synthesizeListeningBlock(makeBlockInput(), TEST_AZURE_CONFIG, client, 'B1');
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        featureKey: 'listening.episode_synthesize_audio',
+        provider: 'azure',
+        service: 'tts_sdk',
+        userId: undefined,
+        actorType: 'system',
+        executionLocation: 'system',
+        attemptNumber: 1,
+        callSequence: 1,
+      }),
+    );
+    expect(gw.mockCompleteEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('records tts_characters from the SSML and a non-billable provider_requests', async () => {
+    const { client } = makeSupabase();
+    await synthesizeListeningBlock(makeBlockInput({ ssml: '<speak><voice name="x"><prosody rate="0%">Hello world</prosody></voice></speak>' }), TEST_AZURE_CONFIG, client, 'B1');
+    const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false }));
+    const ttsMetric = metrics.find((m) => m.metricKey === 'tts_characters');
+    expect(ttsMetric?.isBillable).toBe(true);
+    expect(ttsMetric?.quantity).toBeGreaterThan(0);
+  });
+
+  it('a non-retryable cancellation creates exactly one failed event (no retry attempted)', async () => {
+    mockState.shouldCancel = true;
+    mockState.cancellationRetryable = false; // AuthenticationFailure — non-retryable
+    const { client } = makeSupabase();
+    await expect(synthesizeListeningBlock(makeBlockInput(), TEST_AZURE_CONFIG, client, 'B1'))
+      .rejects.toThrow(ListeningAzureSynthesisCanceledError);
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
+    expect(gw.mockFailEvent).toHaveBeenCalledTimes(1);
+    expect(gw.mockCompleteEvent).not.toHaveBeenCalled();
+  });
+
+  it('exhausting all retryable-cancellation attempts creates one failed event per physical attempt, sharing one correlationId with a globally increasing attemptNumber', async () => {
+    vi.useFakeTimers();
+    try {
+      mockState.shouldCancel = true;
+      mockState.cancellationRetryable = true; // ServiceError — retryable
+      const { client } = makeSupabase();
+
+      const promise = synthesizeListeningBlock(makeBlockInput(), TEST_AZURE_CONFIG, client, 'B1');
+      // Rejections must be observed as soon as they occur, before advancing
+      // timers further, to avoid an unhandled-rejection window.
+      const assertion = expect(promise).rejects.toThrow(ListeningAzureSynthesisCanceledError);
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      // maxRetries=2 -> 3 physical attempts total, all cancelled (retryable
+      // until the last one, which gives up because attempt >= maxRetries).
+      expect(gw.mockStartEvent).toHaveBeenCalledTimes(3);
+      expect(gw.mockFailEvent).toHaveBeenCalledTimes(3);
+      expect(gw.mockCompleteEvent).not.toHaveBeenCalled();
+
+      const calls = gw.mockStartEvent.mock.calls.map((c: any) => c[0]);
+      expect(calls.map((c: any) => c.attemptNumber)).toEqual([1, 2, 3]);
+      expect(new Set(calls.map((c: any) => c.correlationId)).size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('metadata contains no SSML/voice content — only allowlisted technical fields', async () => {
+    const { client } = makeSupabase();
+    await synthesizeListeningBlock(makeBlockInput({ ssml: '<speak><voice name="x">Very secret story content</voice></speak>' }), TEST_AZURE_CONFIG, client, 'B1');
+    const startCall = gw.mockStartEvent.mock.calls[0][0] as any;
+    const metadataStr = JSON.stringify(startCall.metadata);
+    expect(metadataStr).not.toContain('secret story content');
+  });
+
+  it('a telemetry failure (startEvent) does not break synthesis', async () => {
+    gw.mockStartEvent.mockRejectedValue(new Error('db down'));
+    const { client } = makeSupabase();
+    const result = await synthesizeListeningBlock(makeBlockInput(), TEST_AZURE_CONFIG, client, 'B1');
+    expect(result.status).toBe('validated');
+  });
+
+  it('an idempotent cache hit (already-validated asset, file still in Storage) never calls the Speech SDK and never records a Gateway event', async () => {
+    const audioPath = 'staging/B1/ep-1/v1/ssml-abc123ha/block-01.mp3';
+    const existingAsset = {
+      id: 'existing-asset', audio_path: audioPath, duration_ms: 5000,
+      file_size_bytes: 12345, audio_hash: 'hash-1', word_timing_status: 'complete',
+    };
+    const chain: any = {};
+    for (const m of ['select', 'eq']) chain[m] = vi.fn().mockReturnValue(chain);
+    chain.maybeSingle = vi.fn().mockResolvedValue({ data: existingAsset, error: null });
+    const client = {
+      from: vi.fn(() => chain),
+      storage: { from: vi.fn(() => ({ list: vi.fn().mockResolvedValue({ data: [{ name: audioPath.split('/').pop() }], error: null }) })) },
+    } as any;
+
+    const { SpeechSynthesizer } = await import('microsoft-cognitiveservices-speech-sdk');
+    (SpeechSynthesizer as any).mockClear();
+    const result = await synthesizeListeningBlock(makeBlockInput(), TEST_AZURE_CONFIG, client, 'B1');
+    expect(result.status).toBe('validated');
+    expect(SpeechSynthesizer).not.toHaveBeenCalled();
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
 });

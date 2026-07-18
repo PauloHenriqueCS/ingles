@@ -5,6 +5,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
 import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
+import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
 // ── Public result types ───────────────────────────────────────────────────────
 
@@ -232,11 +233,33 @@ function escapeXml(t: string): string {
     .replace(/'/g, '&apos;');
 }
 
+// ── Metric extractor — deterministic count, never the request text itself ─────
+
+function extractStorySessionTtsMetrics(characterCount: number): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+    {
+      metricKey: 'tts_characters',
+      unitType: 'character',
+      quantity: characterCount,
+      isBillable: true,
+      measurementSource: 'ssml_request_body',
+    },
+  ];
+}
+
 async function synthesizeAudio(
   text: string,
   azureKey: string,
   azureRegion: string,
   voice: string,
+  userId: string,
 ): Promise<Buffer> {
   const ssml =
     `<speak version="1.0" xml:lang="en-US">` +
@@ -245,35 +268,62 @@ async function synthesizeAudio(
     `</voice></speak>`;
 
   const url = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000);
+  const characterCount = countTtsSsmlCharacters(ssml);
 
-  let resp: Response;
-  try {
-    resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Ocp-Apim-Subscription-Key': azureKey,
-        'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
-        'User-Agent': 'lemon-english-app/1.0',
+  const gatewayDeps = getProductionDeps();
+  const buf = await executeAiGatewayCall<ArrayBuffer>(
+    {
+      featureKey: 'listening.story_session_tts',
+      provider: 'azure',
+      service: 'tts_rest',
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      executionLocation: 'system',
+      correlationId: gatewayDeps.uuidGen(),
+      attemptNumber: 1,
+      callSequence: 1,
+      technicalMetadata: {
+        endpoint: 'listening/story/generate',
+        region: azureRegion,
+        voiceName: voice,
       },
-      body: ssml,
-      signal: controller.signal,
-    });
-  } catch (err: unknown) {
-    const isAbort = err instanceof Error && err.name === 'AbortError';
-    throw new Error(isAbort ? 'AZURE_TTS_TIMEOUT' : `AZURE_TTS_NETWORK_ERROR`);
-  } finally {
-    clearTimeout(timer);
-  }
+    },
+    async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
 
-  if (resp.status === 429) throw new Error('AZURE_TTS_RATE_LIMITED');
-  if (resp.status === 401 || resp.status === 403) throw new Error('AZURE_TTS_AUTH_FAILED');
-  if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}`);
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Ocp-Apim-Subscription-Key': azureKey,
+            'Content-Type': 'application/ssml+xml',
+            'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+            'User-Agent': 'lemon-english-app/1.0',
+          },
+          body: ssml,
+          signal: controller.signal,
+        });
+      } catch (err: unknown) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        throw new Error(isAbort ? 'AZURE_TTS_TIMEOUT' : `AZURE_TTS_NETWORK_ERROR`);
+      } finally {
+        clearTimeout(timer);
+      }
 
-  const buf = await resp.arrayBuffer();
-  if (!buf.byteLength) throw new Error('AZURE_TTS_EMPTY_AUDIO');
+      if (resp.status === 429) throw new Error('AZURE_TTS_RATE_LIMITED');
+      if (resp.status === 401 || resp.status === 403) throw new Error('AZURE_TTS_AUTH_FAILED');
+      if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}`);
+
+      const b = await resp.arrayBuffer();
+      if (!b.byteLength) throw new Error('AZURE_TTS_EMPTY_AUDIO');
+      return b;
+    },
+    gatewayDeps,
+    () => extractStorySessionTtsMetrics(characterCount),
+  );
 
   return Buffer.from(buf);
 }
@@ -361,7 +411,7 @@ export async function generateStorySession(
   const ai = await callAI(level, openaiKey, userId);
 
   // 4. Azure TTS: synthesize story audio using user's preferred voice
-  const audioBuffer = await synthesizeAudio(ai.storyEn, azureKey, azureRegion, voice);
+  const audioBuffer = await synthesizeAudio(ai.storyEn, azureKey, azureRegion, voice, userId);
 
   // 5. Upload to Supabase Storage, get 1-hour signed URL
   const { url: audioUrl, expiresAt: audioExpiresAt } = await uploadAndSign(

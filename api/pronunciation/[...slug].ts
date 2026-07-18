@@ -3,6 +3,15 @@ import { isValidUuid, buildStatusResponse, rowToAssessment } from '../../src/lib
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import type { PronunciationNormalizedResult, PronunciationFailCode } from '../../src/types';
 import { methodGuard, safeLog, resolveSlug } from '../_helpers';
+import {
+  executeAiGatewayCall,
+  getProductionDeps,
+  getSharedServiceClient,
+  authorizeProviderSession,
+  reconcileEventCost,
+  rebuildDailyBucketForEvent,
+} from '../_ai-gateway/index';
+import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +36,217 @@ const AZURE_ERROR_MESSAGES: Record<string, string> = {
   AZURE_SPEECH_RATE_LIMITED: 'O serviço de pronúncia está temporariamente indisponível.',
   AZURE_SPEECH_UNAVAILABLE: 'O serviço de pronúncia está temporariamente indisponível.',
 };
+
+function extractTokenMetrics(): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+  ];
+}
+
+// ── pronunciation.assess_text — Gateway session bridge ────────────────────────
+// The physical Azure call happens entirely in the browser (Speech SDK), so it
+// cannot be wrapped with executeAiGatewayCall. Instead, ai_provider_sessions
+// is the authorization/correlation bridge (per the AI Gateway foundation):
+// this backend authorizes a session when issuing the token, and the browser
+// later reports technical completion through the already-authenticated
+// /complete and /fail endpoints below — never a direct browser→Supabase write.
+//
+// Session creation/completion is itself gated by pronunciation.assess_text's
+// own runtime policy: while legacy (Fase A of Etapa 9), none of this runs —
+// no session row, no gatewaySessionId in the response, zero new behavior.
+
+const ASSESS_TEXT_FEATURE_KEY = 'pronunciation.assess_text';
+// Reasonable upper bound for a single continuous assessment recording —
+// generous relative to the Speech SDK's own analysis timeout (3× audio
+// duration, capped at 5 minutes in pronunciationFlow.ts), so genuine
+// recordings are never rejected while implausible values still are.
+const MAX_ASSESS_TEXT_DURATION_SECONDS = 900;
+
+async function maybeAuthorizeAssessTextSession(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  assessmentId: string,
+  ephemeralToken: string,
+  authorizationExpiresAt: Date,
+): Promise<string | undefined> {
+  try {
+    const policy = await gatewayDeps.policyResolver.resolvePolicy({
+      featureKey: ASSESS_TEXT_FEATURE_KEY,
+      provider: 'azure',
+      userId,
+      actorType: 'user',
+      executionLocation: 'frontend',
+    });
+    if (policy.gatewayMode !== 'observe') return undefined;
+
+    const { sessionId } = await authorizeProviderSession(
+      gatewayDeps.usageRepository,
+      {
+        featureKey: ASSESS_TEXT_FEATURE_KEY,
+        provider: 'azure',
+        userId,
+        initiatedByUserId: userId,
+        internalSessionType: 'pronunciation_assessment',
+        internalSessionId: assessmentId,
+        authorizationExpiresAt,
+        metadata: { endpoint: 'pronunciation/start' },
+      },
+      ephemeralToken,
+    );
+    return sessionId;
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextAuthorize.failed', { message: String(e) });
+    return undefined; // fail-open: token issuance must never be blocked by this
+  }
+}
+
+/**
+ * Atomically completes (or fails) the ai_provider_sessions row for a
+ * pronunciation.assess_text session, re-validating ownership/feature/
+ * provider/non-terminal-status server-side — the client-supplied
+ * gatewaySessionId is never trusted beyond "which row to look up."
+ * Returns the row if the transition succeeded, or null if the session
+ * didn't exist, didn't belong to this user, or was already terminal
+ * (idempotent no-op — never double-counts).
+ */
+async function transitionAssessTextSession(
+  userId: string,
+  gatewaySessionId: string,
+  update: { status: 'completed'; durationSeconds: number } | { status: 'failed' },
+): Promise<{ id: string } | null> {
+  const supabase = getSharedServiceClient();
+  const payload: Record<string, unknown> = {
+    status: update.status,
+    ended_at: new Date().toISOString(),
+  };
+  if (update.status === 'completed') payload.duration_seconds = update.durationSeconds;
+
+  const { data, error } = await supabase
+    .from('ai_provider_sessions')
+    .update(payload)
+    .eq('id', gatewaySessionId)
+    .eq('user_id', userId)
+    .eq('feature_key', ASSESS_TEXT_FEATURE_KEY)
+    .eq('provider', 'azure')
+    .in('status', ['authorized', 'connecting', 'active'])
+    .select('id')
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data as { id: string };
+}
+
+/**
+ * Records the completed physical Azure call as a normal ai_usage_event +
+ * metrics, exactly like every backend-wrapped feature — the only difference
+ * is the "physical call" already happened in the browser, so there is no
+ * invoke() to wrap; the event is recorded directly once the browser's
+ * authenticated completion report is validated and the session transition
+ * above has already succeeded.
+ */
+async function recordAssessTextUsageEvent(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  gatewaySessionId: string,
+  durationSeconds: number,
+): Promise<void> {
+  const startedAt = gatewayDeps.clock();
+  const requestId = gatewayDeps.uuidGen();
+  const correlationId = gatewayDeps.uuidGen();
+  const eventId = await gatewayDeps.usageRepository.startEvent({
+    requestId,
+    correlationId,
+    userId,
+    initiatedByUserId: userId,
+    actorType: 'user',
+    featureKey: ASSESS_TEXT_FEATURE_KEY,
+    provider: 'azure',
+    service: 'pronunciation_assessment_sdk',
+    executionLocation: 'frontend',
+    isBillable: true,
+    attemptNumber: 1,
+    callSequence: 1,
+    resourceType: 'ai_provider_session',
+    resourceId: gatewaySessionId,
+    metadata: { endpoint: 'pronunciation/complete' },
+    startedAt,
+  });
+
+  await gatewayDeps.usageRepository.completeEvent(eventId, { latencyMs: gatewayDeps.clock() - startedAt });
+
+  const metrics: GatewayUsageMetric[] = [
+    { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: 'client_report' },
+    { metricKey: 'audio_seconds', unitType: 'second', quantity: durationSeconds, isBillable: true, measurementSource: 'client_sdk_reported' },
+  ];
+  await gatewayDeps.usageRepository.insertMetrics(eventId, metrics);
+
+  try {
+    await reconcileEventCost(eventId, {
+      usageRepository: gatewayDeps.usageRepository,
+      pricingRepository: gatewayDeps.pricingRepository,
+      logger: gatewayDeps.logger,
+    });
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextCost.failed', { message: String(e) });
+  }
+
+  try {
+    await rebuildDailyBucketForEvent(eventId, {
+      dailyRollupRepository: gatewayDeps.dailyRollupRepository,
+      logger: gatewayDeps.logger,
+    });
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextRollup.failed', { message: String(e) });
+  }
+}
+
+async function completeAssessTextGatewaySession(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  gatewaySessionId: string,
+  durationSeconds: number,
+): Promise<void> {
+  try {
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 0 || durationSeconds > MAX_ASSESS_TEXT_DURATION_SECONDS) {
+      gatewayDeps.logger('gateway.assessTextComplete.rejectedDuration', { durationSeconds });
+      return;
+    }
+    const session = await transitionAssessTextSession(userId, gatewaySessionId, { status: 'completed', durationSeconds });
+    if (!session) return; // unknown/foreign/already-terminal — idempotent no-op
+
+    const policy = await gatewayDeps.policyResolver.resolvePolicy({
+      featureKey: ASSESS_TEXT_FEATURE_KEY, provider: 'azure', userId,
+      actorType: 'user', executionLocation: 'frontend',
+    });
+    if (policy.gatewayMode !== 'observe') return;
+
+    await recordAssessTextUsageEvent(gatewayDeps, userId, gatewaySessionId, durationSeconds);
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextComplete.failed', { message: String(e) });
+    // fail-open: never throw — this must not affect the pedagogical response
+  }
+}
+
+async function failAssessTextGatewaySession(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  gatewaySessionId: string,
+): Promise<void> {
+  try {
+    await transitionAssessTextSession(userId, gatewaySessionId, { status: 'failed' });
+    // No ai_usage_event is created here: unlike /complete, we cannot prove a
+    // physical Azure call was actually attempted (the browser may call /fail
+    // before ever reaching the Speech SDK step) — never invent an event.
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextFail.failed', { message: String(e) });
+  }
+}
 
 async function handleStart(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
@@ -66,9 +286,29 @@ async function handleStart(req: any, res: any) {
   const assessmentId = result.assessmentId as string;
   const referenceText = result.referenceText as string;
   const isOurSlot = result.action === 'created' || result.action === 'reactivated' || result.action === 'existing_processing' || result.action === 'restarted';
+  const gatewayDeps = getProductionDeps();
   let tokenResult: Awaited<ReturnType<typeof issueAzureSpeechToken>>;
   try {
-    tokenResult = await issueAzureSpeechToken();
+    tokenResult = await executeAiGatewayCall(
+      {
+        featureKey: 'pronunciation.start_assessment',
+        provider: 'azure',
+        service: 'speech_sts',
+        userId: auth.userId,
+        initiatedByUserId: auth.userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        resourceType: 'pronunciation_assessment',
+        resourceId: assessmentId,
+        technicalMetadata: { endpoint: 'pronunciation/start' },
+      },
+      () => issueAzureSpeechToken(),
+      gatewayDeps,
+      extractTokenMetrics,
+    );
   } catch (err) {
     if (isOurSlot && assessmentId) {
       const errorCode = err instanceof AzureSpeechError ? err.code : 'TOKEN_ISSUE_FAILED';
@@ -84,8 +324,23 @@ async function handleStart(req: any, res: any) {
     console.error('[pronunciation/start] Unexpected token error:', err instanceof Error ? err.message : 'unknown');
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a análise.' });
   }
+
+  // Additive, retrocompatible: gatewaySessionId is only present when
+  // pronunciation.assess_text is in observe mode (Fase A: always absent).
+  const gatewaySessionId = await maybeAuthorizeAssessTextSession(
+    gatewayDeps,
+    auth.userId,
+    assessmentId,
+    tokenResult.token,
+    new Date(Date.now() + tokenResult.expiresInSeconds * 1000),
+  );
+
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(200).json({ assessmentId, attemptId, token: tokenResult.token, region: tokenResult.region, language: 'en-US', referenceText });
+  return res.status(200).json({
+    assessmentId, attemptId, token: tokenResult.token, region: tokenResult.region,
+    language: 'en-US', referenceText,
+    ...(gatewaySessionId ? { gatewaySessionId } : {}),
+  });
 }
 
 // ─── complete ─────────────────────────────────────────────────────────────────
@@ -120,7 +375,7 @@ async function handleComplete(req: any, res: any) {
   if (contentLength > MAX_BODY_BYTES_COMPLETE) {
     return res.status(413).json({ code: 'PAYLOAD_TOO_LARGE', message: 'Payload muito grande.' });
   }
-  const { assessmentId, attemptId, result } = raw;
+  const { assessmentId, attemptId, result, gatewaySessionId } = raw;
   if (!isValidUuid(assessmentId)) return res.status(400).json({ code: 'INVALID_ASSESSMENT_ID', message: 'assessmentId inválido.' });
   if (!isValidUuid(attemptId)) return res.status(400).json({ code: 'INVALID_ATTEMPT_ID', message: 'attemptId inválido.' });
   if (!validateResult(result)) return res.status(400).json({ code: 'INVALID_RESULT', message: 'Resultado inválido ou fora do intervalo permitido.' });
@@ -145,6 +400,16 @@ async function handleComplete(req: any, res: any) {
     console.error('[pronunciation/complete] Unexpected RPC result:', rpc.error);
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao salvar o resultado.' });
   }
+
+  // Additive Gateway telemetry — never affects the response above. Only runs
+  // when the client (still authenticated) reports a gatewaySessionId, which
+  // is only ever issued when pronunciation.assess_text is in observe mode.
+  if (typeof gatewaySessionId === 'string' && isValidUuid(gatewaySessionId)) {
+    try {
+      await completeAssessTextGatewaySession(getProductionDeps(), auth.userId, gatewaySessionId, result.audioDurationSeconds);
+    } catch { /* fail-open — already isolated inside, this is a final safety net */ }
+  }
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({ assessmentId, status: 'completed', result });
 }
@@ -162,7 +427,7 @@ async function handleFail(req: any, res: any) {
   if (!auth) return;
   const { supabase } = auth;
   const body = req.body ?? {};
-  const { assessmentId, attemptId, code } = body;
+  const { assessmentId, attemptId, code, gatewaySessionId } = body;
   if (!isValidUuid(assessmentId)) return res.status(400).json({ code: 'INVALID_ASSESSMENT_ID', message: 'assessmentId inválido.' });
   if (!isValidUuid(attemptId)) return res.status(400).json({ code: 'INVALID_ATTEMPT_ID', message: 'attemptId inválido.' });
   if (typeof code !== 'string' || !ALLOWED_CODES.has(code as PronunciationFailCode)) {
@@ -182,6 +447,14 @@ async function handleFail(req: any, res: any) {
     console.error('[pronunciation/fail] Unexpected RPC result:', rpc.error);
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno.' });
   }
+
+  // Additive Gateway telemetry — never affects the response above.
+  if (typeof gatewaySessionId === 'string' && isValidUuid(gatewaySessionId)) {
+    try {
+      await failAssessTextGatewaySession(getProductionDeps(), auth.userId, gatewaySessionId);
+    } catch { /* fail-open — already isolated inside, this is a final safety net */ }
+  }
+
   return res.status(200).json({ status: rpc.action ?? 'no_op' });
 }
 

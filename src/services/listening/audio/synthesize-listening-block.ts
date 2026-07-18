@@ -29,6 +29,9 @@ import { computeListeningAudioHash } from './hash-listening-audio';
 import { uploadListeningAudioStaging, listeningAudioFileExists } from './upload-listening-audio-staging';
 import { persistListeningAudio } from './persist-listening-audio';
 import { azureTicksToMilliseconds } from './normalize-listening-bookmarks';
+import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
+import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -102,6 +105,60 @@ export class ListeningAudioDurationInvalidError extends Error {
 
 // ─── Tick conversion (re-exported for CLI convenience) ──────────────────────
 export { azureTicksToMilliseconds };
+
+// ─── Gateway wiring — wraps only the physical Azure SDK synthesis call ──────
+
+/**
+ * Internal signal: the physical call resolved but Azure reported a
+ * cancellation. Thrown from inside the Gateway-wrapped invoke() so the
+ * Gateway records this specific physical attempt as failed (matching "erro
+ * do Azure: failed"); the retry loop below still makes the same
+ * retryable/non-retryable decision as before.
+ */
+class SynthesisCancellationSignal extends Error {
+  constructor(
+    public readonly retryable: boolean,
+    public readonly errorCodeStr: string,
+    public readonly cancellationDetails: string,
+  ) {
+    super(`Azure synthesis canceled: ${cancellationDetails}`);
+    this.name = 'SynthesisCancellationSignal';
+  }
+}
+
+async function runSynthesisOnceGated(
+  ssml: string,
+  azureConfig: ListeningAzureSpeechConfig,
+): Promise<ListeningSynthesisRawResult> {
+  const rawResult = await runSynthesisOnce(ssml, azureConfig);
+  const sdkResult = extractSdkResult(rawResult);
+  if (sdkResult && (sdkResult as { reason?: number }).reason === ResultReason.Canceled) {
+    const details = CancellationDetails.fromResult(sdkResult as Parameters<typeof CancellationDetails.fromResult>[0]);
+    const errorCodeStr = CancellationErrorCode[details.ErrorCode] ?? String(details.ErrorCode);
+    const retryable = details.reason !== CancellationReason.Error || !isNonRetryableErrorCode(errorCodeStr);
+    throw new SynthesisCancellationSignal(retryable, errorCodeStr, details.errorDetails ?? '');
+  }
+  return rawResult;
+}
+
+function extractEpisodeAudioMetrics(characterCount: number): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+    {
+      metricKey: 'tts_characters',
+      unitType: 'character',
+      quantity: characterCount,
+      isBillable: true,
+      measurementSource: 'ssml_request_body',
+    },
+  ];
+}
 
 // ─── Core synthesis (one attempt) ───────────────────────────────────────────
 
@@ -274,6 +331,14 @@ export async function synthesizeListeningBlock(
   let rawResult: ListeningSynthesisRawResult | null = null;
   let lastError: Error | null = null;
 
+  // One correlationId for every physical attempt at this block; a single
+  // synthesis call always sends the exact same SSML, so the billable
+  // character count is computed once and reused per attempt.
+  const gatewayDeps = getProductionDeps();
+  const synthesisCorrelationId = gatewayDeps.uuidGen();
+  const characterCount = countTtsSsmlCharacters(ssml);
+  const maxAttempts = azureConfig.maxRetries + 1;
+
   for (let attempt = 0; attempt <= azureConfig.maxRetries; attempt++) {
     if (attempt > 0) {
       const delay = RETRY_DELAY_BASE_MS * attempt;
@@ -285,33 +350,47 @@ export async function synthesizeListeningBlock(
     }
 
     try {
-      rawResult = await runSynthesisOnce(ssml, azureConfig);
-
-      // Check if result is a cancellation
-      const sdkResult = extractSdkResult(rawResult);
-      if (sdkResult && (sdkResult as { reason?: number }).reason === ResultReason.Canceled) {
-        const details = CancellationDetails.fromResult(sdkResult as Parameters<typeof CancellationDetails.fromResult>[0]);
-        const errorCodeStr = CancellationErrorCode[details.ErrorCode] ?? String(details.ErrorCode);
-        const retryable =
-          details.reason !== CancellationReason.Error ||
-          !isNonRetryableErrorCode(errorCodeStr);
-
-        if (!retryable || attempt >= azureConfig.maxRetries) {
+      rawResult = await executeAiGatewayCall<ListeningSynthesisRawResult>(
+        {
+          featureKey: 'listening.episode_synthesize_audio',
+          provider: 'azure',
+          service: 'tts_sdk',
+          actorType: 'system',
+          executionLocation: 'system',
+          correlationId: synthesisCorrelationId,
+          attemptNumber: attempt + 1,
+          callSequence: 1,
+          resourceType: 'listening_block',
+          resourceId: blockId,
+          technicalMetadata: {
+            endpoint: 'listening-episode-synthesize-audio',
+            region: azureConfig.region,
+            voiceName: azureConfig.voiceName,
+            blockIndex: blockOrder,
+            phaseAttempt: attempt + 1,
+            maxAttempts,
+          },
+        },
+        () => runSynthesisOnceGated(ssml, azureConfig),
+        gatewayDeps,
+        () => extractEpisodeAudioMetrics(characterCount),
+      );
+      break;
+    } catch (err) {
+      if (err instanceof SynthesisCancellationSignal) {
+        if (!err.retryable || attempt >= azureConfig.maxRetries) {
           throw new ListeningAzureSynthesisCanceledError(
             episodeId,
             blockOrder,
-            retryable,
-            errorCodeStr,
-            `Azure synthesis canceled: ${details.errorDetails}`,
+            err.retryable,
+            err.errorCodeStr,
+            err.message,
           );
         }
-        lastError = new Error(`Cancellation: ${details.errorDetails}`);
+        lastError = new Error(`Cancellation: ${err.cancellationDetails}`);
         rawResult = null;
         continue;
       }
-      break;
-    } catch (err) {
-      if (err instanceof ListeningAzureSynthesisCanceledError) throw err;
 
       const isTimeout = err instanceof Error && err.message === '__TIMEOUT__';
       if (isTimeout) {

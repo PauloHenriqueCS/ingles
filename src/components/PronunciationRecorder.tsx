@@ -38,6 +38,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
   const assessmentIdRef        = useRef<string | null>(null);
   const cancelRecognitionRef   = useRef<(() => void) | null>(null);
   const mountedRef             = useRef(true);
+  const gatewaySessionIdRef    = useRef<string | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -124,7 +125,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
         audioBlob:      recorder.audioBlob,
         audioDurationMs: recorder.durationMs,
       },
-      { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef },
+      { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef, gatewaySessionIdRef },
       (state) => { if (mountedRef.current) setAnalysis(state); },
     );
   }, [reviewId, recorder.audioBlob, recorder.durationMs]);

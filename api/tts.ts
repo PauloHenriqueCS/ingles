@@ -9,6 +9,9 @@
 
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, safeLog, jsonError, PAYLOAD_LIMITS } from './_helpers';
+import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import type { GatewayUsageMetric } from './_ai-gateway/index';
+import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
 
 // ── Voice configuration ───────────────────────────────────────────────────────
 
@@ -55,6 +58,56 @@ function getAzureConfig(): { key: string; region: string } {
   return { key, region };
 }
 
+// ── Gateway wiring — wraps only the physical Azure fetch call ─────────────────
+
+class AzureTtsHttpError extends Error {
+  constructor(public readonly azureStatus: number) {
+    super(`Azure TTS returned HTTP ${azureStatus}`);
+    this.name = 'AzureTtsHttpError';
+  }
+}
+class AzureTtsTimeoutError extends Error {
+  constructor() {
+    super('Azure TTS request timed out');
+    this.name = 'AzureTtsTimeoutError';
+  }
+}
+class AzureTtsNetworkError extends Error {
+  constructor() {
+    super('Could not reach Azure TTS');
+    this.name = 'AzureTtsNetworkError';
+  }
+}
+class AzureTtsEmptyAudioError extends Error {
+  constructor() {
+    super('Azure TTS returned empty audio');
+    this.name = 'AzureTtsEmptyAudioError';
+  }
+}
+
+function buildTtsMetrics(characterCount: number): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+    {
+      metricKey: 'tts_characters',
+      unitType: 'character',
+      quantity: characterCount,
+      isBillable: true,
+      // Deterministic count of the actual SSML body sent, per Microsoft's
+      // documented billing rule (see tts-character-count.ts) — not an
+      // estimate, but computed from the request rather than confirmed by
+      // Azure's response (Azure's TTS REST response carries no usage field).
+      measurementSource: 'ssml_request_body',
+    },
+  ];
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -98,50 +151,84 @@ export default async function handler(req: any, res: any) {
 
   const ssml = buildSsml(normalized, resolvedVoice);
   const ttsUrl = `https://${config.region}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  const characterCount = countTtsSsmlCharacters(ssml);
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
-
-  let ttsResponse: Response;
+  const gatewayDeps = getProductionDeps();
+  let audioBuffer: ArrayBuffer;
   try {
-    ttsResponse = await fetch(ttsUrl, {
-      method: 'POST',
-      headers: {
-        'Ocp-Apim-Subscription-Key': config.key,
-        'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
-        'User-Agent': 'lemon-english-app/1.0',
+    audioBuffer = await executeAiGatewayCall<ArrayBuffer>(
+      {
+        featureKey: 'tts.synthesize',
+        provider: 'azure',
+        service: 'tts_rest',
+        userId: auth.userId,
+        initiatedByUserId: auth.userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'tts',
+          region: config.region,
+          voiceName: resolvedVoice,
+        },
       },
-      body: ssml,
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const isAbort = err instanceof Error && err.name === 'AbortError';
-    safeLog('tts', isAbort ? 'azure_timeout' : 'azure_network_error', 503, {
-      chars: normalized.length,
-    });
-    return jsonError(
-      res,
-      isAbort ? 504 : 503,
-      'TTS_UNAVAILABLE',
-      'Não foi possível gerar o áudio agora. Tente novamente.',
+      async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
+        let ttsResponse: Response;
+        try {
+          ttsResponse = await fetch(ttsUrl, {
+            method: 'POST',
+            headers: {
+              'Ocp-Apim-Subscription-Key': config.key,
+              'Content-Type': 'application/ssml+xml',
+              'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+              'User-Agent': 'lemon-english-app/1.0',
+            },
+            body: ssml,
+            signal: controller.signal,
+          });
+        } catch (err) {
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          throw isAbort ? new AzureTtsTimeoutError() : new AzureTtsNetworkError();
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (!ttsResponse.ok) {
+          throw new AzureTtsHttpError(ttsResponse.status);
+        }
+
+        const buf = await ttsResponse.arrayBuffer();
+        if (!buf.byteLength) {
+          throw new AzureTtsEmptyAudioError();
+        }
+        return buf;
+      },
+      gatewayDeps,
+      () => buildTtsMetrics(characterCount),
     );
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!ttsResponse.ok) {
-    const azureStatus = ttsResponse.status;
-    safeLog('tts', 'azure_error', azureStatus, { azure_status: azureStatus, chars: normalized.length });
-    const status = azureStatus === 429 ? 503 : azureStatus >= 500 ? 503 : 400;
-    return jsonError(res, status, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
-  }
-
-  const audioBuffer = await ttsResponse.arrayBuffer();
-
-  if (!audioBuffer.byteLength) {
-    safeLog('tts', 'empty_audio', 503, { chars: normalized.length });
-    return jsonError(res, 503, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+  } catch (err) {
+    if (err instanceof AzureTtsTimeoutError) {
+      safeLog('tts', 'azure_timeout', 503, { chars: normalized.length });
+      return jsonError(res, 504, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+    }
+    if (err instanceof AzureTtsNetworkError) {
+      safeLog('tts', 'azure_network_error', 503, { chars: normalized.length });
+      return jsonError(res, 503, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+    }
+    if (err instanceof AzureTtsHttpError) {
+      safeLog('tts', 'azure_error', err.azureStatus, { azure_status: err.azureStatus, chars: normalized.length });
+      const status = err.azureStatus === 429 ? 503 : err.azureStatus >= 500 ? 503 : 400;
+      return jsonError(res, status, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+    }
+    if (err instanceof AzureTtsEmptyAudioError) {
+      safeLog('tts', 'empty_audio', 503, { chars: normalized.length });
+      return jsonError(res, 503, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+    }
+    throw err;
   }
 
   safeLog('tts', 'success', 200, { chars: normalized.length });

@@ -25,6 +25,11 @@ export function createMockGatewayDeps() {
   const mockClock = vi.fn(() => 1000);
   const mockUuidGen = vi.fn(() => 'test-uuid');
   const mockLogger = vi.fn();
+  const mockCreateProviderSession = vi.fn();
+  const mockActivateSession = vi.fn();
+  const mockCompleteSession = vi.fn();
+  const mockFailSession = vi.fn();
+  const mockExpireSession = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
@@ -34,11 +39,11 @@ export function createMockGatewayDeps() {
       failEvent: mockFailEvent,
       cancelEvent: vi.fn(),
       insertMetrics: mockInsertMetrics,
-      createProviderSession: vi.fn(),
-      activateSession: vi.fn(),
-      completeSession: vi.fn(),
-      failSession: vi.fn(),
-      expireSession: vi.fn(),
+      createProviderSession: mockCreateProviderSession,
+      activateSession: mockActivateSession,
+      completeSession: mockCompleteSession,
+      failSession: mockFailSession,
+      expireSession: mockExpireSession,
       getEventForCosting: mockGetEventForCosting,
       getMetricsForEvent: mockGetMetricsForEvent,
       updateMetricCost: mockUpdateMetricCost,
@@ -60,6 +65,7 @@ export function createMockGatewayDeps() {
   function resetDefaults() {
     let eventCounter = 0;
     let uuidCounter = 0;
+    let sessionCounter = 0;
     mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'legacy', runtimeStatus: 'enabled' });
     mockStartEvent.mockImplementation(() => Promise.resolve(`event-${++eventCounter}`));
     mockCompleteEvent.mockResolvedValue(undefined);
@@ -75,6 +81,11 @@ export function createMockGatewayDeps() {
     mockListBucketsForDate.mockResolvedValue([]);
     mockClock.mockReturnValue(1000);
     mockUuidGen.mockImplementation(() => `test-uuid-${++uuidCounter}`);
+    mockCreateProviderSession.mockImplementation(() => Promise.resolve(`session-${++sessionCounter}`));
+    mockActivateSession.mockResolvedValue(undefined);
+    mockCompleteSession.mockResolvedValue(undefined);
+    mockFailSession.mockResolvedValue(undefined);
+    mockExpireSession.mockResolvedValue(undefined);
   }
 
   return {
@@ -95,6 +106,11 @@ export function createMockGatewayDeps() {
     mockClock,
     mockUuidGen,
     mockLogger,
+    mockCreateProviderSession,
+    mockActivateSession,
+    mockCompleteSession,
+    mockFailSession,
+    mockExpireSession,
     resetDefaults,
   };
 }

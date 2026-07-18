@@ -4,7 +4,8 @@ import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
 import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
-import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
+import type { GatewayUsageMetric, GatewayDeps } from '../../../../api/_ai-gateway/index';
+import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -357,6 +358,27 @@ function escapeXml(t: string): string {
     .replace(/'/g, '&apos;');
 }
 
+// ── Metric extractor — deterministic count, never the request text itself ─────
+
+function extractTwoPartTtsMetrics(characterCount: number): GatewayUsageMetric[] {
+  return [
+    {
+      metricKey: 'provider_requests',
+      unitType: 'request',
+      quantity: 1,
+      isBillable: false,
+      measurementSource: 'provider_response',
+    },
+    {
+      metricKey: 'tts_characters',
+      unitType: 'character',
+      quantity: characterCount,
+      isBillable: true,
+      measurementSource: 'ssml_request_body',
+    },
+  ];
+}
+
 async function synthesizeAudio(
   text: string,
   azureKey: string,
@@ -364,6 +386,10 @@ async function synthesizeAudio(
   voice: string,
   partLabel: string,
   requestId: string,
+  userId: string,
+  gatewayDeps: GatewayDeps,
+  correlationId: string,
+  attemptNumber: number,
 ): Promise<Buffer> {
   const ssml =
     `<speak version="1.0" xml:lang="en-US">` +
@@ -372,44 +398,73 @@ async function synthesizeAudio(
     `</voice></speak>`;
 
   const endpoint = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000);
-
+  const characterCount = countTtsSsmlCharacters(ssml);
   const t0 = Date.now();
-  let resp: Response;
-  try {
-    resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Ocp-Apim-Subscription-Key': azureKey,
-        'Content-Type': 'application/ssml+xml',
-        // 64 kbps mono — adequate for speech, ~half the size of 128 kbps
-        'X-Microsoft-OutputFormat': 'audio-16khz-64kbitrate-mono-mp3',
-        'User-Agent': 'lemon-english-app/1.0',
+
+  const buf = await executeAiGatewayCall<ArrayBuffer>(
+    {
+      featureKey: 'listening.two_part_tts',
+      provider: 'azure',
+      service: 'tts_rest',
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      executionLocation: 'system',
+      correlationId,
+      attemptNumber,
+      callSequence: 1,
+      operationPart: partLabel,
+      technicalMetadata: {
+        endpoint: 'listening/generate',
+        region: azureRegion,
+        voiceName: voice,
+        blockIndex: partLabel,
       },
-      body: ssml,
-      signal: controller.signal,
-    });
-  } catch (err: unknown) {
-    const isAbort = err instanceof Error && err.name === 'AbortError';
-    const code = isAbort ? `AZURE_TTS_TIMEOUT_${partLabel}` : `AZURE_TTS_NETWORK_ERROR_${partLabel}`;
-    stepLog(requestId, 'tts_fetch_error', { partLabel, code, region: azureRegion });
-    throw new Error(code);
-  } finally {
-    clearTimeout(timer);
-  }
+    },
+    async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 90_000);
 
-  const ttsMs = Date.now() - t0;
-  stepLog(requestId, 'tts_response', { partLabel, httpStatus: resp.status, ttsMs, region: azureRegion });
+      let resp: Response;
+      try {
+        resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Ocp-Apim-Subscription-Key': azureKey,
+            'Content-Type': 'application/ssml+xml',
+            // 64 kbps mono — adequate for speech, ~half the size of 128 kbps
+            'X-Microsoft-OutputFormat': 'audio-16khz-64kbitrate-mono-mp3',
+            'User-Agent': 'lemon-english-app/1.0',
+          },
+          body: ssml,
+          signal: controller.signal,
+        });
+      } catch (err: unknown) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        const code = isAbort ? `AZURE_TTS_TIMEOUT_${partLabel}` : `AZURE_TTS_NETWORK_ERROR_${partLabel}`;
+        stepLog(requestId, 'tts_fetch_error', { partLabel, code, region: azureRegion });
+        throw new Error(code);
+      } finally {
+        clearTimeout(timer);
+      }
 
-  if (resp.status === 429) throw new Error(`AZURE_TTS_RATE_LIMITED_${partLabel}`);
-  if (resp.status === 401 || resp.status === 403) throw new Error(`AZURE_TTS_AUTH_FAILED_${partLabel}`);
-  if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}_${partLabel}`);
+      const ttsMs = Date.now() - t0;
+      stepLog(requestId, 'tts_response', { partLabel, httpStatus: resp.status, ttsMs, region: azureRegion });
 
-  const buf = await resp.arrayBuffer();
-  if (!buf.byteLength) throw new Error(`AZURE_TTS_EMPTY_AUDIO_${partLabel}`);
+      if (resp.status === 429) throw new Error(`AZURE_TTS_RATE_LIMITED_${partLabel}`);
+      if (resp.status === 401 || resp.status === 403) throw new Error(`AZURE_TTS_AUTH_FAILED_${partLabel}`);
+      if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}_${partLabel}`);
 
-  stepLog(requestId, 'tts_audio_received', { partLabel, bytes: buf.byteLength });
+      const b = await resp.arrayBuffer();
+      if (!b.byteLength) throw new Error(`AZURE_TTS_EMPTY_AUDIO_${partLabel}`);
+
+      stepLog(requestId, 'tts_audio_received', { partLabel, bytes: b.byteLength });
+      return b;
+    },
+    gatewayDeps,
+    () => extractTwoPartTtsMetrics(characterCount),
+  );
+
   return Buffer.from(buf);
 }
 
@@ -434,6 +489,7 @@ async function synthesizeParts(
   voice: string,
   secret: string,
   requestId: string,
+  userId: string,
 ): Promise<ListeningStoryResult> {
   const t0 = Date.now();
   stepLog(requestId, 'tts_start', {
@@ -442,9 +498,14 @@ async function synthesizeParts(
     part2Words: ai.parts[1].text.split(' ').length,
   });
 
+  // Both physical TTS calls belong to the same logical execution: one shared
+  // correlationId, and attemptNumber reserved synchronously (1, 2) before
+  // Promise.all starts — deterministic regardless of which call resolves first.
+  const gatewayDeps = getProductionDeps();
+  const ttsCorrelationId = gatewayDeps.uuidGen();
   const [audio1, audio2] = await Promise.all([
-    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, voice, 'part1', requestId),
-    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, voice, 'part2', requestId),
+    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, voice, 'part1', requestId, userId, gatewayDeps, ttsCorrelationId, 1),
+    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, voice, 'part2', requestId, userId, gatewayDeps, ttsCorrelationId, 2),
   ]);
 
   stepLog(requestId, 'tts_all_done', {
@@ -545,7 +606,7 @@ export async function generateListeningStory(
 
   // 3. TTS (throws StoryTtsError on failure, carrying the packed story for retry)
   try {
-    const result = await synthesizeParts(ai, azureKey, azureRegion, voice, secret, requestId);
+    const result = await synthesizeParts(ai, azureKey, azureRegion, voice, secret, requestId, userId);
     stepLog(requestId, 'complete', { totalMs: Date.now() - totalStart });
     return result;
   } catch (err) {

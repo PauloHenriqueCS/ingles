@@ -35,6 +35,13 @@
     "src/services/listening/prepare-listening-subtitles.ts",
     "src/services/listening/generate-listening-questions.ts",
     "src/services/listening/generate-listening-story.ts",
-    "src/services/listening/listening-ai-callfn-gateway.test.ts"
+    "src/services/listening/listening-ai-callfn-gateway.test.ts",
+    "api/tts.ts",
+    "api/__tests__/tts-gateway.test.ts",
+    "api/__tests__/tts-character-count.test.ts",
+    "api/pronunciation/[...slug].ts",
+    "api/__tests__/pronunciation-token-gateway.test.ts",
+    "api/__tests__/pronunciation-assessment-gateway.test.ts",
+    "src/services/listening/audio/synthesize-listening-block.ts"
   ]
 }
