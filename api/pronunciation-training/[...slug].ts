@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
+import { executeAiGatewayCall, getProductionDeps } from '../_ai-gateway/index';
+import type { GatewayUsageMetric } from '../_ai-gateway/index';
 
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
@@ -40,6 +43,56 @@ Rules:
 Output only the text. Nothing else.`;
 }
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractGenerateTextMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 // ─── POST /api/pronunciation-training/generate-text ──────────────────────────
 
 async function handleGenerateText(req: any, res: any) {
@@ -58,13 +111,35 @@ async function handleGenerateText(req: any, res: any) {
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Serviço de IA não configurado.');
 
   const openai = new OpenAI({ apiKey, timeout: GENERATE_TIMEOUT_MS });
+  const gatewayDeps = getProductionDeps();
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      messages: [{ role: 'system', content: buildSystemPrompt(userLevel) }, { role: 'user', content: 'Write the text now.' }],
-      temperature: 0.9,
-      max_tokens: 400,
-    });
+    const completion = await executeAiGatewayCall<ChatCompletion>(
+      {
+        featureKey: 'pronunciation.generate_text',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: AI_MODEL,
+        userId: auth.userId,
+        initiatedByUserId: auth.userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'pronunciation-training/generate-text',
+          flowType: 'generate_text',
+        },
+      },
+      () => openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: [{ role: 'system', content: buildSystemPrompt(userLevel) }, { role: 'user', content: 'Write the text now.' }],
+        temperature: 0.9,
+        max_tokens: 400,
+      }),
+      gatewayDeps,
+      extractGenerateTextMetrics,
+    );
     const text = completion.choices[0]?.message?.content?.trim() ?? '';
     if (!text) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Não foi possível gerar o texto. Tente novamente.');
     safeLog('pronunciation-training/generate-text', 'success', 200);

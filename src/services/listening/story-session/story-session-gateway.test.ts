@@ -1,0 +1,218 @@
+/**
+ * Integration tests for generate-story-session.ts and generate-listening-story.ts
+ * (story-session variant) — AI Gateway integration (Etapa 8D).
+ *
+ * Covers featureKey listening.story_session_generate (generateStorySession) and
+ * listening.two_part_generate (generateListeningStory). Only the physical
+ * openai.chat.completions.create(...) call inside each private callAI() is
+ * wrapped — Azure TTS, storage upload, and answer-token signing are untouched
+ * and are stubbed here only so the functions can run end-to-end.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createMockGatewayDeps, aiOk } from '../../../../api/__tests__/_ai-gateway-test-helpers';
+
+const { mockCreate, gw } = vi.hoisted(() => {
+  const mockCreate = vi.fn();
+  return { mockCreate, gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps> };
+});
+
+vi.mock('../../../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../api/_ai-gateway/index')>();
+  return { ...actual, getProductionDeps: () => gw.mockDeps };
+});
+
+vi.mock('openai', () => ({
+  default: vi.fn().mockImplementation(function () {
+    return { chat: { completions: { create: mockCreate } } };
+  }),
+}));
+
+vi.mock('../daily/resolve-user-listening-level', () => ({
+  resolveUserListeningLevel: vi.fn().mockResolvedValue('B1'),
+}));
+
+import { generateStorySession } from './generate-story-session';
+import { generateListeningStory } from './generate-listening-story';
+
+const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000003';
+
+const VALID_STORY_SESSION_JSON = JSON.stringify({
+  title: 'A Short Trip',
+  storyEn: 'Once upon a time...',
+  storyPt: 'Era uma vez...',
+  question: {
+    prompt: 'What happened?',
+    options: ['A', 'B', 'C', 'D', 'E'],
+    correctIndex: 0,
+    explanationPt: 'Porque sim.',
+  },
+});
+
+const VALID_TWO_PART_JSON = JSON.stringify({
+  title: 'A Longer Story',
+  level: 'B1',
+  summary: 'A story in two parts.',
+  parts: [
+    {
+      id: 1,
+      text: 'Part one text.',
+      question: { text: 'Q1?', options: ['A', 'B', 'C', 'D', 'E'], correctIndex: 0, explanationPt: 'Pt' },
+    },
+    {
+      id: 2,
+      text: 'Part two text.',
+      question: { text: 'Q2?', options: ['A', 'B', 'C', 'D', 'E'], correctIndex: 0, explanationPt: 'Pt' },
+    },
+  ],
+});
+
+function makeSupabase() {
+  return {
+    from: vi.fn(() => ({
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      single: vi.fn().mockResolvedValue({ data: { audio_preferences: {} } }),
+    })),
+    storage: {
+      from: vi.fn(() => ({
+        upload: vi.fn().mockResolvedValue({ error: null }),
+        createSignedUrl: vi.fn().mockResolvedValue({ data: { signedUrl: 'https://example.com/signed.mp3' }, error: null }),
+      })),
+    },
+  } as any;
+}
+
+function mockFetchOk() {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new ArrayBuffer(16),
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  Object.assign(gw, createMockGatewayDeps());
+  gw.resetDefaults();
+  mockCreate.mockImplementation(() => aiOk(VALID_STORY_SESSION_JSON, { prompt_tokens: 100, completion_tokens: 50 }));
+  global.fetch = mockFetchOk() as any;
+});
+
+// ── listening.story_session_generate ───────────────────────────────────────────
+
+describe('generateStorySession — LEGACY mode', () => {
+  it('returns the story and writes no telemetry', async () => {
+    const result = await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    expect(result.title).toBe('A Short Trip');
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('generateStorySession — OBSERVE mode', () => {
+  beforeEach(() => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+  });
+
+  it('records exactly one event with featureKey listening.story_session_generate', async () => {
+    await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        featureKey: 'listening.story_session_generate',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: 'gpt-4o-mini',
+        userId: USER_ID,
+        initiatedByUserId: USER_ID,
+        actorType: 'user',
+        executionLocation: 'system',
+        attemptNumber: 1,
+      }),
+    );
+    expect(gw.mockCompleteEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('a provider error creates a failed event and the original error still propagates', async () => {
+    mockCreate.mockRejectedValue(new Error('AI_EMPTY_RESPONSE'));
+    await expect(
+      generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret'),
+    ).rejects.toThrow();
+    expect(gw.mockFailEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('metadata contains no story/question content', async () => {
+    await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const startCall = gw.mockStartEvent.mock.calls[0][0] as any;
+    const metadataStr = JSON.stringify(startCall.metadata);
+    expect(metadataStr).not.toContain('A Short Trip');
+    expect(metadataStr).not.toContain('Once upon a time');
+  });
+});
+
+// ── listening.two_part_generate ─────────────────────────────────────────────────
+
+describe('generateListeningStory (story-session) — LEGACY mode', () => {
+  it('returns the two-part story and writes no telemetry', async () => {
+    mockCreate.mockImplementation(() => aiOk(VALID_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
+    const result = await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    expect(result.title).toBe('A Longer Story');
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('generateListeningStory (story-session) — OBSERVE mode', () => {
+  beforeEach(() => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    mockCreate.mockImplementation(() => aiOk(VALID_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
+  });
+
+  it('records exactly one event with featureKey listening.two_part_generate when generating fresh', async () => {
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        featureKey: 'listening.two_part_generate',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        userId: USER_ID,
+        actorType: 'user',
+        executionLocation: 'system',
+        attemptNumber: 1,
+      }),
+    );
+  });
+
+  it('records input/output tokens from the real usage field', async () => {
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'input_text_tokens', quantity: 200 }));
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'output_text_tokens', quantity: 100 }));
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false }));
+  });
+
+  it('idempotency: a supplied storyPackage skips OpenAI entirely — no physical call, no event', async () => {
+    // First call (fresh) to obtain a valid packed storyPackage from a TTS failure path
+    // is unnecessary here — we only need to prove that when storyPackage is present,
+    // callAI (and therefore the gateway) is never invoked. Force TTS failure on a
+    // fresh call to capture a real packed storyPackage from StoryTtsError.
+    let storyPackage: string | undefined;
+    global.fetch = vi.fn().mockRejectedValue(new Error('network down')) as any;
+    try {
+      await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    } catch (err: any) {
+      storyPackage = err.storyPackage;
+    }
+    expect(storyPackage).toBeTruthy();
+    expect(mockCreate).toHaveBeenCalledTimes(1); // the one fresh AI call above
+
+    mockCreate.mockClear();
+    gw.mockStartEvent.mockClear();
+    global.fetch = mockFetchOk() as any; // TTS succeeds this time
+
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', storyPackage);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+});

@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { AICallWithUsageFn, AICallResult } from './validate-questions-with-ai';
+import { executeAiGatewayCall, getProductionDeps } from '../../../api/_ai-gateway/index';
+import type { GatewayUsageMetric } from '../../../api/_ai-gateway/index';
 import { buildEnglishSubtitleCues } from './build-english-subtitle-cues';
 import type { CanonicalSentence } from './build-english-subtitle-cues';
 import { validateEnglishReconstruction } from './reconstruct-subtitle-text';
@@ -129,17 +132,101 @@ export class ListeningSubtitlesAlreadyExistError extends Error {
 const AI_MODEL = 'gpt-4o-mini';
 const SUBTITLE_TIMEOUT_MS = 120_000;
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractSubtitleMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
   const client = new OpenAI({ apiKey, timeout: SUBTITLE_TIMEOUT_MS, maxRetries: 0 });
+  // Lazy: getProductionDeps() (and the Supabase client it constructs) must not
+  // run just because this factory was created — only when a physical call is
+  // actually about to happen. Callers build this closure via `callAI ??
+  // createSubtitleAICallFn(...)`, which evaluates eagerly even on paths that
+  // never end up invoking it (dry-run, idempotent early-return).
+  let gatewayDeps: ReturnType<typeof getProductionDeps> | undefined;
+  let correlationId: string | undefined;
+  let physicalAttempt = 0;
+
   return async (systemPrompt: string, userPrompt: string): Promise<AICallResult> => {
+    if (!gatewayDeps) {
+      gatewayDeps = getProductionDeps();
+      correlationId = gatewayDeps.uuidGen();
+    }
     const start = Date.now();
-    const resp = await client.chat.completions.create({
-      model: AI_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    });
+    physicalAttempt += 1;
+    const resp = await executeAiGatewayCall<ChatCompletion>(
+      {
+        featureKey: 'listening.episode_translate_subtitles',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: AI_MODEL,
+        actorType: 'system',
+        executionLocation: 'system',
+        correlationId,
+        attemptNumber: physicalAttempt,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'listening-episode-translate-subtitles',
+          flowType: 'prepare_subtitles',
+          physicalAttempt,
+        },
+      },
+      () => client.chat.completions.create({
+        model: AI_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+      gatewayDeps,
+      extractSubtitleMetrics,
+    );
     return {
       text: resp.choices[0]?.message?.content ?? '',
       usage: {

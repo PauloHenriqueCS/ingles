@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
+import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 
 // ── Public result types ───────────────────────────────────────────────────────
 
@@ -75,19 +78,91 @@ Rules:
 - Translation: complete, not summarized`;
 }
 
-async function callAI(level: string, openaiKey: string): Promise<AIStory> {
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractStorySessionMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
+async function callAI(level: string, openaiKey: string, userId: string): Promise<AIStory> {
   const client = new OpenAI({ apiKey: openaiKey, timeout: 90_000, maxRetries: 1 });
 
-  const resp = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: buildPrompt(level) },
-      { role: 'user', content: 'Generate the activity now.' },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.85,
-    max_tokens: 2000,
-  });
+  const gatewayDeps = getProductionDeps();
+  const resp = await executeAiGatewayCall<ChatCompletion>(
+    {
+      featureKey: 'listening.story_session_generate',
+      provider: 'openai',
+      service: 'chat.completions',
+      model: 'gpt-4o-mini',
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      executionLocation: 'system',
+      correlationId: gatewayDeps.uuidGen(),
+      attemptNumber: 1,
+      callSequence: 1,
+      technicalMetadata: {
+        endpoint: 'listening/story/generate',
+        flowType: 'story_session_generate',
+      },
+    },
+    () => client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: buildPrompt(level) },
+        { role: 'user', content: 'Generate the activity now.' },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.85,
+      max_tokens: 2000,
+    }),
+    gatewayDeps,
+    extractStorySessionMetrics,
+  );
 
   const raw = resp.choices[0]?.message?.content ?? '';
   if (!raw) throw new Error('AI_EMPTY_RESPONSE');
@@ -283,7 +358,7 @@ export async function generateStorySession(
   const voice = await resolveUserVoice(userId, serviceClient);
 
   // 3. AI: story text + question (includes correctIndex on server side only)
-  const ai = await callAI(level, openaiKey);
+  const ai = await callAI(level, openaiKey, userId);
 
   // 4. Azure TTS: synthesize story audio using user's preferred voice
   const audioBuffer = await synthesizeAudio(ai.storyEn, azureKey, azureRegion, voice);

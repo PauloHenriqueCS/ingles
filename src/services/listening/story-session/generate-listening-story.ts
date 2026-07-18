@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
+import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
+import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -178,27 +181,100 @@ export function normalizeCorrectIndex(raw: unknown, options: string[]): number {
   throw new Error('UNNORMALIZABLE');
 }
 
+// ── Metric extractor — reads from SDK response, never invents values ──────────
+
+function extractTwoPartMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [];
+
+  metrics.push({
+    metricKey: 'provider_requests',
+    unitType: 'request',
+    quantity: 1,
+    isBillable: false,
+    measurementSource: 'provider_response',
+  });
+
+  const usage = completion.usage;
+  if (!usage) return metrics;
+
+  if (usage.prompt_tokens != null) {
+    metrics.push({
+      metricKey: 'input_text_tokens',
+      unitType: 'token',
+      quantity: usage.prompt_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  if (usage.completion_tokens != null) {
+    metrics.push({
+      metricKey: 'output_text_tokens',
+      unitType: 'token',
+      quantity: usage.completion_tokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  if (cachedTokens != null && cachedTokens > 0) {
+    metrics.push({
+      metricKey: 'cached_input_tokens',
+      unitType: 'token',
+      quantity: cachedTokens,
+      isBillable: true,
+      measurementSource: 'provider_response',
+    });
+  }
+
+  return metrics;
+}
+
 // ── OpenAI call ───────────────────────────────────────────────────────────────
 
 async function callAI(
   level: string,
   openaiKey: string,
   requestId: string,
+  userId: string,
   theme?: string | null,
 ): Promise<AIStory> {
   const client = new OpenAI({ apiKey: openaiKey, timeout: 120_000, maxRetries: 1 });
 
   const t0 = Date.now();
-  const resp = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: buildPrompt(level, theme) },
-      { role: 'user', content: 'Generate the listening activity now.' },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.8,
-    max_tokens: 6000,
-  });
+  const gatewayDeps = getProductionDeps();
+  const resp = await executeAiGatewayCall<ChatCompletion>(
+    {
+      featureKey: 'listening.two_part_generate',
+      provider: 'openai',
+      service: 'chat.completions',
+      model: 'gpt-4o-mini',
+      userId,
+      initiatedByUserId: userId,
+      actorType: 'user',
+      executionLocation: 'system',
+      correlationId: gatewayDeps.uuidGen(),
+      attemptNumber: 1,
+      callSequence: 1,
+      technicalMetadata: {
+        endpoint: 'listening/generate',
+        flowType: 'two_part_generate',
+      },
+    },
+    () => client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: buildPrompt(level, theme) },
+        { role: 'user', content: 'Generate the listening activity now.' },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.8,
+      max_tokens: 6000,
+    }),
+    gatewayDeps,
+    extractTwoPartMetrics,
+  );
   const aiMs = Date.now() - t0;
 
   const raw = resp.choices[0]?.message?.content ?? '';
@@ -461,7 +537,7 @@ export async function generateListeningStory(
     }
   } else {
     stepLog(requestId, 'ai_start', { level, theme: theme ?? 'random' });
-    ai = await callAI(level, openaiKey, requestId, theme);
+    ai = await callAI(level, openaiKey, requestId, userId, theme);
   }
 
   // Pack the story now — before TTS — so we can return it on audio failure

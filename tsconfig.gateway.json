@@ -23,6 +23,18 @@
     "api/generate-theme.ts",
     "api/__tests__/generate-theme-gateway.test.ts",
     "api/compare-rewrite.ts",
-    "api/__tests__/compare-rewrite-gateway.test.ts"
+    "api/__tests__/compare-rewrite-gateway.test.ts",
+    "api/__tests__/_ai-gateway-test-helpers.ts",
+    "api/pronunciation-training/[...slug].ts",
+    "api/__tests__/pronunciation-generate-text-gateway.test.ts",
+    "src/services/listening/story-session/generate-story-session.ts",
+    "src/services/listening/story-session/generate-listening-story.ts",
+    "src/services/listening/story-session/story-session-gateway.test.ts",
+    "src/services/listening/on-demand/process-listening-generation-step.ts",
+    "src/services/listening/on-demand/process-listening-generation-step-gateway.test.ts",
+    "src/services/listening/prepare-listening-subtitles.ts",
+    "src/services/listening/generate-listening-questions.ts",
+    "src/services/listening/generate-listening-story.ts",
+    "src/services/listening/listening-ai-callfn-gateway.test.ts"
   ]
 }
