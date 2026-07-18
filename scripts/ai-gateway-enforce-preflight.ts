@@ -34,7 +34,14 @@
  *                               generic budget-scope mechanism is reachable
  *                               for this feature (same gate as codeReady).
  *   infraDeployed             — GLOBAL. Live-probed: do the Fase 14
- *                               tables/RPCs actually exist in this database.
+ *                               tables/RPCs actually exist in this database,
+ *                               AND (security fix 20260718010000) are
+ *                               anon/authenticated actually stripped of
+ *                               every privilege on them — "deployed" can
+ *                               never mean "deployed but publicly writable."
+ *                               A privilege gap alone also surfaces as its
+ *                               own distinct blocker, unsafe_database_privileges,
+ *                               never silently folded into infra_not_deployed.
  *   concurrencyValidated      — GLOBAL. Live-queried: is there a 'passed'
  *                               row in ai_gateway_concurrency_validations
  *                               whose migration_version and
@@ -116,6 +123,32 @@ async function probeRpcExists(
   const { error } = await supabase.rpc(name, args);
   if (!error) return true;
   return (error as { code?: string }).code !== PGRST_FUNCTION_NOT_FOUND;
+}
+
+// ── unsafeDatabasePrivileges probe (Etapa 11 security fix) ─────────────────
+// Live-queried via _gateway_audit_database_privileges_v1() — introduced by
+// 20260718010000_ai_gateway_enforcement_security_fix.sql specifically for
+// this check. That function itself only calls has_table_privilege/
+// has_function_privilege (no I/O, no side effect); it is REVOKEd from
+// anon/authenticated same as every other Etapa 11 function, reachable only
+// via this script's service-role connection. If the function itself is
+// missing (security-fix migration not yet applied), this fails closed:
+// unsafeDatabasePrivileges = true, exactly like every other infra probe in
+// this file when its target doesn't exist yet.
+const PRIVILEGE_AUDIT_RPC = '_gateway_audit_database_privileges_v1';
+
+async function probeUnsafeDatabasePrivileges(
+  supabase: ReturnType<typeof getSharedServiceClient>,
+): Promise<{ unsafe: boolean; unsafeTables: string[]; unsafeFunctions: string[] }> {
+  const { data, error } = await supabase.rpc(PRIVILEGE_AUDIT_RPC);
+  if (error || !data) {
+    return { unsafe: true, unsafeTables: [], unsafeFunctions: [] };
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as
+    { unsafe_tables: string[] | null; unsafe_functions: string[] | null } | undefined;
+  const unsafeTables = row?.unsafe_tables ?? [];
+  const unsafeFunctions = row?.unsafe_functions ?? [];
+  return { unsafe: unsafeTables.length > 0 || unsafeFunctions.length > 0, unsafeTables, unsafeFunctions };
 }
 
 async function probeInfra(supabase: ReturnType<typeof getSharedServiceClient>) {
@@ -205,6 +238,7 @@ async function assessFeature(
   supabase: ReturnType<typeof getSharedServiceClient>,
   infraDeployed: boolean,
   concurrencyValidated: boolean,
+  unsafeDatabasePrivileges: boolean,
 ): Promise<FeatureReadiness> {
   const meta = FEATURE_METADATA[featureKey];
   const { provider, model } = FEATURE_PROVIDER_MODEL[featureKey];
@@ -230,6 +264,7 @@ async function assessFeature(
     infraDeployed,
     concurrencyValidated,
     realtimeHardControlLiveTested: REALTIME_HARD_CONTROL_LIVE_TESTED,
+    unsafeDatabasePrivileges,
   });
 
   return {
@@ -248,13 +283,14 @@ async function main() {
   const policyResolver = new GatewayPolicyResolver(supabase, 0); // ttlMs=0 — always fresh, this is a one-shot audit
 
   const infra = await probeInfra(supabase);
-  const infraDeployed = infra.rateLimit && infra.dedupe && infra.reservation && infra.breaker && infra.concurrencyLog;
+  const privileges = await probeUnsafeDatabasePrivileges(supabase);
+  const infraDeployed = infra.rateLimit && infra.dedupe && infra.reservation && infra.breaker && infra.concurrencyLog && !privileges.unsafe;
 
   const concurrency = await checkConcurrencyValidated(supabase);
 
   const results: FeatureReadiness[] = [];
   for (const featureKey of AI_FEATURE_KEYS) {
-    results.push(await assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated));
+    results.push(await assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated, privileges.unsafe));
   }
 
   const unitCodeReadyCount = results.filter((r) => r.unitEnforcementCodeReady).length;
@@ -266,7 +302,7 @@ async function main() {
   if (JSON_OUTPUT) {
     console.log(JSON.stringify({
       migrationVersion: MIGRATION_VERSION,
-      infra, infraDeployed,
+      infra, privileges, infraDeployed,
       concurrencyValidated: concurrency.validated, concurrencyScriptHash: concurrency.scriptHash, concurrencyRecord: concurrency.matchedRecord,
       features: results,
       summary: { unitCodeReadyCount, costCodeReadyCount, pricingReadyCount, enforceReadyUnitCount, enforceReadyCostCount, totalFeatures: results.length },
@@ -284,6 +320,10 @@ async function main() {
   console.log(`  reservation:     ${infra.reservation ? 'present' : 'MISSING'}`);
   console.log(`  breaker:         ${infra.breaker ? 'present' : 'MISSING'}`);
   console.log(`  concurrency_log: ${infra.concurrencyLog ? 'present' : 'MISSING'}`);
+  console.log('Database privileges (anon/authenticated must hold ZERO of them — 20260718010000 security fix):');
+  console.log(`  unsafe:          ${privileges.unsafe ? 'YES — anon/authenticated still have access' : 'no'}`);
+  if (privileges.unsafeTables.length > 0) console.log(`    tables:    ${privileges.unsafeTables.join(', ')}`);
+  if (privileges.unsafeFunctions.length > 0) console.log(`    functions: ${privileges.unsafeFunctions.join(', ')}`);
   console.log(`  → infraDeployed=${infraDeployed} (live-detected, never hardcoded).\n`);
 
   console.log('Concurrency validation (ai_gateway_concurrency_validations, live query):');

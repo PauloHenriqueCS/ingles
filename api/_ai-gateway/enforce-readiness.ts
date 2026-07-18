@@ -78,6 +78,15 @@ export interface FeatureReadinessInput {
   infraDeployed: boolean;
   concurrencyValidated: boolean;
   realtimeHardControlLiveTested: boolean;
+  // Live fact from _gateway_audit_database_privileges_v1() (see
+  // 20260718010000_ai_gateway_enforcement_security_fix.sql): true when
+  // anon/authenticated still hold any DML privilege on the 8 Etapa 11
+  // tables or EXECUTE on any of its 18 functions. The CLI already folds
+  // this into its own infraDeployed (infra can never be "deployed safely"
+  // while the raw grants are wrong), but it is surfaced as its own
+  // blocker — distinct from infra_not_deployed — so a report never hides
+  // *which* half of infra is the problem (missing RPCs vs. wrong grants).
+  unsafeDatabasePrivileges: boolean;
 }
 
 export interface FeatureReadiness {
@@ -109,7 +118,10 @@ export interface FeatureReadiness {
  * testable without a database.
  */
 export function computeFeatureReadiness(input: FeatureReadinessInput): FeatureReadiness {
-  const { featureKey, hasPriceCoverage, infraDeployed, concurrencyValidated, realtimeHardControlLiveTested } = input;
+  const {
+    featureKey, hasPriceCoverage, infraDeployed, concurrencyValidated, realtimeHardControlLiveTested,
+    unsafeDatabasePrivileges,
+  } = input;
 
   const isDead = DEAD_UNREACHABLE_FEATURES.has(featureKey);
   const accountingParent = ACCOUNTING_CHILD_PARENT[featureKey] ?? null;
@@ -139,10 +151,17 @@ export function computeFeatureReadiness(input: FeatureReadinessInput): FeatureRe
   if (!pricingReady) blockersCost.push('missing_price');
   if (isRealtimeSessionFeature) { blockersUnit.push('hard_control_not_live_tested'); blockersCost.push('hard_control_not_live_tested'); }
   if (!infraDeployed) { blockersUnit.push('infra_not_deployed'); blockersCost.push('infra_not_deployed'); }
+  if (unsafeDatabasePrivileges) { blockersUnit.push('unsafe_database_privileges'); blockersCost.push('unsafe_database_privileges'); }
   if (!concurrencyValidated) { blockersUnit.push('concurrency_not_validated'); blockersCost.push('concurrency_not_validated'); }
 
-  const enforceReadyUnit = unitEnforcementCodeReady && realtimeHardControlReady && infraDeployed && concurrencyValidated;
-  const enforceReadyCost = costEnforcementCodeReady && pricingReady && realtimeHardControlReady && infraDeployed && concurrencyValidated;
+  // unsafeDatabasePrivileges gates enforceReady* directly, not just via
+  // infraDeployed — the caller (the CLI) already folds it into infraDeployed
+  // before calling this function, but this function must never trust that:
+  // a blockers list containing 'unsafe_database_privileges' can never
+  // coexist with enforceReadyUnit/Cost=true, regardless of what infraDeployed
+  // was passed as.
+  const enforceReadyUnit = unitEnforcementCodeReady && realtimeHardControlReady && infraDeployed && !unsafeDatabasePrivileges && concurrencyValidated;
+  const enforceReadyCost = costEnforcementCodeReady && pricingReady && realtimeHardControlReady && infraDeployed && !unsafeDatabasePrivileges && concurrencyValidated;
 
   return {
     featureKey, isDead, isAccountingChild, accountingParent, hasEstimator, isRealtimeSessionFeature,

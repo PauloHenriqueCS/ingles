@@ -1,13 +1,15 @@
 # Etapa 11 — Implantação e homologação final do enforcement
 
-Procedimento manual exato para aplicar `supabase/migrations/20260718000000_ai_gateway_enforcement.sql`
-e homologar os 7 cenários de `supabase/manual-validation/ai-gateway-enforcement-concurrency.sql`.
+Procedimento manual exato para aplicar `supabase/migrations/20260718000000_ai_gateway_enforcement.sql`,
+a migration corretiva de segurança `supabase/migrations/20260718010000_ai_gateway_enforcement_security_fix.sql`
+(Passo 6 — fecha um gap de privilégio descoberto no postcheck do Passo 5, obrigatória antes de
+prosseguir), e homologar os 7 cenários de `supabase/manual-validation/ai-gateway-enforcement-concurrency.sql`.
 
 **HEAD do repositório neste procedimento:** `ddd0dbd` (migration e script de validação manual
 idênticos, byte a byte, desde `f183e28` — nenhuma mudança de código entre este commit e aquele
 alterou qualquer um dos dois arquivos SQL referenciados aqui).
 
-**Hash SHA-256 atual do script de validação manual** (recalcule antes do Passo 7 — se este arquivo
+**Hash SHA-256 atual do script de validação manual** (recalcule antes do Passo 8 — se este arquivo
 mudar um único byte, este número muda):
 ```
 4561ba5e9f85f6b3fa4fba3d623f6722f1619795bccb8bc51ddc7e750c72a4ff
@@ -239,11 +241,69 @@ SELECT scope_type, scope_key, gateway_mode FROM public.ai_runtime_controls WHERE
 ```
 
 Se **qualquer** um dos itens 5a–5g vier fora do esperado, pare e reporte antes de prosseguir para
-os cenários de concorrência.
+o Passo 6.
+
+**Nota (descoberta em produção após este runbook ter sido escrito):** o item 5d acima checa só uma
+amostra de 2 das 18 funções. Uma auditoria completa (todas as 8 tabelas + todas as 18 funções, via
+`information_schema.role_table_grants` e `has_function_privilege`) contra o projeto já aplicado
+encontrou dois gaps reais que 5a–5g sozinhos não pegam:
+- anon/authenticated retinham o GRANT de tabela padrão que o Supabase concede a todo projeto novo
+  (DELETE/INSERT/REFERENCES/SELECT/TRIGGER/TRUNCATE/UPDATE) nas 8 tabelas — RLS+zero-policy (5c)
+  já bloqueava acesso via PostgREST, mas o GRANT bruto continuava concedido por baixo.
+- 2 das 18 funções — `_gateway_publish_pricing_trigger_v1` e
+  `_gateway_publish_runtime_controls_trigger_v1` — nunca tiveram `REVOKE` explícito na migration
+  original (só são chamadas via trigger, nunca via RPC pela aplicação, então o gap não tinha efeito
+  prático, mas o Supabase security advisor sinaliza EXECUTE concedido a anon/authenticated nas
+  duas, expostas em `/rest/v1/rpc/<nome>`).
+
+Por isso o Passo 6 abaixo é obrigatório antes de seguir para os cenários de concorrência (Passo 7).
 
 ---
 
-## PASSO 6 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
+## PASSO 6 — Migration corretiva de segurança (OBRIGATÓRIA antes do Passo 7)
+
+Aplica `supabase/migrations/20260718010000_ai_gateway_enforcement_security_fix.sql` — fecha os dois
+gaps descritos acima. É **exclusivamente aditiva**: só `REVOKE`/`GRANT` de privilégio nas 8 tabelas
+e 18 funções já existentes, mais um utilitário novo e mínimo, `_gateway_audit_database_privileges_v1()`
+(read-only, sem side effect, `REVOKE`d de anon/authenticated do mesmo jeito) que o preflight
+(`scripts/ai-gateway-enforce-preflight.ts`) usa para reportar `unsafe_database_privileges` ao vivo.
+Nenhuma tabela, função, policy, trigger ou linha de dado da migration original é criada, removida
+ou alterada.
+
+### Aplicar
+
+1. Abra o projeto no [Supabase Studio](https://supabase.com/dashboard) → **SQL Editor** → **New query**.
+2. Abra `supabase/migrations/20260718010000_ai_gateway_enforcement_security_fix.sql` no seu editor local.
+3. Selecione **o arquivo inteiro** (Ctrl+A), copie, cole no SQL Editor — sem editar nada.
+4. Clique **Run**.
+5. Resultado esperado: sucesso, com uma mensagem `NOTICE` no final:
+   `VALIDATION PASSED: anon/authenticated stripped of every privilege on the 8 Etapa 11 tables and
+   of EXECUTE on all 18 Etapa 11 functions; service_role/postgres retain required access; RLS
+   remains enabled with zero policies on all 8 tables; gateway_mode/runtime_status/provider_pricing
+   unchanged`
+6. Se em vez disso vier `ERROR: VALIDATION FAILED: ...`, a transação foi **revertida
+   automaticamente** (nada foi persistido) — pare, copie a mensagem de erro exata e reporte antes de
+   tentar de novo.
+
+### Postcheck
+
+```sql
+SELECT * FROM public._gateway_audit_database_privileges_v1();
+-- EXPECTED: unsafe_tables = '{}' e unsafe_functions = '{}' — os dois arrays vazios.
+
+SELECT
+  has_function_privilege('anon', 'public._gateway_publish_pricing_trigger_v1()', 'EXECUTE') AS anon_can_publish_pricing_trigger,
+  has_function_privilege('authenticated', 'public._gateway_publish_pricing_trigger_v1()', 'EXECUTE') AS authenticated_can_publish_pricing_trigger,
+  has_function_privilege('anon', 'public._gateway_publish_runtime_controls_trigger_v1()', 'EXECUTE') AS anon_can_publish_runtime_trigger,
+  has_function_privilege('authenticated', 'public._gateway_publish_runtime_controls_trigger_v1()', 'EXECUTE') AS authenticated_can_publish_runtime_trigger;
+-- EXPECTED: as 4 colunas = false (os dois gaps reais fechados).
+```
+
+Só prossiga para o Passo 7 depois que este postcheck vier limpo.
+
+---
+
+## PASSO 7 — Os 7 cenários de `ai-gateway-enforcement-concurrency.sql`
 
 ⚠️ **Rode isto só em um projeto de staging/scratch, nunca em produção**, mesmo que a migration em
 si seja segura — os cenários criam e apagam linhas reais (ainda que sintéticas/isoladas) nas tabelas
@@ -294,12 +354,12 @@ outra retorna `status='blocked', blocked_reason='QUOTA_EXCEEDED'`.
 outra retorna `status='blocked', blocked_reason='BUDGET_EXCEEDED'`.
 
 Se qualquer cenário retornar `status='pending'` para **ambas** as chamadas, a claim de atomicidade
-daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 7, e reporte o resultado
+daquele cenário é **FALSA** — pare, não prossiga para o registro do Passo 8, e reporte o resultado
 real (inclusive se for uma falha).
 
 ---
 
-## PASSO 7 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
+## PASSO 8 — NÃO registrar `concurrencyValidated` até você mesmo confirmar
 
 Eu não vou (e não posso, à distância) rodar os 7 cenários por você — a instrução do arquivo é
 explícita: `record_gateway_concurrency_validation_v1` só deve ser chamada **depois** que você
@@ -319,7 +379,7 @@ Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omi
    SELECT public.record_gateway_concurrency_validation_v1(
      '20260718000000_ai_gateway_enforcement',
      'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',
-     '<cole aqui o hash do Passo 7.1>',
+     '<cole aqui o hash do Passo 8.1>',
      'passed',  -- ou 'failed' se qualquer cenário divergiu do EXPECTED
      '<seu nome/identificador técnico>',
      'Rodei os 7 cenários em <data> contra <projeto de staging>. Cenários 4/5 confirmados com sobreposição real via timestamps de duas abas.'
@@ -334,7 +394,7 @@ Quando tiver os 7 resultados (passou ou falhou — registre a verdade, nunca omi
 
 ---
 
-## PASSO 8 — Depois da validação real: preflight e tabela das 25 features
+## PASSO 9 — Depois da validação real: preflight e tabela das 25 features
 
 Comando exato (requer `VITE_SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no `.env`, ambiente
 somente-leitura — o script nunca escreve):
@@ -352,8 +412,12 @@ npx tsx scripts/ai-gateway-enforce-preflight.ts --json
 Isso vai imprimir, por feature, os 9 campos de readiness (`codeReady`, `unitEnforcementCodeReady`,
 `estimatorReady`, `pricingReady`, `costEnforcementCodeReady`, `infraDeployed`,
 `concurrencyValidated`, `realtimeHardControlReady`, `enforceReadyUnit`/`enforceReadyCost`),
-computados ao vivo — `infraDeployed` lido pelos probes de RPC reais (Passo 5b), `concurrencyValidated`
-lido da tabela `ai_gateway_concurrency_validations` (Passo 7).
+computados ao vivo — `infraDeployed` lido pelos probes de RPC reais (Passo 5b) **e** pelo probe de
+privilégios (Passo 6, via `_gateway_audit_database_privileges_v1()`) — se esse probe encontrar
+qualquer privilégio residual de anon/authenticated, `infraDeployed=false` para toda feature e o
+blocker `unsafe_database_privileges` aparece separado de `infra_not_deployed` em `blockersUnit`/
+`blockersCost`, para nunca esconder qual das duas causas é a real. `concurrencyValidated` lido da
+tabela `ai_gateway_concurrency_validations` (Passo 8).
 
 Resultados ainda aceitáveis nesta fase (não são defeitos):
 - Azure/TTS sem preço: `pricingReady=false` e `costEnforcementCodeReady` não bloqueado por isso —
@@ -363,6 +427,6 @@ Resultados ainda aceitáveis nesta fase (não são defeitos):
 - `writing.evaluate_rewrite`: bloqueada por fluxo inacessível (`dead_unreachable`).
 
 Eu não tenho `SUPABASE_SERVICE_ROLE_KEY` neste ambiente de desenvolvimento — não consigo rodar este
-comando nem produzir a tabela final de 25 linhas agora. Depois que você aplicar a migration (Passo
-4) e rodar os cenários (Passo 6/7), me envie a saída do comando acima (ou rode você mesmo e leia
-diretamente) e eu reviso/explico o resultado.
+comando nem produzir a tabela final de 25 linhas agora. Depois que você aplicar a migration original
+(Passo 4), a correção de segurança (Passo 6) e rodar os cenários (Passo 7/8), me envie a saída do
+comando acima (ou rode você mesmo e leia diretamente) e eu reviso/explico o resultado.

@@ -31,8 +31,22 @@ describe('scripts/ai-gateway-enforce-preflight.ts — no hardcoded readiness boo
     expect(src).not.toMatch(/\bCONCURRENCY_VALIDATED\s*=/);
   });
 
-  it('infraDeployed is always assigned from the live probeInfra() result, never a literal', () => {
-    expect(src).toMatch(/const infraDeployed = infra\.rateLimit && infra\.dedupe && infra\.reservation && infra\.breaker && infra\.concurrencyLog;/);
+  it('infraDeployed is always assigned from the live probeInfra() AND probeUnsafeDatabasePrivileges() results, never a literal', () => {
+    expect(src).toMatch(/const infraDeployed = infra\.rateLimit && infra\.dedupe && infra\.reservation && infra\.breaker && infra\.concurrencyLog && !privileges\.unsafe;/);
+  });
+
+  it('privileges is always assigned from the live probeUnsafeDatabasePrivileges() result, never a literal', () => {
+    expect(src).toMatch(/const privileges = await probeUnsafeDatabasePrivileges\(supabase\);/);
+  });
+
+  it('the privilege audit is queried via the live _gateway_audit_database_privileges_v1() RPC, never a hardcoded boolean', () => {
+    expect(src).toMatch(/PRIVILEGE_AUDIT_RPC = '_gateway_audit_database_privileges_v1'/);
+    expect(src).toMatch(/supabase\.rpc\(PRIVILEGE_AUDIT_RPC\)/);
+    expect(src).not.toMatch(/\bUNSAFE_DATABASE_PRIVILEGES\s*=\s*(true|false)/);
+  });
+
+  it('a missing/erroring privilege-audit RPC fails closed (unsafe=true), never assumes safety', () => {
+    expect(src).toMatch(/if \(error \|\| !data\) \{\s*\n\s*return \{ unsafe: true, unsafeTables: \[\], unsafeFunctions: \[\] \};/);
   });
 
   it('concurrencyValidated is always assigned from the live checkConcurrencyValidated() result, never a literal', () => {

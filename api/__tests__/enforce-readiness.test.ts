@@ -24,6 +24,7 @@ function baseInput(overrides: Partial<Parameters<typeof computeFeatureReadiness>
     infraDeployed: true,
     concurrencyValidated: true,
     realtimeHardControlLiveTested: false,
+    unsafeDatabasePrivileges: false,
     ...overrides,
   };
 }
@@ -90,6 +91,28 @@ describe('computeFeatureReadiness — infraDeployed/concurrencyValidated are par
     expect(results[1].enforceReadyUnit).toBe(false);
     expect(results[2].enforceReadyUnit).toBe(false);
     expect(results[3].enforceReadyUnit).toBe(false);
+  });
+});
+
+describe('computeFeatureReadiness — unsafeDatabasePrivileges is a parameter, never a hardcoded constant', () => {
+  it('reports its own distinct blocker, separate from infra_not_deployed, and blocks both enforceReadyUnit/Cost even when infraDeployed is otherwise true', () => {
+    const safe = computeFeatureReadiness(baseInput({ infraDeployed: true, unsafeDatabasePrivileges: false }));
+    const unsafe = computeFeatureReadiness(baseInput({ infraDeployed: true, unsafeDatabasePrivileges: true }));
+    expect(safe.blockersUnit).not.toContain('unsafe_database_privileges');
+    expect(unsafe.blockersUnit).toContain('unsafe_database_privileges');
+    expect(unsafe.blockersCost).toContain('unsafe_database_privileges');
+    // infraDeployed=true was passed explicitly here — proves this is a
+    // genuinely separate signal from infra_not_deployed, not a duplicate
+    // path to the same blocker.
+    expect(unsafe.blockersUnit).not.toContain('infra_not_deployed');
+    expect(unsafe.enforceReadyUnit).toBe(false);
+    expect(unsafe.enforceReadyCost).toBe(false);
+  });
+
+  it('when the CLI folds unsafeDatabasePrivileges into infraDeployed=false, both blockers can legitimately co-occur', () => {
+    const r = computeFeatureReadiness(baseInput({ infraDeployed: false, unsafeDatabasePrivileges: true }));
+    expect(r.blockersUnit).toContain('infra_not_deployed');
+    expect(r.blockersUnit).toContain('unsafe_database_privileges');
   });
 });
 
