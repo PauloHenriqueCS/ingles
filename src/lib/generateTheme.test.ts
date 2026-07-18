@@ -1,12 +1,35 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createMockGatewayDeps } from '../../api/__tests__/_ai-gateway-test-helpers';
 
 // ── Hoist mock refs before vi.mock factory runs ───────────────────────────────
 
-const { mockCreate } = vi.hoisted(() => ({ mockCreate: vi.fn() }));
+const { mockCreate, gw, mockGetDiagnosticContext } = vi.hoisted(() => {
+  const mockCreate = vi.fn();
+  const mockGetDiagnosticContext = vi.fn();
+  return {
+    mockCreate,
+    mockGetDiagnosticContext,
+    gw: {} as ReturnType<typeof import('../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps>,
+  };
+});
 
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
 }));
+
+// Diagnostic mode is feature-flagged off in every test below (the real
+// getDiagnosticGenerationContext already returns a no-op context when
+// WRITING_DIAGNOSTIC_V1 is unset, which it is here) — only the one test that
+// specifically targets the diagnostic idempotency/theme-cache fix overrides
+// this mock.
+vi.mock('../../api/_diagnostic-service', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_diagnostic-service')>();
+  // Default passthrough to the real implementation (returns the no-op
+  // context since WRITING_DIAGNOSTIC_V1 is unset in tests) — individual
+  // tests may override with mockGetDiagnosticContext.mockResolvedValueOnce(...).
+  mockGetDiagnosticContext.mockImplementation(actual.getDiagnosticGenerationContext);
+  return { ...actual, getDiagnosticGenerationContext: mockGetDiagnosticContext };
+});
 
 vi.mock('openai', () => ({
   default: vi.fn(function () {
@@ -14,7 +37,19 @@ vi.mock('openai', () => ({
   }),
 }));
 
+// generate-theme.ts wraps its OpenAI calls with the AI Gateway (Etapa 8).
+// This suite predates that integration and never mocked it, which made
+// getProductionDeps() try to build a real Supabase client and throw. Force
+// legacy mode (the gateway's own zero-DB-dependency no-op path) so these
+// tests exercise generate-theme.ts's own logic without any gateway/DB I/O.
+vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
+  return { ...actual, getProductionDeps: () => gw.mockDeps };
+});
+
 import { requireAuth } from '../../api/_auth';
+import { WRITING_THEMES } from '../domain/writing/writing-themes';
+import { createDiagnosticPlan } from '../domain/diagnostic/writing-diagnostic-planner';
 import handler, {
   normalizeTheme,
   parseRawContent,
@@ -81,6 +116,7 @@ function makeRes() {
     status(code: number) { res._status = code; return res; },
     json(body: unknown) { res._body = body; return res; },
     end() { return res; },
+    setHeader() { return res; },
   };
   return res;
 }
@@ -121,6 +157,9 @@ const VALID_THEME_JSON = JSON.stringify({
 
 beforeEach(() => {
   vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+
+  Object.assign(gw, createMockGatewayDeps());
+  gw.resetDefaults(); // legacy mode — no telemetry, no DB dependency
 
   vi.mocked(requireAuth).mockResolvedValue({
     userId: USER_ID,
@@ -520,12 +559,12 @@ describe('handler — autenticação', () => {
 // ── handler — chave de API ausente ───────────────────────────────────────────
 
 describe('handler — OPENAI_API_KEY ausente', () => {
-  it('retorna 500 quando a chave não está configurada', async () => {
+  it('retorna 503 quando a chave não está configurada', async () => {
     vi.unstubAllEnvs();
     vi.stubEnv('OPENAI_API_KEY', '');
     const res = makeRes();
     await handler(makeReq(), res);
-    expect(res._status).toBe(500);
+    expect(res._status).toBe(503);
     expect(mockCreate).not.toHaveBeenCalled();
   });
 });
@@ -610,6 +649,185 @@ describe('handler — modo normal', () => {
     await handler(makeReq(), res);
     const serialized = JSON.stringify(res._body);
     expect(serialized).not.toContain(USER_ID);
+  });
+});
+
+// ── handler — tema selecionado (correção "Missão do dia" ignora tema) ────────
+//
+// Estas provam a cadeia completa sem chamar a IA real: o endpoint recebe o
+// valor técnico do select (ex: 'football_sports'), converte para o label
+// canônico usando src/domain/writing/writing-themes.ts (nunca uma segunda
+// lista), e o prompt final enviado à IA contém o tema como requisito
+// obrigatório — nunca como sugestão solta.
+
+describe('handler — tema selecionado (Missão do dia)', () => {
+  it('endpoint aceita o campo theme e o converte para o label canônico no prompt', async () => {
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    await handler(req, makeRes());
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('Futebol e esportes');
+  });
+
+  it('o tema aparece como requisito obrigatório, não como sugestão solta', async () => {
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Futebol e esportes.');
+    expect(userMessage).toContain('não pode substituir ou ignorar o tema escolhido');
+    // The old, weak, easily-ignored wording must be gone.
+    expect(userMessage).not.toContain('TEMA SOLICITADO PELO USUÁRIO');
+  });
+
+  it('instrui explicitamente que título, situação, tarefa e vocabulário devem se relacionar ao tema', async () => {
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('título, a situação e o que o usuário deve escrever');
+    expect(userMessage).toContain('suggestedVocabulary');
+  });
+
+  it('o tema tem prioridade explícita sobre o histórico do usuário no prompt', async () => {
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('histórico do usuário pode personalizar a dificuldade e o contexto, mas não pode substituir ou ignorar o tema escolhido');
+  });
+
+  it('funciona para cada valor técnico do catálogo canônico (mesma lista do select)', async () => {
+    for (const t of WRITING_THEMES) {
+      mockCreate.mockClear();
+      const req = makeReq({ body: { theme: t.value } });
+      await handler(req, makeRes());
+      const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+      expect(userMessage).toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
+    }
+  });
+
+  it('"tema aleatório" (campo ausente) mantém o comportamento anterior — nenhum bloco de tema obrigatório', async () => {
+    const req = makeReq({ body: {} });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+    expect(userMessage).not.toContain('TEMA SOLICITADO');
+  });
+
+  it('"tema aleatório" (theme: null explícito) também mantém o comportamento anterior', async () => {
+    const req = makeReq({ body: { theme: null } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+  });
+
+  it('valor de theme desconhecido/inválido é tratado como aleatório, sem quebrar', async () => {
+    const req = makeReq({ body: { theme: 'not_a_real_theme_value' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(200);
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+  });
+
+  it('não faz nenhuma chamada de IA extra além da que já existia (1 tentativa quando a primeira é válida)', async () => {
+    const req = makeReq({ body: { theme: 'travel' } });
+    await handler(req, makeRes());
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('o tema selecionado nunca aparece na resposta HTTP como texto de debug (não vaza estrutura interna do prompt)', async () => {
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    const res = makeRes();
+    await handler(req, res);
+    expect(res._status).toBe(200);
+  });
+});
+
+// ── handler — cache diagnóstico não pode ignorar um novo tema selecionado ────
+//
+// Bug real encontrado na investigação: quando o modo diagnóstico (feature
+// flag WRITING_DIAGNOSTIC_V1, desligada por padrão) está ativo e já existe
+// uma missão diagnóstica gerada, o endpoint reaproveitava essa missão salva
+// no banco incondicionalmente — mesmo que o usuário tivesse acabado de
+// selecionar um tema novo. Corrigido: a reutilização só é permitida quando
+// nenhum tema foi solicitado nesta chamada.
+
+describe('handler — cache diagnóstico e tema selecionado', () => {
+  const existingMission = {
+    id: 'diag-mission-1',
+    user_id: USER_ID,
+    theme_id: 'old-theme-id',
+    diagnostic_sequence: 1 as const,
+    catalog_version: 1,
+    diagnostic_plan: {},
+    objective_ids: [],
+    status: 'generated' as const,
+    regeneration_count: 0,
+    rejection_log: [],
+    prompt_version: 'v1',
+    validator_version: 'v1',
+    accepted_at: null,
+  };
+
+  it('com tema selecionado: NÃO reaproveita a missão diagnóstica existente — gera uma nova respeitando o tema', async () => {
+    mockGetDiagnosticContext.mockResolvedValueOnce({
+      shouldUseDiagnostic: true,
+      diagnosticSequence: 1,
+      existingActiveMission: existingMission,
+      diagnosticPlan: createDiagnosticPlan(1),
+      status: 'mission_1_generated',
+    });
+
+    const req = makeReq({ body: { theme: 'football_sports' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(200);
+    expect(mockCreate).toHaveBeenCalled();
+    const firstCallUserMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(firstCallUserMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Futebol e esportes.');
+  });
+
+  it('sem tema selecionado: idempotência original é preservada — retorna a missão existente sem chamar a IA', async () => {
+    mockGetDiagnosticContext.mockResolvedValueOnce({
+      shouldUseDiagnostic: true,
+      diagnosticSequence: 1,
+      existingActiveMission: existingMission,
+      diagnosticPlan: createDiagnosticPlan(1),
+      status: 'mission_1_generated',
+    });
+
+    const existingThemeRow = {
+      id: 'old-theme-id',
+      title: 'Missão antiga já gerada',
+      description: 'Descrição da missão antiga.',
+      activity_type: 'e-mail',
+      context: 'trabalho',
+      semantic_summary: 'Formato: e-mail',
+      difficulty: 'medium',
+      vocabulary: [],
+      grammar_focus: [],
+    };
+    const themeRowChain: Record<string, unknown> = {};
+    for (const m of ['select', 'eq']) themeRowChain[m] = vi.fn().mockReturnValue(themeRowChain);
+    (themeRowChain as any).maybeSingle = vi.fn().mockResolvedValue({ data: existingThemeRow, error: null });
+    const mockSupa = { from: vi.fn(() => themeRowChain), rpc: vi.fn() };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: mockSupa as any });
+
+    const req = makeReq({ body: {} });
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(200);
+    expect(mockCreate).not.toHaveBeenCalled();
+    const body = res._body as Record<string, unknown>;
+    expect((body.theme as Record<string, unknown>).title).toBe('Missão antiga já gerada');
   });
 });
 

@@ -6,6 +6,8 @@ import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
 import { fetchPendingReviewGroup } from '../lib/pendingReview';
+import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
+import { WRITING_THEMES, RANDOM_THEME_LABEL } from '../domain/writing/writing-themes';
 import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
@@ -15,22 +17,6 @@ interface Props {
   onThemeReady: (theme: EnglishDailyTheme) => void;
   onStartWriting: () => void;
 }
-
-const WRITING_THEMES: { label: string; value: string | null }[] = [
-  { label: 'Tema aleatório', value: null },
-  { label: 'Viagens', value: 'travel' },
-  { label: 'Trabalho e carreira', value: 'work_career' },
-  { label: 'Vida cotidiana', value: 'daily_life' },
-  { label: 'Filmes e séries', value: 'movies_series' },
-  { label: 'Música', value: 'music' },
-  { label: 'Futebol e esportes', value: 'football_sports' },
-  { label: 'Tecnologia', value: 'technology' },
-  { label: 'Comida e restaurantes', value: 'food_restaurants' },
-  { label: 'Relacionamentos e vida social', value: 'relationships_social_life' },
-  { label: 'Saúde e bem-estar', value: 'health_wellbeing' },
-  { label: 'Dinheiro e compras', value: 'money_shopping' },
-  { label: 'Mistério e aventura', value: 'mystery_adventure' },
-];
 
 const FORMAT_LABELS: Record<string, string> = {
   'e-mail': 'E-mail',
@@ -115,22 +101,22 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
         context = buildLearningContextForTheme(reviews);
       }
 
-      const themeLabel = selectedTheme
-        ? (WRITING_THEMES.find(t => t.value === selectedTheme)?.label ?? null)
-        : null;
-
       const authHeader = await getAuthHeader();
+      const requestBody = buildGenerateThemeRequestBody({
+        mode: pendingReview ? 'review' : 'normal',
+        reviewGroup: pendingReview ?? null,
+        learningContext: context,
+        previousThemeId: currentThemeId,
+        excludedTheme,
+        // Raw technical value (e.g. 'football_sports'), or null for "Tema
+        // aleatório" — the backend converts this to a label using the same
+        // canonical WRITING_THEMES catalog, never a second divergent list.
+        selectedTheme,
+      });
       const res = await fetch('/api/generate-theme', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
-        body: JSON.stringify({
-          mode: pendingReview ? 'review' : 'normal',
-          reviewGroup: pendingReview ?? null,
-          learningContext: context,
-          previousThemeId: currentThemeId,
-          excludedTheme,
-          selectedTheme: themeLabel,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       const data = await res.json();
@@ -178,8 +164,9 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             onChange={(e) => setSelectedTheme(e.target.value || null)}
             className="w-full px-3 py-2.5 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-blue-500 cursor-pointer"
           >
+            <option value="">{RANDOM_THEME_LABEL}</option>
             {WRITING_THEMES.map((t) => (
-              <option key={t.value ?? '__random'} value={t.value ?? ''}>
+              <option key={t.value} value={t.value}>
                 {t.label}
               </option>
             ))}

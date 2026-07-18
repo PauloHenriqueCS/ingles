@@ -25,6 +25,7 @@ import { buildPlanConstraintsSection, buildRepairSection } from './_mission-prom
 import { validateMissionAgainstPedagogicalPlan } from '../src/domain/missions/mission-validator';
 import { selectFallbackTemplate, buildFallbackCandidate } from '../src/domain/missions/mission-fallback';
 import type { MissionPedagogicalPlan } from '../src/domain/pedagogy/planner/planner-types';
+import { resolveWritingThemeLabel } from '../src/domain/writing/writing-themes';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -105,6 +106,9 @@ A diferença é simples: o CERTO dá ao aluno um MOTIVO para escrever. O aluno s
 
 ═══ PROCESSO OBRIGATÓRIO — SIGA ESTA ORDEM ═══
 
+PASSO 0 — VERIFICAR TEMA OBRIGATÓRIO
+Se a mensagem do usuário contiver um "TEMA OBRIGATÓRIO", toda a missão (título, situação, tarefa de escrita e vocabulário sugerido) deve girar em torno desse tema. Isso tem prioridade sobre a biblioteca de contextos abaixo — use a biblioteca apenas para escolher formato/conflito/objetivo, nunca para substituir o tema. Se não houver tema obrigatório, escolha livremente.
+
 PASSO 1 — ANALISAR O HISTÓRICO
 Leia o histórico completo. Identifique: formatos usados, conflitos usados, objetivos usados, contextos usados nos últimos temas.
 
@@ -133,6 +137,7 @@ Somente após construir a situação, preencha todos os campos.
 4. NUNCA repita o mesmo objetivo nos últimos 3 temas.
 5. A missão deve dar ao aluno um motivo para escrever. O aluno deve pensar "preciso resolver isso" — não "sobre o que escrever".
 6. Cada missão deve ter: um PERSONAGEM (você, seu chefe, um cliente…), uma SITUAÇÃO, e um FORMATO específico.
+7. Se houver um TEMA OBRIGATÓRIO na mensagem do usuário, ele tem prioridade máxima sobre qualquer sugestão baseada no histórico do aluno. O histórico pode ajustar dificuldade e contexto específico, mas nunca pode substituir ou remover o tema.
 
 ═══ FORMATO DE RESPOSTA ═══
 
@@ -492,6 +497,19 @@ function buildUserMessage(
     lines.push(`Vocabulário estudado: ${vocab.slice(0, 8).join(', ')}`);
   }
 
+  // User-requested theme — placed immediately after the student profile,
+  // ahead of history/restrictions, so it reads as the highest-priority
+  // constraint rather than a suggestion buried at the end of the prompt.
+  if (selectedTheme) {
+    lines.push('');
+    lines.push('═══ TEMA OBRIGATÓRIO ═══');
+    lines.push(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${selectedTheme}.`);
+    lines.push('Crie a missão de escrita centralizada nesse assunto. O título, a situação e o que o usuário deve escrever precisam estar claramente relacionados ao tema.');
+    lines.push('Se houver vocabulário sugerido (suggestedVocabulary), ele também deve estar relacionado ao tema.');
+    lines.push('O histórico do usuário pode personalizar a dificuldade e o contexto, mas não pode substituir ou ignorar o tema escolhido.');
+    lines.push('Este tema tem prioridade sobre a biblioteca de contextos e sobre qualquer sugestão baseada no histórico.');
+  }
+
   // Theme history
   lines.push('');
   lines.push('═══ HISTÓRICO DE MISSÕES GERADAS (mais recente primeiro) ═══');
@@ -557,17 +575,12 @@ function buildUserMessage(
     lines.push('Pense em algo inesperado: uma entrevista, uma carta de reclamação, um tutorial, um debate, um review.');
   }
 
-  // User-requested theme
-  if (selectedTheme) {
-    lines.push('');
-    lines.push('═══ TEMA SOLICITADO PELO USUÁRIO ═══');
-    lines.push(`O usuário escolheu o tema: "${selectedTheme}"`);
-    lines.push('A missão DEVE ser ambientada neste tema. Adapte o formato, o conflito e o contexto para que estejam naturalmente relacionados a este tema.');
-    lines.push('Mantenha todas as demais restrições pedagógicas e de diversidade de formato.');
-  }
-
   lines.push('');
-  lines.push('Siga os 6 passos obrigatórios e crie uma missão envolvente que seja genuinamente diferente de tudo no histórico.');
+  if (selectedTheme) {
+    lines.push(`Siga os 6 passos obrigatórios. Mantenha a diversidade de formato/conflito/objetivo em relação ao histórico, mas o TEMA OBRIGATÓRIO acima não é negociável — a missão inteira deve girar em torno dele.`);
+  } else {
+    lines.push('Siga os 6 passos obrigatórios e crie uma missão envolvente que seja genuinamente diferente de tudo no histórico.');
+  }
 
   return lines.join('\n');
 }
@@ -778,8 +791,15 @@ export default async function handler(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'generate-theme')) return;
 
-  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, selectedTheme: rawSelectedTheme } = req.body ?? {};
-  const selectedTheme = typeof rawSelectedTheme === 'string' && rawSelectedTheme.trim() ? rawSelectedTheme.trim() : null;
+  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
+  // The client sends the raw technical value from the theme select (e.g.
+  // 'football_sports'), never a pre-translated label — the label used in the
+  // AI prompt is resolved here from the same canonical catalog the select
+  // is built from, so there is only ever one source of truth for theme
+  // options. An unrecognized/empty value is treated exactly like "no theme
+  // selected" (random) — never invented.
+  const normalizedThemeValue = typeof rawTheme === 'string' && rawTheme.trim() ? rawTheme.trim() : null;
+  const selectedTheme = resolveWritingThemeLabel(normalizedThemeValue);
 
   // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {
@@ -868,8 +888,11 @@ export default async function handler(req: any, res: any) {
     if (diagnosticCtx?.shouldUseDiagnostic) {
       const diagnosticSequence = diagnosticCtx.diagnosticSequence!;
 
-      // Idempotência: retornar missão existente se já foi gerada (double-click, refresh)
-      if (diagnosticCtx.existingActiveMission) {
+      // Idempotência: retornar missão existente se já foi gerada (double-click, refresh).
+      // Só é seguro reutilizar quando nenhum tema foi solicitado nesta chamada —
+      // a missão salva não tem como ser verificada contra um tema diferente do
+      // que ela foi gerada com, então um novo tema sempre força geração fresca.
+      if (diagnosticCtx.existingActiveMission && !selectedTheme) {
         const existing = diagnosticCtx.existingActiveMission;
         if (existing.theme_id) {
           try {
