@@ -16,8 +16,26 @@
  *
  * A short (5s, same TTL as the policy cache) in-memory staleness bound is
  * inherited for free from GatewayPolicyResolver's own cache — no separate
- * cache is needed here, which keeps "reflected within 5 seconds" true by
- * construction rather than by a second, independently-tuned cache.
+ * cache is needed here.
+ *
+ * Precise scope of that 5s bound — do not overstate it:
+ *   - It bounds how long a NEW call can keep going through the OLD policy
+ *     after an admin changes it — "blocked within up to 5 seconds for new
+ *     calls," never "instantly," and never a guarantee tighter than the
+ *     cache TTL actually in effect (GatewayPolicyResolver's constructor
+ *     accepts a custom ttlMs; getProductionDeps() uses the 5000ms default —
+ *     if that default is ever changed, this bound changes with it).
+ *   - It says NOTHING about an already-connected OpenAI Realtime session.
+ *     Kill-switch blocks NEW webrtc_connect/create_session calls within
+ *     that window, but a session already streaming audio keeps running
+ *     until it hits its own deadline or the best-effort
+ *     session-control-poll-plus-hangup path (see
+ *     api/conversation/[...slug].ts's handleSessionControl) closes it —
+ *     which depends on a call_id having been captured and on
+ *     hangupRealtimeCall actually succeeding, NEITHER of which has been
+ *     live-tested against production OpenAI as of this delivery. Do not
+ *     describe active-session termination as proven until a real smoke
+ *     test with a real call_id confirms it.
  */
 
 import type { RuntimeStatus } from './types';

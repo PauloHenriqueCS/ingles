@@ -11,15 +11,27 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps, aiOk } from '../../../../api/__tests__/_ai-gateway-test-helpers';
+import { estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/estimators';
 
-const { mockCreate, gw } = vi.hoisted(() => {
+const { mockCreate, gw, capturedContexts } = vi.hoisted(() => {
   const mockCreate = vi.fn();
-  return { mockCreate, gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps> };
+  return {
+    mockCreate,
+    gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps>,
+    capturedContexts: [] as any[],
+  };
 });
 
 vi.mock('../../../../api/_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../api/_ai-gateway/index')>();
-  return { ...actual, getProductionDeps: () => gw.mockDeps };
+  return {
+    ...actual,
+    getProductionDeps: () => gw.mockDeps,
+    executeAiGatewayCall: (async (context: any, ...rest: any[]) => {
+      capturedContexts.push(context);
+      return (actual.executeAiGatewayCall as any)(context, ...rest);
+    }) as typeof actual.executeAiGatewayCall,
+  };
 });
 
 vi.mock('openai', () => ({
@@ -93,6 +105,7 @@ function mockFetchOk() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  capturedContexts.length = 0;
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockCreate.mockImplementation(() => aiOk(VALID_STORY_SESSION_JSON, { prompt_tokens: 100, completion_tokens: 50 }));
@@ -263,6 +276,21 @@ describe('story_session synthesizeAudio — OBSERVE mode', () => {
     const ttsCalls = gw.mockFailEvent.mock.calls;
     expect(ttsCalls.length).toBeGreaterThan(0);
   });
+
+  it('estimatedMetrics (the pre-call reservation) exactly matches the real SSML about to be sent — single physical attempt, not retried', async () => {
+    const fetchSpy = mockFetchOk();
+    global.fetch = fetchSpy as any;
+    await generateStorySession(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+
+    const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const sentSsml = opts.body as string;
+    const ttsContext = capturedContexts.find((c) => c.featureKey === 'listening.story_session_tts');
+    expect(ttsContext).toBeDefined();
+    expect(ttsContext.estimatedMetrics).toEqual([
+      estimateProviderRequests(1),
+      estimateTtsCharacters(sentSsml, true),
+    ]);
+  });
 });
 
 // ── listening.two_part_tts — parallel calls ─────────────────────────────────
@@ -326,6 +354,34 @@ describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => 
     for (const [, metrics] of metricsCalls) {
       const ttsMetric = (metrics as Array<Record<string, unknown>>).find((m) => m.metricKey === 'tts_characters');
       expect((ttsMetric?.quantity as number)).toBeGreaterThan(0);
+    }
+  });
+
+  it('estimatedMetrics (the pre-call reservation) estimates each of the two physical blocks separately, matching each block\'s own real SSML — never a combined/duplicated total', async () => {
+    const fetchCalls: RequestInit[] = [];
+    global.fetch = vi.fn().mockImplementation((_url: string, opts: RequestInit) => {
+      fetchCalls.push(opts);
+      return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(10) });
+    }) as any;
+
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+
+    const ttsContexts = capturedContexts.filter((c) => c.featureKey === 'listening.two_part_tts');
+    expect(ttsContexts).toHaveLength(2);
+    expect(fetchCalls).toHaveLength(2);
+
+    // Order-independent: each physical block's own SSML must be reflected by
+    // exactly one reservation, with no duplication and no cross-block mixing.
+    const expectedQuantities = fetchCalls
+      .map((opts) => estimateTtsCharacters(opts.body as string, true).quantity)
+      .sort((a, b) => a - b);
+    const actualQuantities = ttsContexts
+      .map((c) => (c.estimatedMetrics as Array<{ metricKey: string; quantity: number }>).find((m) => m.metricKey === 'tts_characters')?.quantity)
+      .sort((a, b) => (a as number) - (b as number));
+    expect(actualQuantities).toEqual(expectedQuantities);
+
+    for (const c of ttsContexts) {
+      expect(c.estimatedMetrics).toContainEqual(estimateProviderRequests(1));
     }
   });
 });

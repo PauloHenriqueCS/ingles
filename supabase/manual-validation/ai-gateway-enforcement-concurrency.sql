@@ -55,6 +55,35 @@ INSERT INTO _mv_config VALUES ('00000000-0000-0000-0000-000000000000'); -- ← R
 --      ai_gateway_circuit_breakers) plus one disposable auth.users row you
 --      create and own. Real consumption/usage history is never read,
 --      written, or altered by anything below.
+--
+--   4. PROOF OF CONCURRENCY — required for every "SESSION A / SESSION B"
+--      pair, not just launched-and-forgotten: every reserve_gateway_usage_v1
+--      call in this file is a single, already-atomic RPC (the whole
+--      function body runs inside one implicit transaction), so what these
+--      scenarios actually test is "does Session B's call see Session A's
+--      effect correctly" — a property Postgres's row locking guarantees
+--      once both calls are issued before either result is read, regardless
+--      of exact millisecond timing. To turn "I believe I ran these close
+--      together" into an observable fact:
+--        a. Open TWO real, separate DB connections (two psql processes, or
+--           two browser tabs in Supabase Studio's SQL editor — NOT the same
+--           tab/session reused, which would serialize them trivially and
+--           prove nothing).
+--        b. In psql, run `\timing on` in both sessions first. In Supabase
+--           Studio, note the "Query took Xms" shown after each run.
+--        c. Paste Session A's statement in tab/window A and Session B's in
+--           tab/window B WITHOUT running either yet.
+--        d. Execute A, then immediately (same breath, do not wait for the
+--           result) execute B.
+--        e. After both return, compare their start/end timestamps (psql's
+--           \timing shows duration; cross-reference with `SELECT
+--           statement_timestamp()` run right before each if you need actual
+--           wall-clock start times). CONFIRM the two executions' time
+--           windows overlap — if B's start time is clearly after A's end
+--           time, you ran them sequentially, not concurrently, and the
+--           scenario proves nothing; re-run with tighter timing.
+--        f. Only once genuine overlap is confirmed do the EXPECTED results
+--           below count as a real concurrency proof for that scenario.
 -- =============================================================================
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -186,6 +215,16 @@ DELETE FROM public.usage_reservations WHERE idempotency_key = 'manual-validation
 -- limit — 50 remaining) is seeded directly (simulating prior real usage +
 -- an existing in-flight reservation), then two concurrent 40-second
 -- attempts race the remaining 50.
+--
+-- THIS IS A REAL TWO-TRANSACTION CONCURRENCY TEST, not two sequential calls
+-- in one script — follow the PROOF OF CONCURRENCY protocol in SETUP item 4
+-- above exactly:
+--   Step 1: open Session A's connection, paste its statement below, do NOT run it yet.
+--   Step 2: open Session B's connection (separate tab/process), paste its statement, do NOT run it yet.
+--   Step 3: execute Session A.
+--   Step 4: WITHOUT reading Session A's result, immediately execute Session B.
+--   Step 5: only now read both results and confirm the timing overlap per SETUP item 4(e).
+-- Do not mark this scenario passed if you ran B only after seeing A's output.
 
 INSERT INTO public.ai_gateway_quota_buckets (
   subject_type, subject_id, feature_key, metric_key, period_type, period_start, period_end,
@@ -195,7 +234,7 @@ INSERT INTO public.ai_gateway_quota_buckets (
   '2099-01-01T00:00:00Z', '2099-02-01T00:00:00Z', 300, 250
 );
 
--- SESSION A:
+-- SESSION A (Step 3 — paste in connection/tab #1, execute first):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario4-a', (SELECT test_user_id FROM _mv_config), NULL,
   'conversation.realtime_usage', 'openai', 'preflight-validation-model',
@@ -203,7 +242,8 @@ SELECT * FROM public.reserve_gateway_usage_v1(
   '[]'::jsonb, NULL, 120
 );
 
--- SESSION B (run immediately, before A's transaction commits):
+-- SESSION B (Step 4 — paste in connection/tab #2 BEFORE running Session A;
+-- execute immediately after Session A, without waiting for or reading A's result):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario4-b', (SELECT test_user_id FROM _mv_config), NULL,
   'conversation.realtime_usage', 'openai', 'preflight-validation-model',
@@ -265,11 +305,17 @@ DELETE FROM public.ai_gateway_quota_buckets
 -- $1.00 daily limit ($0.10 remaining). Two concurrent calls each estimate
 -- $0.08 — individually within budget (0.90+0.08=0.98<=1.00) but not
 -- together (0.90+0.08+0.08=1.06>1.00).
+--
+-- THIS IS A REAL TWO-TRANSACTION CONCURRENCY TEST — follow the PROOF OF
+-- CONCURRENCY protocol in SETUP item 4 exactly, same as Scenario 4: paste
+-- both statements first without running either, execute A, then
+-- immediately execute B without reading A's result, then verify timing
+-- overlap before trusting the outcome.
 
 INSERT INTO public.ai_gateway_budget_buckets (scope_type, scope_key, period_type, period_start, period_end, committed_cost_usd, reserved_cost_usd)
 VALUES ('feature', 'manual-validation-scenario5', 'day', '2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z', 0.90, 0.00);
 
--- SESSION A:
+-- SESSION A (execute first, in connection/tab #1):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario5-a', NULL, NULL, 'writing.correct', 'openai', 'preflight-validation-model',
   '[{"quota_key":"provider_requests","unit_type":"request","reserved_quantity":1,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
@@ -277,7 +323,8 @@ SELECT * FROM public.reserve_gateway_usage_v1(
   '0.08', 120
 );
 
--- SESSION B (run immediately):
+-- SESSION B (execute immediately after A, in connection/tab #2, WITHOUT
+-- reading A's result first):
 SELECT * FROM public.reserve_gateway_usage_v1(
   'manual-validation-scenario5-b', NULL, NULL, 'writing.correct', 'openai', 'preflight-validation-model',
   '[{"quota_key":"provider_requests","unit_type":"request","reserved_quantity":1,"limit_quantity":null,"period_type":null,"period_start":null,"period_end":null}]'::jsonb,
@@ -391,6 +438,44 @@ DROP TABLE IF EXISTS _mv_config;
 -- it now via Supabase Studio / `supabase auth admin delete-user` — this
 -- script never deletes auth.users rows itself (too destructive to automate
 -- blindly against a table it doesn't own).
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RECORD THE VALIDATION — run this ONLY after you have personally observed
+-- all seven scenarios' real results (per the PROOF OF CONCURRENCY protocol
+-- for scenarios 4/5) and confirmed every EXPECTED outcome above actually
+-- happened. This INSERT is what scripts/ai-gateway-enforce-preflight.ts
+-- reads to compute concurrencyValidated — do not run it speculatively, and
+-- do not run it if any scenario's real result diverged from EXPECTED (call
+-- record_gateway_concurrency_validation_v1 with p_status='failed' and
+-- explain in p_notes instead — a record of a real failure is still real
+-- data, never delete/hide a bad result).
+--
+-- Step 1 — compute the CURRENT hash of this exact file (from your shell,
+-- not from inside SQL — the file must be hashed as it exists on disk right
+-- now, byte for byte):
+--   macOS/Linux:  shasum -a 256 supabase/manual-validation/ai-gateway-enforcement-concurrency.sql
+--   Windows:      Get-FileHash supabase\manual-validation\ai-gateway-enforcement-concurrency.sql -Algorithm SHA256
+--   or simply run the preflight script itself — it prints this same hash:
+--     npx tsx scripts/ai-gateway-enforce-preflight.ts | grep "validation script hash"
+--
+-- Step 2 — call the function with that exact hash (this function is
+-- reachable only via direct service-role DB access — REVOKEd from
+-- anon/authenticated — so no ordinary user or frontend code path can ever
+-- call it):
+--
+-- SELECT public.record_gateway_concurrency_validation_v1(
+--   '20260718000000_ai_gateway_enforcement',                             -- p_migration_version — must match the literal in the migration's header AND in scripts/ai-gateway-enforce-preflight.ts's MIGRATION_VERSION constant
+--   'supabase/manual-validation/ai-gateway-enforcement-concurrency.sql',  -- p_validation_script_path
+--   '<paste the sha256 hex digest from Step 1 here>',                    -- p_validation_script_sha256
+--   'passed',                                                            -- or 'failed' — never omit a bad result
+--   '<your name/handle — technical audit identifier, not a user_id>',    -- p_executed_by
+--   'Ran all 7 scenarios on <date> against <scratch project ref>. Scenarios 4/5 confirmed real overlapping execution via \timing.' -- p_notes
+-- );
+--
+-- If this file is edited after recording a validation (even a single
+-- character), the hash changes and the row above no longer matches —
+-- concurrencyValidated automatically reverts to false for the new file
+-- content, with no separate "invalidate" step required.
 
 -- =============================================================================
 -- SUMMARY — fill in after actually running the above against a real Postgres.

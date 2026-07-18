@@ -34,6 +34,17 @@
 --          gateway_mode de provider/feature (o dashboard não tem essa
 --          fonte hoje) nem sobrescreve preços seedados manualmente fora
 --          desta publicação (marcados por source_reference).
+-- BLOCO 8: ai_gateway_concurrency_validations + record_gateway_
+--          concurrency_validation_v1 — registro persistente, server-only
+--          (sem policy de RLS, função revogada de anon/authenticated), do
+--          resultado real da execução manual dos 7 cenários de
+--          supabase/manual-validation/ai-gateway-enforcement-concurrency.sql.
+--          O preflight (scripts/ai-gateway-enforce-preflight.ts) lê esta
+--          tabela ao vivo para computar concurrencyValidated — nunca um
+--          boolean fixo no código. Vinculado a migration_version +
+--          validation_script_sha256 (hash do arquivo de validação
+--          calculado em tempo real): qualquer alteração no arquivo invalida
+--          automaticamente uma aprovação anterior.
 --
 -- Nenhum gateway_mode ou runtime_status EXISTENTE é alterado por esta
 -- migration em si (os triggers do BLOCO 7 só disparam com escrita futura
@@ -1317,6 +1328,98 @@ CREATE TRIGGER trg_publish_pricing_on_version
   AFTER INSERT OR UPDATE ON public.ai_pricing_versions
   FOR EACH ROW EXECUTE FUNCTION public._gateway_publish_pricing_trigger_v1();
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BLOCO 8: ai_gateway_concurrency_validations — registro de validação humana
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Correction requirement: concurrencyValidated can never be a hardcoded
+-- boolean in application code — it must be a persistent, server-only fact
+-- tied to exactly which migration version and which validation script
+-- content was actually exercised. This table is that fact. It is never
+-- writable by anon/authenticated (REVOKE below + no RLS policy at all —
+-- RLS enabled with zero policies means only service_role bypasses), so no
+-- ordinary user or frontend code path can ever record an approval; only
+-- someone with direct service-role/DB access (the same access level
+-- required to apply a migration in the first place) can call
+-- record_gateway_concurrency_validation_v1.
+--
+-- validation_script_sha256 is compared against a LIVE hash of
+-- supabase/manual-validation/ai-gateway-enforcement-concurrency.sql,
+-- computed by the preflight script at run time — if that file changes by
+-- even one byte after a validation was recorded, the hash no longer
+-- matches any row here and concurrencyValidated reverts to false
+-- automatically, with no manual "invalidate" step required.
+CREATE TABLE IF NOT EXISTS public.ai_gateway_concurrency_validations (
+  id                        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  migration_version         TEXT        NOT NULL,
+  validation_script_path    TEXT        NOT NULL,
+  validation_script_sha256  TEXT        NOT NULL CHECK (validation_script_sha256 ~ '^[0-9a-f]{64}$'),
+  status                    TEXT        NOT NULL,
+  executed_at               TIMESTAMPTZ NOT NULL,
+  executed_by               TEXT        NOT NULL CHECK (char_length(executed_by) BETWEEN 1 AND 200),
+  notes                     TEXT,
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT chk_agcv_status CHECK (status IN ('passed', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agcv_lookup ON public.ai_gateway_concurrency_validations
+  (migration_version, validation_script_sha256, status, executed_at DESC);
+
+ALTER TABLE public.ai_gateway_concurrency_validations ENABLE ROW LEVEL SECURITY;
+-- Sem políticas: somente service role acessa (leitura E escrita) — nem
+-- authenticated nem anon podem ler ou escrever esta tabela diretamente.
+
+-- record_gateway_concurrency_validation_v1: the ONLY way to write a row,
+-- and even this function is REVOKEd from anon/authenticated below — it is
+-- reachable only via direct service-role DB access (psql / SQL editor with
+-- the service role, the same channel used to apply the migration itself),
+-- never through any HTTP route this application exposes. Append-only by
+-- design (no UPDATE/DELETE function is provided) — a stale or superseded
+-- validation is superseded by a NEWER row, never edited in place, so the
+-- audit trail is never rewritten.
+CREATE OR REPLACE FUNCTION public.record_gateway_concurrency_validation_v1(
+  p_migration_version        TEXT,
+  p_validation_script_path   TEXT,
+  p_validation_script_sha256 TEXT,
+  p_status                   TEXT,
+  p_executed_by              TEXT,
+  p_notes                    TEXT DEFAULT NULL
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id UUID;
+BEGIN
+  IF p_migration_version IS NULL OR char_length(p_migration_version) = 0 THEN
+    RAISE EXCEPTION 'migration_version is required';
+  END IF;
+  IF p_validation_script_sha256 !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'validation_script_sha256 must be a 64-char lowercase hex SHA-256 digest';
+  END IF;
+  IF p_status NOT IN ('passed', 'failed') THEN
+    RAISE EXCEPTION 'status must be passed or failed';
+  END IF;
+  IF p_executed_by IS NULL OR char_length(p_executed_by) = 0 THEN
+    RAISE EXCEPTION 'executed_by is required (a technical identifier for audit — who actually ran the scenarios)';
+  END IF;
+
+  INSERT INTO public.ai_gateway_concurrency_validations (
+    migration_version, validation_script_path, validation_script_sha256, status, executed_at, executed_by, notes
+  ) VALUES (
+    p_migration_version, p_validation_script_path, p_validation_script_sha256, p_status, NOW(), p_executed_by, p_notes
+  ) RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.record_gateway_concurrency_validation_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.record_gateway_concurrency_validation_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM anon;
+REVOKE ALL ON FUNCTION public.record_gateway_concurrency_validation_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM authenticated;
+
 -- =============================================================================
 -- VALIDAÇÃO INLINE — captura estado ANTES, aplica, compara DEPOIS
 -- =============================================================================
@@ -1352,10 +1455,11 @@ BEGIN
     WHERE table_schema = 'public'
       AND table_name IN (
         'ai_gateway_decisions', 'ai_gateway_idempotency_locks', 'ai_gateway_circuit_breakers', 'api_rate_limits',
-        'ai_gateway_quota_buckets', 'ai_gateway_budget_buckets', 'ai_gateway_reservation_budget_links'
+        'ai_gateway_quota_buckets', 'ai_gateway_budget_buckets', 'ai_gateway_reservation_budget_links',
+        'ai_gateway_concurrency_validations'
       );
-  IF v_diff_count != 7 THEN
-    RAISE EXCEPTION 'VALIDATION FAILED: expected 7 new tables, found %', v_diff_count;
+  IF v_diff_count != 8 THEN
+    RAISE EXCEPTION 'VALIDATION FAILED: expected 8 new tables, found %', v_diff_count;
   END IF;
 
   SELECT COUNT(*) INTO v_diff_count FROM pg_proc
@@ -1368,13 +1472,13 @@ BEGIN
       '_gateway_touch_quota_bucket_v1', '_gateway_touch_budget_bucket_v1',
       'gateway_publish_runtime_controls_v1', 'gateway_publish_pricing_v1',
       '_gateway_publish_runtime_controls_trigger_v1', '_gateway_publish_pricing_trigger_v1',
-      'expire_stale_gateway_reservations_v1'
+      'expire_stale_gateway_reservations_v1', 'record_gateway_concurrency_validation_v1'
     );
-  IF v_diff_count != 17 THEN
-    RAISE EXCEPTION 'VALIDATION FAILED: expected 17 gateway functions, found %', v_diff_count;
+  IF v_diff_count != 18 THEN
+    RAISE EXCEPTION 'VALIDATION FAILED: expected 18 gateway functions, found %', v_diff_count;
   END IF;
 
-  RAISE NOTICE 'VALIDATION PASSED: 7 new tables, 16 new/re-declared functions, zero changes to existing ai_runtime_controls rows, runtime_status and usage_reservations.status CHECK constraints widened additively';
+  RAISE NOTICE 'VALIDATION PASSED: 8 new tables, 18 new/re-declared functions, zero changes to existing ai_runtime_controls rows, runtime_status and usage_reservations.status CHECK constraints widened additively';
 END;
 $$;
 
@@ -1383,6 +1487,8 @@ COMMIT;
 -- =============================================================================
 -- ROLLBACK MANUAL (documentado, não executado por esta migration)
 -- =============================================================================
+--   DROP FUNCTION IF EXISTS public.record_gateway_concurrency_validation_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT);
+--   DROP TABLE IF EXISTS public.ai_gateway_concurrency_validations;
 --   DROP TRIGGER IF EXISTS trg_publish_pricing_on_version ON public.ai_pricing_versions;
 --   DROP FUNCTION IF EXISTS public._gateway_publish_pricing_trigger_v1();
 --   DROP FUNCTION IF EXISTS public.gateway_publish_pricing_v1();

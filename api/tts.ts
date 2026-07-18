@@ -9,7 +9,7 @@
 
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, safeLog, jsonError, PAYLOAD_LIMITS } from './_helpers';
-import { executeAiGatewayCall, getProductionDeps } from './_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTtsCharacters, estimateProviderRequests } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
 
@@ -173,6 +173,13 @@ export default async function handler(req: any, res: any) {
           region: config.region,
           voiceName: resolvedVoice,
         },
+        // Etapa 11 correction — the exact SSML is already built above, so
+        // this is an exact count (the same counter buildTtsMetrics() below
+        // uses for the real tts_characters metric), not a guess. A missing
+        // Azure price (confirmed: 0 provider_pricing rows for azure) blocks
+        // only USD budget enforcement — this reservation still protects the
+        // per-unit character quota regardless of price.
+        estimatedMetrics: [estimateProviderRequests(1), estimateTtsCharacters(ssml, true)],
       },
       async () => {
         const controller = new AbortController();

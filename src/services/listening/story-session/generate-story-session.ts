@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
-import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
@@ -289,6 +289,11 @@ async function synthesizeAudio(
         region: azureRegion,
         voiceName: voice,
       },
+      // Etapa 11 correction — exact SSML character count (same counter the
+      // real metric below uses), single physical attempt (this function is
+      // called once per session, not retried). Missing Azure price blocks
+      // only USD budget enforcement, never this per-character quota.
+      estimatedMetrics: [estimateProviderRequests(1), estimateTtsCharacters(ssml, true)],
     },
     async () => {
       const controller = new AbortController();

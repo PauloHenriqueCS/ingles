@@ -9,16 +9,29 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import { estimateTtsCharacters, estimateProviderRequests } from '../_ai-gateway/estimators';
 
-const { mockFetch, mockRequireAuth, gw } = vi.hoisted(() => {
+const { mockFetch, mockRequireAuth, gw, capturedContexts } = vi.hoisted(() => {
   const mockFetch = vi.fn();
   const mockRequireAuth = vi.fn();
-  return { mockFetch, mockRequireAuth, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  return {
+    mockFetch,
+    mockRequireAuth,
+    gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps>,
+    capturedContexts: [] as any[],
+  };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_ai-gateway/index')>();
-  return { ...actual, getProductionDeps: () => gw.mockDeps };
+  return {
+    ...actual,
+    getProductionDeps: () => gw.mockDeps,
+    executeAiGatewayCall: (async (context: any, ...rest: any[]) => {
+      capturedContexts.push(context);
+      return (actual.executeAiGatewayCall as any)(context, ...rest);
+    }) as typeof actual.executeAiGatewayCall,
+  };
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
@@ -62,6 +75,7 @@ function makeRes() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  capturedContexts.length = 0;
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockFetch.mockImplementation(() => mockAzureOk());
@@ -121,6 +135,17 @@ describe('OBSERVE mode', () => {
     // Deterministic and > 0; never derived from response, never persisted text.
     expect(typeof ttsMetric?.quantity).toBe('number');
     expect((ttsMetric?.quantity as number)).toBeGreaterThan(0);
+  });
+
+  it('estimatedMetrics (the pre-call reservation) exactly matches the real SSML about to be sent — same counter as the real tts_characters metric, computed before the physical call', async () => {
+    await handler(makeReq({ body: { text: 'Café ação 😀' } }), makeRes());
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const sentSsml = opts.body as string;
+    expect(capturedContexts).toHaveLength(1);
+    expect(capturedContexts[0].estimatedMetrics).toEqual([
+      estimateProviderRequests(1),
+      estimateTtsCharacters(sentSsml, true),
+    ]);
   });
 
   it('provider_requests is non-billable', async () => {

@@ -29,7 +29,7 @@ import { computeListeningAudioHash } from './hash-listening-audio';
 import { uploadListeningAudioStaging, listeningAudioFileExists } from './upload-listening-audio-staging';
 import { persistListeningAudio } from './persist-listening-audio';
 import { azureTicksToMilliseconds } from './normalize-listening-bookmarks';
-import { executeAiGatewayCall, getProductionDeps } from '../../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
@@ -370,6 +370,13 @@ export async function synthesizeListeningBlock(
             phaseAttempt: attempt + 1,
             maxAttempts,
           },
+          // Etapa 11 correction — same SSML/characterCount every attempt
+          // (computed once above, reused per retry); provider_requests=1
+          // per attempt because each retry is its own separate
+          // executeAiGatewayCall with its own reservation — maxAttempts is
+          // already recorded in technicalMetadata for audit, not folded
+          // into a single inflated per-call estimate.
+          estimatedMetrics: [estimateProviderRequests(1), estimateTtsCharacters(ssml, true)],
         },
         () => runSynthesisOnceGated(ssml, azureConfig),
         gatewayDeps,

@@ -9,6 +9,7 @@ import { buildStagingAudioPath } from './listening-audio-config';
 import { DURATION_MIN_MS, DURATION_MAX_MS } from './listening-audio-config';
 import type { RawListeningBookmarkEvent, RawListeningWordBoundaryEvent } from './listening-audio-types';
 import { createMockGatewayDeps } from '../../../../api/__tests__/_ai-gateway-test-helpers';
+import { estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/estimators';
 
 // ─── AI Gateway mock ─────────────────────────────────────────────────────────
 // synthesizeListeningBlock now wraps its physical Azure calls with the AI
@@ -16,13 +17,23 @@ import { createMockGatewayDeps } from '../../../../api/__tests__/_ai-gateway-tes
 // synthesize-listening-block-gateway.test.ts — this file only needs
 // getProductionDeps() to resolve to 'legacy' so it never touches Supabase.
 
-const { gw } = vi.hoisted(() => {
-  return { gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps> };
+const { gw, capturedContexts } = vi.hoisted(() => {
+  return {
+    gw: {} as ReturnType<typeof import('../../../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps>,
+    capturedContexts: [] as any[],
+  };
 });
 
 vi.mock('../../../../api/_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../api/_ai-gateway/index')>();
-  return { ...actual, getProductionDeps: () => gw.mockDeps };
+  return {
+    ...actual,
+    getProductionDeps: () => gw.mockDeps,
+    executeAiGatewayCall: (async (context: any, ...rest: any[]) => {
+      capturedContexts.push(context);
+      return (actual.executeAiGatewayCall as any)(context, ...rest);
+    }) as typeof actual.executeAiGatewayCall,
+  };
 });
 
 // ─── Azure SDK mock ──────────────────────────────────────────────────────────
@@ -241,6 +252,7 @@ beforeEach(() => {
   mockState.throwOnSynthesize = null;
   mockState.closeCallCount = 0;
   capturedSynthesizer = null;
+  capturedContexts.length = 0;
   vi.clearAllMocks();
   Object.assign(gw, createMockGatewayDeps());
   (gw as ReturnType<typeof createMockGatewayDeps>).resetDefaults();
@@ -753,6 +765,16 @@ describe('synthesizeListeningBlock — AI Gateway (OBSERVE mode)', () => {
       const calls = gw.mockStartEvent.mock.calls.map((c: any) => c[0]);
       expect(calls.map((c: any) => c.attemptNumber)).toEqual([1, 2, 3]);
       expect(new Set(calls.map((c: any) => c.correlationId)).size).toBe(1);
+
+      // estimatedMetrics (the pre-call reservation) considers every retry:
+      // one independent reservation per physical attempt, each carrying the
+      // same exact SSML character estimate (the SSML never changes between
+      // retries — only the attempt succeeds or fails).
+      expect(capturedContexts).toHaveLength(3);
+      const expected = [estimateProviderRequests(1), estimateTtsCharacters(makeBlockInput().ssml, true)];
+      for (const ctx of capturedContexts) {
+        expect(ctx.estimatedMetrics).toEqual(expected);
+      }
     } finally {
       vi.useRealTimers();
     }

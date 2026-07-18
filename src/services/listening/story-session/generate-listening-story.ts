@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
-import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../../../../api/_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../../../../api/_ai-gateway/index';
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 
@@ -421,6 +421,12 @@ async function synthesizeAudio(
         voiceName: voice,
         blockIndex: partLabel,
       },
+      // Etapa 11 correction — each of the two physical blocks is its own
+      // executeAiGatewayCall (independently reserved and committed for
+      // exactly its own block's real character count) — estimated
+      // separately here per invocation, never combined, so there is no
+      // double-reservation/double-commit risk across the two blocks.
+      estimatedMetrics: [estimateProviderRequests(1), estimateTtsCharacters(ssml, true)],
     },
     async () => {
       const controller = new AbortController();
