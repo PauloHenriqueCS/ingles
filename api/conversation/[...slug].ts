@@ -601,7 +601,7 @@ async function handleSession(req: any, res: any) {
   // auto-stop) — enforcement itself stays server-side via session-control.
   const sessionStartNowMs = Date.now();
   const authorizedAtStart = computeAuthorizedRecording(
-    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000, sessionStartNowMs,
+    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
   );
 
   res.setHeader('Cache-Control', 'no-store');
@@ -1209,24 +1209,30 @@ async function hangupRealtimeCall(callId: string): Promise<{ ok: boolean }> {
 export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'technical';
 
 export interface AuthorizedRecording {
+  /**
+   * STABLE total budget for this call, measured from startedAtMs — the same
+   * quantity the client compares its session-start-relative elapsed time
+   * against. Must NOT shrink merely because time passed between polls (only
+   * because the underlying entitlement itself changed), or a client comparing
+   * elapsed-since-start against a "remaining-from-this-poll" number would
+   * stop the recording early — a real bug caught only by live testing.
+   */
   authorizedMaxRecordingSeconds: number;
   recordingLimitReason: RecordingLimitReason;
+  /** Absolute wall-clock deadline — for server-side terminate decisions only, never sent to the client. */
+  effectiveDeadlineMs: number;
 }
 
 /**
  * perTurnCapSeconds/monthlyRemainingSeconds are a TOTAL budget for this call
  * (not a fresh grant every poll), so each is anchored to the call's own
  * startedAtMs to get an absolute deadline — never re-based off "now", or a
- * long-running call would silently ignore time it already spent. The
- * technical ceiling is already an absolute deadline (startedAtMs +
- * REALTIME_MAX_SESSION_SECONDS). authorizedMaxRecordingSeconds is then just
- * "how much time is left from now until the earliest of the three".
+ * long-running call would silently ignore time it already spent.
  */
 function computeAuthorizedRecording(
   entitlements: Awaited<ReturnType<typeof getCurrentUserPlanEntitlements>>,
   startedAtMs: number,
   technicalDeadlineMs: number,
-  nowMs: number,
 ): AuthorizedRecording {
   const perTurnCapSeconds = entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds;
   const monthlyRemainingSeconds = entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining;
@@ -1235,7 +1241,8 @@ function computeAuthorizedRecording(
   const monthlyDeadlineMs = Number.isFinite(monthlyRemainingSeconds) ? startedAtMs + monthlyRemainingSeconds * 1000 : Infinity;
 
   const effectiveDeadlineMs = Math.min(technicalDeadlineMs, perTurnDeadlineMs, monthlyDeadlineMs);
-  const authorizedMaxRecordingSeconds = Math.max(0, (effectiveDeadlineMs - nowMs) / 1000);
+  // Session-start-relative, not poll-time-relative — stays stable across polls.
+  const authorizedMaxRecordingSeconds = Math.max(0, (effectiveDeadlineMs - startedAtMs) / 1000);
 
   let recordingLimitReason: RecordingLimitReason;
   if (effectiveDeadlineMs === perTurnDeadlineMs && Number.isFinite(perTurnDeadlineMs)) {
@@ -1246,7 +1253,7 @@ function computeAuthorizedRecording(
     recordingLimitReason = 'technical';
   }
 
-  return { authorizedMaxRecordingSeconds, recordingLimitReason };
+  return { authorizedMaxRecordingSeconds, recordingLimitReason, effectiveDeadlineMs };
 }
 
 async function handleSessionControl(req: any, res: any) {
@@ -1330,28 +1337,26 @@ async function handleSessionControl(req: any, res: any) {
     // credits — see computeFeatureState). Fail-open on error, same
     // philosophy as the entitlement check just above: never cut off an
     // otherwise-healthy call over a transient DB hiccup.
-    const controlNowMs = Date.now();
-    let effectiveDeadlineMs = deadlineAtMs;
     let authorized: AuthorizedRecording = {
-      authorizedMaxRecordingSeconds: Math.max(0, (deadlineAtMs - controlNowMs) / 1000),
+      authorizedMaxRecordingSeconds: Math.max(0, (deadlineAtMs - startedAtMs) / 1000),
       recordingLimitReason: 'technical',
+      effectiveDeadlineMs: deadlineAtMs,
     };
     try {
       const entitlements = await getCurrentUserPlanEntitlements(userId);
-      authorized = computeAuthorizedRecording(entitlements, startedAtMs, deadlineAtMs, controlNowMs);
-      effectiveDeadlineMs = controlNowMs + authorized.authorizedMaxRecordingSeconds * 1000;
+      authorized = computeAuthorizedRecording(entitlements, startedAtMs, deadlineAtMs);
     } catch (e) {
       gatewayDeps.logger('gateway.sessionControl.planLimit.failed', { message: String(e) });
     }
 
-    if (Date.now() >= effectiveDeadlineMs) {
+    if (Date.now() >= authorized.effectiveDeadlineMs) {
       const reason = authorized.recordingLimitReason === 'monthly_balance' ? 'plan_monthly_balance_exhausted' : 'plan_recording_limit_reached';
       return terminate(reason);
     }
 
     return res.status(200).json({
       terminate: false,
-      deadlineAt: new Date(effectiveDeadlineMs).toISOString(),
+      deadlineAt: new Date(authorized.effectiveDeadlineMs).toISOString(),
       authorizedMaxRecordingSeconds: authorized.authorizedMaxRecordingSeconds,
       recordingLimitReason: authorized.recordingLimitReason,
     });

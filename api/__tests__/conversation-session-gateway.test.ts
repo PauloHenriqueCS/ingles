@@ -1005,7 +1005,11 @@ describe('POST /session-control — mid-session control poll', () => {
     expect(typeof body.deadlineAt).toBe('string');
   });
 
-  it('scenario 22: reconciles the authorized max seconds on every poll, accounting for time already elapsed this session', async () => {
+  it('scenario 22: reports a STABLE session-start-relative total budget across polls, not a shrinking remaining-from-poll value', async () => {
+    // Regression test for a real bug caught by live E2E testing: returning
+    // "time remaining from this poll" instead of "total budget from session
+    // start" made the frontend (which compares against elapsed-since-start)
+    // stop the recording early, well before the entitled duration.
     const startedAt = new Date(Date.now() - 15 * 1000).toISOString(); // 15s already elapsed
     mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
     const entitlements = permissiveEntitlements();
@@ -1019,8 +1023,9 @@ describe('POST /session-control — mid-session control poll', () => {
     const body = res._body() as { terminate: boolean; authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
     expect(body.terminate).toBe(false);
     expect(body.recordingLimitReason).toBe('per_turn');
-    // 45s total budget - 15s already spent = ~30s left, NOT a fresh 45s.
-    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(30, 0);
+    // Stays 45 (the total budget), NOT 45-15=30 — the frontend's elapsed
+    // timer is measured from session start, so this value must be too.
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(45, 0);
   });
 
   it('fails open (no termination) when a DB/telemetry error occurs', async () => {
