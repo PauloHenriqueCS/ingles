@@ -154,13 +154,35 @@ function hasWiredEstimator(featureKey: AiFeatureKey): boolean {
 const DEAD_UNREACHABLE_FEATURES = new Set<AiFeatureKey>(['writing.evaluate_rewrite']);
 
 // ── Realtime hard session control ────────────────────────────────────────────
-const REALTIME_SESSION_FEATURES = new Set<AiFeatureKey>(['conversation.webrtc_connect', 'conversation.realtime_usage']);
+// Includes conversation.create_session: it is what authorizes the
+// ai_provider_sessions row hangupRealtimeCall later acts on, so its
+// enforce-readiness is coupled to the same unproven termination path —
+// explicitly required to stay false alongside webrtc_connect/realtime_usage
+// until a real smoke test proves it.
+const REALTIME_SESSION_FEATURES = new Set<AiFeatureKey>([
+  'conversation.create_session', 'conversation.webrtc_connect', 'conversation.realtime_usage',
+]);
 // Implemented (call_id capture + backend hangup — see
 // api/conversation/[...slug].ts) but not live-verified against production
 // OpenAI in this environment. Flip to true only after a real smoke test
 // (see the Etapa 11 correction's test list, item "smoke real obrigatório")
 // confirms hangup actually terminates a live session.
 const REALTIME_HARD_CONTROL_LIVE_TESTED = false;
+
+// ── Global gates that no per-feature code change can satisfy ─────────────────
+// enforceReady can NEVER be true while either of these is false, regardless
+// of any single feature's own code readiness. Both are hardcoded false in
+// this delivery — flip only after actually doing the thing named, never
+// speculatively:
+//   MIGRATION_APPLIED_REMOTELY — 20260718000000_ai_gateway_enforcement.sql
+//     has not been applied to any environment by this delivery (confirmed
+//     live: ai_gateway_quota_buckets does not exist remotely).
+//   CONCURRENCY_VALIDATED — supabase/manual-validation/ai-gateway-
+//     enforcement-concurrency.sql's 7 scenarios have not been executed
+//     against a real Postgres (no local instance available in this
+//     environment). Atomicity is reasoned-through, not proven.
+const MIGRATION_APPLIED_REMOTELY = false;
+const CONCURRENCY_VALIDATED = false;
 
 // ── Fase 14 infra probe ──────────────────────────────────────────────────────
 
@@ -219,6 +241,15 @@ interface FeatureReadiness {
   unitEnforcementCodeReady: boolean;
   costEnforcementCodeReady: boolean;
   realtimeHardControlReady: boolean;
+  // codeReady = every code-level dimension satisfied (unit + cost + hard
+  // control where applicable), independent of infra/concurrency.
+  codeReady: boolean;
+  // enforceReady = the ONLY field that means "safe to flip gateway_mode to
+  // enforce right now." False whenever codeReady is false, OR infra isn't
+  // deployed, OR concurrency hasn't been validated — no per-feature code
+  // change can ever make this true on its own while either global gate is
+  // false. As of this delivery this is false for all 25 features.
+  enforceReady: boolean;
   blockers: string[];
 }
 
@@ -226,6 +257,7 @@ async function assessFeature(
   featureKey: AiFeatureKey,
   policyResolver: GatewayPolicyResolver,
   supabase: ReturnType<typeof getSharedServiceClient>,
+  infraDeployed: boolean,
 ): Promise<FeatureReadiness> {
   const meta = FEATURE_METADATA[featureKey];
   const { provider, model } = FEATURE_PROVIDER_MODEL[featureKey];
@@ -254,10 +286,15 @@ async function assessFeature(
   if (!hasEstimator) blockers.push('missing_estimator');
   if (hasPriceCoverage === false) blockers.push('missing_price');
   if (isRealtimeSessionFeature) blockers.push('hard_control_not_live_tested');
+  if (!infraDeployed) blockers.push('infra_not_deployed');
+  if (!CONCURRENCY_VALIDATED) blockers.push('concurrency_not_validated');
+  if (!MIGRATION_APPLIED_REMOTELY) blockers.push('migration_not_applied');
 
   const unitEnforcementCodeReady = !isDead && hasEstimator;
   const costEnforcementCodeReady = !isDead && hasPriceCoverage !== false; // true|'not_applicable' both count as ready
   const realtimeHardControlReady = isRealtimeSessionFeature ? REALTIME_HARD_CONTROL_LIVE_TESTED : true; // n/a features trivially "ready" on this dimension
+  const codeReady = unitEnforcementCodeReady && costEnforcementCodeReady && realtimeHardControlReady;
+  const enforceReady = codeReady && infraDeployed && CONCURRENCY_VALIDATED && MIGRATION_APPLIED_REMOTELY;
 
   return {
     featureKey,
@@ -273,6 +310,8 @@ async function assessFeature(
     unitEnforcementCodeReady,
     costEnforcementCodeReady,
     realtimeHardControlReady,
+    codeReady,
+    enforceReady,
     blockers,
   };
 }
@@ -286,19 +325,19 @@ async function main() {
 
   const results: FeatureReadiness[] = [];
   for (const featureKey of AI_FEATURE_KEYS) {
-    results.push(await assessFeature(featureKey, policyResolver, supabase));
+    results.push(await assessFeature(featureKey, policyResolver, supabase, infraDeployed));
   }
 
   const unitCodeReadyCount = results.filter((r) => r.unitEnforcementCodeReady).length;
   const costCodeReadyCount = results.filter((r) => r.costEnforcementCodeReady).length;
-  const fullyDatabaseDeployedReadyCount = infraDeployed
-    ? results.filter((r) => r.unitEnforcementCodeReady && r.costEnforcementCodeReady && r.blockers.length === 0).length
-    : 0;
+  const codeReadyCount = results.filter((r) => r.codeReady).length;
+  const enforceReadyCount = results.filter((r) => r.enforceReady).length;
 
   if (JSON_OUTPUT) {
     console.log(JSON.stringify({
-      infra, infraDeployed, features: results,
-      summary: { unitCodeReadyCount, costCodeReadyCount, fullyDatabaseDeployedReadyCount, totalFeatures: results.length },
+      infra, infraDeployed, concurrencyValidated: CONCURRENCY_VALIDATED, migrationAppliedRemotely: MIGRATION_APPLIED_REMOTELY,
+      features: results,
+      summary: { unitCodeReadyCount, costCodeReadyCount, codeReadyCount, enforceReadyCount, totalFeatures: results.length },
     }, null, 2));
     return;
   }
@@ -318,6 +357,7 @@ async function main() {
     console.log(`  current: gatewayMode=${r.currentGatewayMode} runtimeStatus=${r.currentRuntimeStatus}`);
     console.log(`  provider=${r.provider} billable=${r.isBillable} entitlementMapping=${r.hasEntitlementMapping} priceCoverage=${r.hasPriceCoverage} estimator=${r.hasEstimator}`);
     console.log(`  unitEnforcementCodeReady=${r.unitEnforcementCodeReady}  costEnforcementCodeReady=${r.costEnforcementCodeReady}${r.isRealtimeSessionFeature ? `  realtimeHardControlReady=${r.realtimeHardControlReady}` : ''}`);
+    console.log(`  codeReady=${r.codeReady}  enforceReady=${r.enforceReady}`);
     console.log(`  blockers: ${r.blockers.length > 0 ? r.blockers.join(', ') : '(none)'}`);
     console.log('');
   }
@@ -325,10 +365,13 @@ async function main() {
   console.log('Summary (code-level, i.e. "would this work once the migration is deployed"):');
   console.log(`  unit (quota/rate/dedupe/breaker/kill-switch) code-ready: ${unitCodeReadyCount}/${results.length}`);
   console.log(`  cost (USD budget) code-ready:                           ${costCodeReadyCount}/${results.length}`);
-  console.log('Summary (database-level, i.e. what actually works in THIS environment right now):');
-  console.log(`  infra deployed: ${infraDeployed}`);
-  console.log(`  fully ready (unit + cost + zero blockers) AND infra deployed: ${fullyDatabaseDeployedReadyCount}/${results.length}`);
-  console.log('\nNo enforce activation is permitted for any feature with a non-empty blockers list.');
+  console.log(`  fully codeReady (unit + cost + hard-control where applicable): ${codeReadyCount}/${results.length}`);
+  console.log('Summary (global gates — none of these can be satisfied by any per-feature code change):');
+  console.log(`  infra deployed:        ${infraDeployed}`);
+  console.log(`  concurrency validated: ${CONCURRENCY_VALIDATED}  (see supabase/manual-validation/ai-gateway-enforcement-concurrency.sql)`);
+  console.log(`  migration applied:     ${MIGRATION_APPLIED_REMOTELY}`);
+  console.log(`\n  enforceReady (the ONLY field meaning "safe to flip gateway_mode to enforce"): ${enforceReadyCount}/${results.length}`);
+  console.log('\nNo enforce activation is permitted for any feature with a non-empty blockers list, and enforceReady is false for every feature until infra is deployed, concurrency is validated, AND the migration is applied.');
 }
 
 main().catch((err) => {
