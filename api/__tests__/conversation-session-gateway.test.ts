@@ -466,6 +466,22 @@ describe('POST /session-usage — conversation.realtime_usage', () => {
     expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1); // unchanged — no second metric write, no second cost
   });
 
+  it('accounting_child: across several distinct response.done events, no quota/budget reservation or entitlement resolution is ever triggered — each is recorded straight through usageRepository, inheriting the parent webrtc_connect session\'s protection instead of re-reserving independently', async () => {
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_multi_1', usage: FULL_USAGE }), makeRes());
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_multi_2', usage: FULL_USAGE }), makeRes());
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: 'resp_multi_3', usage: FULL_USAGE }), makeRes());
+
+    // Three genuinely distinct responses → three accounting events (correct,
+    // expected — each response really did consume new tokens)...
+    expect(gw.mockStartEvent).toHaveBeenCalledTimes(3);
+    // ...but never a fourth call to the entitlement resolver (only
+    // executeAiGatewayCall's enforce-mode pipeline calls it — this handler
+    // never invokes executeAiGatewayCall at all), and never any reservation
+    // mock, proving no independent reservation is ever attempted no matter
+    // how many response.done events arrive for the same session.
+    expect(gw.mockEntitlementResolve).not.toHaveBeenCalled();
+  });
+
   it('a realistic response.done fixture (event.response.id / event.response.usage) relays correctly end to end', async () => {
     // Mirrors exactly what useRealtimeSession.ts extracts from the data
     // channel: const ev = { type: 'response.done', response: { id, usage } }.

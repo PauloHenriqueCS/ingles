@@ -10,15 +10,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
+import { estimateTtsCharacters, estimateProviderRequests } from '../_ai-gateway/estimators';
 
-const { mockRequireAuth, gw } = vi.hoisted(() => {
+const { mockRequireAuth, gw, capturedContexts } = vi.hoisted(() => {
   const mockRequireAuth = vi.fn();
-  return { mockRequireAuth, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  return {
+    mockRequireAuth,
+    gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps>,
+    capturedContexts: [] as any[],
+  };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_ai-gateway/index')>();
-  return { ...actual, getProductionDeps: () => gw.mockDeps };
+  return {
+    ...actual,
+    getProductionDeps: () => gw.mockDeps,
+    executeAiGatewayCall: (async (context: any, ...rest: any[]) => {
+      capturedContexts.push(context);
+      return (actual.executeAiGatewayCall as any)(context, ...rest);
+    }) as typeof actual.executeAiGatewayCall,
+  };
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
@@ -64,6 +76,7 @@ function mockOpenAiTtsFetch(status: number, audioByteLength = 128) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  capturedContexts.length = 0;
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
@@ -139,6 +152,20 @@ describe('OBSERVE mode', () => {
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
     const ttsMetric = metrics.find((m) => m.metricKey === 'tts_characters') as Record<string, unknown>;
     expect(ttsMetric.quantity).toBe(countTtsPlainTextCharacters(sentInput));
+  });
+
+  it('estimatedMetrics (the pre-call reservation) exactly matches the real text about to be sent — same counter as the real tts_characters metric, computed before the physical call', async () => {
+    const globalFetch = mockOpenAiTtsFetch(200);
+    vi.stubGlobal('fetch', globalFetch);
+    await handler(makeReq(), makeRes());
+
+    const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit];
+    const sentInput = (JSON.parse(opts.body as string) as { input: string }).input;
+    expect(capturedContexts).toHaveLength(1);
+    expect(capturedContexts[0].estimatedMetrics).toEqual([
+      estimateProviderRequests(1),
+      estimateTtsCharacters(sentInput, false),
+    ]);
   });
 
   it('an OpenAI HTTP error creates a failed event and preserves the previous error mapping', async () => {
