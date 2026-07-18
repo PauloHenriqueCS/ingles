@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult, RewriteComparisonResult } from '../types';
 import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
@@ -180,15 +182,16 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
           studentLevel: dailyTheme?.level ?? '',
         }),
       });
-      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; reviewSchedule?: ReviewScheduleResult };
+      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewSchedule?: ReviewScheduleResult };
       try {
         data = await res.json();
       } catch {
         throw new Error(`Servidor retornou status ${res.status}`);
       }
       if (!res.ok) {
-        throw new Error(data.error ?? `Erro ${res.status}`);
+        throw new Error(data.message ?? data.error ?? `Erro ${res.status}`);
       }
+      entitlements.refetch();
       const feedback = data.feedback!;
       const ts = data.reviewedAt ?? new Date().toISOString();
       if (data.reviewSchedule?.applied) setReviewSchedule(data.reviewSchedule);
@@ -256,7 +259,17 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     isReviewMode ? (dailyTheme?.requiredWords ?? []) : [],
     originalText,
   );
-  const canSubmit = !isReviewMode || validation.allFound;
+
+  const entitlements = usePlanEntitlements();
+  const writingEntitlements = entitlements.data?.writing ?? null;
+  const writingLoading = entitlements.data === null;
+  const writingDisabledByPlan = writingEntitlements ? !writingEntitlements.enabled : false;
+  const reviewsBlocked = writingEntitlements ? !writingEntitlements.reviews.canStart : false;
+  const maxChars = writingEntitlements && !writingEntitlements.maxCharactersUnlimited ? writingEntitlements.maxCharactersPerText : null;
+  const overLimitBy = maxChars !== null ? Math.max(originalText.length - maxChars, 0) : 0;
+
+  const canSubmit = (!isReviewMode || validation.allFound)
+    && !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
 
   const saveBtnCls =
     saveState === 'saved' ? 'bg-green-700 text-white' :
@@ -288,8 +301,9 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
           <>
         <DailyThemeCard
           theme={dailyTheme}
-          onThemeReady={setDailyTheme}
+          onThemeReady={(t) => { setDailyTheme(t); entitlements.refetch(); }}
           onStartWriting={scrollToWritingField}
+          writingEntitlements={writingEntitlements}
         />
 
         {dailyTheme && (
@@ -334,15 +348,23 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         <div>
           <div className="flex justify-between mb-2">
             <label className="text-xs text-slate-400">Seu texto</label>
-            <span className="text-xs text-slate-500">{words} palavras</span>
+            <span className={`text-xs ${overLimitBy > 0 ? 'text-red-400' : 'text-slate-500'}`}>
+              {maxChars !== null
+                ? `${originalText.length.toLocaleString('pt-BR')} / ${maxChars.toLocaleString('pt-BR')} caracteres`
+                : `${words} palavras`}
+            </span>
           </div>
           <textarea
             ref={textareaRef}
             value={originalText}
             onChange={(e) => setOriginalText(e.target.value)}
             placeholder="Escreva seu texto em inglês aqui..."
+            maxLength={maxChars ?? undefined}
             className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500 min-h-[200px] resize-none"
           />
+          {overLimitBy > 0 && (
+            <p className="text-xs text-red-400 mt-1.5">{ENTITLEMENT_MESSAGES.characterOverLimitAfterPlanChange(overLimitBy)}</p>
+          )}
         </div>
 
         <div>
@@ -364,6 +386,20 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
 
         {isReviewMode && validation.words.length > 0 && (
           <RequiredWordsTracker validation={validation} />
+        )}
+
+        {writingDisabledByPlan && (
+          <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.featureUnavailable}</p>
+        )}
+        {!writingDisabledByPlan && reviewsBlocked && (
+          <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.writingReviewsExhausted}</p>
+        )}
+        {!writingDisabledByPlan && !reviewsBlocked && writingEntitlements && (
+          <p className="text-xs text-slate-500 text-right -mb-1">
+            {writingEntitlements.reviews.unlimited
+              ? ENTITLEMENT_MESSAGES.unlimitedLabel
+              : `${writingEntitlements.reviews.remaining} revis${writingEntitlements.reviews.remaining === 1 ? 'ão restante' : 'ões restantes'} hoje`}
+          </p>
         )}
 
         <div className="flex gap-3">

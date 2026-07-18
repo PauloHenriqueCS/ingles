@@ -14,9 +14,15 @@ import {
   rebuildDailyBucketForEvent,
   DuplicateUsageEventError,
   evaluateKillSwitch,
+  estimateTtsCharacters,
+  estimateProviderRequests,
+  estimateRealtimeSessionSeconds,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
+import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { checkRecordingDuration } from '../_entitlements/require-feature-access';
+import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
 
@@ -120,6 +126,11 @@ async function handlePreview(req: any, res: any) {
         attemptNumber: 1,
         callSequence: 1,
         technicalMetadata: { endpoint: 'conversation/preview', voiceId, pace },
+        // Etapa 11 correction — the exact text is already known before the
+        // call (built two lines above), so this is an EXACT count, not an
+        // estimate — the same counter buildPreviewTtsMetrics() below uses to
+        // record the real tts_characters metric after the call succeeds.
+        estimatedMetrics: [estimateProviderRequests(1), estimateTtsCharacters(input, false)],
       },
       async () => {
         const ctrl = new AbortController();
@@ -350,6 +361,24 @@ async function handleSession(req: any, res: any) {
   const openaiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!openaiKey) {
     return res.status(503).json({ code: 'OPENAI_NOT_CONFIGURED', message: 'O serviço de conversa não está configurado.' });
+  }
+
+  // ── Plan entitlements ──────────────────────────────────────────────────────
+  // Gates creating a NEW realtime session (the costly operation). Distinct
+  // from prefs.dailyConversationGoalMinutes below, which is the user's own
+  // practice goal (untouched, always preserved) — this is the commercial
+  // monthly quota + extra purchased credits.
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
+  }
+  if (!entitlements.conversation.enabled) {
+    return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.conversationUnavailable });
+  }
+  if (!entitlements.conversation.monthlyTime.canStart) {
+    return res.status(403).json({ code: 'MONTHLY_LIMIT_REACHED', message: ENTITLEMENT_MESSAGES.conversationMinutesExhausted });
   }
 
   const safetyIdentifier = createHash('sha256').update(userId).digest('hex');
@@ -1226,7 +1255,30 @@ async function handleSessionControl(req: any, res: any) {
       }
     }
 
-    return res.status(200).json({ terminate: false, deadlineAt: new Date(deadlineAtMs).toISOString() });
+    // Plan-based recording deadline — tightens (never loosens) the technical
+    // cap above, using the smaller of conversation_max_recording_seconds and
+    // the remaining monthly balance (which already folds in extra purchased
+    // credits — see computeFeatureState). Fail-open on error, same
+    // philosophy as the entitlement check just above: never cut off an
+    // otherwise-healthy call over a transient DB hiccup.
+    let effectiveDeadlineMs = deadlineAtMs;
+    try {
+      const entitlements = await getCurrentUserPlanEntitlements(userId);
+      const perTurnCapSeconds = entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds;
+      const monthlyRemainingSeconds = entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining;
+      const commercialCapSeconds = Math.min(perTurnCapSeconds, monthlyRemainingSeconds);
+      if (Number.isFinite(commercialCapSeconds)) {
+        effectiveDeadlineMs = Math.min(effectiveDeadlineMs, startedAtMs + commercialCapSeconds * 1000);
+      }
+    } catch (e) {
+      gatewayDeps.logger('gateway.sessionControl.planLimit.failed', { message: String(e) });
+    }
+
+    if (Date.now() >= effectiveDeadlineMs) {
+      return terminate('plan_recording_limit_reached');
+    }
+
+    return res.status(200).json({ terminate: false, deadlineAt: new Date(effectiveDeadlineMs).toISOString() });
   } catch (e) {
     console.error('[conversation/session-control] check failed', e instanceof Error ? e.message : 'unknown');
     // Fail-open: a telemetry/DB error here must never cut off an active

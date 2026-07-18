@@ -45,6 +45,14 @@
     "src/services/listening/audio/synthesize-listening-block.ts",
     "api/conversation/[...slug].ts",
     "api/__tests__/conversation-preview-gateway.test.ts",
-    "api/__tests__/conversation-session-gateway.test.ts"
+    "api/__tests__/conversation-session-gateway.test.ts",
+    "api/_entitlements/**/*.ts",
+    "api/plan-entitlements.ts",
+    "api/listening/[...slug].ts",
+    "api/__tests__/entitlements-resolve-capability-values.test.ts",
+    "api/__tests__/plan-entitlements-service.test.ts",
+    "api/__tests__/require-feature-access.test.ts",
+    "api/__tests__/listening-today-entitlements.test.ts",
+    "src/domain/entitlements/**/*.ts"
   ]
 }

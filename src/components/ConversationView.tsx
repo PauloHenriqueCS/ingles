@@ -1,16 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
-import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2 } from 'lucide-react';
+import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import { useConversationCaptions } from '../hooks/useConversationCaptions';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
-import { recordConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
+import { recordConversationSession, getDayTotalSeconds, isConversationGoalMet } from '../lib/conversationSessions';
 import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
+import type { ConversationEntitlements } from '../domain/entitlements/entitlement-types';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { formatMonthlyRemaining, formatExtraMinutesRemaining } from '../domain/entitlements/entitlement-formatting';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -26,7 +30,7 @@ const WARNING_MS = 25 * 60 * 1000;
 function GoalProgress({ todayTotalSec, goalMinutes }: { todayTotalSec: number; goalMinutes: number }) {
   const totalMin = todayTotalSec / 60;
   const pct = Math.min(100, Math.round((totalMin / goalMinutes) * 100));
-  const met = totalMin >= goalMinutes;
+  const met = isConversationGoalMet(todayTotalSec, goalMinutes);
   const displayedMin = Math.floor(totalMin);
   const remaining = Math.ceil(goalMinutes - totalMin);
 
@@ -51,6 +55,29 @@ function GoalProgress({ todayTotalSec, goalMinutes }: { todayTotalSec: number; g
       )}
     </div>
   );
+}
+
+// ── Monthly conversation balance indicator (commercial plan, not the daily goal) ──
+
+function ConversationBalanceIndicator({ conversation }: { conversation: ConversationEntitlements }) {
+  if (!conversation.enabled) {
+    return (
+      <p className="text-xs text-amber-400 flex items-center gap-1.5 justify-center">
+        <Lock className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+        {ENTITLEMENT_MESSAGES.conversationUnavailable}
+      </p>
+    );
+  }
+  if (conversation.monthlyTime.unlimited) {
+    return <p className="text-xs text-teal-400 font-medium text-center">{ENTITLEMENT_MESSAGES.conversationUnlimitedLabel}</p>;
+  }
+  if (conversation.monthlyTime.state === 'monthly_limit_reached') {
+    return <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>;
+  }
+  if (conversation.monthlyTime.state === 'available_with_extra_credits') {
+    return <p className="text-xs text-amber-300 text-center">{formatExtraMinutesRemaining(conversation.monthlyTime.remaining)}</p>;
+  }
+  return <p className="text-xs text-slate-400 text-center">{formatMonthlyRemaining(conversation.monthlyTime.remaining)}</p>;
 }
 
 // ── Summary chips ─────────────────────────────────────────────────────────────
@@ -115,7 +142,14 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
   const session      = useRealtimeSession(playbackRate);
   const { captionsEnabled, toggleCaptions } = useConversationCaptions();
+  const entitlements = usePlanEntitlements();
   const today   = getTodaySP();
+
+  const conversation = entitlements.data?.conversation ?? null;
+  const conversationLoading = entitlements.data === null;
+  const conversationDisabledByPlan = conversation ? !conversation.enabled : false;
+  const conversationBlocked = conversation ? !conversation.monthlyTime.canStart : false;
+  const startDisabled = conversationLoading || conversationDisabledByPlan || conversationBlocked;
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
@@ -149,6 +183,7 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
       recordConversationSession(today, durationSec)
         .then(() => {
           onComplete?.();
+          entitlements.refetch(); // reconcile the monthly balance with the server, never optimistic-only
           return getDayTotalSeconds(today);
         })
         .then(setTodayTotalSec)
@@ -224,6 +259,11 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
           </div>
         ) : (
           <div className="flex flex-col gap-4">
+
+            {/* ── Monthly conversation balance (commercial plan) ──────────── */}
+            {!conversationLoading && conversation && (
+              <ConversationBalanceIndicator conversation={conversation} />
+            )}
 
             {/* ── Daily goal card ────────────────────────────────────────── */}
             <ConversationDailyGoalCard
@@ -328,15 +368,25 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
 
             {/* ── Start / restart button ─────────────────────────────────── */}
             {canStart && (
-              <button
-                onClick={session.start}
-                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px]"
-              >
-                <span className="flex items-center justify-center gap-2">
-                  <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                  {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
-                </span>
-              </button>
+              <>
+                {!conversationLoading && conversationDisabledByPlan && (
+                  <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationUnavailable}</p>
+                )}
+                {!conversationLoading && !conversationDisabledByPlan && conversationBlocked && (
+                  <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>
+                )}
+                <button
+                  onClick={() => { if (!startDisabled) session.start(); }}
+                  disabled={startDisabled}
+                  aria-disabled={startDisabled}
+                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+                    {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
+                  </span>
+                </button>
+              </>
             )}
 
             {/* ── Personalizar tutor button ─────────────────────────────── */}

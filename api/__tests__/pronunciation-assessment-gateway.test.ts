@@ -14,11 +14,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockIssueToken, mockRequireAuth, gw } = vi.hoisted(() => {
+const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => {
   const mockIssueToken = vi.fn();
   const mockRequireAuth = vi.fn();
-  return { mockIssueToken, mockRequireAuth, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
+  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 // Separate mock Supabase client standing in for getSharedServiceClient() —
@@ -47,6 +49,10 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 import handler from '../pronunciation/[...slug]';
 
@@ -86,12 +92,28 @@ function makeRes() {
   return res;
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockIssueToken.mockResolvedValue({ token: 'ephemeral-azure-token', region: 'eastus', expiresInSeconds: 540 });
   mockSessionsFrom.mockReturnValue(makeSessionsChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 
 // ── pronunciation.start_assessment ─────────────────────────────────────────
@@ -150,6 +172,16 @@ describe('POST /start — pronunciation.start_assessment', () => {
       expect(gw.mockDeps.usageRepository.createProviderSession).toHaveBeenCalledWith(
         expect.objectContaining({ featureKey: 'pronunciation.assess_text', provider: 'azure', userId: USER_ID }),
       );
+    });
+
+    it('reserves audio_seconds using the server-authorized maximum duration ceiling, never a client-chosen value — /start receives no duration field from the client at all', async () => {
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), makeRes());
+      const call = (gw.mockDeps.usageRepository.createProviderSession as any).mock.calls[0][0];
+      // MAX_ASSESS_TEXT_DURATION_SECONDS in api/pronunciation/[...slug].ts —
+      // the server's own generous upper bound, never derived from anything
+      // the browser sent (the /start request body has no duration field to
+      // begin with, so there is nothing client-supplied to trust or ignore).
+      expect(call.metadata.estimatedAudioSecondsCeiling).toBe(900);
     });
 
     it('never persists the ephemeral token — only its SHA-256 fingerprint', async () => {
@@ -382,5 +414,96 @@ describe('POST /fail — pronunciation.assess_text session bridge', () => {
       res,
     );
     expect(res._status()).toBe(200);
+  });
+});
+
+// ── Plan entitlements enforcement ──────────────────────────────────────────────
+
+describe('plan entitlements enforcement', () => {
+  describe('POST /start', () => {
+    beforeEach(() => {
+      mockRequireAuth.mockResolvedValue({
+        userId: USER_ID,
+        supabase: makeSupabaseRpc({ reserve_pronunciation_assessment: { action: 'created', assessmentId: ASSESSMENT_ID, referenceText: 'Read this aloud.' } }),
+      });
+      process.env.AZURE_SPEECH_REGION = 'eastus';
+    });
+
+    it('returns 403 FEATURE_DISABLED and never reserves a slot when pronunciation is off', async () => {
+      const entitlements = permissiveEntitlements();
+      entitlements.pronunciation.enabled = false;
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('FEATURE_DISABLED');
+      expect(mockIssueToken).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 DAILY_LIMIT_REACHED and never issues a token once the daily evaluation limit is exhausted', async () => {
+      const entitlements = permissiveEntitlements();
+      entitlements.pronunciation.evaluations = { enabled: true, unlimited: false, limit: 5, consumed: 5, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false };
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
+      expect(mockIssueToken).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /complete', () => {
+    it('rejects a recording over the plan max, releases the slot via fail_pronunciation_assessment, and never persists the result', async () => {
+      const entitlements = permissiveEntitlements();
+      entitlements.pronunciation.maxRecordingSeconds = 30;
+      entitlements.pronunciation.maxRecordingUnlimited = false;
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+      const rpc = makeSupabaseRpc({
+        complete_pronunciation_assessment: {},
+        fail_pronunciation_assessment: { action: 'marked_failed' },
+      });
+      mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: rpc });
+
+      const res = makeRes();
+      await handler(
+        makeReq({
+          url: '/api/pronunciation/complete',
+          body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: { ...VALID_RESULT, audioDurationSeconds: 45 } },
+        }),
+        res,
+      );
+
+      expect(res._status()).toBe(413);
+      expect((res._body() as any).code).toBe('RECORDING_TOO_LONG');
+      expect(rpc.rpc).toHaveBeenCalledWith('fail_pronunciation_assessment', expect.objectContaining({ p_assessment_id: ASSESSMENT_ID, p_attempt_id: ATTEMPT_ID, p_error_code: 'RESULT_INVALID' }));
+      expect(rpc.rpc).not.toHaveBeenCalledWith('complete_pronunciation_assessment', expect.anything());
+    });
+
+    it('allows a recording within the plan max through to complete_pronunciation_assessment', async () => {
+      const entitlements = permissiveEntitlements();
+      entitlements.pronunciation.maxRecordingSeconds = 30;
+      entitlements.pronunciation.maxRecordingUnlimited = false;
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+      const rpc = makeSupabaseRpc({ complete_pronunciation_assessment: {} });
+      mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: rpc });
+
+      const res = makeRes();
+      await handler(
+        makeReq({
+          url: '/api/pronunciation/complete',
+          body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: { ...VALID_RESULT, audioDurationSeconds: 12.5 } },
+        }),
+        res,
+      );
+
+      expect(res._status()).toBe(200);
+      expect(rpc.rpc).toHaveBeenCalledWith('complete_pronunciation_assessment', expect.anything());
+    });
   });
 });

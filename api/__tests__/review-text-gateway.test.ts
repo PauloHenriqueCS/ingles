@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
 // ── Hoisted values — available inside vi.mock factories ───────────────────────
 
@@ -31,6 +32,7 @@ const {
   mockPolicyResolvePolicy,
   mockRequireAuth,
   mockApplyRateLimit,
+  mockGetCurrentUserPlanEntitlements,
   mockDeps,
 } = vi.hoisted(() => {
   const mockCreate = vi.fn();
@@ -49,6 +51,7 @@ const {
   const mockPolicyResolvePolicy = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
@@ -98,6 +101,7 @@ const {
     mockPolicyResolvePolicy,
     mockRequireAuth,
     mockApplyRateLimit,
+    mockGetCurrentUserPlanEntitlements,
     mockDeps,
   };
 });
@@ -118,6 +122,12 @@ vi.mock('openai', () => ({
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: mockApplyRateLimit }));
+
+// Plan entitlements — permissive by default; individual tests override
+// mockGetCurrentUserPlanEntitlements to exercise blocking.
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 // ── Handler import ────────────────────────────────────────────────────────────
 
@@ -251,6 +261,22 @@ const reviewBody = {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 
@@ -273,6 +299,7 @@ beforeEach(() => {
   mockListBucketsForDate.mockResolvedValue([]);
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeDefaultSupabase() });
   mockApplyRateLimit.mockResolvedValue(true);
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   (mockDeps.clock as ReturnType<typeof vi.fn>).mockReturnValue(1000);
   (mockDeps.uuidGen as ReturnType<typeof vi.fn>).mockReturnValue('test-uuid');
 

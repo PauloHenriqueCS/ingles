@@ -4,8 +4,9 @@ import { EntriesStore, DailyProgress } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
 import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
 import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
-import { getPronunciationDatesForMonth, computeDailyProgress } from '../lib/dailyProgress';
+import { getPronunciationDatesForMonth, computeDailyProgress, type ActiveDailyFeatures } from '../lib/dailyProgress';
 import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import DailyProgressIcons from './DailyProgressIcons';
 import DailyProgressModal from './DailyProgressModal';
 
@@ -54,6 +55,20 @@ export default function MonthView({
   const [pronunciationDates, setPronunciationDates] = useState<Set<string>>(new Set());
   const [listeningProgress, setListeningProgress] = useState<Record<string, 'not_started' | 'in_progress' | 'completed'>>({});
   const [modalDate, setModalDate] = useState<string | null>(null);
+  const entitlements = usePlanEntitlements();
+
+  // While the plan is still resolving, default to "all three active" —
+  // matches computeDailyProgress's own fail-safe default, so the calendar
+  // never shows a day as incomplete-for-a-reason-that-doesn't-exist during
+  // the loading window, and never flashes green either since the underlying
+  // per-activity statuses are unaffected by this flag.
+  const activeFeatures: ActiveDailyFeatures = entitlements.data
+    ? {
+        writingEnabled: entitlements.data.writing.enabled,
+        pronunciationEnabled: entitlements.data.pronunciation.enabled,
+        listeningEnabled: entitlements.data.listening.enabled,
+      }
+    : { writingEnabled: true, pronunciationEnabled: true, listeningEnabled: true };
 
   useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
 
@@ -87,10 +102,11 @@ export default function MonthView({
         convGoalSec,
         pronunciationDates,
         listeningProgress[d],
+        activeFeatures,
       );
     }
     return map;
-  }, [currentYear, currentMonth, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress]);
+  }, [currentYear, currentMonth, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress, activeFeatures]);
 
   const todayProgress = useMemo(() => computeDailyProgress(
     today,
@@ -99,7 +115,8 @@ export default function MonthView({
     convGoalSec,
     pronunciationDates,
     listeningProgress[today],
-  ), [today, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress]);
+    activeFeatures,
+  ), [today, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress, activeFeatures]);
 
   function toggleDay(dow: number) {
     setSelectedDays((prev) => {
@@ -225,14 +242,18 @@ export default function MonthView({
         {/* Today's checklist */}
         {(() => {
           const activities = [
-            { key: 'writing',      label: 'Escrita',     status: todayProgress.writing,      accent: 'text-violet-400', onClick: onOpenWriting },
-            { key: 'pronunciation',label: 'Pronúncia',   status: todayProgress.pronunciation, accent: 'text-blue-400',   onClick: onOpenPronunciation },
-            { key: 'conversation', label: 'Conversação', status: todayProgress.conversation,  accent: 'text-teal-400',   onClick: onOpenConversation },
-            { key: 'listening',    label: 'Listening',   status: todayProgress.listening,     accent: 'text-amber-400',  onClick: onOpenListening },
+            { key: 'writing',      label: 'Escrita',     status: todayProgress.writing,      accent: 'text-violet-400', onClick: onOpenWriting,      enabled: activeFeatures.writingEnabled,      optional: false },
+            { key: 'pronunciation',label: 'Pronúncia',   status: todayProgress.pronunciation, accent: 'text-blue-400',   onClick: onOpenPronunciation, enabled: activeFeatures.pronunciationEnabled, optional: false },
+            { key: 'conversation', label: 'Conversação', status: todayProgress.conversation,  accent: 'text-teal-400',   onClick: onOpenConversation,  enabled: entitlements.data ? entitlements.data.conversation.enabled : true, optional: true },
+            { key: 'listening',    label: 'Listening',   status: todayProgress.listening,     accent: 'text-amber-400',  onClick: onOpenListening,     enabled: activeFeatures.listeningEnabled,    optional: false },
           ] as const;
 
-          const completed = activities.filter(a => a.status === 'completed').length;
-          const pct = (completed / activities.length) * 100;
+          // Progress mirrors allActiveCompleted's own rule: conversation is
+          // never counted (always optional), and a feature disabled by the
+          // plan is neither required nor counted against progress.
+          const obligatory = activities.filter((a) => !a.optional && a.enabled);
+          const completed = obligatory.filter(a => a.status === 'completed').length;
+          const pct = obligatory.length > 0 ? (completed / obligatory.length) * 100 : 0;
 
           return (
             <div className="mt-4 bg-slate-800 rounded-xl overflow-hidden">
@@ -241,9 +262,9 @@ export default function MonthView({
               </div>
 
               <div className="divide-y divide-slate-700/50">
-                {activities.map(({ key, label, status, accent, onClick }) => {
-                  const done   = status === 'completed';
-                  const inProg = status === 'in_progress';
+                {activities.map(({ key, label, status, accent, onClick, enabled, optional }) => {
+                  const done   = enabled && status === 'completed';
+                  const inProg = enabled && status === 'in_progress';
                   return (
                     <button
                       key={key}
@@ -261,6 +282,16 @@ export default function MonthView({
                       <span className={`flex-1 text-sm font-medium ${done ? accent : 'text-slate-200'}`}>
                         {label}
                       </span>
+                      {!enabled && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-500 text-[10px] font-medium shrink-0">
+                          Não incluído no plano
+                        </span>
+                      )}
+                      {enabled && optional && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 text-[10px] font-medium shrink-0">
+                          Opcional
+                        </span>
+                      )}
                       <ChevronRight className="w-4 h-4 text-slate-600 shrink-0" />
                     </button>
                   );
@@ -270,7 +301,9 @@ export default function MonthView({
               <div className="px-4 py-3 border-t border-slate-700 space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-400">
                   <span>Progresso de hoje</span>
-                  <span className="font-medium text-slate-300">{completed} de {activities.length} atividades concluídas</span>
+                  <span className="font-medium text-slate-300">
+                    {obligatory.length > 0 ? `${completed} de ${obligatory.length} atividades concluídas` : 'Nenhuma atividade obrigatória no plano'}
+                  </span>
                 </div>
                 <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
                   <div

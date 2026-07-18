@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic } from 'lucide-react';
+import { Mic, Lock } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import ConfirmPronunciationModal from './ConfirmPronunciationModal';
 import PronunciationResult from './PronunciationResult';
 import { getAuthHeader } from '../lib/apiAuth';
@@ -11,6 +12,8 @@ import {
   type AnalysisPhase,
   type AnalysisState,
 } from '../lib/pronunciationFlow';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
 
 interface Props {
   referenceText: string;
@@ -25,12 +28,27 @@ function formatTime(ms: number): string {
 }
 
 export default function PronunciationRecorder({ referenceText, reviewId }: Props) {
-  const recorder   = useAudioRecorder();
+  const entitlements = usePlanEntitlements();
+  const pronunciation = entitlements.data?.pronunciation ?? null;
+  const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
+    ? pronunciation.maxRecordingSeconds * 1000
+    : undefined;
+  const recorder   = useAudioRecorder(maxRecordingMs);
   const statusData = usePronunciationStatus(reviewId);
+
+  const pronunciationLoading = entitlements.data === null;
+  const pronunciationDisabledByPlan = pronunciation ? !pronunciation.enabled : false;
+  const evaluationsBlocked = pronunciation ? !pronunciation.evaluations.canStart : false;
 
   const [analysis, setAnalysis] = useState<AnalysisState>({
     phase: reviewId !== null ? 'loading_status' : 'idle',
   });
+
+  // Reconcile the daily-evaluations count once an analysis actually completes.
+  useEffect(() => {
+    if (analysis.phase === 'completed') entitlements.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysis.phase]);
 
   // Prevents double-click from launching two concurrent executions.
   const flowLockRef            = useRef(false);
@@ -113,6 +131,9 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
 
   const handleConfirm = useCallback(() => {
     if (flowLockRef.current) return;
+    // Frontend guard for UX only — the backend re-checks entitlements
+    // immediately before reserving the assessment slot.
+    if (pronunciationDisabledByPlan || evaluationsBlocked) return;
     flowLockRef.current = true;
 
     const attemptId = crypto.randomUUID();
@@ -128,7 +149,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef, gatewaySessionIdRef },
       (state) => { if (mountedRef.current) setAnalysis(state); },
     );
-  }, [reviewId, recorder.audioBlob, recorder.durationMs]);
+  }, [reviewId, recorder.audioBlob, recorder.durationMs, pronunciationDisabledByPlan, evaluationsBlocked]);
 
   const handleRetry = useCallback(() => {
     assessmentIdRef.current = null;
@@ -155,7 +176,12 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
     recorder.phase === 'done'    &&
     recorder.audioBlob !== null  &&
     !isProcessing                &&
-    analysis.phase === 'idle';
+    analysis.phase === 'idle'    &&
+    !pronunciationLoading        &&
+    !pronunciationDisabledByPlan &&
+    !evaluationsBlocked;
+
+  const recordingDisabled = pronunciationLoading || pronunciationDisabledByPlan || evaluationsBlocked;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -253,6 +279,24 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
             </div>
           </div>
 
+          {/* Plan access notice */}
+          {pronunciationDisabledByPlan && (
+            <p className="text-xs text-amber-400 flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+              {ENTITLEMENT_MESSAGES.featureUnavailable}
+            </p>
+          )}
+          {!pronunciationDisabledByPlan && evaluationsBlocked && (
+            <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.pronunciationEvaluationsExhausted}</p>
+          )}
+          {!pronunciationDisabledByPlan && !evaluationsBlocked && pronunciation && recorder.phase === 'idle' && (
+            <p className="text-xs text-slate-500">
+              {pronunciation.evaluations.unlimited
+                ? ENTITLEMENT_MESSAGES.unlimitedLabel
+                : formatDailyRemaining(pronunciation.evaluations.remaining, 'avaliação', 'avaliações')}
+            </p>
+          )}
+
           {/* Processing overlay */}
           {isProcessing && (
             <div className="bg-slate-800 rounded-xl p-4 flex items-center gap-3" role="status" aria-live="polite">
@@ -283,7 +327,9 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
               {recorder.phase === 'idle' && (
                 <button
                   onClick={recorder.startRecording}
-                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+                  disabled={recordingDisabled}
+                  aria-disabled={recordingDisabled}
+                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-40 disabled:cursor-not-allowed"
                   aria-label="Iniciar gravação de áudio"
                 >
                   <span className="flex items-center justify-center gap-2">
@@ -306,9 +352,9 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
                     <span className="text-sm text-slate-200 font-medium">Gravando</span>
                     <span
                       className="text-sm text-slate-400 tabular-nums ml-auto"
-                      aria-label={`Tempo decorrido: ${formatTime(recorder.elapsedMs)}`}
+                      aria-label={`Tempo decorrido: ${formatTime(recorder.elapsedMs)}${maxRecordingMs ? ` de ${formatTime(maxRecordingMs)}` : ''}`}
                     >
-                      {formatTime(recorder.elapsedMs)}
+                      {formatTime(recorder.elapsedMs)}{maxRecordingMs ? ` / ${formatTime(maxRecordingMs)}` : ''}
                     </span>
                   </div>
                   <button
@@ -323,6 +369,11 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
 
               {recorder.phase === 'done' && recorder.audioUrl && (
                 <div className="space-y-3">
+                  {recorder.stoppedByMaxDuration && pronunciation && !pronunciation.maxRecordingUnlimited && (
+                    <p className="text-xs text-amber-400">
+                      {ENTITLEMENT_MESSAGES.recordingLimitReached(pronunciation.maxRecordingSeconds)}
+                    </p>
+                  )}
                   <div className="bg-slate-800 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-slate-200 font-medium">Sua gravação</span>

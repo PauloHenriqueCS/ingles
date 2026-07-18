@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 
 // ── Hoist mock refs ───────────────────────────────────────────────────────────
 
@@ -49,6 +50,15 @@ const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
 
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
+}));
+
+// Plan entitlements — permissive by default (writing enabled + unlimited),
+// matching this suite's pre-entitlements behavior; overridden per-test where needed.
+const { mockGetCurrentUserPlanEntitlements } = vi.hoisted(() => ({
+  mockGetCurrentUserPlanEntitlements: vi.fn(),
+}));
+vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
 vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
@@ -168,6 +178,22 @@ function aiOk(content: string) {
   return Promise.resolve({ choices: [{ message: { content } }] });
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
   vi.mocked(requireAuth).mockResolvedValue({
@@ -175,6 +201,7 @@ beforeEach(() => {
     supabase: makeDefaultSupabase() as any,
   });
   mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 
 afterEach(() => {

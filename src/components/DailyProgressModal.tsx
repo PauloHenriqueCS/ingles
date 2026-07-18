@@ -57,6 +57,7 @@ export default function DailyProgressModal({
     detail?: string;
     action?: () => void;
     actionLabel?: string;
+    optional?: boolean;
   };
 
   const rows: Row[] = [
@@ -76,7 +77,9 @@ export default function DailyProgressModal({
       icon: MessagesSquare,
       label: 'Conversação com IA',
       status: progress.conversation,
-      detail: `${convMin} / ${goalMin} min`,
+      // Never required for the day to be green — see computeDailyProgress.
+      detail: progress.conversation === 'completed' ? 'Meta diária concluída' : `${convMin} / ${goalMin} min`,
+      optional: true,
     },
     {
       icon: Headphones,
@@ -130,6 +133,11 @@ export default function DailyProgressModal({
                       {row.status === 'coming_soon' && (
                         <span className="text-[10px] bg-slate-600 text-slate-400 px-1.5 py-0.5 rounded-full leading-none">
                           Em breve
+                        </span>
+                      )}
+                      {row.optional && (
+                        <span className="text-[10px] bg-slate-600 text-slate-400 px-1.5 py-0.5 rounded-full leading-none">
+                          Opcional
                         </span>
                       )}
                     </div>

@@ -1,5 +1,14 @@
 import { supabase } from './supabase';
 
+/**
+ * The single source of truth for "was today's conversation goal met" —
+ * used by the calendar, the daily goal card, and the in-session progress
+ * bar. Never recompute this comparison ad-hoc in a component.
+ */
+export function isConversationGoalMet(totalSeconds: number, goalMinutes: number): boolean {
+  return totalSeconds >= goalMinutes * 60;
+}
+
 export async function recordConversationSession(date: string, durationSec: number): Promise<void> {
   if (durationSec < 10) return;
   const { error } = await supabase.from('conversation_sessions').insert({ session_date: date, duration_sec: durationSec });

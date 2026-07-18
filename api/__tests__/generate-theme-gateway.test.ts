@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
 // ── Hoisted values — available inside vi.mock factories ───────────────────────
 
@@ -30,6 +31,7 @@ const {
   mockRequireAuth,
   mockApplyRateLimit,
   mockGetDiagnosticContext,
+  mockGetCurrentUserPlanEntitlements,
   mockDeps,
 } = vi.hoisted(() => {
   const mockCreate = vi.fn();
@@ -47,6 +49,7 @@ const {
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
   const mockGetDiagnosticContext = vi.fn();
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
@@ -81,7 +84,7 @@ const {
     mockCreate, mockStartEvent, mockCompleteEvent, mockFailEvent, mockInsertMetrics,
     mockGetEventForCosting, mockGetMetricsForEvent, mockUpdateMetricCost, mockUpdateEventCost,
     mockFindActivePrice, mockRebuildBucketForEvent, mockPolicyResolvePolicy, mockRequireAuth,
-    mockApplyRateLimit, mockGetDiagnosticContext, mockDeps,
+    mockApplyRateLimit, mockGetDiagnosticContext, mockGetCurrentUserPlanEntitlements, mockDeps,
   };
 });
 
@@ -100,6 +103,13 @@ vi.mock('openai', () => ({
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: mockApplyRateLimit }));
+
+// Plan entitlements — permissive by default (writing enabled + unlimited),
+// matching current unrestricted behavior; individual tests override
+// mockGetCurrentUserPlanEntitlements to exercise blocking.
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 // Diagnostic mode — off by default; individual tests override mockGetDiagnosticContext.
 vi.mock('../_diagnostic-service', () => ({
@@ -231,6 +241,24 @@ function aiOk(content: string, usage?: Record<string, unknown>) {
   });
 }
 
+// ── Plan entitlements fixture ──────────────────────────────────────────────────
+
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -252,6 +280,7 @@ beforeEach(() => {
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeDefaultSupabase() });
   mockApplyRateLimit.mockResolvedValue(true);
   mockGetDiagnosticContext.mockResolvedValue({ shouldUseDiagnostic: false });
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   (mockDeps.clock as ReturnType<typeof vi.fn>).mockReturnValue(1000);
   (mockDeps.uuidGen as ReturnType<typeof vi.fn>).mockReturnValue('test-uuid');
 
@@ -770,5 +799,102 @@ describe('diagnostic phase falling through to normal phase', () => {
     expect(calls.map((c) => c.metadata.phaseAttempt)).toEqual([1, 2, 1]);
     // correlationId is identical across the phase change.
     expect(new Set(calls.map((c) => c.correlationId)).size).toBe(1);
+  });
+});
+
+// ── Plan entitlements enforcement ──────────────────────────────────────────────
+
+describe('plan entitlements enforcement', () => {
+  it('returns 403 FEATURE_DISABLED and never calls OpenAI when writing is disabled by the plan', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.writing.enabled = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('FEATURE_DISABLED');
+  });
+
+  it('returns 403 DAILY_LIMIT_REACHED and never calls OpenAI once the daily generation limit is exhausted', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.writing.themeGenerations = {
+      enabled: true, unlimited: false, limit: 2, consumed: 2, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
+  });
+
+  it('allows generation through when writing is enabled and generations remain', async () => {
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(res._status()).toBe(200);
+  });
+
+  it('does not block the diagnostic "reuse existing mission" shortcut on the daily generation limit', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.writing.themeGenerations = {
+      enabled: true, unlimited: false, limit: 1, consumed: 1, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+    mockGetDiagnosticContext.mockResolvedValue({
+      shouldUseDiagnostic: true,
+      diagnosticSequence: 1,
+      existingActiveMission: { theme_id: 'existing-theme-1' },
+      diagnosticPlan: null,
+    });
+    const supa = makeDefaultSupabase();
+    (supa.from as any) = vi.fn((table: string) => {
+      if (table === 'generated_themes') {
+        return {
+          update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ data: null, error: null }) }) }),
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) }),
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({
+                  data: { id: 'existing-theme-1', title: 'Old', description: 'desc', activity_type: 'e-mail', context: 'trabalho', semantic_summary: '', difficulty: 'easy', vocabulary: [], grammar_focus: [] },
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+          insert: vi.fn(),
+        };
+      }
+      return makeChain({ data: null, error: null });
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: supa });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).themeId).toBe('existing-theme-1');
+  });
+
+  it('resolves entitlements from the authenticated userId, never from the request body', async () => {
+    await handler(makeReq({ body: { learningContext: {}, userId: 'injected-evil', planId: 'injected-plan' } }), makeRes());
+    expect(mockGetCurrentUserPlanEntitlements).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it('returns 500 INTERNAL_ERROR and never calls OpenAI when entitlement resolution itself fails', async () => {
+    mockGetCurrentUserPlanEntitlements.mockRejectedValue(new Error('db down'));
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(res._status()).toBe(500);
   });
 });

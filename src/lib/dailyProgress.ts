@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { DailyActivityStatus, DailyProgress, DayEntry } from '../types';
 import { toSpDate } from './timezone';
+import { isConversationGoalMet } from './conversationSessions';
 
 export async function getPronunciationDatesForMonth(
   year: number,
@@ -36,9 +37,22 @@ function writingStatus(entry: DayEntry | undefined): DailyActivityStatus {
 
 function conversationStatus(totalSec: number, goalSec: number): DailyActivityStatus {
   if (totalSec <= 0) return 'not_started';
-  if (totalSec >= goalSec) return 'completed';
+  if (isConversationGoalMet(totalSec, goalSec / 60)) return 'completed';
   return 'in_progress';
 }
+
+/** Which of the three daily-obligatory activities the user's plan has turned on. Conversation is never part of this — it is always optional for the day's color. */
+export interface ActiveDailyFeatures {
+  writingEnabled: boolean;
+  pronunciationEnabled: boolean;
+  listeningEnabled: boolean;
+}
+
+const ALL_FEATURES_ACTIVE: ActiveDailyFeatures = {
+  writingEnabled: true,
+  pronunciationEnabled: true,
+  listeningEnabled: true,
+};
 
 export function computeDailyProgress(
   date: string,
@@ -47,6 +61,9 @@ export function computeDailyProgress(
   convGoalSec: number,
   pronunciationDates: Set<string>,
   listeningStatus?: 'not_started' | 'in_progress' | 'completed',
+  // Defaults to "all three active" so any caller not yet passing plan info
+  // keeps the pre-entitlements behavior instead of silently going green-less.
+  activeFeatures: ActiveDailyFeatures = ALL_FEATURES_ACTIVE,
 ): DailyProgress {
   const writing = writingStatus(entry);
   const pronunciation: DailyActivityStatus = pronunciationDates.has(date)
@@ -55,11 +72,17 @@ export function computeDailyProgress(
   const conversation = conversationStatus(convTotalSec, convGoalSec);
   const listening: DailyActivityStatus = listeningStatus ?? 'not_started';
 
+  // Conversation is always optional — it is deliberately never included
+  // here, regardless of plan or goal state. Only writing/pronunciation/
+  // listening that are actually active in the plan are obligatory; a day
+  // with none of the three active never turns green automatically.
+  const obligatoryStatuses: DailyActivityStatus[] = [];
+  if (activeFeatures.writingEnabled) obligatoryStatuses.push(writing);
+  if (activeFeatures.pronunciationEnabled) obligatoryStatuses.push(pronunciation);
+  if (activeFeatures.listeningEnabled) obligatoryStatuses.push(listening);
+
   const allActiveCompleted =
-    writing === 'completed' &&
-    pronunciation === 'completed' &&
-    conversation === 'completed' &&
-    listening === 'completed';
+    obligatoryStatuses.length > 0 && obligatoryStatuses.every((s) => s === 'completed');
 
   return { date, writing, pronunciation, conversation, listening, allActiveCompleted };
 }

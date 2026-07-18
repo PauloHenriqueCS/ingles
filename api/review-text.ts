@@ -5,6 +5,9 @@ import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, s
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
+import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
+import { checkTextLength } from './_entitlements/require-feature-access';
+import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -316,6 +319,26 @@ export default async function handler(req: any, res: any) {
   }
 
   if (!await applyRateLimit(res, userId, 'review-text')) return;
+
+  // ── Plan entitlements ────────────────────────────────────────────────────────
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch (e) {
+    safeLog('review-text', 'entitlements_resolve_failed', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  if (!entitlements.writing.enabled) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
+  const lengthCheck = checkTextLength(originalText, entitlements.writing.maxCharactersPerText, entitlements.writing.maxCharactersUnlimited);
+  if (!lengthCheck.allowed) {
+    return jsonError(res, 413, lengthCheck.code!, lengthCheck.message!);
+  }
+  if (!entitlements.writing.reviews.canStart) {
+    const code = entitlements.writing.reviews.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
+    return jsonError(res, 403, code, ENTITLEMENT_MESSAGES.writingReviewsExhausted);
+  }
 
   const isReviewMode =
     mode === 'review' &&

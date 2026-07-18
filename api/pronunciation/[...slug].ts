@@ -10,8 +10,12 @@ import {
   authorizeProviderSession,
   reconcileEventCost,
   rebuildDailyBucketForEvent,
+  estimateAudioSecondsCeiling,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
+import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { checkRecordingDuration } from '../_entitlements/require-feature-access';
+import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -85,6 +89,20 @@ async function maybeAuthorizeAssessTextSession(
     });
     if (policy.gatewayMode !== 'observe') return undefined;
 
+    // Etapa 11 correction — the server-authorized ceiling (never a
+    // client-chosen duration) is what a real reservation would be sized
+    // against; recorded here so it is genuinely computed and auditable per
+    // session. Not yet tied to a live blocking reservation: this bridge's
+    // physical call happens entirely client-side (like
+    // conversation.webrtc_connect), so there is no executeAiGatewayCall
+    // invocation here for an enforce-mode reservation to attach to — the
+    // same documented, honest limitation class as Realtime's session
+    // control (see handleSessionControl's doc comment). Real consumption is
+    // still only ever recorded from the completed session
+    // (recordAssessTextUsageEvent, durationSeconds validated server-side),
+    // never a client-reported estimate.
+    const estimatedAudioSeconds = estimateAudioSecondsCeiling(MAX_ASSESS_TEXT_DURATION_SECONDS);
+
     const { sessionId } = await authorizeProviderSession(
       gatewayDeps.usageRepository,
       {
@@ -95,7 +113,7 @@ async function maybeAuthorizeAssessTextSession(
         internalSessionType: 'pronunciation_assessment',
         internalSessionId: assessmentId,
         authorizationExpiresAt,
-        metadata: { endpoint: 'pronunciation/start' },
+        metadata: { endpoint: 'pronunciation/start', estimatedAudioSecondsCeiling: estimatedAudioSeconds.quantity },
       },
       ephemeralToken,
     );
@@ -265,6 +283,21 @@ async function handleStart(req: any, res: any) {
   if (!azureRegion) {
     return res.status(503).json({ code: 'AZURE_SPEECH_NOT_CONFIGURED', message: AZURE_ERROR_MESSAGES.AZURE_SPEECH_NOT_CONFIGURED });
   }
+
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(auth.userId);
+  } catch {
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
+  }
+  if (!entitlements.pronunciation.enabled) {
+    return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable });
+  }
+  if (!entitlements.pronunciation.evaluations.canStart) {
+    const code = entitlements.pronunciation.evaluations.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
+    return res.status(403).json({ code, message: ENTITLEMENT_MESSAGES.pronunciationEvaluationsExhausted });
+  }
+
   const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_assessment', {
     p_text_version_id: textVersionId, p_azure_region: azureRegion, p_attempt_id: attemptId,
   });
@@ -379,6 +412,29 @@ async function handleComplete(req: any, res: any) {
   if (!isValidUuid(assessmentId)) return res.status(400).json({ code: 'INVALID_ASSESSMENT_ID', message: 'assessmentId inválido.' });
   if (!isValidUuid(attemptId)) return res.status(400).json({ code: 'INVALID_ATTEMPT_ID', message: 'attemptId inválido.' });
   if (!validateResult(result)) return res.status(400).json({ code: 'INVALID_RESULT', message: 'Resultado inválido ou fora do intervalo permitido.' });
+
+  // Server-side re-validation of the plan's recording-duration cap — the
+  // client-side auto-stop is UX only, this is the definitive check. A
+  // rejected duration releases the reservation slot (RESULT_INVALID) rather
+  // than leaving the assessment stuck "processing", so the user can retry.
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(auth.userId);
+  } catch {
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
+  }
+  const durationCheck = checkRecordingDuration(
+    result.audioDurationSeconds, entitlements.pronunciation.maxRecordingSeconds, entitlements.pronunciation.maxRecordingUnlimited,
+  );
+  if (!durationCheck.allowed) {
+    try {
+      await supabase.rpc('fail_pronunciation_assessment', { p_assessment_id: assessmentId, p_attempt_id: attemptId, p_error_code: 'RESULT_INVALID' });
+    } catch (e) {
+      console.error('[pronunciation/complete] Failed to release slot after duration rejection:', e instanceof Error ? e.message : 'unknown');
+    }
+    return res.status(413).json({ code: durationCheck.code, message: durationCheck.message });
+  }
+
   const { data: rpcData, error: rpcError } = await supabase.rpc('complete_pronunciation_assessment', {
     p_assessment_id: assessmentId, p_attempt_id: attemptId,
     p_pronunciation_score: result.pronunciationScore, p_accuracy_score: result.accuracyScore,

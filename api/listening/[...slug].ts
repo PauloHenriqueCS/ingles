@@ -13,6 +13,8 @@ import { markListeningPlaybackCompleted } from '../../src/services/listening/exe
 import { getListeningToday } from '../../src/services/listening/daily/get-listening-today';
 import { getListeningByDate } from '../../src/services/listening/daily/get-listening-by-date';
 import { resolveListeningActivityDate } from '../../src/services/listening/daily/resolve-listening-activity-date';
+import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { enqueueListeningJob } from '../../src/services/listening/jobs/enqueue-listening-job';
 import { startListeningGeneration } from '../../src/services/listening/on-demand/start-listening-generation';
 import { getListeningGenerationStatus } from '../../src/services/listening/on-demand/get-listening-generation-status';
@@ -252,6 +254,32 @@ async function handleToday(req: any, res: any) {
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId, supabase } = auth;
+
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  if (!entitlements.listening.enabled) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
+  // The daily limit only gates STARTING a new story — continuing or
+  // reopening today's already-assigned story must never be blocked by it.
+  if (!entitlements.listening.stories.canStart) {
+    const activityDate = resolveListeningActivityDate();
+    const { data: existingAssignment } = await supabase
+      .from('user_listening_assignments')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('activity_date', activityDate)
+      .maybeSingle();
+    if (!existingAssignment) {
+      const code = entitlements.listening.stories.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
+      return jsonError(res, 403, code, ENTITLEMENT_MESSAGES.listeningStoriesExhausted);
+    }
+  }
+
   try {
     const result = await getListeningToday(supabase, userId);
     res.setHeader('Cache-Control', 'private, no-store');

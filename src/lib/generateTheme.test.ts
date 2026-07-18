@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createMockGatewayDeps } from '../../api/__tests__/_ai-gateway-test-helpers';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 
 // ── Hoist mock refs before vi.mock factory runs ───────────────────────────────
 
@@ -15,6 +16,13 @@ const { mockCreate, gw, mockGetDiagnosticContext } = vi.hoisted(() => {
 
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
+}));
+
+const { mockGetCurrentUserPlanEntitlements } = vi.hoisted(() => ({
+  mockGetCurrentUserPlanEntitlements: vi.fn(),
+}));
+vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
 // Diagnostic mode is feature-flagged off in every test below (the real
@@ -156,6 +164,21 @@ const VALID_THEME_JSON = JSON.stringify({
   responseExamples: [],
 });
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
 
@@ -167,6 +190,7 @@ beforeEach(() => {
     supabase: makeDefaultSupabase() as any,
   });
 
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   mockCreate.mockImplementation(() => aiResponse(VALID_THEME_JSON));
 });
 

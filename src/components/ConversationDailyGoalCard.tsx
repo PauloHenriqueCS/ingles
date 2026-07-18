@@ -1,4 +1,5 @@
 import { Target, CheckCircle2 } from 'lucide-react';
+import { isConversationGoalMet } from '../lib/conversationSessions';
 
 export interface ConversationDailyGoalCardProps {
   accumulatedSec: number;
@@ -9,7 +10,7 @@ export default function ConversationDailyGoalCard({ accumulatedSec, goalMinutes 
   const totalMin = accumulatedSec / 60;
   const displayedMin = Math.floor(totalMin);
   const pct = Math.min(100, Math.round((totalMin / goalMinutes) * 100));
-  const met = totalMin >= goalMinutes;
+  const met = isConversationGoalMet(accumulatedSec, goalMinutes);
   const remaining = Math.ceil(goalMinutes - totalMin);
 
   return (

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Target, Clock, Zap, Check, Info } from 'lucide-react';
+import { Target, Clock, Zap, Check, Info, Lock } from 'lucide-react';
 import { EnglishDailyTheme, ResponseExample } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
@@ -8,6 +8,9 @@ import { getAuthHeader } from '../lib/apiAuth';
 import { fetchPendingReviewGroup } from '../lib/pendingReview';
 import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
 import { WRITING_THEMES, RANDOM_THEME_LABEL } from '../domain/writing/writing-themes';
+import type { WritingEntitlements } from '../domain/entitlements/entitlement-types';
+import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
@@ -16,6 +19,8 @@ interface Props {
   theme: EnglishDailyTheme | null;
   onThemeReady: (theme: EnglishDailyTheme) => void;
   onStartWriting: () => void;
+  /** null while the plan is still resolving — never treat as "available" during that window. */
+  writingEntitlements: WritingEntitlements | null;
 }
 
 const FORMAT_LABELS: Record<string, string> = {
@@ -50,7 +55,7 @@ function formatLabel(format: string | undefined, activityType: string | undefine
   return FORMAT_LABELS[key] ?? key.replace(/_/g, ' ');
 }
 
-export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: Props) {
+export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, writingEntitlements }: Props) {
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
@@ -58,7 +63,23 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
   const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
   const isLoading = genState === 'loading';
 
+  const entitlementsLoading = writingEntitlements === null;
+  const disabledByPlan = writingEntitlements ? !writingEntitlements.enabled : false;
+  const generationsLimit = writingEntitlements?.themeGenerations ?? null;
+  const generationsBlocked = generationsLimit ? !generationsLimit.canStart : false;
+  const generateDisabled = isLoading || entitlementsLoading || disabledByPlan || generationsBlocked;
+
+  const remainingLabel = !generationsLimit
+    ? null
+    : generationsLimit.unlimited
+    ? ENTITLEMENT_MESSAGES.unlimitedLabel
+    : formatDailyRemaining(generationsLimit.remaining, 'geração', 'gerações');
+
   async function generate() {
+    // Frontend guard for UX only — the backend re-checks this immediately
+    // before calling the AI, which is the actual source of truth.
+    if (entitlementsLoading || disabledByPlan || generationsBlocked) return;
+
     setGenState('loading');
     setErrorMsg(null);
 
@@ -120,7 +141,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Erro ao gerar missão');
+      if (!res.ok) throw new Error(data.message ?? data.error ?? 'Erro ao gerar missão');
 
       onThemeReady(data.theme as EnglishDailyTheme);
       setCurrentThemeId(data.themeId ?? null);
@@ -150,7 +171,14 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
       {/* No theme yet */}
       {!theme && !isLoading && (
         <div className="px-4 pb-4 space-y-3">
-          {genState === 'error' ? (
+          {disabledByPlan ? (
+            <p className="text-xs text-amber-400 flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+              {ENTITLEMENT_MESSAGES.featureUnavailable}
+            </p>
+          ) : generationsBlocked ? (
+            <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.writingGenerationsExhausted}</p>
+          ) : genState === 'error' ? (
             <p className="text-xs text-red-400">
               {errorMsg || 'Não foi possível gerar a missão. Tente novamente.'}
             </p>
@@ -162,7 +190,8 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
           <select
             value={selectedTheme ?? ''}
             onChange={(e) => setSelectedTheme(e.target.value || null)}
-            className="w-full px-3 py-2.5 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-blue-500 cursor-pointer"
+            disabled={generateDisabled}
+            className="w-full px-3 py-2.5 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-blue-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <option value="">{RANDOM_THEME_LABEL}</option>
             {WRITING_THEMES.map((t) => (
@@ -173,11 +202,15 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
           </select>
           <button
             onClick={generate}
-            disabled={isLoading}
-            className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 transition-colors"
+            disabled={generateDisabled}
+            aria-disabled={generateDisabled}
+            className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {genState === 'error' ? 'Tentar novamente' : 'Receber missão'}
           </button>
+          {remainingLabel && !disabledByPlan && !generationsBlocked && (
+            <p className="text-xs text-slate-500 text-center">{remainingLabel}</p>
+          )}
         </div>
       )}
 
@@ -336,21 +369,33 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting }: 
             </Section>
           )}
 
+          {/* Blocked-generation message — the current mission stays fully usable either way */}
+          {!disabledByPlan && generationsBlocked && (
+            <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.writingGenerationsExhausted}</p>
+          )}
+
           {/* Action buttons */}
-          <div className="flex gap-2 pt-1">
-            <button
-              onClick={generate}
-              disabled={isLoading}
-              className="flex-1 py-2.5 rounded-xl text-xs font-medium text-slate-400 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 transition-colors"
-            >
-              Outra missão
-            </button>
-            <button
-              onClick={onStartWriting}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-            >
-              Aceitar missão
-            </button>
+          <div className="flex flex-col gap-1.5 pt-1">
+            <div className="flex gap-2">
+              <button
+                onClick={generate}
+                disabled={generateDisabled}
+                aria-disabled={generateDisabled}
+                title={generationsBlocked ? ENTITLEMENT_MESSAGES.writingGenerationsExhausted : undefined}
+                className="flex-1 py-2.5 rounded-xl text-xs font-medium text-slate-400 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Outra missão
+              </button>
+              <button
+                onClick={onStartWriting}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+              >
+                Aceitar missão
+              </button>
+            </div>
+            {remainingLabel && !disabledByPlan && !generationsBlocked && (
+              <p className="text-xs text-slate-500 text-center">{remainingLabel}</p>
+            )}
           </div>
         </div>
       )}

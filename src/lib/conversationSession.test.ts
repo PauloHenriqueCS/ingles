@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 
 // ── Source-code smoke tests ──────────────────────────────────────────────────
 // These verify that the GA endpoints are used and the Beta endpoints are gone.
@@ -57,6 +58,13 @@ describe('conversationSession — VAD silence tolerance', () => {
 // the pre-existing OpenAI response mapping unchanged.
 
 vi.mock('../../api/_auth', () => ({ requireAuth: vi.fn() }));
+
+const { mockGetCurrentUserPlanEntitlements } = vi.hoisted(() => ({
+  mockGetCurrentUserPlanEntitlements: vi.fn(),
+}));
+vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
@@ -153,10 +161,26 @@ function mockFetch(status: number, body: unknown) {
   });
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.stubEnv('OPENAI_API_KEY', 'sk-test-key');
   vi.stubEnv('OPENAI_REALTIME_MODEL', 'gpt-realtime-2.1-mini');
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 
 describe('conversationSession handler — GA format', () => {

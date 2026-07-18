@@ -32,6 +32,9 @@ import {
   normalizeGrammarGuide,
   normalizeOptionalExercises,
 } from './_mission-grammar-guide';
+import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
+import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
+import type { PlanEntitlementsSnapshot } from '../src/domain/entitlements/entitlement-types';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -846,6 +849,29 @@ export default async function handler(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'generate-theme')) return;
 
+  // ── Plan entitlements ────────────────────────────────────────────────────────
+  // writing.enabled gates the ENTIRE endpoint, including reusing an already-
+  // generated mission — when the plan turns writing off, nothing comes back.
+  // The per-day generation limit (themeGenerations) is checked separately,
+  // right before each place a NEW AI call is about to happen, so it never
+  // blocks reusing the diagnostic flow's already-generated mission.
+  let entitlements: PlanEntitlementsSnapshot;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch (e) {
+    safeLog('generate-theme', 'entitlements_resolve_failed', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  if (!entitlements.writing.enabled) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
+  function blockedByGenerationLimit(): { code: string; message: string } | null {
+    if (entitlements.writing.themeGenerations.canStart) return null;
+    const code = entitlements.writing.themeGenerations.state === 'monthly_limit_reached'
+      ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
+    return { code, message: ENTITLEMENT_MESSAGES.writingGenerationsExhausted };
+  }
+
   const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
   // The client sends the raw technical value from the theme select (e.g.
   // 'football_sports'), never a pre-translated label — the label used in the
@@ -1004,6 +1030,11 @@ export default async function handler(req: any, res: any) {
       }
 
       // Gerar nova missão diagnóstica
+      const diagnosticGenerationBlock = blockedByGenerationLimit();
+      if (diagnosticGenerationBlock) {
+        return jsonError(res, 403, diagnosticGenerationBlock.code, diagnosticGenerationBlock.message);
+      }
+
       const diagnosticPlan = diagnosticCtx.diagnosticPlan!;
       const diagnosticSystemPrompt = SYSTEM_PROMPT + DIAGNOSTIC_SYSTEM_PROMPT_EXTENSION;
       const recentDiagnosticTitles = recentThemes.slice(0, 5)
@@ -1186,6 +1217,11 @@ export default async function handler(req: any, res: any) {
     const expectedWords = [...new Set<string>(items.map((i) => i.correctedValue).filter(Boolean))];
     const level = String((learningContext as any)?.currentLevel || 'A1');
 
+    const reviewGenerationBlock = blockedByGenerationLimit();
+    if (reviewGenerationBlock) {
+      return jsonError(res, 403, reviewGenerationBlock.code, reviewGenerationBlock.message);
+    }
+
     const MAX_REVIEW_ATTEMPTS = 3;
     let reviewTheme: Record<string, unknown> | null = null;
     let lastValidationError: string | null = null;
@@ -1279,6 +1315,11 @@ export default async function handler(req: any, res: any) {
   }
 
   // ── NORMAL MODE ──────────────────────────────────────────────────────────────
+
+  const normalGenerationBlock = blockedByGenerationLimit();
+  if (normalGenerationBlock) {
+    return jsonError(res, 403, normalGenerationBlock.code, normalGenerationBlock.message);
+  }
 
   // Inject excluded theme at the top so deduplication catches it immediately
   if (excludedTheme) {

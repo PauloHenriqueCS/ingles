@@ -9,6 +9,8 @@ export interface UseAudioRecorderReturn {
   audioUrl: string | null;
   durationMs: number;
   errorMessage: string | null;
+  /** True when this recording was auto-stopped by maxDurationMs, not by the user. */
+  stoppedByMaxDuration: boolean;
   startRecording: () => Promise<void>;
   stopRecording: () => void;
   deleteRecording: () => void;
@@ -37,13 +39,21 @@ function classifyError(err: unknown): string {
   return 'Não foi possível criar a gravação. Verifique o microfone e tente novamente.';
 }
 
-export function useAudioRecorder(): UseAudioRecorderReturn {
+/**
+ * @param maxDurationMs Optional hard cap (e.g. the plan's recording-duration
+ * limit). When set, the recording auto-stops the instant it's reached —
+ * never a technical concern, purely a commercial limit passed in by the caller.
+ */
+export function useAudioRecorder(maxDurationMs?: number): UseAudioRecorderReturn {
   const [phase, setPhase] = useState<RecorderPhase>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [durationMs, setDurationMs] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [stoppedByMaxDuration, setStoppedByMaxDuration] = useState(false);
+  const maxDurationRef = useRef<number | undefined>(maxDurationMs);
+  maxDurationRef.current = maxDurationMs;
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -102,6 +112,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     setDurationMs(0);
     setElapsedMs(0);
     setErrorMessage(null);
+    setStoppedByMaxDuration(false);
     setPhase('requesting');
 
     // Request microphone immediately — must happen directly in the user gesture on iOS
@@ -198,7 +209,14 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     setPhase('recording');
 
     intervalRef.current = setInterval(() => {
-      if (isMountedRef.current) setElapsedMs(Date.now() - startTimeRef.current);
+      if (!isMountedRef.current) return;
+      const elapsed = Date.now() - startTimeRef.current;
+      setElapsedMs(elapsed);
+      const max = maxDurationRef.current;
+      if (max && elapsed >= max && mediaRecorderRef.current?.state === 'recording') {
+        setStoppedByMaxDuration(true);
+        mediaRecorderRef.current.stop();
+      }
     }, 200);
   }, []);
 
@@ -218,8 +236,9 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     setDurationMs(0);
     setElapsedMs(0);
     setErrorMessage(null);
+    setStoppedByMaxDuration(false);
     setPhase('idle');
   }, []);
 
-  return { phase, elapsedMs, audioBlob, audioUrl, durationMs, errorMessage, startRecording, stopRecording, deleteRecording };
+  return { phase, elapsedMs, audioBlob, audioUrl, durationMs, errorMessage, stoppedByMaxDuration, startRecording, stopRecording, deleteRecording };
 }

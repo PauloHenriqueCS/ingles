@@ -20,10 +20,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockRequireAuth, gw } = vi.hoisted(() => {
+const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => {
   const mockRequireAuth = vi.fn();
-  return { mockRequireAuth, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
+  return { mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 // Separate mock Supabase client standing in for getSharedServiceClient() —
@@ -55,6 +57,9 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true) }));
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 import handler from '../conversation/[...slug]';
 import { DuplicateUsageEventError } from '../_ai-gateway/usage-repository';
@@ -97,12 +102,28 @@ function mockClientSecretsFetch(status: number, body: unknown) {
   });
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
   mockSessionsFrom.mockReturnValue(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   process.env.OPENAI_API_KEY = 'sk-test-key';
   process.env.OPENAI_REALTIME_MODEL = 'gpt-realtime-2.1-mini';
 });
@@ -123,6 +144,48 @@ describe('POST /session — conversation.create_session', () => {
     // so the client can source its self-termination timer from the server.
     expect((res._body() as any).maxSessionSeconds).toBe(30 * 60);
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 FEATURE_DISABLED and never calls OpenAI when conversation is disabled by plan', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.enabled = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('FEATURE_DISABLED');
+    expect((global.fetch as any)).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 MONTHLY_LIMIT_REACHED and never calls OpenAI once the monthly balance (plan + extra credits) is exhausted', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 600, consumed: 600, remaining: 0, period: 'month', state: 'monthly_limit_reached', canStart: false,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('MONTHLY_LIMIT_REACHED');
+    expect((global.fetch as any)).not.toHaveBeenCalled();
+  });
+
+  it('allows session creation through when monthly balance is exhausted but extra credits keep canStart true', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 600, consumed: 600, remaining: 200, period: 'month', state: 'available_with_extra_credits', canStart: true,
+    };
+    entitlements.conversation.extraSecondsAvailable = 200;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
   });
 
   describe('OBSERVE for create_session only (webrtc_connect stays legacy)', () => {
@@ -465,6 +528,24 @@ describe('POST /session-usage — conversation.realtime_usage', () => {
     const res = makeRes();
     await handler(usageReq(), res);
     expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+
+  it('never creates its own reservation — accounting_child: even in enforce mode, this handler only ever records through the parent session\'s already-reserved usageRepository path (startEvent/insertMetrics), never a second executeAiGatewayCall/reservation for the same response.done', async () => {
+    // Etapa 11 correction: conversation.realtime_usage is classified
+    // accounting_child of conversation.webrtc_connect (see
+    // api/_ai-gateway/enforce-readiness.ts's ACCOUNTING_CHILD_PARENT) —
+    // requiring it to reserve independently per response.done would
+    // double-reserve the same already-reserved session. handleSessionUsage
+    // structurally guarantees this today by gating on gatewayMode ===
+    // 'observe' exactly: 'enforce' is not yet an independent reservation
+    // path here, so no second reservation can be invented no matter what
+    // policy is resolved.
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled' });
+    const res = makeRes();
+    await handler(usageReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).status).toBe('ignored');
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
@@ -895,6 +976,68 @@ describe('POST /session-control — mid-session control poll', () => {
     await handler(controlReq(), res);
     expect(res._status()).toBe(401);
     expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+
+  // ── Plan entitlements: commercial recording deadline ─────────────────────
+
+  it('tightens the deadline (and terminates) once the plan max-recording-seconds is reached, before the 30min technical ceiling', async () => {
+    const startedAt = new Date(Date.now() - 90 * 1000).toISOString(); // 90s ago
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 60; // shorter than elapsed 90s
+    entitlements.conversation.maxRecordingUnlimited = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'plan_recording_limit_reached' });
+  });
+
+  it('tightens the deadline using the smaller of per-turn cap and remaining monthly balance', async () => {
+    const startedAt = new Date(Date.now() - 20 * 1000).toISOString(); // 20s ago
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 600; // generous per-turn cap
+    entitlements.conversation.maxRecordingUnlimited = false;
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 600, consumed: 590, remaining: 10, period: 'month', state: 'available', canStart: true,
+    }; // only 10s of monthly balance left — smaller than elapsed 20s
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'plan_recording_limit_reached' });
+  });
+
+  it('does not terminate early when comfortably within both the per-turn cap and the monthly balance', async () => {
+    const startedAt = new Date(Date.now() - 5 * 1000).toISOString(); // 5s ago
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 60;
+    entitlements.conversation.maxRecordingUnlimited = false;
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 600, consumed: 100, remaining: 500, period: 'month', state: 'available', canStart: true,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    const body = res._body() as { terminate: boolean };
+    expect(body.terminate).toBe(false);
+  });
+
+  it('fails open (no early termination) when the plan-limit check itself throws', async () => {
+    const now = new Date().toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: now }, error: null }));
+    mockGetCurrentUserPlanEntitlements.mockRejectedValue(new Error('entitlements service down'));
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as { terminate: boolean }).terminate).toBe(false);
   });
 });
 
