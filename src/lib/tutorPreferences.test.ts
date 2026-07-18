@@ -290,7 +290,65 @@ describe('buildTutorInstructions — safety', () => {
   });
 });
 
-// ── 12. PACE_PLAYBACK_RATE — audio speed values ───────────────────────────────
+// ── 12. Identity is fixed and immutable — regression for "I am Alex" bug ────
+//
+// Bug report: during a voice conversation the AI said "No, I am Alex; the
+// name is not Lemon." Root cause: a stale/legacy `teacher_name` value from
+// the DB (from before the app was renamed from Alex → Lemon) was fed
+// verbatim into the system prompt. These tests lock in that the assistant's
+// identity can never regress again, even if `prefs.teacherName` holds a
+// legacy or attacker/user-supplied value.
+
+describe('buildTutorInstructions — identity is fixed and immutable', () => {
+  it('always asserts "Your name is Lemon" as a top-priority rule', () => {
+    const p = buildTutorInstructions(BASE_DEFAULTS, 'B1');
+    expect(p).toContain('Your name is Lemon');
+    // The identity rule must appear before the personality section (highest priority).
+    expect(p.indexOf('Your name is Lemon')).toBeLessThan(p.indexOf('Nível do aprendiz'));
+  });
+
+  it('ignores a stale/legacy teacherName ("Alex") from unmigrated DB data', () => {
+    const p = buildTutorInstructions({ ...BASE_DEFAULTS, teacherName: 'Alex' }, 'B1');
+    expect(p).toContain('Your name is Lemon');
+    expect(p).not.toMatch(/Você é Alex\b/);
+    expect(p).not.toContain('use apenas "Alex"');
+  });
+
+  it('ignores any other user/DB-supplied name attempt (e.g. "Sarah")', () => {
+    const p = buildTutorInstructions({ ...BASE_DEFAULTS, teacherName: 'Sarah' }, 'B1');
+    expect(p).toContain('Your name is Lemon');
+    expect(p).not.toMatch(/Você é Sarah\b/);
+  });
+
+  it('instructs the model that a user-stated name refers to the user, not the assistant', () => {
+    const p = buildTutorInstructions(BASE_DEFAULTS, 'B1');
+    expect(p.toLowerCase()).toContain('"i am alex"');
+    expect(p.toLowerCase()).toContain("this is the user's own name, not yours");
+  });
+
+  it('instructs the model to hold its name even if the user tries to rename it', () => {
+    const p = buildTutorInstructions(BASE_DEFAULTS, 'B1');
+    expect(p.toLowerCase()).toContain('never adopt a name suggested');
+  });
+
+  it('holds across every personality preset', () => {
+    const presets: AIPreferences['personalityPreset'][] = ['patient', 'friend', 'teacher', 'unfiltered_friend', 'custom'];
+    for (const personalityPreset of presets) {
+      const p = buildTutorInstructions({ ...BASE_DEFAULTS, teacherName: 'Alex', personalityPreset }, 'B1');
+      expect(p).toContain('Your name is Lemon');
+      expect(p).not.toMatch(/Você é Alex\b/);
+    }
+  });
+
+  it('holds across every CEFR level', () => {
+    for (const level of ['A1', 'A2', 'B1', 'B2', 'C1', 'C2']) {
+      const p = buildTutorInstructions({ ...BASE_DEFAULTS, teacherName: 'Alex' }, level);
+      expect(p).toContain('Your name is Lemon');
+    }
+  });
+});
+
+// ── 13. PACE_PLAYBACK_RATE — audio speed values ───────────────────────────────
 
 describe('PACE_PLAYBACK_RATE', () => {
   it('natural pace is exactly 1.0× (reference speed)', () => {

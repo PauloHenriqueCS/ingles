@@ -1,14 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
-import { BASE_DEFAULTS, getDefaultsForLevel, resolvePreset } from '../lib/tutorPreferences';
+import { ASSISTANT_NAME, BASE_DEFAULTS, getDefaultsForLevel, resolvePreset } from '../lib/tutorPreferences';
 import { DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import type { AIPreferences } from '../types';
-
-// Legacy names that must always be remapped to their current equivalents.
-const LEGACY_NAME_MAP: Record<string, string> = { Alex: 'Lemon' };
-function migrateName(name: string): string {
-  return LEGACY_NAME_MAP[name] ?? name;
-}
 
 export interface UseTutorPreferences {
   /** Current draft (local, unsaved) */
@@ -29,7 +23,9 @@ export interface UseTutorPreferences {
 function rowToPrefs(row: Record<string, unknown>): AIPreferences {
   const personality = (row.personality_preset as string | undefined) ?? BASE_DEFAULTS.personalityPreset;
   const prefs: AIPreferences = {
-    teacherName:        migrateName((row.teacher_name as string) ?? BASE_DEFAULTS.teacherName),
+    // Identity is fixed — never trust the stored value (may hold legacy names
+    // like "Alex" or "Lemon AI" from before the app's rename).
+    teacherName:        ASSISTANT_NAME,
     voice:              (row.voice                as string)  ?? BASE_DEFAULTS.voice,
     accent:             (row.accent               as AIPreferences['accent'])      ?? BASE_DEFAULTS.accent,
     speechPace:         (row.speech_pace          as AIPreferences['speechPace'])  ?? BASE_DEFAULTS.speechPace,
@@ -100,11 +96,12 @@ export function useTutorPreferences(): UseTutorPreferences {
           const rawRow = prefsResult.data as Record<string, unknown>;
           const rawName = rawRow.teacher_name as string | undefined;
           const fromDb = rowToPrefs(rawRow);
-          // One-time migration: if DB contains a legacy name, persist the corrected value immediately.
-          if (rawName && LEGACY_NAME_MAP[rawName]) {
+          // Self-heal: if the stored row still holds a stale/legacy name, persist the
+          // fixed identity back immediately so old data doesn't keep reappearing.
+          if (rawName && rawName !== ASSISTANT_NAME) {
             supabase
               .from('ai_conversation_preferences')
-              .update({ teacher_name: fromDb.teacherName })
+              .update({ teacher_name: ASSISTANT_NAME })
               .then(() => {});
           }
           setSaved(fromDb);

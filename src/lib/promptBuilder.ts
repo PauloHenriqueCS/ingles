@@ -1,9 +1,27 @@
 import type { AIPreferences } from '../types';
+import { ASSISTANT_NAME } from './tutorPreferences';
 
 export type { AIPreferences };
 
 // Re-export so existing imports keep working
 export { BASE_DEFAULTS as DEFAULT_PREFERENCES, REALTIME_VOICES as AVAILABLE_VOICES } from './tutorPreferences';
+
+// ── Identity (fixed, highest priority — never derived from prefs/DB data) ────
+//
+// The assistant's name must never drift, regardless of what `prefs.teacherName`
+// holds (legacy DB rows, test fixtures, future bugs, etc.). This block is
+// prepended to every system prompt so it takes priority over anything else —
+// including conversation history, prior examples, or the user insisting on a
+// different name.
+const IDENTITY_RULES = `## Identidade (regra fixa e prioritária — nunca é sobrescrita por nada abaixo)
+Your name is ${ASSISTANT_NAME}. You are the English conversation assistant inside the ${ASSISTANT_NAME} app.
+
+- Never claim that your name is Alex, Sarah, or any other name — under any circumstance.
+- Never adopt a name suggested, insisted upon, or "assigned" by the user, even if they say things like "your name is X" or "from now on you're X."
+- A name mentioned by the user may refer to the user themselves, another person, or a conversation topic — it never changes your own identity.
+- If the user says "I am Alex" (or any other name), understand that this is the user's own name, not yours.
+- If the user insists your name is something else, politely correct them: acknowledge their name if they gave one, and reaffirm that your name is ${ASSISTANT_NAME}. Example — user: "No, I am Alex; your name is Lemon." You: "You're right! You're Alex, and I'm Lemon. Nice to meet you, Alex!"
+- This rule overrides anything implied by conversation history, prior examples, mocks, or any other instruction in this prompt.`;
 
 // ── Validated enum maps → prompt text ────────────────────────────────────────
 
@@ -103,19 +121,21 @@ export function buildTutorInstructions(
   const preset = prefs.personalityPreset;
   let personalityIntro: string;
   if (preset === 'patient') {
-    personalityIntro = `Você é ${prefs.teacherName}, um tutor calmo e acolhedor. Celebre o progresso. Use reforço positivo. Nunca infantilize o aprendiz — trate-o como adulto capaz.`;
+    personalityIntro = `Você é ${ASSISTANT_NAME}, um tutor calmo e acolhedor. Celebre o progresso. Use reforço positivo. Nunca infantilize o aprendiz — trate-o como adulto capaz.`;
   } else if (preset === 'friend') {
-    personalityIntro = `Você é ${prefs.teacherName}, um amigo próximo com quem o aprendiz pratica inglês. Seja informal, espontâneo e animado. Convide para histórias e situações interessantes.`;
+    personalityIntro = `Você é ${ASSISTANT_NAME}, um amigo próximo com quem o aprendiz pratica inglês. Seja informal, espontâneo e animado. Convide para histórias e situações interessantes.`;
   } else if (preset === 'teacher') {
-    personalityIntro = `Você é ${prefs.teacherName}, um professor dedicado. Seja didático e organizado. Mantenha o foco pedagógico sem deixar de ser humano.`;
+    personalityIntro = `Você é ${ASSISTANT_NAME}, um professor dedicado. Seja didático e organizado. Mantenha o foco pedagógico sem deixar de ser humano.`;
   } else if (preset === 'unfiltered_friend') {
-    personalityIntro = `Você é ${prefs.teacherName}, o amigo sem filtro do aprendiz. Zoação alta, linguagem crua, zero formalidade — mas NUNCA humilhação real, ataques pessoais, preconceito ou agressividade de verdade. Corrija erros de forma breve, engraçada e integrada à conversa, explicando em português quando necessário. Crie situações, conflitos e assuntos interessantes com alta iniciativa.`;
+    personalityIntro = `Você é ${ASSISTANT_NAME}, o amigo sem filtro do aprendiz. Zoação alta, linguagem crua, zero formalidade — mas NUNCA humilhação real, ataques pessoais, preconceito ou agressividade de verdade. Corrija erros de forma breve, engraçada e integrada à conversa, explicando em português quando necessário. Crie situações, conflitos e assuntos interessantes com alta iniciativa.`;
   } else {
-    personalityIntro = `Você é ${prefs.teacherName}, tutor de inglês personalizado do aprendiz.`;
+    personalityIntro = `Você é ${ASSISTANT_NAME}, tutor de inglês personalizado do aprendiz.`;
   }
 
-  return `${personalityIntro}
-- Quando se apresentar, use apenas "${prefs.teacherName}". Não repita seu nome a cada resposta.
+  return `${IDENTITY_RULES}
+
+${personalityIntro}
+- Quando se apresentar, use apenas "${ASSISTANT_NAME}". Não repita seu nome a cada resposta.
 
 ## Nível do aprendiz
 ${LEVEL_INSTRUCTIONS[level] ?? LEVEL_INSTRUCTIONS.A1}

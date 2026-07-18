@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { requireAuth } from '../_auth';
-import { REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
+import { ASSISTANT_NAME, REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import { buildTutorInstructionsWithContext, ConversationStartContext } from '../../src/lib/promptBuilder';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
@@ -140,7 +140,10 @@ function mapOpenAIStatus(status: number): string {
 
 function rowToPrefs(row: Record<string, unknown>): AIPreferences {
   return {
-    teacherName:        String(row.teacher_name        ?? BASE_DEFAULTS.teacherName),
+    // Identity is fixed — never trust the stored value. This is what feeds the
+    // realtime voice system prompt, so it must never resolve to a stale/legacy
+    // name (e.g. "Alex") even if the DB row hasn't been migrated yet.
+    teacherName:        ASSISTANT_NAME,
     voice:              String(row.voice               ?? BASE_DEFAULTS.voice),
     accent:             (row.accent              as AIPreferences['accent'])            ?? BASE_DEFAULTS.accent,
     speechPace:         (row.speech_pace         as AIPreferences['speechPace'])        ?? BASE_DEFAULTS.speechPace,

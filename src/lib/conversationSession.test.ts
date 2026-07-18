@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 describe('conversationSession — source code must use GA endpoints', () => {
   it('backend does not use the Beta sessions endpoint', async () => {
-    const src = await import('../../api/conversation/session?raw');
+    const src = await import('../../api/conversation/[...slug]?raw');
     const code = (src as unknown as { default: string }).default;
     expect(code).not.toContain('/v1/realtime/sessions');
     expect(code).toContain('/v1/realtime/client_secrets');
@@ -25,7 +25,7 @@ describe('conversationSession — source code must use GA endpoints', () => {
 
 describe('conversationSession — VAD silence tolerance', () => {
   it('session config uses silence_duration_ms of at least 2000ms to allow natural pauses', async () => {
-    const src = await import('../../api/conversation/session?raw');
+    const src = await import('../../api/conversation/[...slug]?raw');
     const code = (src as unknown as { default: string }).default;
     // Extract the numeric value after "silence_duration_ms:"
     const match = code.match(/silence_duration_ms\s*:\s*(\d+)/);
@@ -35,14 +35,14 @@ describe('conversationSession — VAD silence tolerance', () => {
   });
 
   it('session config does NOT use the old 800ms silence_duration_ms', async () => {
-    const src = await import('../../api/conversation/session?raw');
+    const src = await import('../../api/conversation/[...slug]?raw');
     const code = (src as unknown as { default: string }).default;
     // Ensure the old too-short value is gone
     expect(code).not.toMatch(/silence_duration_ms\s*:\s*800\b/);
   });
 
   it('session config uses server_vad turn detection', async () => {
-    const src = await import('../../api/conversation/session?raw');
+    const src = await import('../../api/conversation/[...slug]?raw');
     const code = (src as unknown as { default: string }).default;
     expect(code).toContain("'server_vad'");
   });
@@ -53,7 +53,7 @@ describe('conversationSession — VAD silence tolerance', () => {
 vi.mock('../../api/_auth', () => ({ requireAuth: vi.fn() }));
 
 import { requireAuth } from '../../api/_auth';
-import handler from '../../api/conversation/session';
+import handler from '../../api/conversation/[...slug]';
 
 const MOCK_USER_ID = '123e4567-e89b-12d3-a456-426614174000';
 
@@ -63,6 +63,44 @@ function makeSupabase(prefsRow: Record<string, unknown> | null = null) {
       select: vi.fn().mockReturnValue({
         maybeSingle: vi.fn().mockResolvedValue({ data: prefsRow }),
       }),
+    }),
+  };
+}
+
+// ── Chainable Supabase mock that fully exercises rowToPrefs() ───────────────
+// The minimal `makeSupabase` above throws inside handleSession's try/catch
+// (its chain lacks .order()/.eq()), so `prefs` silently falls back to
+// BASE_DEFAULTS and rowToPrefs() never actually runs on the DB row. This
+// fuller mock resolves every chain call so we can exercise the real
+// teacher_name → instructions path end to end.
+function makeChainableSupabase(rows: {
+  prefs?: Record<string, unknown> | null;
+}) {
+  function makeChain(data: unknown) {
+    const chain: any = {
+      select:      () => chain,
+      eq:          () => chain,
+      order:       () => chain,
+      limit:       () => chain,
+      maybeSingle: () => Promise.resolve({ data }),
+      then:        (resolve: (v: { data: unknown }) => void) => resolve({ data }),
+    };
+    return chain;
+  }
+
+  let englishReviewsCalls = 0;
+
+  return {
+    from: vi.fn((table: string) => {
+      if (table === 'ai_conversation_preferences') return makeChain(rows.prefs ?? null);
+      if (table === 'english_learning_memory') return makeChain([]);
+      if (table === 'english_reviews') {
+        englishReviewsCalls++;
+        // 1st call: today's review (.maybeSingle()) — 2nd call: recent mistakes (.limit())
+        return makeChain(englishReviewsCalls === 1 ? null : []);
+      }
+      if (table === 'conversation_sessions') return makeChain([]);
+      return makeChain(null);
     }),
   };
 }
@@ -81,7 +119,7 @@ function makeRes() {
 }
 
 function makeReq(body = {}) {
-  return { method: 'POST', body, headers: {} };
+  return { method: 'POST', url: '/api/conversation/session', body, headers: {} };
 }
 
 function mockFetch(status: number, body: unknown) {
@@ -230,5 +268,49 @@ describe('conversationSession handler — GA format', () => {
     const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
     expect(opts.headers['OpenAI-Safety-Identifier']).not.toContain(MOCK_USER_ID);
     expect(opts.headers['OpenAI-Safety-Identifier']).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
+
+// ── Identity regression: stale/legacy teacher_name must never reach the model ─
+// Reproduces the reported bug: a DB row saved before the app's rename still
+// holds teacher_name: 'Alex'. The realtime voice prompt must always assert
+// the fixed "Lemon" identity regardless of that stored value.
+
+describe('conversationSession handler — assistant identity is fixed', () => {
+  it('sends "Lemon" identity instructions even when the DB row has a stale teacher_name', async () => {
+    vi.mocked(requireAuth).mockResolvedValue({
+      userId: MOCK_USER_ID,
+      supabase: makeChainableSupabase({ prefs: { teacher_name: 'Alex' } }) as any,
+    });
+    const globalFetch = mockFetch(200, { value: 'tok', expires_at: 9999, session: { id: 'x' } });
+    vi.stubGlobal('fetch', globalFetch);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(200);
+    const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string>; body: string }];
+    const sentBody = JSON.parse(opts.body as unknown as string);
+    const instructions = sentBody.session.instructions as string;
+
+    expect(instructions).toContain('Your name is Lemon');
+    expect(instructions).not.toMatch(/Você é Alex\b/);
+    expect(instructions).not.toContain('Alex, um');
+  });
+
+  it('sends "Lemon" identity instructions when there is no preferences row yet', async () => {
+    vi.mocked(requireAuth).mockResolvedValue({
+      userId: MOCK_USER_ID,
+      supabase: makeChainableSupabase({ prefs: null }) as any,
+    });
+    const globalFetch = mockFetch(200, { value: 'tok', expires_at: 9999, session: { id: 'x' } });
+    vi.stubGlobal('fetch', globalFetch);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string>; body: string }];
+    const sentBody = JSON.parse(opts.body as unknown as string);
+    expect((sentBody.session.instructions as string)).toContain('Your name is Lemon');
   });
 });

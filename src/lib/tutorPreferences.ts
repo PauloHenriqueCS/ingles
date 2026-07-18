@@ -1,6 +1,16 @@
 import type { AIPreferences } from '../types';
 import { DEFAULT_CONVERSATION_GOAL_MINUTES } from './conversationGoal';
 
+// ── Assistant identity ────────────────────────────────────────────────────────
+//
+// The assistant's name is fixed and non-configurable: it is always "Lemon".
+// This is the single source of truth — every place that needs the assistant's
+// name (system prompt, UI labels, DB defaults) must read it from here instead
+// of trusting `teacher_name` values coming from the database, since older rows
+// may still contain legacy names ("Alex", "Lemon AI") from before the app was
+// renamed. See promptBuilder.ts for how this is enforced in the system prompt.
+export const ASSISTANT_NAME = 'Lemon';
+
 // ── Voice catalog (OpenAI Realtime API) ──────────────────────────────────────
 
 export interface VoiceEntry {
@@ -151,7 +161,7 @@ export const DETAIL_LABELS: Record<AIPreferences['correctionDetail'], { label: s
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
 export const BASE_DEFAULTS: AIPreferences = {
-  teacherName: 'Lemon',
+  teacherName: ASSISTANT_NAME,
   voice: 'coral',
   accent: 'american',
   speechPace: 'slow',
