@@ -223,6 +223,7 @@ FORMATOS DISPONÍVEIS (activityType):
 ${REVIEW_ACTIVITY_TYPES.join(' | ')}
 
 PROCESSO OBRIGATÓRIO (interno — não expor):
+PASSO 0: Verificar se a mensagem do usuário contém um "TEMA OBRIGATÓRIO". Se contiver, a nova situação (PASSO 2) deve girar em torno desse tema — isso tem prioridade sobre o tema original do grupo de revisão. Se não houver, escolha livremente (pode inclusive reaproveitar o contexto do tema original).
 PASSO 1: Ler todos os erros e entender o contexto original.
 PASSO 2: Identificar uma nova situação em que TODAS as palavras corrigidas caibam naturalmente.
 PASSO 3: Escolher um activityType DIFERENTE do último utilizado.
@@ -239,6 +240,7 @@ REGRAS ABSOLUTAS:
 6. Não expor raciocínio — apenas o JSON final.
 7. activityType deve ser da lista de formatos disponíveis.
 8. O campo reviewGroupId deve ser copiado exatamente como recebido.
+9. Se houver um TEMA OBRIGATÓRIO na mensagem do usuário, ele tem prioridade máxima sobre o tema original do grupo de revisão — a situação e a missão devem girar em torno do tema obrigatório, nunca do tema original. Isso NUNCA afeta requiredWords, que continua vindo exclusivamente dos erros do aluno.
 
 FORMATO DE RESPOSTA — somente JSON válido, sem markdown:
 
@@ -295,12 +297,26 @@ function buildReviewUserMessage(
   reviewGroup: ReviewGroupPayload,
   recentThemes: RecentThemeRow[],
   level: string,
-  attempt: number
+  attempt: number,
+  selectedTheme: string | null = null,
 ): string {
   const lines: string[] = [];
 
   lines.push('=== PERFIL DO ALUNO ===');
   lines.push(`Nível: ${level}`);
+
+  // User-requested theme — same contract as normal mode: when present, it
+  // overrides the review group's own originalTheme for the new scenario.
+  // It never touches requiredWords, which stays bound exclusively to the
+  // student's corrected errors regardless of theme.
+  if (selectedTheme) {
+    lines.push('');
+    lines.push('=== TEMA OBRIGATÓRIO ===');
+    lines.push(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${selectedTheme}.`);
+    lines.push('A nova situação criada para esta revisão deve ser centralizada nesse assunto, mesmo que o tema original do grupo de revisão abaixo seja outro.');
+    lines.push('Isso NUNCA afeta requiredWords: as palavras obrigatórias continuam sendo exatamente as corrigidas do aluno, apenas encaixadas numa situação sobre este tema.');
+    lines.push('Este tema tem prioridade máxima sobre o "Tema original" do grupo de revisão listado abaixo.');
+  }
 
   lines.push('');
   lines.push('=== GRUPO DE REVISÃO ===');
@@ -343,7 +359,11 @@ function buildReviewUserMessage(
 
   lines.push('');
   lines.push(`IMPORTANTE: O campo reviewGroupId deve ser exatamente: "${reviewGroup.group.id}"`);
-  lines.push('Siga os 6 passos e gere uma atividade de revisão natural e envolvente.');
+  if (selectedTheme) {
+    lines.push(`Siga os 6 passos. O TEMA OBRIGATÓRIO acima não é negociável — a situação criada deve girar em torno dele, não do tema original do grupo.`);
+  } else {
+    lines.push('Siga os 6 passos e gere uma atividade de revisão natural e envolvente.');
+  }
 
   return lines.join('\n');
 }
@@ -708,6 +728,23 @@ export function normalizeTheme(parsed: any): Record<string, unknown> {
   };
 }
 
+/**
+ * When the user explicitly picked a theme, force the mission's displayed
+ * context/tag to that theme's label. The AI's own `context` choice (or,
+ * in review mode, a leftover from the review group's unrelated
+ * originalTheme) must never override an explicit user selection — the tag
+ * shown in the UI has to reflect what the user picked, not an internal
+ * mission-structure code like "planning".
+ */
+export function applySelectedTopicOverride(
+  candidate: Record<string, unknown>,
+  selectedTheme: string | null,
+): void {
+  if (selectedTheme) {
+    candidate.context = selectedTheme;
+  }
+}
+
 export function parseRawContent(raw: string): any | null {
   try {
     return JSON.parse(raw);
@@ -1049,6 +1086,7 @@ export default async function handler(req: any, res: any) {
       }
 
       if (diagnosticTheme) {
+        applySelectedTopicOverride(diagnosticTheme, selectedTheme);
         // Salvar em generated_themes
         let diagnosticThemeId: string | null = null;
         try {
@@ -1145,7 +1183,8 @@ export default async function handler(req: any, res: any) {
                 { group, items },
                 recentThemes,
                 level,
-                attempt
+                attempt,
+                selectedTheme,
               ),
             },
           ],
@@ -1189,6 +1228,8 @@ export default async function handler(req: any, res: any) {
       safeLog('generate-theme', 'review_validation_failed', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma atividade de revisão válida. Tente novamente.');
     }
+
+    applySelectedTopicOverride(reviewTheme, selectedTheme);
 
     let themeId: string | null = null;
     try {
@@ -1361,6 +1402,8 @@ export default async function handler(req: any, res: any) {
   if (!theme) {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma missão diferente. Tente novamente.');
   }
+
+  applySelectedTopicOverride(theme, selectedTheme);
 
   // Persist to database
   let themeId: string | null = null;

@@ -57,6 +57,7 @@ import handler, {
   isTooSimilar,
   normalizeReviewTheme,
   validateReviewTheme,
+  applySelectedTopicOverride,
 } from '../../api/generate-theme';
 
 // ── Shared test helpers ───────────────────────────────────────────────────────
@@ -277,6 +278,22 @@ describe('normalizeTheme', () => {
   it('preserves grammarTips when it is an object', () => {
     const tips = { 'Present Perfect': 'use para experiências.' };
     expect(normalizeTheme({ grammarTips: tips }).grammarTips).toEqual(tips);
+  });
+});
+
+// ── applySelectedTopicOverride ────────────────────────────────────────────────
+
+describe('applySelectedTopicOverride', () => {
+  it('força context para o tema selecionado, mesmo que a IA tenha escolhido outro', () => {
+    const candidate: Record<string, unknown> = { context: 'trabalho' };
+    applySelectedTopicOverride(candidate, 'Música');
+    expect(candidate.context).toBe('Música');
+  });
+
+  it('não mexe em context quando nenhum tema foi selecionado (aleatório)', () => {
+    const candidate: Record<string, unknown> = { context: 'trabalho' };
+    applySelectedTopicOverride(candidate, null);
+    expect(candidate.context).toBe('trabalho');
   });
 });
 
@@ -747,6 +764,25 @@ describe('handler — tema selecionado (Missão do dia)', () => {
     await handler(req, res);
     expect(res._status).toBe(200);
   });
+
+  it('a tag/context final reflete o tema selecionado mesmo que a IA retorne um context diferente', async () => {
+    mockCreate.mockImplementation(() =>
+      aiResponse(JSON.stringify({ ...JSON.parse(VALID_THEME_JSON), context: 'trabalho' })),
+    );
+    const req = makeReq({ body: { theme: 'music' } });
+    const res = makeRes();
+    await handler(req, res);
+    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
+    expect(theme.context).toBe('Música');
+  });
+
+  it('sem tema selecionado, o context retornado continua sendo o que a IA escolheu (sem override)', async () => {
+    const req = makeReq({ body: {} });
+    const res = makeRes();
+    await handler(req, res);
+    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
+    expect(theme.context).toBe('trabalho');
+  });
 });
 
 // ── handler — cache diagnóstico não pode ignorar um novo tema selecionado ────
@@ -975,5 +1011,99 @@ describe('handler — modo revisão', () => {
     const res = makeRes();
     await handler(req, res);
     expect(res._status).toBe(500);
+  });
+});
+
+// ── handler — modo revisão IGNORAVA o tema selecionado (bug real) ────────────
+//
+// Bug real: quando uma revisão espaçada está pendente, o frontend força
+// mode='review' em toda solicitação, independente do tema escolhido pelo
+// usuário no seletor. O branch de revisão do endpoint nunca lia o campo
+// `theme` — a missão era construída só a partir dos erros corrigidos e do
+// `reviewGroup.group.originalTheme` (ex: uma entrada antiga sobre viagem),
+// ignorando silenciosamente "Música". Corrigido: buildReviewUserMessage
+// agora recebe o tema selecionado e injeta um bloco TEMA OBRIGATÓRIO, e o
+// context final da missão é forçado deterministicamente no servidor.
+
+describe('handler — modo revisão com tema selecionado (Missão do dia ignorava o tema)', () => {
+  const oldTravelReviewGroup = {
+    group: {
+      id: 'group-uuid-456',
+      originalTheme: 'Planejando uma viagem para Paris',
+      sourceEntryDate: '2026-01-10',
+      reviewLevel: 1,
+    },
+    items: [
+      { originalValue: 'therefor', correctedValue: 'therefore', explanation: 'Conector causal', originalSentence: null },
+      { originalValue: 'altough', correctedValue: 'although', explanation: 'Conector de contraste', originalSentence: null },
+    ],
+  };
+
+  beforeEach(() => {
+    // Simula a IA ainda se apoiando no contexto de viagem do grupo de
+    // revisão (title/context) — prova que é o override determinístico, e
+    // não apenas o prompt, que garante o resultado final.
+    mockCreate.mockImplementation(() =>
+      aiResponse(JSON.stringify({
+        ...JSON.parse(REVIEW_GROUP_JSON),
+        title: 'Planejando uma Viagem dos Sonhos',
+        context: 'viagens',
+      })),
+    );
+  });
+
+  it('injeta TEMA OBRIGATÓRIO no prompt de revisão quando um tema é selecionado', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Música.');
+    expect(userMessage).toContain('mesmo que o tema original do grupo de revisão abaixo seja outro');
+  });
+
+  it('deixa explícito no prompt que requiredWords não é afetado pelo tema', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).toContain('Isso NUNCA afeta requiredWords');
+  });
+
+  it('a missão antiga de viagem não é reaproveitada: a tag final reflete Música, não o tema original do grupo', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(200);
+    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
+    expect(theme.context).toBe('Música');
+    expect(theme.context).not.toBe('viagens');
+  });
+
+  it('requiredWords continua vindo exatamente dos erros do aluno mesmo com tema selecionado', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
+    expect(theme.requiredWords).toEqual(['therefore', 'although']);
+  });
+
+  it('sem tema selecionado, o modo revisão mantém o comportamento anterior (sem bloco de tema obrigatório)', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup } });
+    await handler(req, makeRes());
+
+    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+  });
+
+  it('funciona para todo o catálogo canônico de temas também no modo revisão', async () => {
+    for (const t of WRITING_THEMES) {
+      mockCreate.mockClear();
+      const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: t.value } });
+      await handler(req, makeRes());
+      const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
+      expect(userMessage).toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
+    }
   });
 });
