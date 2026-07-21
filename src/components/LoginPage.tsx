@@ -1,6 +1,14 @@
 import { useState } from 'react';
-import { Mail, BookOpen } from 'lucide-react';
+import { Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+function LemonMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M5 4H9V16H19V20H5V4Z" />
+    </svg>
+  );
+}
 
 type Mode = 'login' | 'signup';
 type State = 'idle' | 'loading' | 'error' | 'signup_sent';
@@ -80,9 +88,9 @@ export default function LoginPage() {
       <div className="max-w-sm w-full space-y-6">
         <div className="text-center space-y-1">
           <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2">
-            <BookOpen className="w-6 h-6 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+            <LemonMark className="w-6 h-6 text-blue-400 shrink-0" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-100">English Writing</h1>
+          <h1 className="text-2xl font-bold text-slate-100">Lemon</h1>
           <p className="text-slate-400 text-sm">
             {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}
           </p>
