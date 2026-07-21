@@ -16,6 +16,7 @@ import {
   type CostCalculationOutcome,
 } from '../_ai-gateway/cost-calculator';
 import { calculateLineCostUsd, sumDecimalStrings } from '../_ai-gateway/decimal';
+import { estimateTtsCharacters, estimateAudioSecondsCeiling } from '../_ai-gateway/estimators';
 import type { PricingRepositoryInterface, PriceLookupResult } from '../_ai-gateway/pricing-repository';
 import type { UsageEventForCosting, UsageMetricForCosting } from '../_ai-gateway/usage-repository';
 
@@ -558,5 +559,167 @@ describe('Realtime audio tokens — split with no double charge (same rule as te
     const first = await calculateEventCost(realtimeEvent(), metrics, repo, noopLogger);
     const second = await calculateEventCost(realtimeEvent(), metrics, repo, noopLogger);
     expect(second.totalCostUsd).toBe(first.totalCostUsd);
+  });
+});
+
+// ── 17. TTS characters + Azure pronunciation audio_seconds ─────────────────────
+// Regression guard for migration 20260721000000_ai_gateway_provider_pricing_
+// tts_and_azure_speech — the 6 features previously blocked by missing_price
+// (conversation.preview_tts, tts.synthesize, listening.story_session_tts,
+// listening.two_part_tts, listening.episode_synthesize_audio,
+// pronunciation.assess_text). Prices mirrored exactly from that migration —
+// never hand-picked round numbers — so a rounding regression in
+// calculateLineCostUsd/rationalToDecimalString would be caught here even
+// though every fixture value in tests 1–16 above divides evenly.
+
+const TTS_AND_AZURE_SPEECH_PRICES: PriceRow[] = [
+  { provider: 'openai', service: 'audio.speech', model: 'tts-1', metricKey: 'tts_characters', currency: 'USD', pricePerUnit: '15.00', unitSize: '1000000', validFrom: '2026-07-21T00:00:00.000Z', validUntil: null },
+  { provider: 'azure', service: 'tts_rest', model: null, metricKey: 'tts_characters', currency: 'USD', pricePerUnit: '15.00', unitSize: '1000000', validFrom: '2026-07-21T00:00:00.000Z', validUntil: null },
+  { provider: 'azure', service: 'tts_sdk', model: null, metricKey: 'tts_characters', currency: 'USD', pricePerUnit: '15.00', unitSize: '1000000', validFrom: '2026-07-21T00:00:00.000Z', validUntil: null },
+  { provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, metricKey: 'audio_seconds', currency: 'USD', pricePerUnit: '1.30', unitSize: '3600', validFrom: '2026-07-21T00:00:00.000Z', validUntil: null },
+];
+
+describe('conversation.preview_tts — openai tts-1, per-character', () => {
+  it('bills tts_characters at USD 15.00 / 1M characters', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'openai', service: 'audio.speech', model: 'tts-1', startedAt: '2026-07-21T00:00:00.000Z' }),
+      [
+        metric('m-tts', 'tts_characters', 137),
+        metric('m-requests', 'provider_requests', 1, false),
+      ],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    const tts = outcome.metricResults.find((m) => m.metricKey === 'tts_characters')!;
+    expect(tts.billableQuantity).toBe(137);
+    expect(tts.calculatedCostUsd).toBe('0.002055');
+    expect(outcome.allBillableMetricsPriced).toBe(true);
+    expect(outcome.totalCostUsd).toBe('0.002055');
+  });
+});
+
+describe('azure TTS — tts_rest and tts_sdk are distinct price rows despite an identical rate', () => {
+  it('tts.synthesize (service=tts_rest) bills 3000 characters at USD 15.00/1M', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'tts_rest', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [metric('m-tts', 'tts_characters', 3000)],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBe('0.045');
+  });
+
+  it('listening.episode_synthesize_audio (service=tts_sdk) bills 600 characters at the same USD 15.00/1M rate', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'tts_sdk', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [metric('m-tts', 'tts_characters', 600)],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBe('0.009');
+  });
+
+  it('a service not present in provider_pricing (e.g. a typo) never falls back to a sibling azure TTS row', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'tts_websocket', model: null }), // no such row registered
+      [metric('m-tts', 'tts_characters', 3000)],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBeNull();
+    expect(outcome.allBillableMetricsPriced).toBe(false);
+  });
+});
+
+describe('pronunciation.assess_text — azure audio_seconds, non-terminating decimal rounding', () => {
+  it('47 seconds at USD 1.30/hour rounds correctly at the 12-decimal boundary (repeating fraction)', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [
+        metric('m-audio', 'audio_seconds', 47),
+        metric('m-requests', 'provider_requests', 1, false),
+      ],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    const audio = outcome.metricResults.find((m) => m.metricKey === 'audio_seconds')!;
+    // 47 * 1.30 / 3600 = 0.0169722222222... — a genuinely non-terminating
+    // decimal, not a fixture chosen to divide evenly; exercises the same
+    // half-up rounding at the 12th decimal that rationalToDecimalString
+    // applies to every other price in this file.
+    expect(audio.calculatedCostUsd).toBe('0.016972222222');
+    expect(outcome.totalCostUsd).toBe('0.016972222222');
+  });
+
+  it('1 second — smallest billable unit — is still priced, never truncated to zero', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [metric('m-audio', 'audio_seconds', 1)],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBe('0.000361111111');
+  });
+
+  it('a 10-minute (600s) assessment totals USD 0.216666666667', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [metric('m-audio', 'audio_seconds', 600)],
+      makeFakePricingRepository(TTS_AND_AZURE_SPEECH_PRICES),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBe('0.216666666667');
+  });
+});
+
+describe('missing price — the 6 previously-blocked features before this migration existed', () => {
+  it('conversation.preview_tts with no tts-1 price row registered stays unpriced, never silently zero', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'openai', service: 'audio.speech', model: 'tts-1' }),
+      [metric('m-tts', 'tts_characters', 137)],
+      makeFakePricingRepository([]), // simulates the pre-migration state: zero rows
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBeNull();
+    expect(outcome.metricResults[0].pricingId).toBeNull();
+    expect(outcome.allBillableMetricsPriced).toBe(false);
+    expect(outcome.totalCostUsd).toBeNull();
+  });
+
+  it('pronunciation.assess_text with no azure price row registered stays unpriced', async () => {
+    const outcome = await calculateEventCost(
+      makeEvent({ provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, startedAt: '2026-07-21T00:00:00.000Z' }),
+      [metric('m-audio', 'audio_seconds', 47)],
+      makeFakePricingRepository([]),
+      noopLogger,
+    );
+    expect(outcome.metricResults[0].calculatedCostUsd).toBeNull();
+    expect(outcome.allBillableMetricsPriced).toBe(false);
+  });
+});
+
+describe('estimated cost and effective cost share the same normalized unit', () => {
+  // The pre-call estimator (api/_ai-gateway/estimators.ts) and the real
+  // pricing row it will later be reconciled against must agree on the exact
+  // metricKey — otherwise a reservation could size itself against one unit
+  // (e.g. "characters") while the bill is actually computed against another,
+  // silently under- or over-protecting the budget.
+  it('estimateTtsCharacters produces the same metricKey the tts-1/tts_rest/tts_sdk price rows key on', () => {
+    expect(estimateTtsCharacters('Hello there.', false).metricKey).toBe('tts_characters');
+    expect(TTS_AND_AZURE_SPEECH_PRICES.filter((p) => p.metricKey === 'tts_characters')).toHaveLength(3);
+  });
+
+  it('estimateAudioSecondsCeiling produces the same metricKey the pronunciation_assessment_sdk price row keys on, and the real metric it reconciles against carries the identical quantity unit (seconds)', () => {
+    const estimate = estimateAudioSecondsCeiling(60);
+    expect(estimate.metricKey).toBe('audio_seconds');
+
+    const outcome_estimated = calculateLineCostUsd(estimate.quantity, '1.30', '3600');
+    // Real event later reports the actual recorded duration in the SAME
+    // unit (seconds) — never minutes, never a fraction of the ceiling —
+    // so both the pre-call estimate and the post-call actual run through
+    // calculateLineCostUsd with an identical unit_size (3600 = seconds/hour).
+    const outcome_actual = calculateLineCostUsd(47, '1.30', '3600');
+    expect(outcome_estimated).toBe('0.021666666667'); // 60s ceiling
+    expect(outcome_actual).toBe('0.016972222222');     // 47s actually recorded — same unit, different quantity
   });
 });
