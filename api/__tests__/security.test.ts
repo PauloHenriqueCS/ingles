@@ -195,6 +195,37 @@ vi.mock('../_rateLimit', () => ({
   },
 }));
 
+// compare-rewrite.ts and grammar-explanation.ts both call
+// getCurrentUserPlanEntitlements() before their provider/validation logic —
+// mocked permissively here so this file's request-shape assertions (method,
+// auth, payload size, rate limit, missing fields) stay isolated from plan
+// resolution, which has its own dedicated coverage elsewhere
+// (compare-rewrite-gateway.test.ts / grammar-explanation.test.ts).
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: vi.fn().mockResolvedValue({
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: {
+      enabled: true,
+      themeGenerations: { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Infinity, period: 'day', state: 'unlimited', canStart: true },
+      reviews: { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Infinity, period: 'day', state: 'unlimited', canStart: true },
+      maxCharactersPerText: 0, maxCharactersUnlimited: true,
+    },
+    listening: { enabled: true, stories: { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Infinity, period: 'day', state: 'unlimited', canStart: true } },
+    pronunciation: {
+      enabled: true,
+      evaluations: { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Infinity, period: 'day', state: 'unlimited', canStart: true },
+      maxRecordingSeconds: 0, maxRecordingUnlimited: true,
+    },
+    conversation: {
+      enabled: true,
+      monthlyTime: { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Infinity, period: 'month', state: 'unlimited', canStart: true },
+      maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0,
+    },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  }),
+}));
+
 import * as _auth from '../_auth';
 import * as _rateLimit from '../_rateLimit';
 

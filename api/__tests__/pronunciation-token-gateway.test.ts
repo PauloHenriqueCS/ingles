@@ -5,11 +5,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockIssueToken, mockRequireAuth, gw } = vi.hoisted(() => {
+const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => {
   const mockIssueToken = vi.fn();
   const mockRequireAuth = vi.fn();
-  return { mockIssueToken, mockRequireAuth, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
+  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -24,6 +26,9 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('openai', () => ({ default: vi.fn() }));
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 import handler from '../pronunciation-training/[...slug]';
 import { AzureSpeechError } from '../_azure-speech';
@@ -47,12 +52,44 @@ function makeRes() {
   return res;
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockIssueToken.mockResolvedValue({ token: 'ephemeral-token-xyz', region: 'eastus', expiresInSeconds: 540 });
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
+});
+
+describe('plan entitlements gate', () => {
+  it('blocks with FEATURE_DISABLED when pronunciation.enabled is false, before issuing a token', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.pronunciation.enabled = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('FEATURE_DISABLED');
+    expect(mockIssueToken).not.toHaveBeenCalled();
+  });
 });
 
 describe('LEGACY mode', () => {

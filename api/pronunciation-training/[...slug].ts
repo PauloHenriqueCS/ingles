@@ -7,6 +7,34 @@ import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { checkFeatureConfigError } from '../_entitlements/require-feature-access';
+import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
+
+// "Treinar pronúncia" (PronunciationTrainingView) is a standalone practice
+// flow, distinct from the plan-metered pronunciation.evaluations quota used
+// by api/pronunciation/[...slug].ts's official assessment (start/complete).
+// It was previously reachable with NO entitlement check at all — a plan with
+// pronunciation.enabled=false could still call generate-text (OpenAI cost)
+// and token (Azure Speech STS) directly, bypassing the "disabled_by_plan"
+// lock HomePage shows for the same card. This gate re-applies only the
+// on/off flag: per-attempt counting (analyses/day) is intentionally left
+// alone here since the product only defines that limit for the *official*
+// evaluation path — see final audit report for the open decision on whether
+// standalone practice should also carry its own counted limit.
+async function requirePronunciationEnabled(userId: string): Promise<{ status: number; code: string; message: string } | null> {
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return { status: 500, code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' };
+  }
+  const configErrorCheck = checkFeatureConfigError(entitlements.pronunciation.evaluations);
+  if (configErrorCheck) return { status: 500, code: configErrorCheck.code!, message: configErrorCheck.message! };
+  if (!entitlements.pronunciation.enabled) {
+    return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
+  }
+  return null;
+}
 
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
@@ -103,6 +131,10 @@ async function handleGenerateText(req: any, res: any) {
   if (!auth) return;
   const { supabase } = auth;
 
+  const accessDenial = await requirePronunciationEnabled(auth.userId);
+  if (accessDenial) return jsonError(res, accessDenial.status, accessDenial.code, accessDenial.message);
+  if (!await applyRateLimit(res, auth.userId, 'pronunciation-training-generate-text')) return;
+
   let userLevel = 'A2';
   try {
     const { data } = await supabase.from('english_learning_memory').select('current_level').eq('user_id', auth.userId).order('updated_at', { ascending: false }).limit(1).maybeSingle();
@@ -176,6 +208,11 @@ async function handleToken(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
   if (!auth) return;
+
+  const accessDenial = await requirePronunciationEnabled(auth.userId);
+  if (accessDenial) return jsonError(res, accessDenial.status, accessDenial.code, accessDenial.message);
+  if (!await applyRateLimit(res, auth.userId, 'pronunciation-training-token')) return;
+
   const gatewayDeps = getProductionDeps();
   try {
     const { token, region, expiresInSeconds } = await executeAiGatewayCall(

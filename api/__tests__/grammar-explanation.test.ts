@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
 // ── Hoisted values — available inside vi.mock factories ───────────────────────
 
@@ -19,6 +20,7 @@ const {
   mockPolicyResolvePolicy,
   mockRequireAuth,
   mockApplyRateLimit,
+  mockGetCurrentUserPlanEntitlements,
   mockDeps,
 } = vi.hoisted(() => {
   const mockCreate = vi.fn();
@@ -30,6 +32,7 @@ const {
   const mockPolicyResolvePolicy = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
+  const mockGetCurrentUserPlanEntitlements = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
@@ -72,6 +75,7 @@ const {
     mockPolicyResolvePolicy,
     mockRequireAuth,
     mockApplyRateLimit,
+    mockGetCurrentUserPlanEntitlements,
     mockDeps,
   };
 });
@@ -93,6 +97,9 @@ vi.mock('openai', () => ({
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: mockApplyRateLimit }));
+vi.mock('../_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
 
 // ── Handler import ────────────────────────────────────────────────────────────
 
@@ -148,6 +155,22 @@ function makeRes() {
   return res;
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -163,6 +186,7 @@ beforeEach(() => {
   mockInsertMetrics.mockResolvedValue(undefined);
   mockRequireAuth.mockResolvedValue({ userId: 'user-123', supabase: makeSupabaseMock() });
   mockApplyRateLimit.mockResolvedValue(true);
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   (mockDeps.clock as ReturnType<typeof vi.fn>).mockReturnValue(1000);
   (mockDeps.uuidGen as ReturnType<typeof vi.fn>).mockReturnValue('test-uuid');
 
@@ -429,5 +453,24 @@ describe('cache hit', () => {
     await handler(makeReq(), res);
     expect(res._status()).toBe(200);
     expect(res._body()).toEqual({ content: GRAMMAR_CONTENT, cached: true });
+  });
+});
+
+describe('plan entitlements gate', () => {
+  it('blocks with FEATURE_DISABLED when writing.enabled is false, before the cache lookup or OpenAI', async () => {
+    const entitlements = permissiveEntitlements();
+    entitlements.writing.enabled = false;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+    // Even a cache hit must never be reachable — writing.enabled gates the
+    // whole endpoint, cached content included (see production comment).
+    mockMaybeSingle.mockResolvedValue({ data: { content: GRAMMAR_CONTENT }, error: null });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('FEATURE_DISABLED');
+    expect(mockMaybeSingle).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });

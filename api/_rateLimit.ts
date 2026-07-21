@@ -28,6 +28,9 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'conversation-preview': { windowSeconds: 3600, maxRequests: 30  },
   'pronunciation-start':  { windowSeconds: 3600, maxRequests: 60  },
   'plan-entitlements':    { windowSeconds: 60,   maxRequests: 30  },
+  'tts':                                { windowSeconds: 3600, maxRequests: 300 },
+  'pronunciation-training-generate-text': { windowSeconds: 3600, maxRequests: 25  },
+  'pronunciation-training-token':         { windowSeconds: 3600, maxRequests: 60  },
 };
 
 // ── Service role client (singleton) ──────────────────────────────────────────

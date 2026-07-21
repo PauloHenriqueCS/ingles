@@ -5,6 +5,9 @@ import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, s
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
+import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
+import { checkFeatureConfigError } from './_entitlements/require-feature-access';
+import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -197,6 +200,26 @@ export default async function handler(req: any, res: any) {
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId } = auth;
+
+  // Rewrite V2 (compare + final correction) is a continuation of a review
+  // the user already started under writing.reviews' quota — only the
+  // feature's on/off flag is re-checked here, never a fresh reviews.canStart,
+  // so an already-authorized V2 attempt is never blocked mid-flow by the
+  // review counter. A plan with writing entirely disabled must still never
+  // reach this endpoint, cached-final-text backfill mode included.
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  const writingConfigErrorCheck = checkFeatureConfigError(entitlements.writing.reviews);
+  if (writingConfigErrorCheck) {
+    return jsonError(res, 500, writingConfigErrorCheck.code!, writingConfigErrorCheck.message!);
+  }
+  if (!entitlements.writing.enabled) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de comparação não está configurado.');

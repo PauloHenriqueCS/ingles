@@ -38,6 +38,55 @@ const ALLOWED_STORY_THEMES = new Set([
   'health_wellbeing', 'money_shopping', 'mystery_adventure',
 ]);
 
+// ─── Entitlement gates for the AI-generation entry points ────────────────────
+// The plan/limit check must be re-run at every route that actually triggers
+// story generation, not only at GET /today (handleToday) — otherwise a
+// client that calls /generate, /story/generate, or /on-demand/* directly
+// (skipping /today entirely) pays no attention to plan or the daily/monthly
+// limit at all.
+
+interface ListeningAccessDenial { status: number; code: string; message: string }
+
+/** Gates STARTING a new generation — same enabled+canStart check as handleToday. */
+async function checkListeningCanStart(userId: string): Promise<ListeningAccessDenial | null> {
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return { status: 500, code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' };
+  }
+  const configErrorCheck = checkFeatureConfigError(entitlements.listening.stories);
+  if (configErrorCheck) return { status: 500, code: configErrorCheck.code!, message: configErrorCheck.message! };
+  if (!entitlements.listening.enabled) {
+    return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
+  }
+  if (!entitlements.listening.stories.canStart) {
+    const code = entitlements.listening.stories.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
+    return { status: 403, code, message: ENTITLEMENT_MESSAGES.listeningStoriesExhausted };
+  }
+  return null;
+}
+
+/** Gates CONTINUING a generation already started (process-next/retry) — only
+ *  the on/off flag, never canStart: the daily/monthly limit already gated
+ *  the original /on-demand/start call, and re-applying it here would block
+ *  a session the user was already correctly granted (same rule handleToday
+ *  documents for "continuing or reopening today's already-active story"). */
+async function checkListeningEnabled(userId: string): Promise<ListeningAccessDenial | null> {
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return { status: 500, code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' };
+  }
+  const configErrorCheck = checkFeatureConfigError(entitlements.listening.stories);
+  if (configErrorCheck) return { status: 500, code: configErrorCheck.code!, message: configErrorCheck.message! };
+  if (!entitlements.listening.enabled) {
+    return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
+  }
+  return null;
+}
+
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
 
 async function handleEpisode(req: any, res: any) {
@@ -493,6 +542,9 @@ async function handleStoryGenerate(req: any, res: any) {
   if (!auth) return;
   const { userId } = auth;
 
+  const listeningAccessCheck = await checkListeningCanStart(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
@@ -551,6 +603,9 @@ async function handleListeningGenerate(req: any, res: any) {
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId } = auth;
+
+  const listeningAccessCheck = await checkListeningCanStart(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
 
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
@@ -650,6 +705,10 @@ async function handleOnDemandStart(req: any, res: any) {
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { userId } = auth;
+
+  const listeningAccessCheck = await checkListeningCanStart(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
   try {
     const serviceClient = getListeningServiceClient();
     const localDate = resolveListeningActivityDate();
@@ -700,6 +759,10 @@ async function handleOnDemandProcessNext(req: any, res: any) {
   if (!sessionId || !/^[0-9a-f-]{36}$/i.test(String(sessionId))) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
   }
+
+  const listeningAccessCheck = await checkListeningEnabled(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
   try {
     const serviceClient = getListeningServiceClient();
     const result = await processListeningGenerationStep(String(sessionId), userId, serviceClient);
@@ -746,6 +809,10 @@ async function handleOnDemandRetry(req: any, res: any) {
   if (!sessionId || !/^[0-9a-f-]{36}$/i.test(String(sessionId))) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'sessionId inválido.');
   }
+
+  const listeningAccessCheck = await checkListeningEnabled(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
   try {
     const serviceClient = getListeningServiceClient();
     const result = await retryListeningGeneration(String(sessionId), userId, serviceClient);

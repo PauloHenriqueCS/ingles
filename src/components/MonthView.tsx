@@ -7,6 +7,7 @@ import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conver
 import { getPronunciationDatesForMonth, computeDailyProgress, type ActiveDailyFeatures } from '../lib/dailyProgress';
 import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import DailyProgressIcons from './DailyProgressIcons';
 import DailyProgressModal from './DailyProgressModal';
 
@@ -268,7 +269,11 @@ export default function MonthView({
                   return (
                     <button
                       key={key}
-                      onClick={onClick}
+                      onClick={() => {
+                        if (!enabled) { window.alert(ENTITLEMENT_MESSAGES.featureUnavailable); return; }
+                        onClick?.();
+                      }}
+                      aria-disabled={!enabled}
                       className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-slate-700/40 active:bg-slate-700/60 transition-colors text-left"
                     >
                       <span className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 border-2 transition-colors ${

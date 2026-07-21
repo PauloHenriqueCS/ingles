@@ -9,6 +9,7 @@
 
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, safeLog, jsonError, PAYLOAD_LIMITS } from './_helpers';
+import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTtsCharacters, estimateProviderRequests } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
@@ -116,6 +117,8 @@ export default async function handler(req: any, res: any) {
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
+
+  if (!await applyRateLimit(res, auth.userId, 'tts')) return;
 
   // ── Input validation ───────────────────────────────────────────────────────
 
