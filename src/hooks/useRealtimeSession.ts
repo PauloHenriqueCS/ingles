@@ -60,31 +60,22 @@ export interface UseRealtimeSession {
 // server-provided value (see Step 2 below) is authoritative when present;
 // this constant matches its default so behavior is unchanged either way.
 const DEFAULT_MAX_SESSION_MS = 30 * 60 * 1000;
-const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 
 // How often to poll /api/conversation/session-control while a session is
 // active and the gateway bridge is live (never in legacy mode — see
-// gatewaySessionIdRef below). Fase 9's ceiling is "≤ every 5s".
+// gatewaySessionIdRef below). Fase 9's ceiling is "≤ every 5s". This same
+// poll also renews the server-side heartbeat/lease (see
+// api/conversation/[...slug].ts's handleSessionControl) that the sweep job
+// uses to detect an abandoned session.
 const SESSION_CONTROL_POLL_MS = 5000;
 
-// Etapa 11 correction — best-effort call_id capture. OpenAI's Realtime API
-// documents a Location response header on POST /v1/realtime/calls
-// containing the call id, which a server-side hangup endpoint
-// (POST /v1/realtime/calls/{call_id}/hangup) can later use. Whether the
-// browser can actually READ that header depends on OpenAI exposing it via
-// CORS Access-Control-Expose-Headers — NOT verified live in this
-// environment (no way to make a real, billed Realtime connection from this
-// session). If unexposed, response.headers.get('Location') simply returns
-// null and the session proceeds exactly as before this change — this
-// capture is purely additive, never a precondition for the connection to
-// work. Allowlist-validated (technical id charset only) before ever being
-// sent anywhere.
-const CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
-function extractCallId(locationHeader: string | null): string | undefined {
-  if (!locationHeader) return undefined;
-  const lastSegment = locationHeader.split('/').filter(Boolean).pop();
-  return lastSegment && CALL_ID_RE.test(lastSegment) ? lastSegment : undefined;
-}
+// Etapa 11 — unified interface. Step 5 below POSTs the SDP offer to this
+// backend endpoint instead of straight to OpenAI: the backend makes that
+// call itself (server-to-server, real reliable read of the Location
+// response header) and captures/persists call_id atomically, removing the
+// old dependency on this browser being able to read that header via CORS
+// (never verified live, and no longer needed at all).
+const WEBRTC_CONNECT_URL = '/api/conversation/webrtc-connect';
 
 /** Base interval (ms per character) for the paced caption reveal at 1× speed.
  *  Scaled by playbackRate: slower speed → more ms per char → captions stay in sync. */
@@ -145,7 +136,6 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   // Fase 9 — server-authoritative session ceiling + mid-session control poll.
   const maxSessionMsRef          = useRef<number>(DEFAULT_MAX_SESSION_MS);
   const sessionControlTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const providerCallIdRef        = useRef<string | undefined>(undefined);
   // Fase 12 — commercial-aware authorized recording ceiling, reconciled from
   // /session and every session-control poll. null means "unknown yet" —
   // the auto-stop check below is skipped until a real value arrives.
@@ -218,7 +208,6 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     if (gatewaySessionId) {
       gatewaySessionIdRef.current = null;
       sessionReportedActiveRef.current = false;
-      providerCallIdRef.current = undefined;
       if (wasActive) {
         reportSessionEnd(gatewaySessionId);
       } else {
@@ -415,7 +404,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       // live — report it (no-op if gatewaySessionId is absent, i.e. legacy).
       if (gatewaySessionIdRef.current) {
         sessionReportedActiveRef.current = true;
-        reportSessionActive(gatewaySessionIdRef.current, providerCallIdRef.current);
+        reportSessionActive(gatewaySessionIdRef.current);
 
         // Fase 9 — best-effort mid-session control poll. Only runs while the
         // gateway bridge is live (never in legacy mode); a failure or
@@ -518,7 +507,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       if (!endCalledRef.current) cleanup('ended', 'dc_closed');
     };
 
-    // ── Step 5: SDP offer → /v1/realtime/calls ───────────────────────────────
+    // ── Step 5: SDP offer → /api/conversation/webrtc-connect (unified interface) ─
     let offer: RTCSessionDescriptionInit;
     try {
       offer = await pc.createOffer();
@@ -537,30 +526,26 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
     let answerSdp: string;
     try {
-      const sdpResp = await fetch(REALTIME_CALLS_URL, {
+      const headers = await getAuthHeader();
+      const sdpResp = await fetch(WEBRTC_CONNECT_URL, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/sdp',
-        },
-        body: offer.sdp,
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          sdp: offer.sdp,
+          ephemeralToken: token,
+          ...(gatewaySessionIdRef.current ? { gatewaySessionId: gatewaySessionIdRef.current } : {}),
+        }),
       });
 
       if (!sdpResp.ok) {
         const errText = await sdpResp.text().catch(() => '');
-        console.error('[realtime] /calls failed', { status: sdpResp.status, body: errText.slice(0, 200) });
+        console.error('[realtime] webrtc-connect failed', { status: sdpResp.status, body: errText.slice(0, 200) });
         fail('WEBRTC_FAILED', 'Falha na conexão com o serviço de IA. Tente novamente.');
         return;
       }
 
-      // Best-effort — see extractCallId's doc comment. Never blocks or
-      // slows the connection; a missing/unreadable header just means no
-      // server-side hangup capability for this session (the pre-existing
-      // client-side deadline timer and session-control poll remain active
-      // either way).
-      providerCallIdRef.current = extractCallId(sdpResp.headers.get('Location'));
-
-      answerSdp = await sdpResp.text();
+      const body = await sdpResp.json() as { sdp?: unknown };
+      answerSdp = typeof body.sdp === 'string' ? body.sdp : '';
     } catch {
       fail('WEBRTC_NETWORK', 'Erro de rede ao conectar ao serviço de IA.');
       return;

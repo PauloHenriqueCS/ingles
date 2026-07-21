@@ -83,6 +83,7 @@
 import 'dotenv/config';
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
+import { execFileSync } from 'child_process';
 import {
   AI_FEATURE_KEYS,
   FEATURE_METADATA,
@@ -252,25 +253,65 @@ function computeRealtimeValidationScriptHash(): string | null {
   }
 }
 
+const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/;
+
+// The exact commit whose CODE (not just the runbook doc) the recorded
+// homologation was run against. Prefers the platform-injected commit SHA
+// when this script runs inside a real Vercel deployment (build-time env
+// var, always the exact deployed commit — the filesystem there may not
+// even have a .git directory to shell out to). Falls back to a local `git
+// rev-parse HEAD` for local/dev runs of this CLI. Fails closed (null) if
+// neither source yields a well-formed 40-char SHA — realtimeHardControlReady
+// must never silently assume a match it cannot actually prove.
+function resolveCurrentGitSha(): string | null {
+  const deployed = process.env.VERCEL_GIT_COMMIT_SHA;
+  if (deployed && FULL_GIT_SHA_RE.test(deployed)) return deployed;
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: resolvePath(__dirname, '..'),
+      encoding: 'utf8',
+    }).trim();
+    return FULL_GIT_SHA_RE.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 async function checkRealtimeHardControlValidated(
   supabase: ReturnType<typeof getSharedServiceClient>,
-): Promise<{ validated: boolean; scriptHash: string | null; matchedRecord: { executedAt: string; executedBy: string } | null }> {
+): Promise<{
+  validated: boolean;
+  scriptHash: string | null;
+  currentGitSha: string | null;
+  matchedRecord: { executedAt: string; executedBy: string; gitSha: string } | null;
+}> {
   const scriptHash = computeRealtimeValidationScriptHash();
-  if (!scriptHash) return { validated: false, scriptHash: null, matchedRecord: null };
+  const currentGitSha = resolveCurrentGitSha();
+  if (!scriptHash || !currentGitSha) return { validated: false, scriptHash, currentGitSha, matchedRecord: null };
 
+  // git_sha is part of the match, exactly like validation_script_sha256 —
+  // any commit landing after the recorded homologation (this one included)
+  // silently invalidates it, with zero manual "invalidate" step, same
+  // idiom as the script-hash pin. This is also what makes an evidence
+  // record structurally impossible to be "antiga" (stale): it can only
+  // ever match the literal commit it was recorded against.
   const { data, error } = await supabase
     .from('realtime_hard_control_validations')
-    .select('executed_at, executed_by')
+    .select('executed_at, executed_by, git_sha')
     .eq('hard_control_version', REALTIME_HARD_CONTROL_VERSION)
     .eq('validation_script_sha256', scriptHash)
+    .eq('git_sha', currentGitSha)
     .eq('status', 'passed')
     .order('executed_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (error || !data) return { validated: false, scriptHash, matchedRecord: null };
-  const row = data as { executed_at: string; executed_by: string };
-  return { validated: true, scriptHash, matchedRecord: { executedAt: row.executed_at, executedBy: row.executed_by } };
+  if (error || !data) return { validated: false, scriptHash, currentGitSha, matchedRecord: null };
+  const row = data as { executed_at: string; executed_by: string; git_sha: string };
+  return {
+    validated: true, scriptHash, currentGitSha,
+    matchedRecord: { executedAt: row.executed_at, executedBy: row.executed_by, gitSha: row.git_sha },
+  };
 }
 
 // ── Assessment ─────────────────────────────────────────────────────────────
@@ -391,6 +432,7 @@ async function main() {
       realtimeHardControlVersion: REALTIME_HARD_CONTROL_VERSION,
       realtimeHardControlValidated: realtimeHardControl.validated,
       realtimeHardControlScriptHash: realtimeHardControl.scriptHash,
+      realtimeHardControlCurrentGitSha: realtimeHardControl.currentGitSha,
       realtimeHardControlRecord: realtimeHardControl.matchedRecord,
       features: results,
       summary: { unitCodeReadyCount, costCodeReadyCount, pricingReadyCount, enforceReadyUnitCount, enforceReadyCostCount, totalFeatures: results.length },
@@ -420,7 +462,8 @@ async function main() {
 
   console.log(`Realtime hard-control validation (realtime_hard_control_validations, live query, version=${REALTIME_HARD_CONTROL_VERSION}):`);
   console.log(`  validation script hash (live, right now): ${realtimeHardControl.scriptHash ?? '(file unreadable)'}`);
-  console.log(`  realtimeHardControlReady=${realtimeHardControl.validated}${realtimeHardControl.matchedRecord ? ` (matched record: executed_by=${realtimeHardControl.matchedRecord.executedBy} at ${realtimeHardControl.matchedRecord.executedAt})` : ' (no matching passed record for this exact hard_control_version + script hash)'}\n`);
+  console.log(`  current git SHA (live, right now): ${realtimeHardControl.currentGitSha ?? '(could not resolve — neither VERCEL_GIT_COMMIT_SHA nor a local git repo)'}`);
+  console.log(`  realtimeHardControlReady=${realtimeHardControl.validated}${realtimeHardControl.matchedRecord ? ` (matched record: executed_by=${realtimeHardControl.matchedRecord.executedBy} at ${realtimeHardControl.matchedRecord.executedAt}, git_sha=${realtimeHardControl.matchedRecord.gitSha})` : ' (no matching passed record for this exact hard_control_version + script hash + git_sha)'}\n`);
 
   for (const r of results) {
     console.log(`${r.featureKey}${r.isAccountingChild ? `  [accounting_child of ${r.accountingParent}]` : ''}`);

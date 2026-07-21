@@ -17,6 +17,12 @@
 
 import { checkCronAuth } from '../_auth';
 import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
+import { getSharedServiceClient } from '../../_ai-gateway/index';
+import { hangupAndPersist } from '../../_realtime-hangup';
+import {
+  WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS,
+  REALTIME_HEARTBEAT_STALE_SECONDS, AUTHORIZATION_SWEEP_GRACE_SECONDS,
+} from '../../_realtime-constants';
 import { getJobsServiceClient } from '../../../src/services/listening/jobs/_supabase';
 import { recoverStuckListeningJobs } from '../../../src/services/listening/jobs/recover-stuck-listening-jobs';
 import { processNextListeningJob } from '../../../src/services/listening/jobs/process-listening-job';
@@ -241,6 +247,171 @@ async function handleSupply(req: any, res: any): Promise<void> {
   return res.status(405).json({ success: false, error: 'Method not allowed. Use GET or POST.' });
 }
 
+// ── GET /api/internal/listening/conversation-sweep ───────────────────────────
+// Unrelated to listening — nested here for the same function-count reason
+// as every other unrelated route folded into an existing dispatcher in this
+// codebase (see handlePlanEntitlements in api/pronunciation-training/
+// [...slug].ts): this deployment hit Vercel's Hobby-plan 12-function cap
+// (confirmed by a real production deployment failure, errorCode
+// exceeded_serverless_functions_per_deployment) once Etapa 11's realtime
+// hardening needed one more internal, cron-triggered, service-role-only
+// endpoint. This file was already the established "internal cron job"
+// pattern (checkCronAuth, GET, pg_cron + pg_net via Vault secrets — see
+// supabase/migrations/20260715240000_create_listening_cron_jobs.sql for the
+// scheduling half of that pattern, extended in
+// 20260723020000_conversation_session_heartbeat_and_hangup_evidence.sql for
+// this route), so it was the natural home even though its name says
+// "listening".
+//
+// Runs every minute (registered in the migration above). Closes two
+// distinct classes of orphaned realtime state that no cooperative client
+// path (session-end/session-failed/session-complete/session-control) can
+// ever reach on its own, because by definition the client that would call
+// them is gone — tab closed, crash, or lost network, with no beforeunload/
+// sendBeacon guaranteed to fire:
+//
+//   1. ai_provider_sessions stuck 'active' whose heartbeat (renewed by
+//      handleSessionActive and every handleSessionControl poll — see
+//      api/conversation/[...slug].ts) has gone quiet for longer than
+//      REALTIME_HEARTBEAT_STALE_SECONDS, OR stuck 'authorized'/'connecting'
+//      (client fetched a token but the call never even reached
+//      session-active) past its authorization_expires_at. Each gets a real
+//      hangupAndPersist() attempt (using whatever call_id was captured —
+//      see handleWebrtcConnect) before being marked 'expired', so a
+//      genuinely abandoned OpenAI Realtime call is not just forgotten
+//      locally but actually terminated server-side.
+//
+//   2. conversation_session_authorizations stuck 'authorized' past
+//      authorized_at + authorized_max_seconds + a grace window (the same
+//      authoritative duration computation handleSessionComplete uses,
+//      clamped to authorized_max_seconds, mirrored into
+//      conversation_sessions only when > 0) — closes the exact quota-bypass
+//      gap this table was created to prevent (2026-07-21 audit) for the one
+//      path session-complete alone can never cover: nobody left to call it.
+//
+// Every UPDATE below is the same guarded-by-current-status pattern used
+// throughout api/conversation/[...slug].ts (matches no rows if another path
+// already closed the same row first — concurrency-safe, idempotent, safe to
+// run every minute even if a previous run is still finishing a slow hangup
+// call for an unrelated row).
+
+interface StaleProviderSessionRow {
+  id: string;
+  provider_session_id: string | null;
+  started_at: string | null;
+}
+
+async function closeStaleProviderSession(
+  supabase: ReturnType<typeof getSharedServiceClient>,
+  row: StaleProviderSessionRow,
+): Promise<void> {
+  if (row.provider_session_id) {
+    await hangupAndPersist(row.id, row.provider_session_id).catch(() => undefined);
+  }
+  const startedAtMs = row.started_at ? new Date(row.started_at).getTime() : null;
+  const durationSeconds = startedAtMs !== null && Number.isFinite(startedAtMs)
+    ? Math.max(0, (Date.now() - startedAtMs) / 1000)
+    : null;
+  await supabase
+    .from('ai_provider_sessions')
+    .update({
+      status: 'expired',
+      ended_at: new Date().toISOString(),
+      ...(durationSeconds !== null ? { duration_seconds: durationSeconds, measurement_source: 'sweep_expired' } : {}),
+    })
+    .eq('id', row.id)
+    .in('status', ['active', 'authorized', 'connecting']);
+}
+
+async function handleConversationSweep(req: any, res: any): Promise<void> {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const supabase = getSharedServiceClient();
+  const nowIso = new Date().toISOString();
+
+  let expiredSessions = 0;
+  let closedAuthorizations = 0;
+
+  try {
+    // ── 1a. 'active' sessions whose heartbeat has gone stale ────────────────
+    const heartbeatCutoff = new Date(Date.now() - REALTIME_HEARTBEAT_STALE_SECONDS * 1000).toISOString();
+    const { data: staleActive } = await supabase
+      .from('ai_provider_sessions')
+      .select('id, provider_session_id, started_at')
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .eq('status', 'active')
+      .lt('last_heartbeat_at', heartbeatCutoff);
+
+    for (const row of (staleActive ?? []) as StaleProviderSessionRow[]) {
+      await closeStaleProviderSession(supabase, row);
+      expiredSessions++;
+    }
+
+    // ── 1b. 'authorized'/'connecting' sessions past their auth window ───────
+    const { data: staleAuthorized } = await supabase
+      .from('ai_provider_sessions')
+      .select('id, provider_session_id, started_at')
+      .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+      .eq('provider', 'openai')
+      .in('status', ['authorized', 'connecting'])
+      .not('authorization_expires_at', 'is', null)
+      .lt('authorization_expires_at', nowIso);
+
+    for (const row of (staleAuthorized ?? []) as StaleProviderSessionRow[]) {
+      await closeStaleProviderSession(supabase, row);
+      expiredSessions++;
+    }
+
+    // ── 2. conversation_session_authorizations abandoned past their grace ──
+    // DB-side filter is a safe superset (authorized_max_seconds can never
+    // exceed REALTIME_MAX_SESSION_SECONDS — see computeAuthorizedRecording
+    // in api/conversation/[...slug].ts); the exact per-row deadline
+    // (authorized_at + its own authorized_max_seconds + grace) is checked
+    // in JS below before any row is actually closed.
+    const csaOuterCutoff = new Date(Date.now() - (REALTIME_MAX_SESSION_SECONDS + AUTHORIZATION_SWEEP_GRACE_SECONDS) * 1000).toISOString();
+    const { data: staleAuthRows } = await supabase
+      .from('conversation_session_authorizations')
+      .select('id, user_id, session_date, authorized_at, authorized_max_seconds')
+      .eq('status', 'authorized')
+      .lt('authorized_at', csaOuterCutoff);
+
+    for (const row of (staleAuthRows ?? []) as Array<{
+      id: string; user_id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
+    }>) {
+      const authorizedAtMs = new Date(row.authorized_at).getTime();
+      const graceDeadlineMs = authorizedAtMs + row.authorized_max_seconds * 1000 + AUTHORIZATION_SWEEP_GRACE_SECONDS * 1000;
+      if (Date.now() < graceDeadlineMs) continue; // DB filter was a safe superset — not actually past grace yet
+
+      const durationSeconds = Math.floor(Math.max(0, Math.min((Date.now() - authorizedAtMs) / 1000, row.authorized_max_seconds)));
+      const { data: updated } = await supabase
+        .from('conversation_session_authorizations')
+        .update({ status: 'completed', completed_at: new Date().toISOString(), duration_seconds: durationSeconds })
+        .eq('id', row.id)
+        .eq('status', 'authorized')
+        .select('id')
+        .maybeSingle();
+
+      if (!updated) continue; // another path (or a concurrent sweep tick) already closed it — no-op
+      closedAuthorizations++;
+
+      if (durationSeconds > 0) {
+        const { error: insertErr } = await supabase
+          .from('conversation_sessions')
+          .insert({ user_id: row.user_id, session_date: row.session_date, duration_sec: durationSeconds });
+        if (insertErr) {
+          safeLog('internal/listening/conversation-sweep', 'mirror_duration_failed', 200, { error: insertErr.message });
+        }
+      }
+    }
+
+    safeLog('internal/listening/conversation-sweep', 'swept', 200, { expiredSessions, closedAuthorizations });
+    return res.status(200).json({ success: true, expiredSessions, closedAuthorizations });
+  } catch (err) {
+    safeLog('internal/listening/conversation-sweep', 'sweep_error', 500, { error: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ success: false, error: 'Sweep failed.', detail: String(err) });
+  }
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -260,6 +431,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     case 'storage-audit':      return handleStorageAudit(req, res);
     case 'cleanup':            return handleCleanup(req, res);
     case 'supply':             return handleSupply(req, res);
+    case 'conversation-sweep': return handleConversationSweep(req, res);
     default:
       return res.status(404).json({ error: 'Route not found', slug });
   }

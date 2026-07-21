@@ -70,18 +70,13 @@ describe('reporting calls — fire-and-forget transport', () => {
     expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-1' });
   });
 
-  it('reportSessionActive includes callId in the body when a call_id was captured (Etapa 11 correction)', async () => {
-    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
-    vi.stubGlobal('fetch', mockFetch);
-
-    reportSessionActive('session-1b', 'call_abc123');
-    await new Promise((r) => setTimeout(r, 0));
-
-    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(opts.body as string)).toEqual({ gatewaySessionId: 'session-1b', callId: 'call_abc123' });
-  });
-
-  it('reportSessionActive omits callId entirely when absent — never sends callId: undefined', async () => {
+  // Etapa 11, unified interface — call_id is no longer client-reported at
+  // all. It used to be an optional second argument here (best-effort,
+  // captured from a response header the browser might not be able to read
+  // via CORS); handleWebrtcConnect now captures and persists it atomically,
+  // server-side, before this report ever fires — reportSessionActive's body
+  // is unconditionally just { gatewaySessionId }.
+  it('reportSessionActive never sends a callId field — the body is always exactly { gatewaySessionId }', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     vi.stubGlobal('fetch', mockFetch);
 

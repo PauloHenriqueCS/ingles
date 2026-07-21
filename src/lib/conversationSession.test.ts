@@ -16,6 +16,18 @@ describe('conversationSession — source code must use GA endpoints', () => {
     const src = await import('../hooks/useRealtimeSession?raw');
     const code = (src as unknown as { default: string }).default;
     expect(code).not.toContain('/v1/realtime?model=');
+  });
+
+  it('frontend hook never talks to OpenAI directly for the SDP/WebRTC leg (Etapa 11 unified interface) — it posts to this backend, which makes that call server-to-server', async () => {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    const code = (src as unknown as { default: string }).default;
+    expect(code).not.toContain('api.openai.com');
+    expect(code).toContain('/api/conversation/webrtc-connect');
+  });
+
+  it('backend (not the browser) POSTs the SDP offer to the real /v1/realtime/calls endpoint', async () => {
+    const src = await import('../../api/conversation/[...slug]?raw');
+    const code = (src as unknown as { default: string }).default;
     expect(code).toContain('/v1/realtime/calls');
   });
 });
@@ -423,7 +435,10 @@ describe('client-side gatewaySessionId chain (useRealtimeSession.ts)', () => {
   it('reportSessionActive is called from dc.onopen — after the data channel actually opens, not at token issuance or SDP send', async () => {
     const code = await hookSource();
     const onopenBlock = code.slice(code.indexOf('dc.onopen = () => {'), code.indexOf('dc.onmessage = (e) => {'));
-    expect(onopenBlock).toContain('reportSessionActive(gatewaySessionIdRef.current, providerCallIdRef.current)');
+    // Etapa 11, unified interface — call_id is no longer client-reported at
+    // all (captured server-side by handleWebrtcConnect at SDP-negotiation
+    // time), so reportSessionActive takes only gatewaySessionId now.
+    expect(onopenBlock).toContain('reportSessionActive(gatewaySessionIdRef.current)');
     // Guarded — never called unconditionally (legacy: ref stays null, no-op).
     expect(onopenBlock).toMatch(/if \(gatewaySessionIdRef\.current\) \{\s*sessionReportedActiveRef\.current = true;\s*reportSessionActive/);
   });

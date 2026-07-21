@@ -93,3 +93,26 @@ describe('realtimeHardControlReady — live-queried, never a hardcoded boolean (
     expect(src).toMatch(/import\s*\{[^}]*REALTIME_HARD_CONTROL_VERSION[^}]*\}\s*from\s*'\.\.\/api\/_ai-gateway\/enforce-readiness'/s);
   });
 });
+
+describe('realtime_hard_control_validations evidence — git_sha binding (2026-07-23 audit)', () => {
+  it('never declares a hardcoded git SHA constant standing in for the live commit', () => {
+    expect(src).not.toMatch(/const\s+(?:CURRENT_)?GIT_SHA\s*=\s*['"][0-9a-f]{7,40}['"]/);
+  });
+
+  it('resolveCurrentGitSha prefers the platform-injected VERCEL_GIT_COMMIT_SHA and falls back to a local `git rev-parse HEAD`', () => {
+    expect(src).toMatch(/process\.env\.VERCEL_GIT_COMMIT_SHA/);
+    expect(src).toMatch(/execFileSync\('git', \['rev-parse', 'HEAD'\]/);
+  });
+
+  it('resolveCurrentGitSha validates the shape (40-char lowercase hex) of both sources before trusting either — never assumes a well-formed value', () => {
+    expect(src).toMatch(/FULL_GIT_SHA_RE\s*=\s*\/\^\[0-9a-f\]\{40\}\$\//);
+  });
+
+  it('checkRealtimeHardControlValidated queries by git_sha in addition to hard_control_version and validation_script_sha256 — a validation recorded against any other commit can never match', () => {
+    expect(src).toMatch(/\.eq\('git_sha', currentGitSha\)/);
+  });
+
+  it('an unresolvable current git SHA fails closed (validated=false), never assumes a match', () => {
+    expect(src).toMatch(/if \(!scriptHash \|\| !currentGitSha\) return \{ validated: false, scriptHash, currentGitSha, matchedRecord: null \};/);
+  });
+});

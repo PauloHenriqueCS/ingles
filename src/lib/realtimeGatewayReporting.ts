@@ -103,18 +103,14 @@ async function post(path: string, body: Record<string, unknown>): Promise<void> 
 
 /**
  * Reports that the physical WebRTC connection succeeded and the session is
- * live. `callId` (Etapa 11 correction) is the OpenAI Realtime call id,
- * captured — best-effort — from the `Location` response header of the
- * browser's own POST to https://api.openai.com/v1/realtime/calls. Only
- * present when the browser could actually read that header (requires
- * OpenAI to expose it via CORS `Access-Control-Expose-Headers`, which has
- * not been verified live in this environment — see useRealtimeSession.ts's
- * capture site). Absent (undefined) is the normal, silently-degraded case:
- * the session still works identically, it just can't be server-side
- * hung-up on deadline/kill-switch, same as before this correction.
+ * live. The OpenAI Realtime call id is no longer reported by the client at
+ * all (Etapa 11, unified interface) — /api/conversation/webrtc-connect
+ * captures and persists it server-side, atomically, at SDP-negotiation
+ * time, before this report ever fires (see useRealtimeSession.ts's Step 5
+ * and api/conversation/[...slug].ts's handleWebrtcConnect).
  */
-export function reportSessionActive(gatewaySessionId: string, callId?: string): void {
-  void post('/api/conversation/session-active', callId ? { gatewaySessionId, callId } : { gatewaySessionId });
+export function reportSessionActive(gatewaySessionId: string): void {
+  void post('/api/conversation/session-active', { gatewaySessionId });
 }
 
 /** Reports that the connection attempt failed (before or during establishment). */

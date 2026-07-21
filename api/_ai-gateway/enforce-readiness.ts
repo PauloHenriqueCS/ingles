@@ -30,12 +30,25 @@ export const MIGRATION_VERSION = '20260718030000_ai_gateway_enforcement_budget_c
 
 // Identifies WHICH hard-control architecture was homologated (see
 // supabase/manual-validation/realtime-hard-control-validation.md and
-// supabase/migrations/20260722000000_realtime_hard_control_validation.sql).
-// Advances only if the underlying mechanism changes (e.g. a future switch to
-// OpenAI's "unified interface" — see the comment above handleSessionControl
-// in api/conversation/[...slug].ts) — a validation recorded against a
-// superseded architecture must never silently count for a new one.
-export const REALTIME_HARD_CONTROL_VERSION = 'session_control_hangup_v1';
+// supabase/migrations/20260722000000_realtime_hard_control_validation.sql /
+// 20260723010000_realtime_hard_control_evidence_schema.sql /
+// 20260723020000_conversation_session_heartbeat_and_hangup_evidence.sql).
+// Advances only if the underlying mechanism changes — a validation recorded
+// against a superseded architecture must never silently count for a new
+// one. Bumped in this entry to 'session_control_unified_interface_v1'
+// exactly because the mechanism DID change: call_id capture moved from
+// best-effort client-reported (browser reads the OpenAI response's Location
+// header, dependent on CORS exposure never verified live) to the unified
+// interface (api/conversation/[...slug].ts's handleWebrtcConnect — this
+// backend makes the SDP POST to OpenAI itself, server-to-server, so it
+// always reads Location reliably), plus a server-side heartbeat/lease and
+// sweep job (api/internal/listening/[...slug].ts's handleConversationSweep)
+// that now force-closes abandoned sessions no cooperative client path could
+// ever reach. No prior approval exists under any version (the table was
+// empty before this entry — confirmed by live query) — this bump costs
+// nothing today, it only guarantees any FUTURE architecture change can never
+// silently inherit an old approval either.
+export const REALTIME_HARD_CONTROL_VERSION = 'session_control_unified_interface_v1';
 
 export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' | 'azure'; model: string | null }> = {
   'conversation.preview_tts':              { provider: 'openai', model: 'tts-1' },

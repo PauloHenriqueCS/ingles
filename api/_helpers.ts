@@ -25,6 +25,7 @@ export const PAYLOAD_LIMITS = {
   CONVERSATION:  4_096,   //   4 KB — session config (body is minimal)
   PREVIEW:       2_048,   //   2 KB — voice + pace
   TTS:          16_384,   //  16 KB — TTS text payload
+  WEBRTC_SDP:   32_768,   //  32 KB — SDP offer (audio-only, but leaves headroom for extra ICE/codec lines)
 } as const;
 
 // ── Timeout values (ms) ───────────────────────────────────────────────────────

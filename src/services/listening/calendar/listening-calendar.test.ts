@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolveListeningCalendarStatus } from './resolve-listening-calendar-status';
 import { buildListeningCalendarActivity } from './build-listening-calendar-activity';
-import { computeDailyProgress } from '../../../lib/dailyProgress';
+import { computeDailyProgress, type ActiveDailyFeatures } from '../../../lib/dailyProgress';
+
+const ALL_ACTIVE: ActiveDailyFeatures = { writingEnabled: true, pronunciationEnabled: true, listeningEnabled: true };
 
 // ── resolveListeningCalendarStatus ───────────────────────────────────────────
 
@@ -124,13 +126,13 @@ describe('computeDailyProgress — listening integration', () => {
 
   // Test 2: The day of Listening is marked as active
   it('listening completed → day shows amber dot (listening=completed)', () => {
-    const progress = computeDailyProgress(date, undefined, 0, 900, noPron, 'completed');
+    const progress = computeDailyProgress(date, undefined, 0, 900, noPron, 'completed', ALL_ACTIVE);
     expect(progress.listening).toBe('completed');
   });
 
   // Test 3: Listening recognized alongside other activities
   it('all activities + listening completed → allActiveCompleted=true', () => {
-    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'completed');
+    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'completed', ALL_ACTIVE);
     expect(progress.writing).toBe('completed');
     expect(progress.pronunciation).toBe('completed');
     expect(progress.conversation).toBe('completed');
@@ -140,22 +142,44 @@ describe('computeDailyProgress — listening integration', () => {
 
   // Test 4: Listening alone is enough to be recognized (not undefined/coming_soon)
   it('listening completed alone → allActiveCompleted=false but listening is recognized', () => {
-    const progress = computeDailyProgress(date, undefined, 0, 900, noPron, 'completed');
+    const progress = computeDailyProgress(date, undefined, 0, 900, noPron, 'completed', ALL_ACTIVE);
     expect(progress.listening).toBe('completed');
     // allActiveCompleted requires all activities, so false here
     expect(progress.allActiveCompleted).toBe(false);
   });
 
-  // Test: listening not_started does NOT block allActiveCompleted (backward compat for past days)
+  // Test: listening not_started does NOT block allActiveCompleted for a plan
+  // where listening isn't an active obligatory feature (backward compat for
+  // past days / plans without listening turned on). With ALL_ACTIVE (the
+  // implicit default this test used before activeFeatures was made
+  // explicit), listening is symmetric with writing/pronunciation — its
+  // status DOES gate allActiveCompleted, same as any other obligatory
+  // activity (see the adjacent "listening completed alone" test above,
+  // where an incomplete OTHER activity correctly keeps allActiveCompleted
+  // false). "Optional" only holds when listeningEnabled is actually false.
   it('listening not_started does not block allActiveCompleted (optional activity)', () => {
-    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'not_started');
+    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'not_started', {
+      writingEnabled: true, pronunciationEnabled: true, listeningEnabled: false,
+    });
     expect(progress.allActiveCompleted).toBe(true);
   });
 
   // Test: listening undefined (no assignment) defaults to not_started and does NOT block allActiveCompleted
   it('listening undefined (no assignment) defaults to not_started, allows allActiveCompleted', () => {
-    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, undefined);
+    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, undefined, {
+      writingEnabled: true, pronunciationEnabled: true, listeningEnabled: false,
+    });
     expect(progress.listening).toBe('not_started');
+    expect(progress.allActiveCompleted).toBe(true);
+  });
+
+  // activeFeatures explicit: listening disabled for this plan never blocks
+  // allActiveCompleted even when incomplete — proves the flag (not just the
+  // default) actually gates the obligatory-status list.
+  it('listening disabled in activeFeatures never blocks allActiveCompleted, regardless of status', () => {
+    const progress = computeDailyProgress(date, fullEntry(), 1800, 900, withPron, 'not_started', {
+      writingEnabled: true, pronunciationEnabled: true, listeningEnabled: false,
+    });
     expect(progress.allActiveCompleted).toBe(true);
   });
 });

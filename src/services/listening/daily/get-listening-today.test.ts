@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const {
   mockBuildListeningEpisodeSession,
@@ -51,8 +51,21 @@ function makeRow(overrides: Record<string, unknown> = {}) {
 describe('getListeningToday — multi-story per day', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // getListeningToday calls resolveListeningActivityDate() with no
+    // argument internally — it always reads the real wall clock. Every
+    // fixture below hardcodes activity_date/activityDate as '2026-07-18';
+    // without pinning the clock here, that hardcode only worked by
+    // coincidence on the day this suite happened to be written, and would
+    // silently diverge (wrong assertions, or assignments created under a
+    // date nothing else in the fixtures matches) on any other day.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-18T15:00:00Z')); // 2026-07-18 noon in America/Sao_Paulo (UTC-3)
     mockResolveUserListeningLevel.mockResolvedValue('A1');
     mockBuildListeningEpisodeSession.mockResolvedValue({ progress: null });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('scenario 1/2: limit=1 — first call selects and creates the single story', async () => {

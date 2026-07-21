@@ -24,6 +24,8 @@ import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlemen
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getTodaySP } from '../../src/lib/timezone';
+import { hangupAndPersist } from '../_realtime-hangup';
+import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
 
@@ -188,13 +190,20 @@ const REALTIME_MODEL =
 
 const CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/client_secrets';
 
+// Etapa 11 — unified interface. Same endpoint the browser used to POST its
+// SDP offer to directly; now this backend makes that call instead (see
+// handleWebrtcConnect below).
+const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+
 // Server-authoritative Realtime session ceiling (Etapa 11, Fase 9). Same
 // value the client already enforced itself via a hardcoded constant before
 // this stage (src/hooks/useRealtimeSession.ts's old MAX_SESSION_MS) — moving
 // it server-side changes nothing about today's behavior, it only lets
 // /session-control (below) compute the same deadline independently of
-// client-side JS, and gives a single place to change it later.
-const REALTIME_MAX_SESSION_SECONDS = 30 * 60;
+// client-side JS, and gives a single place to change it later. Imported
+// (not declared here) from api/_realtime-constants.ts — the sweep job in
+// api/internal/listening/[...slug].ts's conversation-sweep route needs the
+// exact same value.
 
 const SESSION_ERROR_STATUS: Record<string, number> = {
   OPENAI_INVALID_SESSION: 400,
@@ -778,7 +787,8 @@ async function handleSessionComplete(req: any, res: any) {
 // response.done, via session-usage, deduplicated by
 // (provider_session_record_id, provider_request_id = response.id).
 
-const WEBRTC_CONNECT_FEATURE_KEY = 'conversation.webrtc_connect';
+// WEBRTC_CONNECT_FEATURE_KEY imported (not declared here) — see the comment
+// on REALTIME_MAX_SESSION_SECONDS's import above.
 const REALTIME_USAGE_FEATURE_KEY = 'conversation.realtime_usage';
 
 const ALLOWED_END_REASONS = new Set([
@@ -795,6 +805,122 @@ function sessionsClient() {
   return getSharedServiceClient();
 }
 
+// ── /webrtc-connect ──────────────────────────────────────────────────────
+// Etapa 11 — unified interface for WebRTC signaling. Previously
+// (useRealtimeSession.ts, Step 5) the BROWSER posted its SDP offer directly
+// to REALTIME_CALLS_URL with the ephemeral token, and this app's only
+// chance to learn the OpenAI call_id was reading the response's `Location`
+// header client-side — which only works if OpenAI exposes that header via
+// CORS `Access-Control-Expose-Headers`, never verified live (see the old
+// extractCallId doc comment in that file, now removed). This endpoint
+// relays the SAME authenticated POST (same ephemeral token, same body,
+// same OpenAI endpoint) from the BACKEND instead: a server-to-server fetch
+// has no CORS restriction on which response headers it can read, so
+// call_id is now captured reliably on every call, every time, with no
+// dependency on browser/CORS behavior at all.
+//
+// Trust model unchanged from before this endpoint existed: still the
+// short-lived ephemeral token minted by /session (never the real,
+// long-lived OPENAI_API_KEY) that authenticates this specific call — this
+// endpoint does not elevate what a compromised/expired token could do, it
+// only changes WHO makes the HTTP request. The token arrives in the
+// request body, is used exactly once, synchronously, in this function, and
+// is never logged or persisted (same rule as provider-sessions.ts's
+// fingerprint-only persistence of ephemeral tokens elsewhere in this
+// module).
+//
+// call_id is persisted immediately (best-effort — a failure here never
+// blocks returning the SDP answer the browser is waiting on to complete
+// the handshake) rather than waiting for /session-active as before: a call
+// that negotiates SDP successfully but then fails ICE before the data
+// channel opens now still has a captured call_id available for cleanup
+// (see the sweep job in api/internal/conversation/sweep.ts), which the old
+// client-reported-at-session-active path could never provide for that
+// scenario.
+function extractCallIdFromLocation(locationHeader: string | null): string | null {
+  if (!locationHeader) return null;
+  const lastSegment = locationHeader.split('/').filter(Boolean).pop();
+  return lastSegment && PROVIDER_RESPONSE_ID_RE.test(lastSegment) ? lastSegment : null;
+}
+
+async function handleWebrtcConnect(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.WEBRTC_SDP)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const body = req.body ?? {};
+  const sdp = typeof body.sdp === 'string' ? body.sdp : null;
+  const ephemeralToken = typeof body.ephemeralToken === 'string' ? body.ephemeralToken : null;
+  const gatewaySessionId = typeof body.gatewaySessionId === 'string' ? body.gatewaySessionId : null;
+
+  if (!sdp) {
+    return jsonError(res, 400, 'INVALID_SDP', 'Oferta SDP inválida.');
+  }
+  if (!ephemeralToken) {
+    return jsonError(res, 400, 'MISSING_EPHEMERAL_TOKEN', 'Token de sessão ausente.');
+  }
+  if (gatewaySessionId !== null && !isValidUuid(gatewaySessionId)) {
+    return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
+  }
+
+  let openaiRes: Response;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
+    try {
+      openaiRes = await fetch(REALTIME_CALLS_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ephemeralToken}`,
+          'Content-Type': 'application/sdp',
+        },
+        body: sdp,
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return jsonError(res, 502, 'WEBRTC_NETWORK', 'Erro de rede ao conectar ao serviço de IA.');
+  }
+
+  if (!openaiRes.ok) {
+    const errText = await openaiRes.text().catch(() => '');
+    console.error('[conversation/webrtc-connect] /calls failed', { status: openaiRes.status, body: errText.slice(0, 200) });
+    return jsonError(res, 502, 'WEBRTC_FAILED', 'Falha na conexão com o serviço de IA. Tente novamente.');
+  }
+
+  // Server-to-server read — always reliable, no CORS exposure required.
+  const callId = extractCallIdFromLocation(openaiRes.headers.get('Location'));
+  const answerSdp = await openaiRes.text();
+  if (!answerSdp) {
+    return jsonError(res, 502, 'WEBRTC_FAILED', 'Resposta SDP vazia recebida do serviço de IA.');
+  }
+
+  if (callId && gatewaySessionId) {
+    try {
+      await sessionsClient()
+        .from('ai_provider_sessions')
+        .update({ provider_session_id: callId })
+        .eq('id', gatewaySessionId)
+        .eq('user_id', userId)
+        .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
+        .eq('provider', 'openai')
+        .in('status', ['authorized', 'connecting', 'active']);
+    } catch (e) {
+      // Best-effort — the SDP answer below is still returned regardless;
+      // worst case this call simply has no server-side hangup capability
+      // later, same degraded-but-working posture as before this endpoint.
+      console.error('[conversation/webrtc-connect] failed to persist call_id', e instanceof Error ? e.message : 'unknown');
+    }
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).json({ sdp: answerSdp });
+}
+
 // ── /active ───────────────────────────────────────────────────────────────
 
 async function handleSessionActive(req: any, res: any) {
@@ -808,14 +934,15 @@ async function handleSessionActive(req: any, res: any) {
   if (!isValidUuid(gatewaySessionId)) {
     return jsonError(res, 400, 'INVALID_GATEWAY_SESSION_ID', 'gatewaySessionId inválido.');
   }
-  // Etapa 11 correction — best-effort OpenAI Realtime call id, captured
-  // browser-side from the Location header of its own POST to
-  // /v1/realtime/calls (see useRealtimeSession.ts's extractCallId). Optional
-  // and allowlist-validated; absent whenever the browser couldn't read the
-  // header (e.g. not CORS-exposed) — the session still works identically,
-  // it just has no server-side hangup capability. Never logged, never
-  // returned to any client — persisted only in this service-role-only
-  // column for handleSessionControl's own use.
+  // call_id is now captured server-side and persisted synchronously by
+  // handleWebrtcConnect above, before this handler ever runs — this
+  // client-reported fallback only still matters for an older cached
+  // frontend bundle that predates the unified interface (still POSTs
+  // straight to OpenAI and reads Location itself, best-effort). The
+  // guarded UPDATE below only overwrites provider_session_id when callId is
+  // present, so on a current bundle (callId always absent — the field was
+  // removed from the client payload) it never clobbers what
+  // handleWebrtcConnect already wrote.
   const callId = typeof body.callId === 'string' && PROVIDER_RESPONSE_ID_RE.test(body.callId) ? body.callId : null;
 
   try {
@@ -826,9 +953,14 @@ async function handleSessionActive(req: any, res: any) {
     // client-reported duration.
     const startedAtMs = gatewayDeps.clock();
     const nowIso = new Date(startedAtMs).toISOString();
+    // last_heartbeat_at — first lease renewal. handleSessionControl renews
+    // it on every subsequent poll; the sweep job (api/internal/conversation/
+    // sweep.ts) treats a session whose heartbeat has gone stale (tab
+    // closed/crashed/lost network — session-control simply stops being
+    // polled) as abandoned and force-closes it server-side.
     const { data, error } = await sessionsClient()
       .from('ai_provider_sessions')
-      .update({ status: 'active', started_at: nowIso, ...(callId ? { provider_session_id: callId } : {}) })
+      .update({ status: 'active', started_at: nowIso, last_heartbeat_at: nowIso, ...(callId ? { provider_session_id: callId } : {}) })
       .eq('id', gatewaySessionId)
       .eq('user_id', userId)
       .eq('feature_key', WEBRTC_CONNECT_FEATURE_KEY)
@@ -1277,37 +1409,13 @@ async function handleSessionEnd(req: any, res: any) {
 // regardless of what any client does. Realtime accordingly stays classified
 // blocked_no_hard_session_control in the enforce-readiness preflight and
 // must never move to enforce for duration limits until proven otherwise.
-// Etapa 11 correction — real server-side termination. Documented OpenAI
-// Realtime endpoint (audited against current API reference): a call created
-// via POST /v1/realtime/calls can be forcibly ended via
-// POST /v1/realtime/calls/{call_id}/hangup, authenticated with the real
-// (server-only) API key — never the ephemeral client token. Only reachable
-// when a call_id was actually captured (see handleSessionActive) — when
-// absent, this function is never invoked and the session falls back to the
-// pre-existing client-cooperative signal only (documented, not hidden).
-// Idempotent by construction: hanging up an already-ended call is expected
-// to fail harmlessly on OpenAI's side (4xx), treated the same as success
-// here — there is nothing further to clean up locally either way.
-async function hangupRealtimeCall(callId: string): Promise<{ ok: boolean }> {
-  const openaiKey = (process.env.OPENAI_API_KEY ?? '').trim();
-  if (!openaiKey) return { ok: false };
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUTS.SHORT);
-    try {
-      const resp = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${openaiKey}` },
-        signal: ctrl.signal,
-      });
-      return { ok: resp.ok };
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return { ok: false };
-  }
-}
+// Real server-side termination + outcome persistence — call_id is now
+// always captured by handleWebrtcConnect above (best-effort fallback via
+// handleSessionActive's client-reported field for an older cached bundle).
+// hangupAndPersist (imported at the top of this file) is shared with the
+// abandoned-session sweep job (api/internal/conversation/sweep.ts) — see
+// api/_realtime-hangup.ts's own doc comment for the full account of the
+// endpoint semantics.
 
 // Etapa: per-recording authorized maximum (Fase 12). The frontend must never
 // compute this alone — it always comes from here, as the smallest positive
@@ -1395,16 +1503,31 @@ async function handleSessionControl(req: any, res: any) {
       return res.status(200).json({ terminate: true, reason: 'session_not_active' });
     }
 
+    // Heartbeat/lease renewal — this poll (every ~5s while the client is
+    // alive) IS the heartbeat. Renewed unconditionally here, before the
+    // terminate checks below, regardless of outcome: a session about to be
+    // told to terminate still just had live contact with its client this
+    // instant, so it must never look "abandoned" to the sweep job (api/
+    // internal/conversation/sweep.ts) purely because this same poll is
+    // also the one that ends it. Best-effort — a failure here never blocks
+    // the actual terminate/continue decision below.
+    try {
+      await sessionsClient().from('ai_provider_sessions').update({ last_heartbeat_at: new Date().toISOString() }).eq('id', gatewaySessionId);
+    } catch (e) {
+      console.error('[conversation/session-control] heartbeat update failed', e instanceof Error ? e.message : 'unknown');
+    }
+
     // Ownership is already enforced by the query above (.eq('user_id',
     // userId)) — a user can never poll control for, and therefore never
     // trigger a hangup on, a session belonging to someone else.
     const providerSessionId = (session as { provider_session_id: string | null }).provider_session_id;
     const terminate = async (reason: string) => {
-      // Best-effort, real server-side termination — see hangupRealtimeCall's
-      // doc comment. A hangup failure (including "no call_id captured for
-      // this session") never blocks the terminate signal itself: the client
-      // still closes its own RTCPeerConnection either way.
-      if (providerSessionId) await hangupRealtimeCall(providerSessionId).catch(() => undefined);
+      // Best-effort, real server-side termination + outcome persistence —
+      // see api/_realtime-hangup.ts's doc comment. A hangup failure
+      // (including "no call_id captured for this session") never blocks
+      // the terminate signal itself: the client still closes its own
+      // RTCPeerConnection either way.
+      if (providerSessionId) await hangupAndPersist(gatewaySessionId, providerSessionId).catch(() => undefined);
       return res.status(200).json({ terminate: true, reason });
     };
 
@@ -1486,6 +1609,7 @@ export default async function handler(req: any, res: any) {
   switch (slug) {
     case 'preview':        return handlePreview(req, res);
     case 'session':        return handleSession(req, res);
+    case 'webrtc-connect': return handleWebrtcConnect(req, res);
     // Flat, single-segment routes — NOT nested (session/active etc.). A
     // nested sub-path under this catch-all 404'd in production: Vercel
     // never routed the extra path segment to this function at all, so

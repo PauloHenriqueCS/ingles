@@ -9,6 +9,8 @@ import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
+import { evaluateSkillPromotion } from '../../src/lib/promotionService';
+import type { PromotionTrigger } from '../../src/domain/promotion/promotion-types';
 
 // "Treinar pronúncia" (PronunciationTrainingView) is a standalone practice
 // flow, distinct from the plan-metered pronunciation.evaluations quota used
@@ -268,6 +270,79 @@ async function handlePlanEntitlements(req: any, res: any) {
   }
 }
 
+// ─── POST /api/pronunciation-training/evaluate ─────────────────────────────────
+// Unrelated to pronunciation training — nested here for the same reason as
+// handlePlanEntitlements above (Vercel Hobby-plan 12-function cap; this
+// deployment was back at 13 after api/conversation/[...slug].ts and
+// api/internal/conversation/[...slug].ts's Etapa 11 additions, confirmed by
+// a real production deployment failure — errorCode
+// exceeded_serverless_functions_per_deployment). Was its own top-level
+// api/promotion/evaluate.ts; moved verbatim (no behavior change). No caller
+// of the old path existed anywhere in this repo at move time (confirmed by
+// a full-repo search) — skill promotion is evaluated by
+// evaluateSkillPromotion() directly from other server-side call sites, not
+// over HTTP, so this route currently has no known caller either; kept
+// available (not deleted) since removing a public API surface is a
+// separate, unrelated decision from a function-count fix.
+
+const VALID_PROMOTION_SKILLS = ['writing', 'pronunciation', 'conversation'] as const;
+type ValidPromotionSkill = typeof VALID_PROMOTION_SKILLS[number];
+
+function isValidPromotionSkill(s: unknown): s is ValidPromotionSkill {
+  return typeof s === 'string' && (VALID_PROMOTION_SKILLS as readonly string[]).includes(s);
+}
+
+function isValidPromotionTrigger(t: unknown): t is PromotionTrigger {
+  const valid = [
+    'mission_completed', 'checkpoint_completed', 'evidence_processed',
+    'topic_mastered', 'session_ended', 'admin_recalculate', 'job', 'retry',
+  ];
+  return typeof t === 'string' && valid.includes(t);
+}
+
+async function handlePromotionEvaluate(req: any, res: any): Promise<void> {
+  if (!methodGuard(req, res, ['POST'])) return;
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  const { userId } = auth;
+  const body = req.body ?? {};
+
+  const { skill, trigger, idempotencyKey } = body as {
+    skill?: unknown;
+    trigger?: unknown;
+    idempotencyKey?: unknown;
+  };
+
+  if (!isValidPromotionSkill(skill)) {
+    jsonError(res, 400, 'INVALID_REQUEST', 'skill deve ser writing, pronunciation ou conversation.');
+    return;
+  }
+
+  const resolvedTrigger: PromotionTrigger =
+    isValidPromotionTrigger(trigger) ? trigger : 'mission_completed';
+
+  const resolvedKey: string =
+    typeof idempotencyKey === 'string' && idempotencyKey.length > 0
+      ? idempotencyKey
+      : crypto.randomUUID();
+
+  try {
+    const evaluation = await evaluateSkillPromotion({
+      userId,
+      skill,
+      trigger: resolvedTrigger,
+      idempotencyKey: resolvedKey,
+    });
+
+    res.status(200).json({ evaluation });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Erro interno ao avaliar promoção.';
+    jsonError(res, 500, 'INTERNAL_ERROR', message);
+  }
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -276,6 +351,7 @@ export default async function handler(req: any, res: any) {
     case 'generate-text':     return handleGenerateText(req, res);
     case 'token':             return handleToken(req, res);
     case 'plan-entitlements': return handlePlanEntitlements(req, res);
+    case 'evaluate':          return handlePromotionEvaluate(req, res);
     default:                  return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }
