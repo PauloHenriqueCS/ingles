@@ -33,8 +33,36 @@ import {
 import { checkRewriteEvaluationIdempotency } from './writingRewriteIdempotency';
 import { persistRewriteEvaluation } from './writingRewritePersistence';
 import { runDeterministicComparison } from './writingRewriteDeterministicComparison';
-import { callModelEvaluator } from './writingRewriteModelEvaluator';
+import { callModelEvaluator, buildRewriteEvaluationPrompt, type ModelEvaluationOutput } from './writingRewriteModelEvaluator';
 import { logRewriteEvent } from './writingRewriteObservability';
+import {
+  executeAiGatewayCall,
+  getProductionDeps,
+  estimateTextTokens,
+  type GatewayUsageMetric,
+} from '../../api/_ai-gateway/index';
+
+const MODEL_EVALUATOR_MAX_OUTPUT_TOKENS = 2048; // matches the real max_tokens passed to OpenAI in writingRewriteModelEvaluator.ts
+
+/**
+ * Reads real token usage from the provider response (writingRewriteModelEvaluator
+ * captures it from the same HTTP response the evaluation content comes from —
+ * never a second call). Falls back to just provider_requests if usage is
+ * unavailable (e.g. a provider response shape change), matching how every
+ * other extractor in this codebase degrades when `.usage` is absent.
+ */
+function extractRewriteEvaluatorMetrics(result: ModelEvaluationOutput): GatewayUsageMetric[] {
+  const metrics: GatewayUsageMetric[] = [
+    { metricKey: 'provider_requests', unitType: 'request', quantity: 1, isBillable: false, measurementSource: 'provider_response' },
+  ];
+  if (result.usage?.promptTokens != null) {
+    metrics.push({ metricKey: 'input_text_tokens', unitType: 'token', quantity: result.usage.promptTokens, isBillable: true, measurementSource: 'provider_response' });
+  }
+  if (result.usage?.completionTokens != null) {
+    metrics.push({ metricKey: 'output_text_tokens', unitType: 'token', quantity: result.usage.completionTokens, isBillable: true, measurementSource: 'provider_response' });
+  }
+  return metrics;
+}
 
 export interface EvaluateWritingRewriteInput {
   authenticatedUserId: string;
@@ -166,22 +194,46 @@ export async function evaluateWritingRewrite(
     independenceAssessment: deterministicResult.layerB.copyDetection.assessment,
   });
 
-  // ── Step 8: Model evaluation ──────────────────────────────────────────────
+  // ── Step 8: Model evaluation — routed through the AI Gateway ──────────────
+  // featureKey 'writing.evaluate_rewrite': this IS the real, only physical
+  // call that evaluates the V2 rewrite (previously called OpenAI directly
+  // via fetch(), bypassing the Gateway entirely — see writingRewriteModelEvaluator.ts).
+  // Wrapping it here adds reservation/telemetry/budget tracking without a
+  // second AI request: callModelEvaluator's own single fetch() is the
+  // `invoke` the Gateway wraps, and its real token usage (already present in
+  // that same HTTP response) is what extractRewriteEvaluatorMetrics reports.
   const apiKey = process.env.OPENAI_API_KEY ?? '';
-  let modelOutput;
+  const modelInput = { originalText, correctedText, rewriteText, mainMistakes, effectiveLevel, deterministicResult };
+  const gatewayDeps = getProductionDeps();
+  let modelOutput: ModelEvaluationOutput;
 
   try {
     logRewriteEvent({ event: 'rewrite_model_called', rewriteSubmissionId, requestId: clientRequestId });
-    modelOutput = await callModelEvaluator(
+    modelOutput = await executeAiGatewayCall<ModelEvaluationOutput>(
       {
-        originalText,
-        correctedText,
-        rewriteText,
-        mainMistakes,
-        effectiveLevel,
-        deterministicResult,
+        featureKey: 'writing.evaluate_rewrite',
+        provider: 'openai',
+        service: 'chat.completions',
+        model: 'gpt-4o',
+        userId: authenticatedUserId,
+        initiatedByUserId: authenticatedUserId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: clientRequestId,
+        attemptNumber: 1,
+        callSequence: 1,
+        technicalMetadata: {
+          endpoint: 'writing-rewrite-evaluate',
+          operation: 'evaluate_rewrite',
+        },
+        estimatedMetrics: estimateTextTokens(
+          buildRewriteEvaluationPrompt(modelInput).length,
+          MODEL_EVALUATOR_MAX_OUTPUT_TOKENS,
+        ),
       },
-      apiKey,
+      () => callModelEvaluator(modelInput, apiKey),
+      gatewayDeps,
+      extractRewriteEvaluatorMetrics,
     );
     logRewriteEvent({ event: 'rewrite_model_succeeded', rewriteSubmissionId, requestId: clientRequestId });
   } catch (err) {

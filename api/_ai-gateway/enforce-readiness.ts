@@ -28,6 +28,15 @@ import { FEATURE_METADATA, type AiFeatureKey } from './feature-catalog';
 // am I validating" question equally unambiguous).
 export const MIGRATION_VERSION = '20260718030000_ai_gateway_enforcement_budget_conflict_ambiguity_fix';
 
+// Identifies WHICH hard-control architecture was homologated (see
+// supabase/manual-validation/realtime-hard-control-validation.md and
+// supabase/migrations/20260722000000_realtime_hard_control_validation.sql).
+// Advances only if the underlying mechanism changes (e.g. a future switch to
+// OpenAI's "unified interface" — see the comment above handleSessionControl
+// in api/conversation/[...slug].ts) — a validation recorded against a
+// superseded architecture must never silently count for a new one.
+export const REALTIME_HARD_CONTROL_VERSION = 'session_control_hangup_v1';
+
 export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' | 'azure'; model: string | null }> = {
   'conversation.preview_tts':              { provider: 'openai', model: 'tts-1' },
   'conversation.create_session':           { provider: 'openai', model: 'gpt-realtime-2.1-mini' },
@@ -39,7 +48,9 @@ export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' |
   'writing.correct_v2_text':               { provider: 'openai', model: 'gpt-4o-mini' },
   'writing.generate_topic':                { provider: 'openai', model: 'gpt-4o-mini' },
   'writing.explain_grammar':               { provider: 'openai', model: 'gpt-4o-mini' },
-  'writing.evaluate_rewrite':              { provider: 'openai', model: 'gpt-4o-mini' },
+  // gpt-4o, not gpt-4o-mini: matches the real model used by
+  // writingRewriteModelEvaluator.ts's callModelEvaluator (DEFAULT_CONFIG.model).
+  'writing.evaluate_rewrite':              { provider: 'openai', model: 'gpt-4o' },
   'pronunciation.generate_text':           { provider: 'openai', model: 'gpt-4o-mini' },
   'pronunciation.get_azure_token':         { provider: 'azure',  model: null },
   'pronunciation.start_assessment':        { provider: 'azure',  model: null },
@@ -58,7 +69,7 @@ export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' |
 
 export const WIRED_ESTIMATOR_FEATURES = new Set<AiFeatureKey>([
   'writing.correct', 'writing.correct_review', 'writing.compare_rewrite', 'writing.correct_v2_text',
-  'writing.generate_topic', 'writing.explain_grammar',
+  'writing.generate_topic', 'writing.explain_grammar', 'writing.evaluate_rewrite',
   'pronunciation.generate_text',
   'listening.story_session_generate', 'listening.two_part_generate', 'listening.episode_generate_story',
   'listening.episode_generate_questions', 'listening.episode_translate_synopsis', 'listening.episode_translate_subtitles',
@@ -70,7 +81,13 @@ export const ACCOUNTING_CHILD_PARENT: Partial<Record<AiFeatureKey, AiFeatureKey>
   'conversation.realtime_usage': 'conversation.webrtc_connect',
 };
 
-export const DEAD_UNREACHABLE_FEATURES = new Set<AiFeatureKey>(['writing.evaluate_rewrite']);
+// Previously included 'writing.evaluate_rewrite': its real implementation
+// (writingRewriteOrchestrator.ts's callModelEvaluator invocation) called
+// OpenAI directly via fetch(), bypassing the Gateway entirely, and had no
+// HTTP endpoint reaching it at all — see api/writing-rewrite-evaluate.ts
+// (new endpoint) and the Gateway-wrapped call site added to
+// writingRewriteOrchestrator.ts. No feature is dead today.
+export const DEAD_UNREACHABLE_FEATURES = new Set<AiFeatureKey>([]);
 
 export const REALTIME_SESSION_FEATURES = new Set<AiFeatureKey>([
   'conversation.create_session', 'conversation.webrtc_connect', 'conversation.realtime_usage',

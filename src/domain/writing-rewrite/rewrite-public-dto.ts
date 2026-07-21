@@ -31,6 +31,13 @@ export interface PublicWritingRewriteDTO {
     correctionOutcomes: Array<{
       correctionId: string;
       status: RewriteCorrectionOutcome['status'];
+      // Already user-facing excerpts computed server-side (never raw model
+      // JSON, never internal confidence/copy-signal fields) — exposed so a
+      // caller can render "you wrote X, correct form Y, your rewrite Z"
+      // without needing its own client-side copy of the original mistakes.
+      originalExcerpt: string;
+      expectedCorrection: string;
+      rewriteExcerpt?: string;
       explanationPtBR: string;
     }>;
     newIssues: Array<{
@@ -92,6 +99,9 @@ export function buildPublicRewriteDTO(
           correctionOutcomes: evaluation.correctionOutcomes.map(o => ({
             correctionId: o.correctionId,
             status: o.status,
+            originalExcerpt: o.originalExcerpt,
+            expectedCorrection: o.expectedCorrection,
+            rewriteExcerpt: o.rewriteExcerpt,
             explanationPtBR: o.explanationPtBR,
           })),
           newIssues: evaluation.newIssues.map(issue => ({

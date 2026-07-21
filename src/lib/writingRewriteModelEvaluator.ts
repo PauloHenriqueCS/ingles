@@ -34,6 +34,8 @@ export interface ModelEvaluationOutput {
   cohesionImprovementScore: number;  // 0–100
   summaryPtBR: string;
   schemaVersion: string;
+  /** Real token usage from the provider response, for AI Gateway telemetry — never estimated. */
+  usage?: { promptTokens: number; completionTokens: number };
 }
 
 export interface ModelEvaluatorConfig {
@@ -267,6 +269,7 @@ export async function callModelEvaluator(
 
   const body = (await response.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
 
   const content = body?.choices?.[0]?.message?.content;
@@ -274,5 +277,10 @@ export async function callModelEvaluator(
     throw new Error('Model evaluator returned empty content');
   }
 
-  return parseModelEvaluationOutput(content);
+  const parsed = parseModelEvaluationOutput(content);
+  const usage = body?.usage;
+  if (usage?.prompt_tokens != null && usage?.completion_tokens != null) {
+    parsed.usage = { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens };
+  }
+  return parsed;
 }

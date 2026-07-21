@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Loader2, Target } from 'lucide-react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
 import { getAuthHeader } from '../lib/apiAuth';
+import { mapRewriteEvaluationToComparisonResult } from '../lib/rewriteComparisonAdapter';
+import type { PublicWritingRewriteDTO } from '../domain/writing-rewrite/rewrite-public-dto';
 import V2AudioPlayer from './V2AudioPlayer';
 import CollapsibleBlock from './CollapsibleBlock';
 
@@ -21,8 +23,8 @@ interface Props {
 }
 
 export default function RewriteSection({
-  originalText,
   aiReview,
+  reviewId,
   initialV2Text,
   initialV2Comparison,
   initialV2FinalText,
@@ -64,43 +66,54 @@ export default function RewriteSection({
     }
   }
 
+  // Primary evaluation path: the canonical rewrite engine
+  // (src/lib/writingRewriteOrchestrator.ts), reached through
+  // /api/writing-rewrite-evaluate — one AI Gateway call per submission
+  // under featureKey 'writing.evaluate_rewrite'. Replaces the legacy
+  // /api/compare-rewrite comparison call entirely (no longer invoked from
+  // here); the separate "final corrected text" generation below is a
+  // different feature (writing.correct_v2_text, unchanged) fired
+  // independently, not a second evaluation.
   async function compare() {
     if (!rewriteText.trim()) {
       setEmptyWarning(true);
       return;
     }
+    if (!reviewId) {
+      // No silent failure: surfaces the same visible error state as any
+      // other failure mode below — there is no fallback path to the legacy
+      // endpoint (it no longer performs evaluation).
+      console.error('[writing-rewrite-evaluate] missing reviewId — cannot evaluate');
+      setCompareState('error');
+      return;
+    }
     setEmptyWarning(false);
     setCompareState('loading');
     setResult(null);
+    const trimmedRewrite = rewriteText.trim();
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/compare-rewrite', {
+      const res = await fetch('/api/writing-rewrite-evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
-        body: JSON.stringify({
-          originalText,
-          correctedText: aiReview.correctedText,
-          rewriteText: rewriteText.trim(),
-          mainMistakes: aiReview.mainMistakes,
-        }),
+        body: JSON.stringify({ reviewId, rewriteText: trimmedRewrite }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
-      const comparison = data.result as RewriteComparisonResult;
+      const dto = data.result as PublicWritingRewriteDTO;
+      const comparison = mapRewriteEvaluationToComparisonResult(dto);
       setResult(comparison);
       setCompareState('done');
-      onSaveV2?.(rewriteText.trim(), comparison);
-      // Server also returns finalCorrectedText in the same response
-      const serverFinal = typeof data.finalCorrectedText === 'string' ? data.finalCorrectedText.trim() : '';
-      if (serverFinal) {
-        setFinalCorrectedText(serverFinal);
-        setFinalCorrectState('done');
-        onV2FinalText?.(serverFinal);
-      }
+      onSaveV2?.(trimmedRewrite, comparison);
     } catch (err) {
-      console.error('[compare-rewrite]', err);
+      console.error('[writing-rewrite-evaluate]', err);
       setCompareState('error');
     }
+
+    // Independent of the evaluation above — its own visible loading/error/
+    // retry UI (not fire-and-forget). A failure here never blocks or hides
+    // the evaluation result already set above.
+    generateFinalText(trimmedRewrite);
   }
 
   const hasCompared = compareState === 'done' || !!(initialV2Comparison);

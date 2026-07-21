@@ -129,20 +129,32 @@ describe('computeFeatureReadiness — accounting_child (conversation.realtime_us
   });
 });
 
-describe('computeFeatureReadiness — dead/unreachable features stay blocked regardless of every other input', () => {
-  it('writing.evaluate_rewrite is estimatorReady=false and both enforceReady flags false even with every other input maximally favorable', () => {
-    expect(DEAD_UNREACHABLE_FEATURES.has('writing.evaluate_rewrite')).toBe(true);
+describe('computeFeatureReadiness — no dead/unreachable features remain (Etapa 11 completion invariant)', () => {
+  it('DEAD_UNREACHABLE_FEATURES is empty — every one of the 25 catalog features has a real, reachable call site', () => {
+    expect(DEAD_UNREACHABLE_FEATURES.size).toBe(0);
+  });
+
+  it('writing.evaluate_rewrite is no longer dead: estimatorReady/codeReady are true given favorable inputs, same as any other wired feature', () => {
+    // Regression guard for the previous bug: its real implementation
+    // (writingRewriteOrchestrator.ts's callModelEvaluator invocation) called
+    // OpenAI directly via fetch(), bypassing the Gateway, and had zero HTTP
+    // endpoint reaching it — see api/writing-rewrite-evaluate.ts and the
+    // Gateway-wrapped call site now in writingRewriteOrchestrator.ts.
+    expect(DEAD_UNREACHABLE_FEATURES.has('writing.evaluate_rewrite')).toBe(false);
+    expect(hasWiredEstimator('writing.evaluate_rewrite')).toBe(true);
     const r = computeFeatureReadiness(baseInput({
       featureKey: 'writing.evaluate_rewrite',
       hasPriceCoverage: true,
       infraDeployed: true,
       concurrencyValidated: true,
     }));
-    expect(r.isDead).toBe(true);
-    expect(r.estimatorReady).toBe(false);
-    expect(r.enforceReadyUnit).toBe(false);
-    expect(r.enforceReadyCost).toBe(false);
-    expect(r.blockersUnit).toContain('dead_unreachable');
+    expect(r.isDead).toBe(false);
+    expect(r.estimatorReady).toBe(true);
+    expect(r.codeReady).toBe(true);
+    expect(r.enforceReadyUnit).toBe(true);
+    expect(r.enforceReadyCost).toBe(true);
+    expect(r.blockersUnit).not.toContain('dead_unreachable');
+    expect(r.blockersCost).not.toContain('dead_unreachable');
   });
 });
 
