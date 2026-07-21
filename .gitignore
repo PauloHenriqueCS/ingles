@@ -6,3 +6,5 @@ playwright-report/
 test-results/
 UserspauloAppDataLocalTempgh_deployments.json
 .claude/
+.vercel
+.env*

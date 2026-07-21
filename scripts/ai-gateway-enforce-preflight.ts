@@ -115,6 +115,20 @@ const REALTIME_HARD_CONTROL_LIVE_TESTED = false;
 const PGRST_FUNCTION_NOT_FOUND = 'PGRST202';
 const DUMMY_UUID_INVALID = 'not-a-uuid'; // deliberately malformed — forces a type-cast error before the function body runs, never a real write, regardless of whether the function exists
 
+// PostgREST/Postgres errors always carry a non-empty `code` (a PGRSTxxx code
+// or a Postgres SQLSTATE) — that's how we know the request actually reached
+// the database and the function under test rejected our deliberately bad
+// args (proving it exists) rather than the request failing before it ever
+// got there. A bad/garbled auth header, DNS failure, or other transport
+// error surfaces as a plain JS TypeError with an EMPTY `code` (see
+// undici's Headers.set throwing on an invalid header value) — that must
+// never be read as "function present", or a broken credential silently
+// masquerades as healthy infra. Fail closed on anything without a real
+// Postgres/PostgREST error code.
+function isPostgrestError(error: unknown): error is { code: string; message?: string } {
+  return typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string' && (error as { code: string }).code.length > 0;
+}
+
 async function probeRpcExists(
   supabase: ReturnType<typeof getSharedServiceClient>,
   name: string,
@@ -122,7 +136,8 @@ async function probeRpcExists(
 ): Promise<boolean> {
   const { error } = await supabase.rpc(name, args);
   if (!error) return true;
-  return (error as { code?: string }).code !== PGRST_FUNCTION_NOT_FOUND;
+  if (!isPostgrestError(error)) return false; // transport/auth failure, never "present"
+  return error.code !== PGRST_FUNCTION_NOT_FOUND;
 }
 
 // ── unsafeDatabasePrivileges probe (Etapa 11 security fix) ─────────────────
@@ -278,8 +293,27 @@ async function assessFeature(
   };
 }
 
+// Cheap, side-effect-free connectivity/auth check run before any probe. A
+// bad or garbled SUPABASE_SERVICE_ROLE_KEY (e.g. the wrong value pasted into
+// the env var) fails every subsequent call with a transport-level error,
+// which the fail-closed probes below would otherwise silently absorb into
+// "unsafe"/"not validated" — technically correct (fail closed) but
+// misleading, since it looks identical to a real infra/security problem.
+// Surfacing it here, loudly and first, is the whole fix for the confusing
+// "ran fine, reported everything blocked" experience this script produced
+// with a broken credential.
+async function assertLiveCredentials(supabase: ReturnType<typeof getSharedServiceClient>): Promise<void> {
+  const { error } = await supabase.from('ai_gateway_concurrency_validations').select('id', { count: 'exact', head: true });
+  if (error && !isPostgrestError(error)) {
+    console.error('ERROR: SUPABASE_SERVICE_ROLE_KEY (or VITE_SUPABASE_URL) is set but rejected by Supabase — this is a credential/transport problem, not an infra/readiness problem.');
+    console.error(`  raw error: ${(error as { message?: string }).message ?? String(error)}`);
+    process.exit(1);
+  }
+}
+
 async function main() {
   const supabase = getSharedServiceClient();
+  await assertLiveCredentials(supabase);
   const policyResolver = new GatewayPolicyResolver(supabase, 0); // ttlMs=0 — always fresh, this is a one-shot audit
 
   const infra = await probeInfra(supabase);
@@ -288,10 +322,15 @@ async function main() {
 
   const concurrency = await checkConcurrencyValidated(supabase);
 
-  const results: FeatureReadiness[] = [];
-  for (const featureKey of AI_FEATURE_KEYS) {
-    results.push(await assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated, privileges.unsafe));
-  }
+  // Each feature's assessment is an independent, read-only round trip
+  // (policy resolution + price-coverage lookup) — running them sequentially
+  // turned a ~25-feature audit into several minutes with zero incremental
+  // output, which is indistinguishable from a hang. They share no mutable
+  // state, so parallelizing is safe.
+  const results: FeatureReadiness[] = await Promise.all(
+    AI_FEATURE_KEYS.map((featureKey) =>
+      assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated, privileges.unsafe)),
+  );
 
   const unitCodeReadyCount = results.filter((r) => r.unitEnforcementCodeReady).length;
   const costCodeReadyCount = results.filter((r) => r.costEnforcementCodeReady).length;
