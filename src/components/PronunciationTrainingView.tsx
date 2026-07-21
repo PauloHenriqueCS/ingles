@@ -18,6 +18,7 @@ import {
 } from '../lib/trainingWordCategory';
 import type { PronunciationNormalizedResult } from '../types';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
+import { apiUrl } from '../lib/apiUrl';
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ function cleanWordForTts(displayWord: string): string {
 
 async function fetchTtsUrl(text: string, voice: string): Promise<string> {
   const headers = await getAuthHeader();
-  const resp = await fetch('/api/tts', {
+  const resp = await fetch(apiUrl('/api/tts'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ text, voice }),
@@ -79,7 +80,7 @@ async function fetchTtsUrl(text: string, voice: string): Promise<string> {
 
 async function fetchAzureToken(): Promise<{ token: string; region: string }> {
   const headers = await getAuthHeader();
-  const resp = await fetch('/api/pronunciation-training/token', {
+  const resp = await fetch(apiUrl('/api/pronunciation-training/token'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
   });
@@ -444,7 +445,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
     try {
       const headers = await getAuthHeader();
-      const resp = await fetch('/api/pronunciation-training/generate-text', {
+      const resp = await fetch(apiUrl('/api/pronunciation-training/generate-text'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
       });

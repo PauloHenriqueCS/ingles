@@ -9,6 +9,7 @@ import {
   saveAudioSettings,
 } from '../lib/audioSettings';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 
 type PreviewStatus = 'idle' | 'loading' | 'playing' | 'done' | 'error';
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -59,7 +60,7 @@ export default function AudioSettingsView({ onBack }: Props) {
     setPreviewStatus('loading');
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/tts', {
+      const res = await fetch(apiUrl('/api/tts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ text: AUDIO_PREVIEW_TEXT, voice: azureVoiceName }),

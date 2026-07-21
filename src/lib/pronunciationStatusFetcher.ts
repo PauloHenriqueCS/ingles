@@ -1,4 +1,5 @@
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 import type { PronunciationStatusResponse } from '../types';
 
 export class PronunciationStatusError extends Error {
@@ -13,7 +14,7 @@ export async function fetchPronunciationStatus(
   signal?: AbortSignal,
 ): Promise<PronunciationStatusResponse> {
   const headers = await getAuthHeader();
-  const url = `/api/pronunciation/status?textVersionId=${encodeURIComponent(reviewId)}`;
+  const url = apiUrl(`/api/pronunciation/status?textVersionId=${encodeURIComponent(reviewId)}`);
   const resp = await fetch(url, { headers, signal });
   if (!resp.ok) {
     const json: { error?: string } = await resp.json().catch(() => ({}));

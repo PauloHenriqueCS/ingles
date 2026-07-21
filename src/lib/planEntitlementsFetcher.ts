@@ -1,9 +1,10 @@
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 
 export async function fetchPlanEntitlements(signal?: AbortSignal): Promise<PlanEntitlementsSnapshot> {
   const authHeader = await getAuthHeader();
-  const res = await fetch('/api/pronunciation-training/plan-entitlements', { headers: authHeader, signal });
+  const res = await fetch(apiUrl('/api/pronunciation-training/plan-entitlements'), { headers: authHeader, signal });
   if (!res.ok) {
     throw new Error('Não foi possível carregar as informações do seu plano.');
   }

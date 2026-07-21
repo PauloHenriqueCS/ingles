@@ -13,6 +13,7 @@ import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
 import { createReviewGroupFromReview } from '../lib/reviewGroups';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import CollapsibleBlock from './CollapsibleBlock';
 import DailyThemeCard from './DailyThemeCard';
 import MissionGrammarGuide from './MissionGrammarGuide';
@@ -167,7 +168,7 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     setReviewError(null);
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/review-text', {
+      const res = await fetch(apiUrl('/api/review-text'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({

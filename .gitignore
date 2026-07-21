@@ -8,3 +8,4 @@ UserspauloAppDataLocalTempgh_deployments.json
 .claude/
 .vercel
 .env*
+!.env.mobile

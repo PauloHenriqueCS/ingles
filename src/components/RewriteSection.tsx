@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Loader2, Target } from 'lucide-react';
 import { AIFeedback, RewriteComparisonResult } from '../types';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import { mapRewriteEvaluationToComparisonResult } from '../lib/rewriteComparisonAdapter';
 import type { PublicWritingRewriteDTO } from '../domain/writing-rewrite/rewrite-public-dto';
 import V2AudioPlayer from './V2AudioPlayer';
@@ -44,7 +45,7 @@ export default function RewriteSection({
     setFinalCorrectState('loading');
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/compare-rewrite', {
+      const res = await fetch(apiUrl('/api/compare-rewrite'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
@@ -93,7 +94,7 @@ export default function RewriteSection({
     const trimmedRewrite = rewriteText.trim();
     try {
       const authHeader = await getAuthHeader();
-      const res = await fetch('/api/writing-rewrite-evaluate', {
+      const res = await fetch(apiUrl('/api/writing-rewrite-evaluate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ reviewId, rewriteText: trimmedRewrite }),

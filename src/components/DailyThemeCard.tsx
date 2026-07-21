@@ -5,6 +5,7 @@ import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import { fetchPendingReviewGroup } from '../lib/pendingReview';
 import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
 import { WRITING_THEMES, RANDOM_THEME_LABEL } from '../domain/writing/writing-themes';
@@ -134,7 +135,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
         // canonical WRITING_THEMES catalog, never a second divergent list.
         selectedTheme,
       });
-      const res = await fetch('/api/generate-theme', {
+      const res = await fetch(apiUrl('/api/generate-theme'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify(requestBody),

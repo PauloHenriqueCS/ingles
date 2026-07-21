@@ -18,6 +18,7 @@ import {
 } from '../lib/tutorPreferences';
 import { AVAILABLE_CONVERSATION_GOALS, DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 
 // Re-export hook type for convenience
 export type { UseTutorPreferences };
@@ -52,7 +53,7 @@ function useVoicePreview() {
     setError(null);
     try {
       const headers = await getAuthHeader();
-      const resp = await fetch('/api/conversation/preview', {
+      const resp = await fetch(apiUrl('/api/conversation/preview'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify({ voice: voiceId, pace }),

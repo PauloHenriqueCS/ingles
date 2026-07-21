@@ -6,6 +6,7 @@ import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import ConfirmPronunciationModal from './ConfirmPronunciationModal';
 import PronunciationResult from './PronunciationResult';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import {
   runAnalysisFlow,
   PHASE_MESSAGES,
@@ -108,7 +109,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       const atid = attemptIdRef.current;
       if (aid && atid) {
         getAuthHeader().then((headers) => {
-          fetch('/api/pronunciation/fail', {
+          fetch(apiUrl('/api/pronunciation/fail'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...headers },
             body: JSON.stringify({ assessmentId: aid, attemptId: atid, code: 'CLIENT_INTERRUPTED' }),

@@ -11,6 +11,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Volume2, Loader2, Play, Pause, RotateCcw, AlertCircle } from 'lucide-react';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, AudioSettings } from '../lib/audioSettings';
 
 type AudioState = 'idle' | 'loading' | 'playing' | 'paused' | 'done' | 'error';
@@ -85,7 +86,7 @@ export default function V2AudioPlayer({ text }: Props) {
 
     const authHeader = await getAuthHeader();
 
-    const res = await fetch('/api/tts', {
+    const res = await fetch(apiUrl('/api/tts'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader },
       body: JSON.stringify({ text, voice: audioSettingsRef.current.voice }),

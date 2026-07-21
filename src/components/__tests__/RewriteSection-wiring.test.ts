@@ -38,17 +38,17 @@ function extractFunctionBody(fnName: string): string {
 describe('RewriteSection.tsx — primary evaluation path calls the canonical endpoint', () => {
   it('compare() calls /api/writing-rewrite-evaluate', () => {
     const compareBody = extractFunctionBody('compare');
-    expect(compareBody).toMatch(/fetch\('\/api\/writing-rewrite-evaluate'/);
+    expect(compareBody).toMatch(/fetch\(apiUrl\('\/api\/writing-rewrite-evaluate'\)/);
   });
 
   it('compare() does NOT call the legacy /api/compare-rewrite endpoint directly', () => {
     const compareBody = extractFunctionBody('compare');
-    expect(compareBody).not.toMatch(/fetch\('\/api\/compare-rewrite'/);
+    expect(compareBody).not.toMatch(/fetch\(apiUrl\('\/api\/compare-rewrite'\)/);
   });
 
   it('compare() contains exactly one fetch(...) call to an evaluation endpoint (no duplicate/parallel evaluation call)', () => {
     const compareBody = extractFunctionBody('compare');
-    const evaluationFetchCalls = compareBody.match(/fetch\('\/api\/writing-rewrite-evaluate'/g) ?? [];
+    const evaluationFetchCalls = compareBody.match(/fetch\(apiUrl\('\/api\/writing-rewrite-evaluate'\)/g) ?? [];
     expect(evaluationFetchCalls).toHaveLength(1);
     // generateFinalText() is invoked (a separate feature, writing.correct_v2_text,
     // not a second evaluation), never a second writing-rewrite-evaluate call.
@@ -68,7 +68,7 @@ describe('RewriteSection.tsx — primary evaluation path calls the canonical end
 
   it('generateFinalText() (the separate final-text feature) still exists and is untouched, using its own endpoint', () => {
     const finalTextBody = extractFunctionBody('generateFinalText');
-    expect(finalTextBody).toMatch(/fetch\('\/api\/compare-rewrite'/);
+    expect(finalTextBody).toMatch(/fetch\(apiUrl\('\/api\/compare-rewrite'\)/);
     expect(finalTextBody).toMatch(/generateFinalTextOnly: true/);
   });
 

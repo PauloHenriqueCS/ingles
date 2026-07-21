@@ -1,6 +1,7 @@
 import { convertToWavPcm, AudioConversionError } from './audioConverter';
 import { createRecognitionSession, PronunciationServiceError } from './pronunciationService';
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 import type { PronunciationFailCode, PronunciationNormalizedResult } from '../types';
 
 export type AnalysisPhase =
@@ -54,7 +55,7 @@ async function reportFail(refs: FlowRefs, code: PronunciationFailCode): Promise<
   const gatewaySessionId = refs.gatewaySessionIdRef?.current ?? undefined;
   try {
     const headers = await getAuthHeader();
-    await fetch('/api/pronunciation/fail', {
+    await fetch(apiUrl('/api/pronunciation/fail'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ assessmentId: aid, attemptId: atid, code, ...(gatewaySessionId ? { gatewaySessionId } : {}) }),
@@ -112,7 +113,7 @@ export async function runAnalysisFlow(
   };
   try {
     const headers = await getAuthHeader();
-    const resp = await fetch('/api/pronunciation/start', {
+    const resp = await fetch(apiUrl('/api/pronunciation/start'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ textVersionId: input.reviewId, attemptId: input.attemptId }),
@@ -176,7 +177,7 @@ export async function runAnalysisFlow(
   setPhase({ phase: 'saving_result' });
   try {
     const headers = await getAuthHeader();
-    const resp = await fetch('/api/pronunciation/complete', {
+    const resp = await fetch(apiUrl('/api/pronunciation/complete'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({

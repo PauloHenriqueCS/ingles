@@ -1,4 +1,5 @@
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 import { supabase } from './supabase';
 import type {
   EpisodeSessionResponse,
@@ -31,7 +32,7 @@ export class ListeningApiError extends Error {
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = await getAuthHeader();
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     ...init,
     headers: {
       'Content-Type': 'application/json',

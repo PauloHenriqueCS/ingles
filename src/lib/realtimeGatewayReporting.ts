@@ -16,6 +16,7 @@
  */
 
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 
 // ── End/failure reason — small, backend-validated vocabulary ────────────────
 
@@ -77,7 +78,7 @@ function logBridgeFailure(path: string, body: Record<string, unknown>, detail: {
 async function post(path: string, body: Record<string, unknown>): Promise<void> {
   try {
     const headers = await getAuthHeader();
-    const res = await fetch(path, {
+    const res = await fetch(apiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
@@ -162,7 +163,7 @@ const RECORDING_LIMIT_REASONS = new Set<RecordingLimitReason>(['per_turn', 'mont
 export async function checkSessionControl(gatewaySessionId: string): Promise<SessionControlResult> {
   try {
     const headers = await getAuthHeader();
-    const res = await fetch('/api/conversation/session-control', {
+    const res = await fetch(apiUrl('/api/conversation/session-control'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ gatewaySessionId }),

@@ -5,6 +5,7 @@ import PronunciationWordDetailPanel from './PronunciationWordDetailPanel';
 import { Volume2, Mic, Square, Pause, Loader2, CheckCircle } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
 import { createRecognitionSession, PronunciationServiceError } from '../lib/pronunciationService';
 import { DEFAULT_AUDIO_SETTINGS, fetchAudioSettings } from '../lib/audioSettings';
@@ -205,7 +206,7 @@ function PracticeWordRow({
       setTtsPhase('loading');
       try {
         const headers = await getAuthHeader();
-        const resp = await fetch('/api/tts', {
+        const resp = await fetch(apiUrl('/api/tts'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...headers },
           body: JSON.stringify({ text: cleanWord, voice }),
@@ -263,7 +264,7 @@ function PracticeWordRow({
 
     try {
       const headers = await getAuthHeader();
-      const tokenResp = await fetch('/api/pronunciation-training/token', {
+      const tokenResp = await fetch(apiUrl('/api/pronunciation-training/token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
       });

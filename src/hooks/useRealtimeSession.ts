@@ -1,5 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { getAuthHeader } from '../lib/apiAuth';
+import { apiUrl } from '../lib/apiUrl';
 import {
   reportSessionActive,
   reportSessionFailed,
@@ -290,7 +291,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     let model: string;
     try {
       const headers = await getAuthHeader();
-      const resp = await fetch('/api/conversation/session', {
+      const resp = await fetch(apiUrl('/api/conversation/session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
       });
@@ -527,7 +528,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     let answerSdp: string;
     try {
       const headers = await getAuthHeader();
-      const sdpResp = await fetch(WEBRTC_CONNECT_URL, {
+      const sdpResp = await fetch(apiUrl(WEBRTC_CONNECT_URL), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify({

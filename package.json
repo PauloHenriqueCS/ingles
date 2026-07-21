@@ -33,7 +33,7 @@
     "listening:audit": "npx tsx scripts/listening-audit.ts",
     "ai-gateway:reconcile-event": "npx tsx scripts/ai-gateway-reconcile-event.ts",
     "ai-gateway:reconcile-day": "npx tsx scripts/ai-gateway-reconcile-day.ts",
-    "cap:sync": "vite build && npx cap sync android",
+    "cap:sync": "vite build --mode mobile && npx cap sync android",
     "cap:open:android": "npx cap open android"
   },
   "dependencies": {

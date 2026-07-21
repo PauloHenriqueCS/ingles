@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, XCircle, CheckCircle2, Lightbulb, AlertTriangle } from 'lucide-react';
 import { findGrammarContent, GrammarContent } from '../lib/grammarContent';
+import { apiUrl } from '../lib/apiUrl';
 
 interface Props {
   grammarName: string;
@@ -30,7 +31,7 @@ export default function GrammarHelpModal({ grammarName, missionTip, onClose }: P
     setStatus('loading');
     setErrorMsg(null);
 
-    fetch('/api/grammar-explanation', {
+    fetch(apiUrl('/api/grammar-explanation'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ grammarName }),

@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { getAuthHeader } from './apiAuth';
+import { apiUrl } from './apiUrl';
 
 /**
  * The single source of truth for "was today's conversation goal met" —
@@ -26,7 +27,7 @@ export function isConversationGoalMet(totalSeconds: number, goalMinutes: number)
 export async function completeConversationSession(recordingAuthorizationId: string): Promise<void> {
   try {
     const headers = await getAuthHeader();
-    await fetch('/api/conversation/session-complete', {
+    await fetch(apiUrl('/api/conversation/session-complete'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ recordingAuthorizationId }),
