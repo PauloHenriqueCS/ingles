@@ -23,6 +23,7 @@ import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count'
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
+import { getTodaySP } from '../../src/lib/timezone';
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
 
@@ -604,6 +605,35 @@ async function handleSession(req: any, res: any) {
     entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
   );
 
+  // Quota-bypass fix (2026-07-21 audit) — a server-only authorization row,
+  // independent of conversation.webrtc_connect's (still 'legacy') AI Gateway
+  // observe mode. session-complete below closes it and computes the
+  // authoritative duration itself from authorized_at — never from a
+  // client-supplied number — before mirroring it into conversation_sessions,
+  // the table plan-entitlements-service.ts sums for monthlyTime.consumed.
+  // Best-effort: a failure here must never block issuing the token the
+  // student is waiting for; it just means this call's duration silently
+  // won't count toward their quota (same direction of failure as before this
+  // fix existed, never worse).
+  let recordingAuthorizationId: string | null = null;
+  const authorizedMaxSecondsFloor = Math.floor(authorizedAtStart.authorizedMaxRecordingSeconds);
+  if (authorizedMaxSecondsFloor > 0) {
+    try {
+      const { data: authRow, error: authErr } = await getSharedServiceClient()
+        .from('conversation_session_authorizations')
+        .insert({
+          user_id: userId,
+          session_date: getTodaySP(),
+          authorized_max_seconds: authorizedMaxSecondsFloor,
+        })
+        .select('id')
+        .single();
+      if (!authErr && authRow) recordingAuthorizationId = (authRow as { id: string }).id;
+    } catch (e) {
+      gatewayDeps.logger('gateway.conversationSessionAuthorization.failed', { message: String(e) });
+    }
+  }
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     token:     data.value,
@@ -621,8 +651,89 @@ async function handleSession(req: any, res: any) {
     // above). Never inferred client-side.
     authorizedMaxRecordingSeconds: authorizedAtStart.authorizedMaxRecordingSeconds,
     recordingLimitReason: authorizedAtStart.recordingLimitReason,
+    // Present whenever the authorization row above was written — the client
+    // must send this (unchanged) back to /session-complete when the call
+    // ends so the server can compute and record the real duration. Absent
+    // (older cached bundle, or the best-effort insert above failed) simply
+    // means this call's time is never credited toward monthlyTime.consumed.
+    ...(recordingAuthorizationId ? { recordingAuthorizationId } : {}),
     ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
+}
+
+// ── /session-complete ───────────────────────────────────────────────────────
+// Closes a conversation_session_authorizations row opened by handleSession
+// above and mirrors the authoritative duration into conversation_sessions
+// (read by getDayTotalSeconds/getMonthSessionTotals for the calendar/daily
+// goal UI, and by plan-entitlements-service.ts for the monthly quota).
+// duration_seconds is always computed here from server clocks
+// (now - authorized_at, clamped to authorized_max_seconds) — the client
+// supplies only the authorization id, never a duration. Idempotent by the
+// same guarded-UPDATE pattern as handleSessionEnd: a second call for an
+// already-'completed' row matches no rows and is a no-op.
+async function handleSessionComplete(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.CONVERSATION)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const recordingAuthorizationId = (req.body ?? {}).recordingAuthorizationId;
+  if (!isValidUuid(recordingAuthorizationId)) {
+    return jsonError(res, 400, 'INVALID_RECORDING_AUTHORIZATION_ID', 'recordingAuthorizationId inválido.');
+  }
+
+  try {
+    const gatewayDeps = getProductionDeps();
+    const nowMs = gatewayDeps.clock();
+    const client = getSharedServiceClient();
+    const { data: authRow, error: fetchErr } = await client
+      .from('conversation_session_authorizations')
+      .select('id, session_date, authorized_at, authorized_max_seconds')
+      .eq('id', recordingAuthorizationId)
+      .eq('user_id', userId)
+      .eq('status', 'authorized')
+      .maybeSingle();
+
+    if (fetchErr || !authRow) {
+      // Foreign, already completed, or never created — idempotent no-op.
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const row = authRow as { id: string; session_date: string; authorized_at: string; authorized_max_seconds: number };
+    const elapsedSeconds = (nowMs - new Date(row.authorized_at).getTime()) / 1000;
+    const durationSeconds = Math.floor(Math.max(0, Math.min(elapsedSeconds, row.authorized_max_seconds)));
+
+    // Status guard again on the UPDATE itself — the single source of atomicity:
+    // if two requests race, only the first one's WHERE clause matches any rows.
+    const { data: updated } = await client
+      .from('conversation_session_authorizations')
+      .update({ status: 'completed', completed_at: new Date(nowMs).toISOString(), duration_seconds: durationSeconds })
+      .eq('id', row.id)
+      .eq('status', 'authorized')
+      .select('id')
+      .maybeSingle();
+
+    if (!updated) return res.status(200).json({ status: 'ignored' });
+
+    // conversation_sessions.duration_sec has CHECK (duration_sec > 0) — a
+    // call that never really got going (mic granted, connection dropped in
+    // under a second) simply never produces a calendar/quota row, matching
+    // the pre-fix client behavior of skipping sub-10s sessions as noise.
+    if (durationSeconds > 0) {
+      const { error: insertErr } = await client
+        .from('conversation_sessions')
+        .insert({ user_id: userId, session_date: row.session_date, duration_sec: durationSeconds });
+      if (insertErr) {
+        console.error('[conversation/session-complete] failed to mirror duration', insertErr.message);
+      }
+    }
+
+    return res.status(200).json({ status: 'completed', durationSeconds });
+  } catch (e) {
+    console.error('[conversation/session-complete] failed', e instanceof Error ? e.message : 'unknown');
+    return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
+  }
 }
 
 // ─── POST /api/conversation/session-{active,failed,usage,end} ───────────────
@@ -1387,6 +1498,7 @@ export default async function handler(req: any, res: any) {
     case 'session-usage':  return handleSessionUsage(req, res);
     case 'session-end':    return handleSessionEnd(req, res);
     case 'session-control': return handleSessionControl(req, res);
+    case 'session-complete': return handleSessionComplete(req, res);
     default:                return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

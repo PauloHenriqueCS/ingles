@@ -14,8 +14,18 @@
  *   - user_conversation_credits (the extra-minutes ledger).
  *   - the existing domain tables (generated_themes, english_reviews,
  *     pronunciation_assessments, user_listening_assignments,
- *     conversation_sessions) as the source of truth for consumption —
- *     no parallel counter table.
+ *     conversation_session_authorizations) as the source of truth for
+ *     consumption — no parallel counter table.
+ *
+ *   Conversation is the one exception to "read straight off a single
+ *   column": conversationSecondsThisMonth below is computed from
+ *   conversation_session_authorizations (server-authored, never a client
+ *   INSERT — see 20260721010000_conversation_session_server_authoritative.sql)
+ *   rather than a flat SUM, because an 'authorized'-but-not-yet-'completed'
+ *   row must still count its own elapsed time toward the monthly balance in
+ *   real time. That is what stops (a) an abandoned/never-closed call from
+ *   costing nothing forever, and (b) concurrent calls (multiple tabs) from
+ *   each starting fresh against the same balance.
  *
  * Missing-capability handling (never a blanket fail-open):
  *   - A plan version with NO entitlements configured at all (a genuine
@@ -205,7 +215,7 @@ export async function getCurrentUserPlanEntitlements(
     supabase.from('english_reviews').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('entry_date', todayDate),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
     supabase.from('user_listening_assignments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('activity_date', todayDate).not('episode_id', 'is', null),
-    supabase.from('conversation_sessions').select('duration_sec').eq('user_id', userId).gte('session_date', monthStartDate).lt('session_date', monthEndDate),
+    supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId).gte('session_date', monthStartDate).lt('session_date', monthEndDate),
   ]);
 
   const planRows = (planValuesResult.data ?? []) as CapabilityValueRow[];
@@ -229,8 +239,23 @@ export async function getCurrentUserPlanEntitlements(
   const reviewsToday = reviewCountResult.count ?? 0;
   const pronunciationEvaluationsToday = pronunciationCountResult.count ?? 0;
   const listeningStoriesToday = listeningAssignedResult.count ?? 0;
-  const conversationSecondsThisMonth = ((conversationSecondsResult.data ?? []) as { duration_sec: number }[]).reduce(
-    (sum, r) => sum + (r.duration_sec ?? 0),
+
+  // Never trusts a stored duration_seconds for a row still 'authorized' —
+  // that state means session-complete hasn't (yet, or ever) closed it, so
+  // its contribution is derived live from authorized_at instead. See the
+  // module doc comment above for why this can't be a flat SUM.
+  interface ConversationAuthorizationRow {
+    status: 'authorized' | 'completed';
+    authorized_at: string;
+    authorized_max_seconds: number;
+    duration_seconds: number | null;
+  }
+  const conversationSecondsThisMonth = ((conversationSecondsResult.data ?? []) as ConversationAuthorizationRow[]).reduce(
+    (sum, r) => {
+      if (r.status === 'completed') return sum + (r.duration_seconds ?? 0);
+      const elapsedSeconds = (now.getTime() - new Date(r.authorized_at).getTime()) / 1000;
+      return sum + Math.max(0, Math.min(elapsedSeconds, r.authorized_max_seconds));
+    },
     0,
   );
 

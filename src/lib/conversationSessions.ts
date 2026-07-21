@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getAuthHeader } from './apiAuth';
 
 /**
  * The single source of truth for "was today's conversation goal met" —
@@ -9,10 +10,30 @@ export function isConversationGoalMet(totalSeconds: number, goalMinutes: number)
   return totalSeconds >= goalMinutes * 60;
 }
 
-export async function recordConversationSession(date: string, durationSec: number): Promise<void> {
-  if (durationSec < 10) return;
-  const { error } = await supabase.from('conversation_sessions').insert({ session_date: date, duration_sec: durationSec });
-  if (error) console.error('[conversation] failed to save session', { date, durationSec, error: error.message });
+/**
+ * Closes the server-side authorization opened by /api/conversation/session
+ * (see recordingAuthorizationId in useRealtimeSession.ts) — this is what
+ * actually writes the completed conversation_sessions row, with a duration
+ * computed server-side from authorized_at, never client-supplied. Direct
+ * client INSERT into conversation_sessions is blocked by RLS as of
+ * 20260721010000_conversation_session_server_authoritative.sql: a raw
+ * insert here previously let a student report an arbitrary (understated)
+ * duration for a real, already-costly conversation, bypassing the plan's
+ * monthly quota (plan-entitlements-service.ts sums that table). Best-effort:
+ * a failure just means this call's time doesn't land in the calendar/quota
+ * this time — never surfaced to the student, never retried destructively.
+ */
+export async function completeConversationSession(recordingAuthorizationId: string): Promise<void> {
+  try {
+    const headers = await getAuthHeader();
+    await fetch('/api/conversation/session-complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ recordingAuthorizationId }),
+    });
+  } catch (error) {
+    console.error('[conversation] failed to complete session', { recordingAuthorizationId, error });
+  }
 }
 
 export async function getDayTotalSeconds(date: string): Promise<number> {

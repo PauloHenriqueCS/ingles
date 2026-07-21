@@ -19,8 +19,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
+
+// Read as plain text via Node's fs, not Vite's `?raw` import suffix — the
+// suffix has no meaning under plain `tsc -p tsconfig.gateway.json` (part of
+// `npm run build`), which this file is included in. Same pattern as
+// api/__tests__/ai-gateway-preflight-script-static.test.ts.
+const CONVERSATION_HANDLER_SRC = readFileSync(
+  resolve(__dirname, '..', 'conversation', '[...slug].ts'),
+  'utf8',
+);
 
 const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => {
   const mockRequireAuth = vi.fn();
@@ -1122,6 +1133,130 @@ describe('POST /session-control — mid-session control poll', () => {
   });
 });
 
+// ── POST /session-complete — closes the quota-bypass audited 2026-07-21 ────
+// conversation_sessions used to be writable directly by the client with any
+// duration_sec, and plan-entitlements-service.ts sums that table to decide
+// whether a NEW paid realtime session may start. session-complete is the
+// only writer now: it computes duration from server clocks
+// (gatewayDeps.clock() - authorized_at, clamped to authorized_max_seconds),
+// never from anything the client sends.
+
+describe('POST /session-complete — server-authoritative conversation duration', () => {
+  const AUTH_ID = 'eeeeeeee-0000-0000-0000-000000000099';
+
+  function completeReq(body: Record<string, unknown> = { recordingAuthorizationId: AUTH_ID }) {
+    return makeReq({ url: '/api/conversation/session-complete', body });
+  }
+
+  function makeInsertChain(result: { error: unknown }) {
+    return { insert: vi.fn().mockResolvedValue(result) };
+  }
+
+  it('rejects a malformed recordingAuthorizationId', async () => {
+    const res = makeRes();
+    await handler(completeReq({ recordingAuthorizationId: 'not-a-uuid' }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_RECORDING_AUTHORIZATION_ID');
+    expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+
+  it('requires authentication', async () => {
+    mockRequireAuth.mockImplementation(async (_req: any, res: any) => {
+      res.status(401).json({ error: 'Não autenticado' });
+      return null;
+    });
+    const res = makeRes();
+    await handler(completeReq(), res);
+    expect(res._status()).toBe(401);
+    expect(mockSessionsFrom).not.toHaveBeenCalled();
+  });
+
+  it('computes duration server-side from authorized_at and mirrors it into conversation_sessions', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:20:00Z').getTime());
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: { id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800 },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+
+    const res = makeRes();
+    await handler(completeReq(), res);
+
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ status: 'completed', durationSeconds: 1200 }); // 20 minutes elapsed
+
+    const updateChain = mockSessionsFrom.mock.results[1].value;
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', duration_seconds: 1200 }));
+
+    const insertChain = mockSessionsFrom.mock.results[2].value;
+    expect(insertChain.insert).toHaveBeenCalledWith({ user_id: USER_ID, session_date: '2026-07-18', duration_sec: 1200 });
+  });
+
+  it('never reports more than authorized_max_seconds, even if authorized_at is long past (abandoned session)', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-25T12:00:00Z').getTime()); // 7 days later
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: { id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800 },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+
+    const res = makeRes();
+    await handler(completeReq(), res);
+
+    expect((res._body() as any).durationSeconds).toBe(1800);
+  });
+
+  it('is idempotent: a second completion of the same (already-completed) authorization is a no-op', async () => {
+    mockSessionsFrom.mockReturnValueOnce(makeSelectChain({ data: null, error: null }));
+
+    const res = makeRes();
+    await handler(completeReq(), res);
+
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ status: 'ignored' });
+    // Only the (empty) lookup happened — no update, no conversation_sessions insert.
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(1);
+  });
+
+  it('never mirrors a zero-duration completion into conversation_sessions (its CHECK requires duration_sec > 0)', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:00:00Z').getTime()); // same instant as authorized_at
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: { id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800 },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }));
+
+    const res = makeRes();
+    await handler(completeReq(), res);
+
+    expect(res._body()).toEqual({ status: 'completed', durationSeconds: 0 });
+    // Exactly two sessionsClient().from() calls (select + update) — no third
+    // insert() call into conversation_sessions.
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(2);
+  });
+
+  it('the request body never carries a duration — the client only ever supplies the authorization id', async () => {
+    // Narrow to JUST handleSessionComplete's own body — the next top-level
+    // marker after it is the session-{active,failed,usage,end} section
+    // comment, not the (much further away) dispatcher. Slicing to the
+    // dispatcher previously swept in handleSessionActive/Failed/Usage/End
+    // and handleSessionControl too, all of which legitimately use a
+    // server-computed `durationSeconds` variable — this test's real intent
+    // is narrower: THIS handler must never read a duration out of req.body.
+    const handlerSrc = CONVERSATION_HANDLER_SRC.slice(
+      CONVERSATION_HANDLER_SRC.indexOf('async function handleSessionComplete'),
+      CONVERSATION_HANDLER_SRC.indexOf('// ─── POST /api/conversation/session-{active,failed,usage,end}'),
+    );
+    expect(handlerSrc).not.toMatch(/req\.body[^;]*duration/i);
+    expect(handlerSrc).toContain('recordingAuthorizationId');
+  });
+});
+
 // ── Vercel's REAL catch-all shape — req.query.slug, string AND array ───────
 // A previous round of this suite proved the dispatcher routes a *nested*
 // two-segment slug (['session', 'active']) correctly — but that was a false
@@ -1145,11 +1280,27 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
   it('routes "session" (string) to conversation.create_session, not the webrtc bridge', async () => {
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
     vi.stubGlobal('fetch', mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } }));
+    // handleSession's best-effort conversation_session_authorizations
+    // insert: .insert({...}).select('id').single()
+    mockSessionsFrom.mockReturnValue({
+      insert: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          single: vi.fn().mockResolvedValue({ data: { id: 'eeeeeeee-0000-0000-0000-000000000099' }, error: null }),
+        }),
+      }),
+    });
     const res = makeRes();
     await handler(vercelReq('session'), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('tok');
-    expect(mockSessionsFrom).not.toHaveBeenCalled(); // never touches the bridge tables
+    // Touches conversation_session_authorizations (the quota-bypass fix's
+    // best-effort authorization row, opened here and closed by
+    // /session-complete) but never the webrtc bridge tables
+    // (ai_provider_sessions/ai_usage_events) — those stay untouched unless
+    // conversation.webrtc_connect is in observe mode, which this test never
+    // configures.
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(1);
+    expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
   });
 
   it('routes "session-active" (string) to handleSessionActive', async () => {
@@ -1242,7 +1393,7 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
       res.status(401).json({ error: 'Não autenticado' });
       return null;
     });
-    for (const slug of ['session-active', 'session-failed', 'session-usage', 'session-end', 'session-control']) {
+    for (const slug of ['session-active', 'session-failed', 'session-usage', 'session-end', 'session-control', 'session-complete']) {
       const res = makeRes();
       await handler(vercelReq(slug, { gatewaySessionId: GATEWAY_SESSION_ID }), res);
       expect(res._status()).toBe(401);

@@ -40,6 +40,16 @@ export interface UseRealtimeSession {
   recordingLimitReason: RecordingLimitReason | null;
   /** Friendly message shown when the session was auto-stopped by a commercial limit (not a technical error). */
   stopMessage: string | null;
+  /**
+   * Server-issued id for this call's conversation_session_authorizations row
+   * (see api/conversation/[...slug].ts's handleSession). Present once
+   * connecting has completed a /session round-trip; persists through
+   * 'ended' (not cleared by cleanup()) so the caller can pass it to
+   * completeConversationSession() once, after the call ends. null when
+   * absent (older cached bundle, or the backend's best-effort insert
+   * failed) — the caller simply has nothing to complete in that case.
+   */
+  recordingAuthorizationId: string | null;
   start: () => Promise<void>;
   end: () => void;
   updateInstructions: (instructions: string) => void;
@@ -112,6 +122,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const [authorizedMaxSeconds, setAuthorizedMaxSeconds] = useState<number | null>(null);
   const [recordingLimitReason, setRecordingLimitReason] = useState<RecordingLimitReason | null>(null);
   const [stopMessage, setStopMessage] = useState<string | null>(null);
+  const [recordingAuthorizationId, setRecordingAuthorizationId] = useState<string | null>(null);
 
   const pcRef              = useRef<RTCPeerConnection | null>(null);
   const dcRef              = useRef<RTCDataChannel | null>(null);
@@ -263,6 +274,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     setAuthorizedMaxSeconds(null);
     setRecordingLimitReason(null);
     setStopMessage(null);
+    setRecordingAuthorizationId(null);
 
     // ── Step 1: Mic first (must be in user gesture context, especially on Safari/iPhone) ─
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -306,11 +318,19 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         token: string; sessionId: string | null; voice: string; model: string;
         gatewaySessionId?: string; maxSessionSeconds?: unknown;
         authorizedMaxRecordingSeconds?: unknown; recordingLimitReason?: unknown;
+        recordingAuthorizationId?: unknown;
       };
       token     = body.token;
       sessionId = body.sessionId;
       voice     = body.voice;
       model     = body.model;
+      // Quota-bypass fix (2026-07-21 audit) — closes the loop with
+      // completeConversationSession() once this call ends. Absent whenever
+      // the backend's best-effort insert didn't happen (see handleSession);
+      // this call's time simply won't be credited toward monthlyTime that time.
+      if (typeof body.recordingAuthorizationId === 'string' && body.recordingAuthorizationId) {
+        setRecordingAuthorizationId(body.recordingAuthorizationId);
+      }
       // Additive/optional — only present when conversation.webrtc_connect is
       // in observe mode. Absent (legacy, always at this stage) means every
       // gateway report below stays a no-op.
@@ -576,6 +596,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     status, errorMessage, errorCode, elapsedMs, sessionInfo, isSpeaking,
     transcriptText,
     authorizedMaxSeconds, recordingLimitReason, stopMessage,
+    recordingAuthorizationId,
     start, end, updateInstructions,
   };
 }

@@ -165,7 +165,13 @@ describe('getCurrentUserPlanEntitlements', () => {
         generated_themes: { data: null, error: null, count: 2 },
         english_reviews: { data: null, error: null, count: 0 },
         pronunciation_assessments: { data: null, error: null, count: 0 },
-        conversation_sessions: { data: [{ duration_sec: 300 }, { duration_sec: 120 }], error: null },
+        conversation_session_authorizations: {
+          data: [
+            { status: 'completed', authorized_at: '2026-07-18T10:00:00Z', authorized_max_seconds: 1800, duration_seconds: 300 },
+            { status: 'completed', authorized_at: '2026-07-18T10:00:00Z', authorized_max_seconds: 1800, duration_seconds: 120 },
+          ],
+          error: null,
+        },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
@@ -189,7 +195,10 @@ describe('getCurrentUserPlanEntitlements', () => {
           ],
           error: null,
         },
-        conversation_sessions: { data: [{ duration_sec: 600 }], error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'completed', authorized_at: '2026-07-18T10:00:00Z', authorized_max_seconds: 1800, duration_seconds: 600 }],
+          error: null,
+        },
         user_conversation_credits: { data: [{ remaining_seconds: 200 }], error: null },
       },
     });
@@ -213,13 +222,77 @@ describe('getCurrentUserPlanEntitlements', () => {
           ],
           error: null,
         },
-        conversation_sessions: { data: [{ duration_sec: 600 }], error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'completed', authorized_at: '2026-07-18T10:00:00Z', authorized_max_seconds: 1800, duration_seconds: 600 }],
+          error: null,
+        },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
 
     expect(snapshot.conversation.monthlyTime.state).toBe('monthly_limit_reached');
     expect(snapshot.conversation.monthlyTime.canStart).toBe(false);
+  });
+
+  it('audit fix: counts a still-open (never session-completed) authorization as consuming its elapsed time, not zero', async () => {
+    // Regression test for the quota-bypass this migration closed: a session
+    // that was authorized but whose /session-complete call never landed
+    // (abandoned tab, client skipped the request, etc.) must still count
+    // toward monthlyTime — otherwise never completing it is a free way to
+    // dodge the monthly cap forever.
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
+        conversation_session_authorizations: {
+          // Authorized 20 minutes before "now" with a 30-minute ceiling —
+          // still "in progress" from the server's point of view, so it
+          // counts its elapsed 1200s, not the 0s a client-controlled
+          // duration_sec could have claimed.
+          data: [{ status: 'authorized', authorized_at: '2026-07-18T11:40:00Z', authorized_max_seconds: 1800, duration_seconds: null }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(1200);
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(0);
+  });
+
+  it('audit fix: caps an abandoned authorization at authorized_max_seconds, never lets it grow unbounded', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
+        conversation_session_authorizations: {
+          // Authorized 10 days ago, 30-minute ceiling, never completed —
+          // must be capped at 1800s, not (now - authorized_at) which would
+          // be ~10 days.
+          data: [{ status: 'authorized', authorized_at: '2026-07-08T12:00:00Z', authorized_max_seconds: 1800, duration_seconds: null }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(1800);
   });
 
   it('respects an explicit writing.enabled=false plan value (disabled_by_plan, not unlimited)', async () => {

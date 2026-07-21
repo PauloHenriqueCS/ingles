@@ -440,13 +440,53 @@ CREATE TRIGGER trg_conv_session_user_id
   BEFORE INSERT ON public.conversation_sessions
   FOR EACH ROW EXECUTE FUNCTION public.set_conversation_session_user_id();
 
+-- SELECT-only for the owner (20260721010000_conversation_session_server_authoritative.sql).
+-- Direct client INSERT/UPDATE was removed: it let a student report an
+-- arbitrary (understated) duration for a realtime conversation that already
+-- happened at real cost, bypassing the plan's monthly quota
+-- (plan-entitlements-service.ts sums this table). Only the backend's
+-- service-role client writes here now, from api/conversation/[...slug].ts's
+-- session-complete handler, using the authoritative duration computed from
+-- conversation_session_authorizations.
 DROP POLICY IF EXISTS "Users manage own conversation sessions" ON public.conversation_sessions;
+DROP POLICY IF EXISTS "Users view own conversation sessions" ON public.conversation_sessions;
 
-CREATE POLICY "Users manage own conversation sessions"
+CREATE POLICY "Users view own conversation sessions"
   ON public.conversation_sessions
-  FOR ALL
-  USING     (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
+  FOR SELECT
+  USING (auth.uid() = user_id);
+
+-- =============================================================================
+-- conversation_session_authorizations
+-- Ledger backing the server-authoritative duration for conversation_sessions
+-- (20260721010000_conversation_session_server_authoritative.sql). Written
+-- and read only by the backend's service-role client — no RLS policies are
+-- granted to authenticated/anon, same posture as ai_provider_sessions.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS public.conversation_session_authorizations (
+  id                     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_date           DATE        NOT NULL,
+  authorized_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  authorized_max_seconds INTEGER     NOT NULL CHECK (authorized_max_seconds > 0),
+  status                 TEXT        NOT NULL DEFAULT 'authorized',
+  completed_at           TIMESTAMPTZ,
+  duration_seconds       INTEGER,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT chk_csa_status CHECK (status IN ('authorized', 'completed')),
+  CONSTRAINT chk_csa_duration_non_negative CHECK (duration_seconds IS NULL OR duration_seconds >= 0)
+);
+
+ALTER TABLE public.conversation_session_authorizations ENABLE ROW LEVEL SECURITY;
+
+CREATE INDEX IF NOT EXISTS idx_csa_user_month
+  ON public.conversation_session_authorizations (user_id, session_date);
+
+CREATE INDEX IF NOT EXISTS idx_csa_stale_authorized
+  ON public.conversation_session_authorizations (authorized_at)
+  WHERE status = 'authorized';
 
 -- =============================================================================
 -- pronunciation_assessments

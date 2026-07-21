@@ -9,7 +9,7 @@ import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
 import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
-import { recordConversationSession, getDayTotalSeconds, isConversationGoalMet } from '../lib/conversationSessions';
+import { completeConversationSession, getDayTotalSeconds, isConversationGoalMet } from '../lib/conversationSessions';
 import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 import type { ConversationEntitlements } from '../domain/entitlements/entitlement-types';
@@ -184,7 +184,17 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
     if (session.status === 'ended' && !sessionSavedRef.current && session.elapsedMs > 0) {
       sessionSavedRef.current = true;
       const durationSec = Math.floor(session.elapsedMs / 1000);
-      recordConversationSession(today, durationSec)
+      // Duration is never reported by the client — completeConversationSession
+      // only tells the server WHICH authorization row to close; the server
+      // computes the authoritative duration itself from authorized_at. When
+      // recordingAuthorizationId is absent (older cached bundle, or the
+      // backend's best-effort insert failed at session start) there is
+      // nothing to complete — the call simply won't be credited this time,
+      // same fail-open direction as before this fix existed.
+      const complete = session.recordingAuthorizationId
+        ? completeConversationSession(session.recordingAuthorizationId)
+        : Promise.resolve();
+      complete
         .then(() => {
           onComplete?.();
           entitlements.refetch(); // reconcile the monthly balance with the server, never optimistic-only
