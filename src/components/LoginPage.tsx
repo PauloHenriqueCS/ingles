@@ -89,7 +89,7 @@ export default function LoginPage() {
           </div>
           <h1 className="text-2xl font-bold text-slate-100">Lemon</h1>
           <p className="text-slate-400 text-sm">
-            {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}
+            {mode === 'login' ? 'Entre na sua conta — teste remote-first 21/07' : 'Crie sua conta'}
           </p>
         </div>
 
