@@ -68,3 +68,28 @@ describe('scripts/ai-gateway-enforce-preflight.ts — no hardcoded readiness boo
     expect(src).toMatch(/if \(require\.main === module\) \{/);
   });
 });
+
+describe('realtimeHardControlReady — live-queried, never a hardcoded boolean (Etapa 11 fix)', () => {
+  it('never declares a hardcoded REALTIME_HARD_CONTROL_LIVE_TESTED constant', () => {
+    expect(src).not.toMatch(/REALTIME_HARD_CONTROL_LIVE_TESTED\s*=\s*(true|false)/);
+  });
+
+  it('realtimeHardControlLiveTested passed into computeFeatureReadiness always comes from the live checkRealtimeHardControlValidated() result, never a literal', () => {
+    expect(src).toMatch(/const realtimeHardControl = await checkRealtimeHardControlValidated\(supabase\);/);
+    expect(src).toMatch(/realtimeHardControlLiveTested,\s*\n\s*unsafeDatabasePrivileges,/);
+  });
+
+  it('checkRealtimeHardControlValidated queries the live realtime_hard_control_validations table by the live-computed script hash and current hard_control_version — never assumes a match', () => {
+    expect(src).toMatch(/\.from\('realtime_hard_control_validations'\)/);
+    expect(src).toMatch(/\.eq\('hard_control_version', REALTIME_HARD_CONTROL_VERSION\)/);
+    expect(src).toMatch(/\.eq\('validation_script_sha256', scriptHash\)/);
+  });
+
+  it('an unreadable/missing realtime validation script fails closed (validated=false), never assumes a match', () => {
+    expect(src).toMatch(/function computeRealtimeValidationScriptHash\(\): string \| null \{[\s\S]*?catch \{\s*\n\s*return null;/);
+  });
+
+  it('REALTIME_HARD_CONTROL_VERSION is imported from the shared pure module, not redeclared inline', () => {
+    expect(src).toMatch(/import\s*\{[^}]*REALTIME_HARD_CONTROL_VERSION[^}]*\}\s*from\s*'\.\.\/api\/_ai-gateway\/enforce-readiness'/s);
+  });
+});

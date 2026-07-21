@@ -46,9 +46,18 @@
  *                               row in ai_gateway_concurrency_validations
  *                               whose migration_version and
  *                               validation_script_sha256 match right now.
- *   realtimeHardControlReady — true only once real-time session termination
- *                               has been implemented AND live-verified
- *                               against production OpenAI (never true today).
+ *   realtimeHardControlReady — GLOBAL for the 3 realtime session features.
+ *                               Live-queried, same pattern as
+ *                               concurrencyValidated: is there a 'passed' row
+ *                               in realtime_hard_control_validations
+ *                               (supabase/migrations/20260722000000_realtime_hard_control_validation.sql)
+ *                               whose hard_control_version and
+ *                               validation_script_sha256 match right now —
+ *                               see supabase/manual-validation/
+ *                               realtime-hard-control-validation.md for the
+ *                               real, small, controlled test procedure this
+ *                               records the result of. Never a hardcoded
+ *                               boolean.
  *   enforceReadyUnit/Cost     — the only fields meaning "safe to enforce this
  *                               dimension right now." A TTS feature with no
  *                               price can be enforceReadyUnit=true (character
@@ -89,6 +98,7 @@ import {
 // resolution) that module doesn't fetch itself.
 import {
   MIGRATION_VERSION,
+  REALTIME_HARD_CONTROL_VERSION,
   FEATURE_PROVIDER_MODEL,
   computeFeatureReadiness,
   hashValidationScript,
@@ -104,11 +114,12 @@ const JSON_OUTPUT = process.argv.includes('--json');
 
 const VALIDATION_SCRIPT_PATH = resolvePath(__dirname, '..', 'supabase', 'manual-validation', 'ai-gateway-enforcement-concurrency.sql');
 
-// Implemented (call_id capture + backend hangup — see
-// api/conversation/[...slug].ts) but not live-verified against production
-// OpenAI in this environment. Flip to true only after a real smoke test
-// confirms hangup actually terminates a live session with a real call_id.
-const REALTIME_HARD_CONTROL_LIVE_TESTED = false;
+// realtimeHardControlReady — live-queried from realtime_hard_control_validations
+// (supabase/migrations/20260722000000_realtime_hard_control_validation.sql),
+// exactly like concurrencyValidated below. Never a hardcoded boolean: a
+// missing/failed/stale (script edited since) validation row means false,
+// with zero manual "invalidate" step required.
+const REALTIME_VALIDATION_SCRIPT_PATH = resolvePath(__dirname, '..', 'supabase', 'manual-validation', 'realtime-hard-control-validation.md');
 
 // ── Fase 14 infra probe (infraDeployed) ───────────────────────────────────────
 
@@ -230,6 +241,38 @@ async function checkConcurrencyValidated(
   return { validated: true, scriptHash, matchedRecord: { executedAt: row.executed_at, executedBy: row.executed_by } };
 }
 
+// ── realtimeHardControlReady (live, never hardcoded) ─────────────────────────
+
+function computeRealtimeValidationScriptHash(): string | null {
+  try {
+    const content = readFileSync(REALTIME_VALIDATION_SCRIPT_PATH, 'utf8');
+    return hashValidationScript(content);
+  } catch {
+    return null; // file unreadable — realtimeHardControlReady must fail closed, never assume
+  }
+}
+
+async function checkRealtimeHardControlValidated(
+  supabase: ReturnType<typeof getSharedServiceClient>,
+): Promise<{ validated: boolean; scriptHash: string | null; matchedRecord: { executedAt: string; executedBy: string } | null }> {
+  const scriptHash = computeRealtimeValidationScriptHash();
+  if (!scriptHash) return { validated: false, scriptHash: null, matchedRecord: null };
+
+  const { data, error } = await supabase
+    .from('realtime_hard_control_validations')
+    .select('executed_at, executed_by')
+    .eq('hard_control_version', REALTIME_HARD_CONTROL_VERSION)
+    .eq('validation_script_sha256', scriptHash)
+    .eq('status', 'passed')
+    .order('executed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) return { validated: false, scriptHash, matchedRecord: null };
+  const row = data as { executed_at: string; executed_by: string };
+  return { validated: true, scriptHash, matchedRecord: { executedAt: row.executed_at, executedBy: row.executed_by } };
+}
+
 // ── Assessment ─────────────────────────────────────────────────────────────
 // All readiness-field computation itself (codeReady, estimatorReady,
 // pricingReady, enforceReadyUnit/Cost, blockers, ...) lives in the pure,
@@ -254,6 +297,7 @@ async function assessFeature(
   infraDeployed: boolean,
   concurrencyValidated: boolean,
   unsafeDatabasePrivileges: boolean,
+  realtimeHardControlLiveTested: boolean,
 ): Promise<FeatureReadiness> {
   const meta = FEATURE_METADATA[featureKey];
   const { provider, model } = FEATURE_PROVIDER_MODEL[featureKey];
@@ -278,7 +322,7 @@ async function assessFeature(
     hasPriceCoverage,
     infraDeployed,
     concurrencyValidated,
-    realtimeHardControlLiveTested: REALTIME_HARD_CONTROL_LIVE_TESTED,
+    realtimeHardControlLiveTested,
     unsafeDatabasePrivileges,
   });
 
@@ -321,6 +365,7 @@ async function main() {
   const infraDeployed = infra.rateLimit && infra.dedupe && infra.reservation && infra.breaker && infra.concurrencyLog && !privileges.unsafe;
 
   const concurrency = await checkConcurrencyValidated(supabase);
+  const realtimeHardControl = await checkRealtimeHardControlValidated(supabase);
 
   // Each feature's assessment is an independent, read-only round trip
   // (policy resolution + price-coverage lookup) — running them sequentially
@@ -329,7 +374,7 @@ async function main() {
   // state, so parallelizing is safe.
   const results: FeatureReadiness[] = await Promise.all(
     AI_FEATURE_KEYS.map((featureKey) =>
-      assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated, privileges.unsafe)),
+      assessFeature(featureKey, policyResolver, supabase, infraDeployed, concurrency.validated, privileges.unsafe, realtimeHardControl.validated)),
   );
 
   const unitCodeReadyCount = results.filter((r) => r.unitEnforcementCodeReady).length;
@@ -343,6 +388,10 @@ async function main() {
       migrationVersion: MIGRATION_VERSION,
       infra, privileges, infraDeployed,
       concurrencyValidated: concurrency.validated, concurrencyScriptHash: concurrency.scriptHash, concurrencyRecord: concurrency.matchedRecord,
+      realtimeHardControlVersion: REALTIME_HARD_CONTROL_VERSION,
+      realtimeHardControlValidated: realtimeHardControl.validated,
+      realtimeHardControlScriptHash: realtimeHardControl.scriptHash,
+      realtimeHardControlRecord: realtimeHardControl.matchedRecord,
       features: results,
       summary: { unitCodeReadyCount, costCodeReadyCount, pricingReadyCount, enforceReadyUnitCount, enforceReadyCostCount, totalFeatures: results.length },
     }, null, 2));
@@ -368,6 +417,10 @@ async function main() {
   console.log('Concurrency validation (ai_gateway_concurrency_validations, live query):');
   console.log(`  validation script hash (live, right now): ${concurrency.scriptHash ?? '(file unreadable)'}`);
   console.log(`  concurrencyValidated=${concurrency.validated}${concurrency.matchedRecord ? ` (matched record: executed_by=${concurrency.matchedRecord.executedBy} at ${concurrency.matchedRecord.executedAt})` : ' (no matching passed record for this exact migration_version + script hash)'}\n`);
+
+  console.log(`Realtime hard-control validation (realtime_hard_control_validations, live query, version=${REALTIME_HARD_CONTROL_VERSION}):`);
+  console.log(`  validation script hash (live, right now): ${realtimeHardControl.scriptHash ?? '(file unreadable)'}`);
+  console.log(`  realtimeHardControlReady=${realtimeHardControl.validated}${realtimeHardControl.matchedRecord ? ` (matched record: executed_by=${realtimeHardControl.matchedRecord.executedBy} at ${realtimeHardControl.matchedRecord.executedAt})` : ' (no matching passed record for this exact hard_control_version + script hash)'}\n`);
 
   for (const r of results) {
     console.log(`${r.featureKey}${r.isAccountingChild ? `  [accounting_child of ${r.accountingParent}]` : ''}`);
