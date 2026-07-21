@@ -32,10 +32,14 @@
     "listening:inventory:ensure": "npx tsx scripts/listening-inventory-ensure.ts",
     "listening:audit": "npx tsx scripts/listening-audit.ts",
     "ai-gateway:reconcile-event": "npx tsx scripts/ai-gateway-reconcile-event.ts",
-    "ai-gateway:reconcile-day": "npx tsx scripts/ai-gateway-reconcile-day.ts"
+    "ai-gateway:reconcile-day": "npx tsx scripts/ai-gateway-reconcile-day.ts",
+    "cap:sync": "vite build && npx cap sync android",
+    "cap:open:android": "npx cap open android"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
+    "@capacitor/android": "8.4.2",
+    "@capacitor/core": "8.4.2",
     "@supabase/supabase-js": "^2.110.1",
     "lucide-react": "^1.24.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.50.0",
@@ -45,6 +49,7 @@
     "recharts": "^3.9.2"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.4.2",
     "@playwright/test": "^1.61.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
