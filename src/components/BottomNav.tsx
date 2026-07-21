@@ -19,7 +19,10 @@ const tabs: { view: View; label: string; icon: LucideIcon }[] = [
 
 export default function BottomNav({ current, onChange }: Props) {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 flex z-10">
+    <nav
+      className="fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 flex z-10"
+      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
       {tabs.map((t) => (
         <button
           key={t.view}

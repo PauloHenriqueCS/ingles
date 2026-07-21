@@ -309,7 +309,10 @@ export default function AudioSettingsView({ onBack }: Props) {
       </div>
 
       {/* Save bar */}
-      <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 border-t border-slate-700 p-4">
+      <div
+        className="fixed bottom-0 left-0 right-0 bg-slate-900/95 border-t border-slate-700 p-4"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+      >
         <div className="max-w-lg mx-auto flex items-center gap-3">
           {saveStatus === 'error' && (
             <p className="text-xs text-red-400 flex-1">Não foi possível salvar. Tente novamente.</p>

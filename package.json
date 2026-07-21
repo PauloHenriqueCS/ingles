@@ -39,7 +39,9 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@capacitor/android": "8.4.2",
+    "@capacitor/app": "8.1.1",
     "@capacitor/core": "8.4.2",
+    "@capacitor/status-bar": "8.0.3",
     "@supabase/supabase-js": "^2.110.1",
     "lucide-react": "^1.24.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.50.0",

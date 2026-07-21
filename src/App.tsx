@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
@@ -82,6 +84,34 @@ export default function App() {
     }
     supabase.auth.signOut();
   }
+
+  // Android hardware back button — the app has no URL-based navigation history,
+  // so Capacitor's default (WebView goBack / exit) would just close the app from
+  // any screen. Walk the same hierarchy a user would tap through: close menu,
+  // close day view, return to home, then exit on a second press from home.
+  const backButtonStateRef = useRef({ menuOpen, view, prevView });
+  backButtonStateRef.current = { menuOpen, view, prevView };
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const listenerPromise = CapacitorApp.addListener('backButton', () => {
+      const { menuOpen: isMenuOpen, view: currentView, prevView: previousView } = backButtonStateRef.current;
+      if (isMenuOpen) {
+        setMenuOpen(false);
+      } else if (currentView === 'day') {
+        setView(previousView);
+      } else if (currentView !== 'home') {
+        setView('home');
+      } else {
+        CapacitorApp.exitApp();
+      }
+    });
+
+    return () => {
+      listenerPromise.then((listener) => listener.remove());
+    };
+  }, []);
 
   if (window.location.pathname === '/auth/callback') {
     return <AuthCallback />;
