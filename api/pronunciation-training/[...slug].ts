@@ -265,7 +265,10 @@ async function handlePlanEntitlements(req: any, res: any) {
     const snapshot = await getCurrentUserPlanEntitlements(userId);
     return res.json(snapshot);
   } catch (err) {
-    safeLog('plan-entitlements', 'resolve_failed', 500);
+    safeLog('plan-entitlements', 'resolve_failed', 500, {
+      errName: err instanceof Error ? err.name : typeof err,
+      errMessage: err instanceof Error ? err.message : String(err),
+    });
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar as informações do seu plano.');
   }
 }
