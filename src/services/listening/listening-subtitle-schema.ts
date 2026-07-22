@@ -28,25 +28,23 @@ export interface ValidatedTranslatedCue {
   textPtBr: string;
 }
 
-// AI semantic validation result
+// AI semantic (quality-only) validation result — per cue, not per block.
+// Identity/count/order/number-preservation are the deterministic layer's job
+// (validateTranslationDeterministic); this layer only judges meaning
+// fidelity, naturalness, and invented/omitted content.
 
-export interface SubtitleAIValidationChecks {
-  meaningPreserved: boolean;
-  noAddedInformation: boolean;
-  noMissingInformation: boolean;
-  ptBrNatural: boolean;
-  namesPreserved: boolean;
-  numbersPreserved: boolean;
-  cueAlignmentValid: boolean;
+export interface CueQualityResult {
+  cueKey: string;
+  valid: boolean;
+  /** Specific reason(s) — empty when valid is true. */
+  issues: string[];
 }
 
-export interface SubtitleAIValidationResult {
+export interface SubtitleQualityValidationResult {
   schemaVersion: string;
-  valid: boolean;
-  confidence: number;
-  checks: SubtitleAIValidationChecks;
-  issues: string[];
-  correctedTextPtBr: Record<string, string> | null;
+  /** true only when every requested cueKey was present in the response and valid. */
+  overallValid: boolean;
+  cueResults: CueQualityResult[];
 }
 
 // English cue built from sentences (pre-translation)

@@ -116,8 +116,18 @@ export class ListeningTranslationValidationFailedError extends Error {
 export class ListeningTranslationCorrectionFailedError extends Error {
   readonly code = 'LISTENING_TRANSLATION_CORRECTION_FAILED';
   readonly retryable = false;
-  constructor(readonly episodeId: string, readonly blockOrder: number) {
-    super(`Translation correction still invalid for episode ${episodeId} block ${blockOrder}`);
+  constructor(
+    readonly episodeId: string,
+    readonly blockOrder: number,
+    readonly failingCues: Array<{ cueKey: string; issues: string[] }> = [],
+  ) {
+    const detail = failingCues
+      .map(c => `${c.cueKey}: ${c.issues.join('; ') || '(no reason given)'}`)
+      .join(' | ');
+    super(
+      `Translation correction still invalid for episode ${episodeId} block ${blockOrder}` +
+      (detail ? ` — ${detail}` : '')
+    );
     this.name = 'ListeningTranslationCorrectionFailedError';
   }
 }
@@ -251,7 +261,6 @@ export interface PrepareListeningSubtitlesInput {
   episodeId: string;
   forceRegeneration?: boolean;
   dryRun?: boolean;
-  minConfidence?: number;
 }
 
 export interface PrepareListeningSubtitlesResult {
@@ -307,7 +316,7 @@ export async function prepareListeningSubtitles(
   callAI?: AICallWithUsageFn,
   supabase?: SupabaseClient,
 ): Promise<PrepareListeningSubtitlesResult> {
-  const { episodeId, forceRegeneration = false, dryRun = false, minConfidence = 0.90 } = input;
+  const { episodeId, forceRegeneration = false, dryRun = false } = input;
 
   const aiCallFn: AICallWithUsageFn = callAI ?? createSubtitleAICallFn(process.env.OPENAI_API_KEY ?? '');
 
@@ -558,35 +567,51 @@ export async function prepareListeningSubtitles(
   }
   if (!translatedCues) throw new Error('unreachable: translatedCues not resolved');
 
-  // ── 9. AI semantic validation per block (with optional correction) ────────────
+  // ── 9. AI quality (meaning/naturalness-only) validation per block, with ───────
+  // bounded, targeted correction. Identity/count/order/numbers are already
+  // guaranteed by step 8 — this only judges linguistic quality, per cue, so a
+  // single borderline cue can no longer fail the whole block, and a repair
+  // round only ever re-requests the cues actually marked invalid.
+  const MAX_QUALITY_CORRECTION_ROUNDS = 2;
   for (const blockOrder of [1, 2] as const) {
-    const blockCues = translatedCues.get(blockOrder)!;
+    let blockCues = translatedCues.get(blockOrder)!;
     const blockTextEn = blockTextEnByOrder.get(blockOrder) ?? '';
 
-    let validation = await validateBlockTranslationWithAI(
-      blockOrder, blockTextEn, blockCues, cefrLevel, episodeId, aiCallFn, minConfidence
-    );
-
-    if (!validation.valid) {
-      // One correction attempt
-      const correctedCues = await correctBlockTranslation(
-        blockOrder, blockTextEn, blockCues, validation, cefrLevel, episodeId, aiCallFn
-      );
-
-      // Re-validate after correction
-      validation = await validateBlockTranslationWithAI(
-        blockOrder, blockTextEn, correctedCues, cefrLevel, episodeId, aiCallFn, minConfidence
-      );
-
-      if (!validation.valid) {
+    for (let round = 0; ; round++) {
+      let validation: Awaited<ReturnType<typeof validateBlockTranslationWithAI>>;
+      try {
+        validation = await validateBlockTranslationWithAI(blockOrder, blockTextEn, blockCues, cefrLevel, episodeId, aiCallFn);
+      } catch (err) {
         if (supabase && !dryRun) {
           await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
         }
-        throw new ListeningTranslationCorrectionFailedError(episodeId, blockOrder);
+        throw err;
       }
 
-      translatedCues.set(blockOrder, correctedCues);
+      if (validation.overallValid) break;
+
+      const failing = validation.cueResults.filter(r => !r.valid);
+
+      console.error(JSON.stringify({
+        event: 'listening_subtitle_quality_repair',
+        episodeId, blockOrder, round: round + 1, maxRounds: MAX_QUALITY_CORRECTION_ROUNDS,
+        failingCueKeys: failing.map(f => f.cueKey),
+        t: Date.now(),
+      }));
+
+      if (round >= MAX_QUALITY_CORRECTION_ROUNDS) {
+        if (supabase && !dryRun) {
+          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+        }
+        throw new ListeningTranslationCorrectionFailedError(
+          episodeId, blockOrder, failing.map(f => ({ cueKey: f.cueKey, issues: f.issues })),
+        );
+      }
+
+      blockCues = await correctBlockTranslation(blockOrder, blockTextEn, blockCues, validation, cefrLevel, episodeId, aiCallFn);
     }
+
+    translatedCues.set(blockOrder, blockCues);
   }
 
   // ── 10. Reconstruct translation_pt from pt-BR cues ────────────────────────────

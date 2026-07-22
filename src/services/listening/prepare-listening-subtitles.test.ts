@@ -49,6 +49,10 @@ function getError(fn: () => unknown): unknown {
   try { fn(); return null; } catch (e) { return e; }
 }
 
+async function getRejection(p: Promise<unknown>): Promise<unknown> {
+  try { await p; return null; } catch (e) { return e; }
+}
+
 // ─── EnglishCueDraft factories ────────────────────────────────────────────────
 
 function makeEnCue(cueKey: string, cueOrder: number, blockOrder: 1 | 2, text: string): EnglishCueDraft {
@@ -83,29 +87,30 @@ function makeRawTranslation(opts: { block1Cues?: unknown[]; block2Cues?: unknown
 
 const TRANSLATION_SUCCESS_JSON = JSON.stringify(makeRawTranslation());
 
+// Per-cue quality validator schema (v2) — includes both blocks' cue keys so
+// the same fixture answers whichever block is currently being validated;
+// extra cueKeys beyond what a given call requested are simply ignored.
 const VALIDATOR_SUCCESS_JSON = JSON.stringify({
-  schemaVersion: '1.0',
-  valid: true,
-  confidence: 0.95,
-  checks: {
-    meaningPreserved: true, noAddedInformation: true, noMissingInformation: true,
-    ptBrNatural: true, namesPreserved: true, numbersPreserved: true, cueAlignmentValid: true,
-  },
-  issues: [],
-  correctedTextPtBr: null,
+  schemaVersion: '2.0',
+  cues: [
+    { cueKey: 'b1-c001', valid: true, issues: [] },
+    { cueKey: 'b2-c001', valid: true, issues: [] },
+  ],
 });
 
-const VALIDATOR_FAIL_WITH_CORRECTION_JSON = JSON.stringify({
-  schemaVersion: '1.0',
-  valid: false,
-  confidence: 0.5,
-  checks: {
-    meaningPreserved: false, noAddedInformation: true, noMissingInformation: true,
-    ptBrNatural: true, namesPreserved: true, numbersPreserved: true, cueAlignmentValid: true,
-  },
-  issues: ['[b1-c001] Meaning not fully preserved.'],
-  correctedTextPtBr: { 'b1-c001': 'A esperta raposa sentou cuidadosamente.' },
+const VALIDATOR_FAIL_JSON = JSON.stringify({
+  schemaVersion: '2.0',
+  cues: [
+    { cueKey: 'b1-c001', valid: false, issues: ['Meaning not fully preserved.'] },
+    { cueKey: 'b2-c001', valid: true, issues: [] },
+  ],
 });
+
+const CORRECTION_RESPONSE_JSON = JSON.stringify({
+  'b1-c001': 'A esperta raposa sentou cuidadosamente.',
+});
+
+const VALIDATOR_MALFORMED_JSON = JSON.stringify({ schemaVersion: '2.0' }); // no cues array
 
 // ─── Supabase mock ────────────────────────────────────────────────────────────
 
@@ -534,26 +539,44 @@ describe('prepareListeningSubtitles — with database', () => {
   });
 
   // Case 35
-  it('makes a correction cycle when block validation fails, then re-validates', async () => {
+  it('makes a targeted correction cycle when block validation fails, then re-validates', async () => {
     const db = makeSupabase();
-    // Translation → validate b1 (fail with correction) → re-validate b1 (pass) → validate b2 (pass)
+    // Translation → validate b1 (fail) → correct b1 (targeted) → re-validate b1 (pass) → validate b2 (pass)
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON,
-      VALIDATOR_FAIL_WITH_CORRECTION_JSON,
+      VALIDATOR_FAIL_JSON,
+      CORRECTION_RESPONSE_JSON,
       VALIDATOR_SUCCESS_JSON,
       VALIDATOR_SUCCESS_JSON,
     ]);
     const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
     expect(result.status).toBe('ready');
-    expect(callAI).toHaveBeenCalledTimes(4);
+    expect(callAI).toHaveBeenCalledTimes(5);
   });
 
-  // Case 36
-  it('returns ready result after successful correction cycle', async () => {
+  // Case 35b
+  it('the correction call asks only for the failing cue, with its specific issue, and lists the still-valid cue separately', async () => {
     const db = makeSupabase();
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON,
-      VALIDATOR_FAIL_WITH_CORRECTION_JSON,
+      VALIDATOR_FAIL_JSON,
+      CORRECTION_RESPONSE_JSON,
+      VALIDATOR_SUCCESS_JSON,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+    await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[2][1] as string;
+    expect(correctionPrompt).toContain('Meaning not fully preserved.');
+    expect(correctionPrompt).toContain('b1-c001');
+  });
+
+  // Case 36
+  it('returns ready result after a successful targeted correction cycle', async () => {
+    const db = makeSupabase();
+    const callAI = makeAI([
+      TRANSLATION_SUCCESS_JSON,
+      VALIDATOR_FAIL_JSON,
+      CORRECTION_RESPONSE_JSON,
       VALIDATOR_SUCCESS_JSON,
       VALIDATOR_SUCCESS_JSON,
     ]);
@@ -564,17 +587,49 @@ describe('prepareListeningSubtitles — with database', () => {
   });
 
   // Case 37
-  it('throws ListeningTranslationCorrectionFailedError when correction does not fix validation', async () => {
+  it('throws ListeningTranslationCorrectionFailedError with the exact failing cueKey/issue after exhausting the correction round limit', async () => {
     const db = makeSupabase();
-    // Translation → validate b1 (fail) → re-validate b1 after correction (still fail)
+    // b1 fails every round; MAX_QUALITY_CORRECTION_ROUNDS = 2, so: validate,
+    // correct, validate, correct, validate (still failing) → give up.
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON,
-      VALIDATOR_FAIL_WITH_CORRECTION_JSON,
-      VALIDATOR_FAIL_WITH_CORRECTION_JSON,
+      VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
+      VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
+      VALIDATOR_FAIL_JSON,
     ]);
-    await expect(
+    const err = await getRejection(
       prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
-    ).rejects.toThrow(ListeningTranslationCorrectionFailedError);
+    );
+    expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('Meaning not fully preserved.');
+    expect(callAI).toHaveBeenCalledTimes(6);
+  });
+
+  // Case 37b
+  it('a malformed validator response is retried as a validator error, not treated as an invalid translation', async () => {
+    const db = makeSupabase();
+    // b1: malformed → retried → pass. b2: pass immediately.
+    const callAI = makeAI([
+      TRANSLATION_SUCCESS_JSON,
+      VALIDATOR_MALFORMED_JSON,
+      VALIDATOR_SUCCESS_JSON,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+    expect(result.status).toBe('ready');
+    expect(callAI).toHaveBeenCalledTimes(4);
+  });
+
+  // Case 37c
+  it('throws a distinct validator error (not a correction failure) when every validator attempt is malformed', async () => {
+    const db = makeSupabase();
+    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, VALIDATOR_MALFORMED_JSON, VALIDATOR_MALFORMED_JSON]);
+    const err = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+    expect(err).not.toBeInstanceOf(ListeningTranslationCorrectionFailedError);
+    expect((err as { code?: string }).code).toBe('LISTENING_TRANSLATION_VALIDATOR_MALFORMED_RESPONSE');
   });
 
   // Case 38b

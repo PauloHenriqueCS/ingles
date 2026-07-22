@@ -2,7 +2,7 @@ import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { EnglishCueDraft } from './listening-subtitle-schema';
 
 export const TRANSLATION_PROMPT_VERSION = 'listening-subtitle-translation-v1';
-export const VALIDATOR_PROMPT_VERSION = 'listening-subtitle-translation-validator-v1';
+export const VALIDATOR_PROMPT_VERSION = 'listening-subtitle-translation-validator-v2';
 
 // ─── System prompts ───────────────────────────────────────────────────────────
 
@@ -24,20 +24,51 @@ ABSOLUTE RULES:
 - Keep translations concise — subtitles must be readable on screen.
 - Maintain the emotional tone (humor, tension, warmth) of the original.`;
 
-export const VALIDATOR_SYSTEM_PROMPT = `You are a quality assurance specialist for Brazilian Portuguese subtitle translations used in English language learning apps.
+// Judges MEANING/QUALITY only — cue identity, count, order, and number
+// preservation are already enforced deterministically before this ever
+// runs (validateTranslationDeterministic), so this prompt does not repeat
+// them. Explicitly lenient about style: an earlier, stricter version of
+// this prompt (with no leniency guidance and an all-7-checks-must-pass
+// gate) was rejecting adequate translations over acceptable stylistic
+// variation with no way to tell which specific cue caused the failure.
+export const VALIDATOR_SYSTEM_PROMPT = `You are a linguistic quality reviewer for Brazilian Portuguese (pt-BR) subtitle translations used in an English-learning app.
 
-Evaluate each translated cue against the English source and return a structured JSON validation report.
+For EACH cue below, judge ONLY:
+- Meaning fidelity: does the Portuguese convey the same meaning as the English, without inventing information or omitting anything that matters to the meaning?
+- Natural Brazilian Portuguese: does it read as natural, idiomatic pt-BR (not machine-literal, not European Portuguese)?
+- Names: are character/place names preserved (not translated, unless a standard pt-BR equivalent exists)?
 
-Evaluate:
-1. meaningPreserved: Is the full meaning of the English cue conveyed in Portuguese?
-2. noAddedInformation: Does the Portuguese add anything not in the English?
-3. noMissingInformation: Does the Portuguese omit anything from the English?
-4. ptBrNatural: Is the Portuguese natural Brazilian Portuguese (not European, not literal)?
-5. namesPreserved: Are character names and proper nouns preserved correctly?
-6. numbersPreserved: Are all numbers (digits, spelled-out numbers, measurements) preserved?
-7. cueAlignmentValid: Does each Portuguese cue correspond to its English cue_key?
+Do NOT mark a cue invalid for:
+- word-for-word phrasing differences that preserve the same meaning;
+- natural word reordering;
+- register/synonym choices (formal vs. informal) that do not change the meaning;
+- omitting filler words that carry no meaning in Portuguese;
+- minor stylistic variation a native speaker would consider equally correct.
 
-Return ONLY valid JSON. No explanation outside JSON.`;
+Only mark a cue invalid for a REAL problem: wrong or missing meaning, invented information, an omission that matters, unnatural/incorrect Portuguese, or a lost/altered name. When in doubt, and the translation is understandable and accurate, mark it valid.
+
+Return ONLY valid JSON, exactly this shape — include EVERY cueKey you were given, in any order:
+{
+  "schemaVersion": "2.0",
+  "cues": [
+    { "cueKey": "<cueKey>", "valid": <boolean>, "issues": [<string>] }
+  ]
+}
+"issues" must be empty when valid is true. When valid is false, state the SPECIFIC problem (not a vague label like "not natural") so it can be fixed without guessing.`;
+
+// Dedicated to the correction step — distinct from VALIDATOR_SYSTEM_PROMPT,
+// which describes a review/evaluation task, not a rewrite task.
+export const CORRECTION_SYSTEM_PROMPT = `You are correcting specific Brazilian Portuguese (pt-BR) subtitle translations that failed quality review.
+
+RULES:
+- Fix ONLY the cues listed as needing correction, using the exact problem stated for each.
+- Do not change anything not called out in the stated problem.
+- Do not translate proper names unless a standard pt-BR equivalent exists.
+- Preserve all numbers exactly.
+- Use natural Brazilian Portuguese (pt-BR), never European Portuguese.
+
+Return ONLY valid JSON, exactly this shape — one entry per cueKey you were asked to fix, nothing else:
+{ "<cueKey>": "<corrected pt-BR text>" }`;
 
 // ─── Prompt builders ──────────────────────────────────────────────────────────
 
@@ -138,23 +169,11 @@ export function buildValidatorUserPrompt(input: ValidationPromptInput): string {
     lines.push('');
   }
 
-  lines.push('Return ONLY valid JSON:');
-  lines.push(`{
-  "schemaVersion": "1.0",
-  "valid": <boolean>,
-  "confidence": <0.0–1.0>,
-  "checks": {
-    "meaningPreserved": <boolean>,
-    "noAddedInformation": <boolean>,
-    "noMissingInformation": <boolean>,
-    "ptBrNatural": <boolean>,
-    "namesPreserved": <boolean>,
-    "numbersPreserved": <boolean>,
-    "cueAlignmentValid": <boolean>
-  },
-  "issues": [<string>],
-  "correctedTextPtBr": null or { "<cueKey>": "<corrected pt-BR text>", … }
-}`);
+  lines.push('Return ONLY valid JSON, one entry per cue listed above:');
+  lines.push(JSON.stringify({
+    schemaVersion: '2.0',
+    cues: cues.map(c => ({ cueKey: c.cueKey, valid: '<boolean>', issues: ['<string, only if valid is false>'] })),
+  }, null, 2));
 
   return lines.join('\n');
 }

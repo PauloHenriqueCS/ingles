@@ -3,13 +3,15 @@ import type {
   EnglishCueDraft,
   RawTranslationResponse,
   RawTranslatedCue,
-  SubtitleAIValidationResult,
+  CueQualityResult,
+  SubtitleQualityValidationResult,
   ValidatedTranslatedCue,
 } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
 import {
   TRANSLATION_SYSTEM_PROMPT,
   VALIDATOR_SYSTEM_PROMPT,
+  CORRECTION_SYSTEM_PROMPT,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
   buildTranslationUserPrompt,
@@ -151,35 +153,8 @@ export function validateTranslationDeterministic(
     const validated: ValidatedTranslatedCue[] = [];
     for (const enCue of enCues) {
       const ptCue = ptKeyMap.get(enCue.cueKey)!;
-
-      if (!ptCue.textPtBr || typeof ptCue.textPtBr !== 'string' || ptCue.textPtBr.trim() === '') {
-        throw new SubtitleTranslationValidationError(
-          'LISTENING_TRANSLATION_INVALID_JSON',
-          `Block ${blockOrder} cue "${enCue.cueKey}": empty translation`
-        );
-      }
-
-      // Check numbers are preserved
-      const enNums = extractNumbers(enCue.text);
-      const ptNums = extractNumbers(ptCue.textPtBr);
-      const enNumSet = new Set(enNums);
-      const ptNumSet = new Set(ptNums);
-      for (const n of enNumSet) {
-        if (!ptNumSet.has(n)) {
-          throw new SubtitleTranslationValidationError(
-            'LISTENING_TRANSLATION_NUMBER_MISMATCH',
-            `Block ${blockOrder} cue "${enCue.cueKey}": number "${n}" missing in translation`
-          );
-        }
-      }
-
-      // Reject translation that is still in English (simple heuristic)
-      if (detectLanguage(ptCue.textPtBr) === 'likely-en') {
-        throw new SubtitleTranslationValidationError(
-          'LISTENING_TRANSLATION_INVALID_JSON',
-          `Block ${blockOrder} cue "${enCue.cueKey}": translation appears to still be in English`
-        );
-      }
+      const textPtBr = typeof ptCue.textPtBr === 'string' ? ptCue.textPtBr : '';
+      assertCueContentValid(blockOrder, enCue.cueKey, enCue.text, textPtBr);
 
       validated.push({
         cueKey: enCue.cueKey,
@@ -187,7 +162,7 @@ export function validateTranslationDeterministic(
         blockOrder,
         sourceSentenceKeys: enCue.sourceSentenceKeys,
         textEn: enCue.text,
-        textPtBr: ptCue.textPtBr.trim(),
+        textPtBr: textPtBr.trim(),
       });
     }
 
@@ -195,6 +170,57 @@ export function validateTranslationDeterministic(
   }
 
   return result;
+}
+
+// ─── Shared deterministic per-cue content check ──────────────────────────────
+// Object identity/count/order is validateTranslationDeterministic's job
+// (above); this is the per-cue TEXT check, reused both there and after a
+// quality-correction round (correctBlockTranslation only rewrites text for
+// specific cueKeys — those rewrites still need this same deterministic
+// re-check before being accepted, since a correction pass could in principle
+// drop a number or leave text empty).
+
+function assertCueContentValid(blockOrder: 1 | 2, cueKey: string, textEn: string, textPtBr: string): void {
+  if (!textPtBr || textPtBr.trim() === '') {
+    throw new SubtitleTranslationValidationError(
+      'LISTENING_TRANSLATION_INVALID_JSON',
+      `Block ${blockOrder} cue "${cueKey}": empty translation`
+    );
+  }
+
+  const enNumSet = new Set(extractNumbers(textEn));
+  const ptNumSet = new Set(extractNumbers(textPtBr));
+  for (const n of enNumSet) {
+    if (!ptNumSet.has(n)) {
+      throw new SubtitleTranslationValidationError(
+        'LISTENING_TRANSLATION_NUMBER_MISMATCH',
+        `Block ${blockOrder} cue "${cueKey}": number "${n}" missing in translation`
+      );
+    }
+  }
+
+  if (detectLanguage(textPtBr) === 'likely-en') {
+    throw new SubtitleTranslationValidationError(
+      'LISTENING_TRANSLATION_INVALID_JSON',
+      `Block ${blockOrder} cue "${cueKey}": translation appears to still be in English`
+    );
+  }
+}
+
+/**
+ * Re-runs the deterministic per-cue content check (numbers preserved,
+ * non-empty, not still English) against a set of cues after a quality
+ * correction round. Identity/count/order are unaffected by correction (it
+ * only ever rewrites textPtBr for cueKeys it was explicitly given), so only
+ * the text-level checks need re-asserting here.
+ */
+export function reassertCorrectedCuesDeterministically(
+  blockOrder: 1 | 2,
+  cues: ValidatedTranslatedCue[],
+): void {
+  for (const cue of cues) {
+    assertCueContentValid(blockOrder, cue.cueKey, cue.textEn, cue.textPtBr);
+  }
 }
 
 // ─── Targeted repair for missing/omitted cues ────────────────────────────────
@@ -305,47 +331,69 @@ export async function translateMissingCues(
   return result;
 }
 
-// ─── AI validation of translation ────────────────────────────────────────────
+// ─── AI validation of translation quality (per cue) ──────────────────────────
+// Identity/count/order/number-preservation are already the deterministic
+// layer's job — this only judges meaning fidelity, naturalness, and
+// invented/omitted content, per cue, so a single borderline cue can no
+// longer fail the entire block or hide which cue actually had a problem.
 
-function parseValidatorResponse(rawText: string, blockOrder: number): SubtitleAIValidationResult {
+export class SubtitleQualityValidatorMalformedResponseError extends Error {
+  readonly code = 'LISTENING_TRANSLATION_VALIDATOR_MALFORMED_RESPONSE';
+  constructor(readonly blockOrder: number, detail: string) {
+    super(`Quality validator returned a malformed/incomplete response for block ${blockOrder}: ${detail}`);
+    this.name = 'SubtitleQualityValidatorMalformedResponseError';
+  }
+}
+
+/**
+ * Parses the validator's per-cue response. Throws
+ * SubtitleQualityValidatorMalformedResponseError (never silently treats it
+ * as "translation invalid") when the response isn't valid JSON, isn't the
+ * expected shape, or is missing a verdict for any of the requested cueKeys —
+ * a malformed response is a MODEL/PARSING problem, not evidence the
+ * translation is bad, and callers must retry the validation call itself.
+ */
+function parseQualityValidatorResponse(
+  rawText: string,
+  blockOrder: number,
+  requestedCueKeys: string[],
+): SubtitleQualityValidationResult {
   const parsed = extractJson(rawText);
   if (!parsed || typeof parsed !== 'object') {
-    return {
-      schemaVersion: '1.0', valid: false, confidence: 0,
-      checks: { meaningPreserved: false, noAddedInformation: false, noMissingInformation: false,
-        ptBrNatural: false, namesPreserved: false, numbersPreserved: false, cueAlignmentValid: false },
-      issues: [`Validator returned non-JSON for block ${blockOrder}`],
-      correctedTextPtBr: null,
-    };
+    throw new SubtitleQualityValidatorMalformedResponseError(blockOrder, 'response is not a JSON object');
   }
   const r = parsed as Record<string, unknown>;
-  const checks = (r.checks && typeof r.checks === 'object') ? r.checks as Record<string, unknown> : {};
-  const result: SubtitleAIValidationResult = {
-    schemaVersion: typeof r.schemaVersion === 'string' ? r.schemaVersion : '1.0',
-    valid: r.valid === true,
-    confidence: typeof r.confidence === 'number' ? r.confidence : 0,
-    checks: {
-      meaningPreserved:      checks.meaningPreserved === true,
-      noAddedInformation:    checks.noAddedInformation === true,
-      noMissingInformation:  checks.noMissingInformation === true,
-      ptBrNatural:           checks.ptBrNatural === true,
-      namesPreserved:        checks.namesPreserved === true,
-      numbersPreserved:      checks.numbersPreserved === true,
-      cueAlignmentValid:     checks.cueAlignmentValid === true,
-    },
-    issues: Array.isArray(r.issues) ? r.issues.filter((i): i is string => typeof i === 'string') : [],
-    correctedTextPtBr: (r.correctedTextPtBr && typeof r.correctedTextPtBr === 'object' && !Array.isArray(r.correctedTextPtBr))
-      ? r.correctedTextPtBr as Record<string, string>
-      : null,
+  if (!Array.isArray(r.cues)) {
+    throw new SubtitleQualityValidatorMalformedResponseError(blockOrder, 'response has no cues array');
+  }
+
+  const byKey = new Map<string, CueQualityResult>();
+  for (const raw of r.cues as Array<Record<string, unknown>>) {
+    if (typeof raw.cueKey !== 'string' || typeof raw.valid !== 'boolean') continue;
+    byKey.set(raw.cueKey, {
+      cueKey: raw.cueKey,
+      valid: raw.valid,
+      issues: Array.isArray(raw.issues) ? raw.issues.filter((i): i is string => typeof i === 'string') : [],
+    });
+  }
+
+  const cueResults: CueQualityResult[] = [];
+  for (const key of requestedCueKeys) {
+    const result = byKey.get(key);
+    if (!result) {
+      throw new SubtitleQualityValidatorMalformedResponseError(blockOrder, `missing a verdict for cue "${key}"`);
+    }
+    cueResults.push(result);
+  }
+
+  return {
+    schemaVersion: typeof r.schemaVersion === 'string' ? r.schemaVersion : '2.0',
+    overallValid: cueResults.every(c => c.valid),
+    cueResults,
   };
-  result.valid = result.valid &&
-    result.checks.meaningPreserved && result.checks.noAddedInformation &&
-    result.checks.noMissingInformation && result.checks.ptBrNatural &&
-    result.checks.namesPreserved && result.checks.numbersPreserved &&
-    result.checks.cueAlignmentValid &&
-    result.confidence >= 0.90;
-  return result;
 }
+
+const MAX_VALIDATOR_CALL_ATTEMPTS = 2;
 
 export async function validateBlockTranslationWithAI(
   blockOrder: 1 | 2,
@@ -354,8 +402,7 @@ export async function validateBlockTranslationWithAI(
   cefrLevel: CEFRLevel,
   episodeId: string,
   callAI: AICallWithUsageFn,
-  minConfidence: number,
-): Promise<SubtitleAIValidationResult> {
+): Promise<SubtitleQualityValidationResult> {
   const userPrompt = buildValidatorUserPrompt({
     episodeId, cefrLevel, blockOrder, blockTextEn,
     cues: validatedCues.map(c => ({
@@ -365,27 +412,45 @@ export async function validateBlockTranslationWithAI(
       textPtBr: c.textPtBr,
     })),
   });
+  const requestedCueKeys = validatedCues.map(c => c.cueKey);
 
-  const { text, usage } = await callAI(VALIDATOR_SYSTEM_PROMPT, userPrompt);
+  let lastError: SubtitleQualityValidatorMalformedResponseError | null = null;
+  for (let attempt = 1; attempt <= MAX_VALIDATOR_CALL_ATTEMPTS; attempt++) {
+    const { text, usage } = await callAI(VALIDATOR_SYSTEM_PROMPT, userPrompt);
 
-  console.error(JSON.stringify({
-    event: 'listening_subtitle_token_usage',
-    stage: 'listening_subtitle_translation_validation',
-    provider: 'openai',
-    promptVersion: VALIDATOR_PROMPT_VERSION,
-    promptTokens: usage.promptTokens,
-    completionTokens: usage.completionTokens,
-    totalTokens: usage.totalTokens,
-    durationMs: usage.durationMs,
-    episodeId,
-    blockOrder,
-    t: Date.now(),
-  }));
+    console.error(JSON.stringify({
+      event: 'listening_subtitle_token_usage',
+      stage: 'listening_subtitle_translation_validation',
+      provider: 'openai',
+      promptVersion: VALIDATOR_PROMPT_VERSION,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      durationMs: usage.durationMs,
+      episodeId,
+      blockOrder,
+      attempt,
+      t: Date.now(),
+    }));
 
-  const result = parseValidatorResponse(text, blockOrder);
-  // Re-apply minConfidence threshold
-  result.valid = result.valid && result.confidence >= minConfidence;
-  return result;
+    try {
+      return parseQualityValidatorResponse(text, blockOrder, requestedCueKeys);
+    } catch (err) {
+      if (!(err instanceof SubtitleQualityValidatorMalformedResponseError)) throw err;
+      lastError = err;
+      console.error(JSON.stringify({
+        event: 'listening_subtitle_validator_malformed_response',
+        episodeId, blockOrder, attempt, maxAttempts: MAX_VALIDATOR_CALL_ATTEMPTS,
+        detail: err.message, t: Date.now(),
+      }));
+    }
+  }
+
+  // Every attempt returned a malformed response — this is a validator/model
+  // availability problem, not a verdict on the translation. Surface it as
+  // its own distinct, clearly-coded failure rather than guessing valid or
+  // invalid.
+  throw lastError!;
 }
 
 // ─── Correction of failed cues ────────────────────────────────────────────────
@@ -401,44 +466,32 @@ function parseCorrectionResponse(rawText: string): Record<string, string> | null
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/**
+ * Corrects ONLY the cues the quality validator marked invalid, each with its
+ * own specific issue text — never a full-block re-translation. Cues already
+ * marked valid pass through unchanged. Returns the corrected cues re-checked
+ * against the deterministic per-cue content rules (numbers/non-empty/not
+ * still-English), so a correction can't silently regress those.
+ */
 export async function correctBlockTranslation(
   blockOrder: 1 | 2,
   blockTextEn: string,
   validatedCues: ValidatedTranslatedCue[],
-  validationResult: SubtitleAIValidationResult,
+  validationResult: SubtitleQualityValidationResult,
   cefrLevel: CEFRLevel,
   episodeId: string,
   callAI: AICallWithUsageFn,
 ): Promise<ValidatedTranslatedCue[]> {
-  // Determine which cue keys failed based on issues mentioning them
-  // and correctedTextPtBr from the validator
-  const correctedByValidator = validationResult.correctedTextPtBr ?? {};
-  const failingKeys = new Set(
-    validationResult.issues
-      .map(issue => {
-        const m = issue.match(/\[([^\]]+)\]/);
-        return m ? m[1] : null;
-      })
-      .filter((k): k is string => k !== null)
-  );
+  const issuesByKey = new Map(validationResult.cueResults.filter(r => !r.valid).map(r => [r.cueKey, r.issues]));
 
-  // If validator provided corrections, use them directly (no extra AI call)
-  if (Object.keys(correctedByValidator).length > 0) {
-    return validatedCues.map(c => ({
-      ...c,
-      textPtBr: typeof correctedByValidator[c.cueKey] === 'string'
-        ? (correctedByValidator[c.cueKey] as string).trim()
-        : c.textPtBr,
-    }));
-  }
-
-  // Build correction prompt
-  const allFailKeys = failingKeys.size > 0 ? failingKeys : new Set(validatedCues.map(c => c.cueKey));
   const failingCues = validatedCues
-    .filter(c => allFailKeys.has(c.cueKey))
-    .map(c => ({ cueKey: c.cueKey, sourceSentenceKeys: c.sourceSentenceKeys, textEn: c.textEn, textPtBr: c.textPtBr, issues: validationResult.issues }));
+    .filter(c => issuesByKey.has(c.cueKey))
+    .map(c => ({
+      cueKey: c.cueKey, sourceSentenceKeys: c.sourceSentenceKeys, textEn: c.textEn, textPtBr: c.textPtBr,
+      issues: issuesByKey.get(c.cueKey)!.length > 0 ? issuesByKey.get(c.cueKey)! : ['Quality review marked this translation invalid without a specific reason.'],
+    }));
   const validCues = validatedCues
-    .filter(c => !allFailKeys.has(c.cueKey))
+    .filter(c => !issuesByKey.has(c.cueKey))
     .map(c => ({ cueKey: c.cueKey, textPtBr: c.textPtBr }));
 
   const correctionPrompt = buildCorrectionUserPrompt({
@@ -446,7 +499,7 @@ export async function correctBlockTranslation(
     failingCues, validCues,
   });
 
-  const { text, usage } = await callAI(VALIDATOR_SYSTEM_PROMPT, correctionPrompt);
+  const { text, usage } = await callAI(CORRECTION_SYSTEM_PROMPT, correctionPrompt);
 
   console.error(JSON.stringify({
     event: 'listening_subtitle_token_usage',
@@ -459,18 +512,21 @@ export async function correctBlockTranslation(
     durationMs: usage.durationMs,
     episodeId,
     blockOrder,
+    correctedCueKeys: failingCues.map(c => c.cueKey),
     t: Date.now(),
   }));
 
   const corrections = parseCorrectionResponse(text);
-  if (!corrections) return validatedCues;
 
-  return validatedCues.map(c => ({
+  const corrected = validatedCues.map(c => ({
     ...c,
-    textPtBr: typeof corrections[c.cueKey] === 'string'
+    textPtBr: corrections && typeof corrections[c.cueKey] === 'string'
       ? corrections[c.cueKey].trim()
       : c.textPtBr,
   }));
+
+  reassertCorrectedCuesDeterministically(blockOrder, corrected);
+  return corrected;
 }
 
 // ─── Main translation call ────────────────────────────────────────────────────
