@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { createClient } from '@supabase/supabase-js';
 import { requireAuth } from './_auth';
+import { getSupabaseServiceCredentials } from './_env';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
@@ -71,8 +72,7 @@ function parseJson(raw: string): unknown {
 }
 
 function serviceRoleClient() {
-  const url = process.env.VITE_SUPABASE_URL ?? '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const { url, key } = getSupabaseServiceCredentials();
   if (!url || !key) return null;
   return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }

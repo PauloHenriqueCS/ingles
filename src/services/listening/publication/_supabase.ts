@@ -1,11 +1,11 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { getSupabaseServiceCredentials } from '../../../../api/_env';
 
 let _serviceClient: SupabaseClient | null = null;
 
 export function getListeningServiceClient(): SupabaseClient {
   if (_serviceClient) return _serviceClient;
-  const url = process.env.VITE_SUPABASE_URL ?? '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const { url, key } = getSupabaseServiceCredentials();
   if (!url || !key) {
     throw new Error('Missing Supabase service role credentials');
   }

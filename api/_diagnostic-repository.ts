@@ -4,12 +4,12 @@
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { getSupabaseServiceCredentials } from './_env';
 
 // ── Service role client (write access a writing_diagnostic_missions) ───────
 
 function createServiceClient(): SupabaseClient {
-  const url = process.env.VITE_SUPABASE_URL ?? '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const { url, key } = getSupabaseServiceCredentials();
   return createClient(url, key);
 }
 

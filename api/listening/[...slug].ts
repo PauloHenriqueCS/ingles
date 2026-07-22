@@ -1,5 +1,6 @@
 import { requireAuth } from '../_auth';
 import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../_helpers';
+import { readEnv } from '../_env';
 import { canUserAccessListeningEpisode } from '../../src/services/listening/publication/authorize-listening-access';
 import { buildPublicListeningEpisode } from '../../src/services/listening/publication/build-public-listening-episode';
 import { LISTENING_ERRORS, ListeningPublicationError } from '../../src/services/listening/publication/listening-publication-types';
@@ -548,7 +549,7 @@ async function handleStoryGenerate(req: any, res: any) {
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
-  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const secret = readEnv('SUPABASE_SERVICE_ROLE_KEY');
 
   if (!openaiKey || !azureKey || !azureRegion || !secret) {
     safeLog('listening/story/generate', 'misconfigured', 503, {});
@@ -582,7 +583,7 @@ async function handleStoryVerify(req: any, res: any) {
   if (typeof selectedOption !== 'number' || selectedOption < 0 || selectedOption > 4)
     return jsonError(res, 400, 'INVALID_REQUEST', 'selectedOption inválido (0–4).');
 
-  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const secret = readEnv('SUPABASE_SERVICE_ROLE_KEY');
   if (!secret) return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço indisponível.');
 
   try {
@@ -610,7 +611,7 @@ async function handleListeningGenerate(req: any, res: any) {
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
-  const secret = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const secret = readEnv('SUPABASE_SERVICE_ROLE_KEY');
 
   const requestId = crypto.randomUUID().slice(0, 8);
 

@@ -4,6 +4,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { getSupabaseServiceCredentials } from '../../api/_env';
 import type { CEFRLevel } from '../domain/curriculum/cefr';
 import type { LearningSkill } from '../domain/learner/learner-skill-types';
 import type { SkillPromotionEvaluation } from '../domain/promotion/promotion-types';
@@ -20,10 +21,8 @@ import {
 // ── Service-role client factory ───────────────────────────────────────────────
 
 function createServiceSupabase() {
-  return createClient(
-    process.env.VITE_SUPABASE_URL ?? '',
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
-  );
+  const { url, key } = getSupabaseServiceCredentials();
+  return createClient(url, key);
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────

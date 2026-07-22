@@ -10,6 +10,7 @@
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { getSupabaseServiceCredentials } from '../_env';
 import type { GatewayCallContext, GatewayPolicy, GatewayMode, RuntimeStatus } from './types';
 
 // ── Status severity ───────────────────────────────────────────────────────────
@@ -68,8 +69,7 @@ export interface PolicyResolverInterface {
 // ── Service role client factory ───────────────────────────────────────────────
 
 function createServiceClient(): SupabaseClient | null {
-  const url = process.env.VITE_SUPABASE_URL ?? '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const { url, key } = getSupabaseServiceCredentials();
   if (!url || !key) return null;
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },

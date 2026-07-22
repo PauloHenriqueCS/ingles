@@ -1,11 +1,9 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { getSupabaseAnonCredentials } from './_env';
 
 function createAuthedSupabase(token: string): SupabaseClient {
-  return createClient(
-    process.env.VITE_SUPABASE_URL ?? '',
-    process.env.VITE_SUPABASE_ANON_KEY ?? '',
-    { global: { headers: { Authorization: `Bearer ${token}` } } }
-  );
+  const { url, key } = getSupabaseAnonCredentials();
+  return createClient(url, key, { global: { headers: { Authorization: `Bearer ${token}` } } });
 }
 
 export interface AuthedContext {
