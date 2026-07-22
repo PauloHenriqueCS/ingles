@@ -31,6 +31,7 @@ import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
 import LoginPage from './components/LoginPage';
+import ResetPasswordPage from './components/ResetPasswordPage';
 
 // Installed once at module load — reacts to ACCOUNT_DEACTIVATED from any
 // authenticated API call, from anywhere in the app, by ending the session.
@@ -129,6 +130,13 @@ export default function App() {
 
   if (window.location.pathname === '/auth/callback') {
     return <AuthCallback />;
+  }
+
+  // Must be checked before the !user gate below: a Supabase recovery link
+  // establishes a session, which would otherwise make this render the main
+  // app instead of the reset-password form.
+  if (window.location.pathname === '/reset-password') {
+    return <ResetPasswordPage />;
   }
 
   if (!authLoading && !user) {

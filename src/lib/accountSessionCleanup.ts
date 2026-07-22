@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 
-export type AccountSessionNoticeKind = 'deleted' | 'blocked';
+export type AccountSessionNoticeKind = 'deleted' | 'blocked' | 'password_changed';
 
 const NOTICE_KEY = 'lemon.accountSessionNotice';
 
@@ -13,7 +13,7 @@ function setNotice(kind: AccountSessionNoticeKind): void {
 export function consumeAccountSessionNotice(): AccountSessionNoticeKind | null {
   try {
     const value = sessionStorage.getItem(NOTICE_KEY);
-    if (value !== 'deleted' && value !== 'blocked') return null;
+    if (value !== 'deleted' && value !== 'blocked' && value !== 'password_changed') return null;
     sessionStorage.removeItem(NOTICE_KEY);
     return value;
   } catch {
@@ -45,5 +45,13 @@ export async function endSessionAfterAccountDeletion(): Promise<void> {
 export async function endSessionAfterAccountBlocked(): Promise<void> {
   await clearPrivateCaches();
   setNotice('blocked');
+  await supabase.auth.signOut();
+}
+
+/** Call right after `auth.updateUser({ password })` succeeds on a password
+ *  recovery session — ends that session (it should not outlive the reset)
+ *  and surfaces a one-time confirmation on the next login screen render. */
+export async function endSessionAfterPasswordReset(): Promise<void> {
+  setNotice('password_changed');
   await supabase.auth.signOut();
 }
