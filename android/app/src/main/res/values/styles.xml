@@ -16,7 +16,20 @@
     </style>
 
 
+    <!--
+      windowSplashScreenAnimatedIcon deliberately left unset here — it's a
+      constrained, roughly-square icon slot (confirmed live on the emulator:
+      setting it to the full logo+"Lemon" wordmark image clipped the wordmark
+      off entirely). Leaving it unset makes the OS default to the app's own
+      launcher icon for that slot instead, which is square-shaped by design
+      and already validated. That covers only the brief native/backported
+      splash phase before the Activity exists; MainActivity then shows the
+      full, uncropped splash image (splash_icon, the actual asset for this
+      task) itself via a plain centered ImageView overlay — see
+      MainActivity.java — which has no icon-slot size/shape constraint.
+    -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
     </style>
 </resources>
