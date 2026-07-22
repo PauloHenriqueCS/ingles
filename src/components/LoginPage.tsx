@@ -81,9 +81,9 @@ export default function LoginPage() {
         <div className="text-center space-y-1">
           <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
             <img
-              src="/brand/lemon-icon.png"
+              src="/brand/lemon-header.png"
               alt=""
-              className="w-8 h-8 object-contain shrink-0"
+              className="w-7 h-7 object-cover object-left shrink-0"
               draggable={false}
             />
           </div>

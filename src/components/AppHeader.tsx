@@ -26,10 +26,10 @@ export default function AppHeader({ onMenuOpen, onLogoClick }: Props) {
         style={{ background: 'none' }}
       >
         <img
-          src="/brand/lemon-header.png"
+          src="/brand/lemon-icon.png"
           alt="Lemon"
           className="h-8 sm:h-10 w-auto object-contain"
-          width={160}
+          width={40}
           height={40}
           fetchPriority="high"
           draggable={false}
