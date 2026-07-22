@@ -44,13 +44,30 @@ const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000002';
 
 function makeSupabase() {
   return {
-    from: vi.fn(() => ({
-      select: vi.fn().mockReturnThis(),
-      eq: vi.fn().mockReturnThis(),
-      order: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockReturnThis(),
-      maybeSingle: vi.fn().mockResolvedValue({ data: { current_level: 'B1' } }),
-    })),
+    from: vi.fn((table: string) => {
+      // The daily get-or-create lookup (pronunciation_training_sessions) —
+      // no existing session by default, so every test below still exercises
+      // the AI-generation path unless it overrides this explicitly.
+      if (table === 'pronunciation_training_sessions') {
+        return {
+          select: vi.fn().mockReturnThis(),
+          eq: vi.fn().mockReturnThis(),
+          maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+        };
+      }
+      // english_learning_memory (current CEFR level lookup)
+      return {
+        select: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        order: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        maybeSingle: vi.fn().mockResolvedValue({ data: { current_level: 'B1' } }),
+      };
+    }),
+    rpc: vi.fn().mockResolvedValue({
+      data: { sessionId: 'session-1', text: 'A short pronunciation practice text.', level: 'B1', status: 'text_generated', result: null },
+      error: null,
+    }),
   };
 }
 

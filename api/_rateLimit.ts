@@ -32,6 +32,7 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'tts':                                { windowSeconds: 3600, maxRequests: 300 },
   'pronunciation-training-generate-text': { windowSeconds: 3600, maxRequests: 25  },
   'pronunciation-training-token':         { windowSeconds: 3600, maxRequests: 60  },
+  'pronunciation-training-start':         { windowSeconds: 3600, maxRequests: 60  },
   'account-deactivate':   { windowSeconds: 3600, maxRequests: 10  },
 };
 

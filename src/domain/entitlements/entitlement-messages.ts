@@ -14,6 +14,10 @@ export const ENTITLEMENT_MESSAGES = {
     'Você concluiu as histórias disponíveis para hoje. Amanhã novas atividades estarão liberadas.',
   pronunciationEvaluationsExhausted:
     'Você atingiu o limite de avaliações de pronúncia de hoje. Continue praticando com os resultados já disponíveis e volte amanhã para novas avaliações.',
+  pronunciationTrainingTextAlreadyGeneratedToday:
+    'Você já recebeu o texto de pronúncia de hoje.',
+  pronunciationTrainingDailyEvaluationCompleted:
+    'Avaliação diária concluída. Volte amanhã para um novo texto e uma nova avaliação.',
   conversationMinutesExhausted:
     'Seus minutos de conversação deste mês acabaram. Sua conversa foi preservada.',
   conversationExtraPurchaseAvailable:

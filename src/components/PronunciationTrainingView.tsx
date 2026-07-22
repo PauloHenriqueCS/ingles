@@ -2,12 +2,19 @@ import { useState, useRef, useEffect, useCallback, MutableRefObject } from 'reac
 import {
   ArrowLeft, Volume2, Mic, Square, Play, Pause,
   RefreshCw, Send, Loader2, CheckCircle, AlertCircle,
-  RotateCcw,
+  RotateCcw, Lock,
 } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { getAuthHeader } from '../lib/apiAuth';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
 import { createRecognitionSession, PronunciationServiceError } from '../lib/pronunciationService';
+import {
+  runTrainingAnalysisFlow,
+  TRAINING_PHASE_MESSAGES,
+  type TrainingAnalysisState,
+  type TrainingFlowRefs,
+} from '../lib/pronunciationTrainingFlow';
 import { buildWordAlignment, type PronunciationWordDetail } from '../lib/pronunciationWordParser';
 import {
   getWordTrainingCategory,
@@ -19,43 +26,11 @@ import {
 import type { PronunciationNormalizedResult } from '../types';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
 import { apiUrl } from '../lib/apiUrl';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-interface AnalysisErrorInfo {
-  userMessage: string;
-  technicalMessage: string | null;
-}
-
-function getAnalysisErrorInfo(err: unknown): AnalysisErrorInfo {
-  if (err instanceof PronunciationServiceError) {
-    const technical = err.message && err.message !== err.code ? err.message : null;
-    switch (err.code) {
-      case 'AZURE_NO_MATCH':
-        return { userMessage: 'Não foi possível detectar fala no áudio.', technicalMessage: technical };
-      case 'AZURE_TIMEOUT':
-        return { userMessage: 'A análise demorou demais. Verifique sua conexão e tente novamente.', technicalMessage: technical };
-      case 'AZURE_NETWORK_ERROR':
-        return { userMessage: 'O serviço de análise de pronúncia está indisponível.', technicalMessage: technical };
-      case 'AZURE_CANCELED':
-        return { userMessage: 'A análise foi interrompida inesperadamente.', technicalMessage: technical };
-      case 'CLIENT_INTERRUPTED':
-        return { userMessage: 'Análise cancelada.', technicalMessage: null };
-      case 'RESULT_INVALID':
-        return { userMessage: 'Não foi possível processar o resultado da análise.', technicalMessage: technical };
-      default:
-        return { userMessage: 'Não foi possível analisar a gravação. Verifique o volume e tente novamente.', technicalMessage: technical };
-    }
-  }
-  if (err instanceof AudioConversionError) {
-    return { userMessage: 'O formato do áudio não é compatível.', technicalMessage: err.message };
-  }
-  const message = err instanceof Error ? err.message.trim() : '';
-  return {
-    userMessage: message || 'Não foi possível analisar a gravação. Verifique o volume e tente novamente.',
-    technicalMessage: null,
-  };
-}
+type SessionStatus = 'text_generated' | 'processing' | 'completed' | 'failed_retryable' | 'failed_final';
 
 function formatTime(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -92,6 +67,10 @@ async function fetchAzureToken(): Promise<{ token: string; region: string }> {
 }
 
 // ── WordRow ───────────────────────────────────────────────────────────────────
+// Per-word re-practice after results are shown — unrelated to the daily
+// text/evaluation limits (a free-standing drill, not "um novo envio
+// oficial"), so it keeps calling /token directly and is untouched by this
+// task's limit enforcement.
 
 interface WordRowProps {
   word: PronunciationWordDetail;
@@ -367,19 +346,24 @@ interface Props {
   onBack: () => void;
 }
 
-type MainPhase    = 'generating' | 'ready' | 'results' | 'gen-error';
-type TtsPhase     = 'idle' | 'loading' | 'playing' | 'error';
-type AnalysisPhase = 'idle' | 'preparing' | 'analyzing' | 'error';
+type MainPhase = 'generating' | 'ready' | 'results' | 'gen-error' | 'blocked';
 
 export default function PronunciationTrainingView({ onBack }: Props) {
+  const entitlementsState = usePlanEntitlements();
+  const pronunciation = entitlementsState.data?.pronunciation ?? null;
+  const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
+    ? pronunciation.maxRecordingSeconds * 1000
+    : undefined;
+
   const [mainPhase, setMainPhase]           = useState<MainPhase>('generating');
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
+  const [sessionId, setSessionId]           = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus]   = useState<SessionStatus | null>(null);
   const [generatedText, setGeneratedText]   = useState<string | null>(null);
   const [userLevel, setUserLevel]           = useState<string | null>(null);
   const [genError, setGenError]             = useState<string | null>(null);
-  const [ttsPhase, setTtsPhase]             = useState<TtsPhase>('idle');
-  const [analysisPhase, setAnalysisPhase]   = useState<AnalysisPhase>('idle');
-  const [analysisError, setAnalysisError]   = useState<string | null>(null);
-  const [analysisErrorTechnical, setAnalysisErrorTechnical] = useState<string | null>(null);
+  const [ttsPhase, setTtsPhase]             = useState<'idle' | 'loading' | 'playing' | 'error'>('idle');
+  const [analysis, setAnalysis]             = useState<TrainingAnalysisState>({ phase: 'idle' });
   const [wordResults, setWordResults]       = useState<PronunciationWordDetail[] | null>(null);
   const [wordCategories, setWordCategories] = useState<Map<string, TrainingCategory>>(new Map());
   const [activeRecordingWordId, setActiveRecordingWordId] = useState<string | null>(null);
@@ -391,11 +375,18 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const ttsUrlRef         = useRef<string | null>(null);
   const sharedAudioRef    = useRef<HTMLAudioElement | null>(null);
   const wordTtsCacheRef   = useRef<Map<string, string>>(new Map());
-  const cancelAnalysisRef = useRef<(() => void) | null>(null);
   const playbackAudioRef  = useRef<HTMLAudioElement | null>(null);
   const prevVoiceRef      = useRef<string>(DEFAULT_AUDIO_SETTINGS.voice);
 
-  const recorder = useAudioRecorder();
+  // Refs threaded into runTrainingAnalysisFlow — the same double-click /
+  // concurrent-submission guard used by the writing flow's PronunciationRecorder.
+  const flowLockRef           = useRef(false);
+  const attemptIdRef          = useRef<string | null>(null);
+  const sessionIdRef          = useRef<string | null>(null);
+  const cancelRecognitionRef  = useRef<(() => void) | null>(null);
+  const flowRefs: TrainingFlowRefs = { mountedRef, attemptIdRef, sessionIdRef, cancelRecognitionRef, flowLockRef };
+
+  const recorder = useAudioRecorder(maxRecordingMs);
 
   // Load voice/speed from user settings on mount
   useEffect(() => {
@@ -416,13 +407,13 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     wordTtsCacheRef.current.clear();
   }, [audioVoice]);
 
-  // Generate text on mount; cleanup on unmount
+  // Get-or-create today's text on mount; cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
     doGenerateText();
     return () => {
       mountedRef.current = false;
-      cancelAnalysisRef.current?.();
+      cancelRecognitionRef.current?.();
       sharedAudioRef.current?.pause();
       playbackAudioRef.current?.pause();
       if (ttsUrlRef.current) URL.revokeObjectURL(ttsUrlRef.current);
@@ -431,15 +422,33 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Best-effort /fail + cancel recognition on unmount during an active submission
+  useEffect(() => {
+    return () => {
+      cancelRecognitionRef.current?.();
+      const sid  = sessionIdRef.current;
+      const atid = attemptIdRef.current;
+      if (sid && atid) {
+        getAuthHeader().then((headers) => {
+          fetch(apiUrl('/api/pronunciation-training/fail'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({ sessionId: sid, attemptId: atid, code: 'CLIENT_INTERRUPTED' }),
+          }).catch(() => undefined);
+        }).catch(() => undefined);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const doGenerateText = useCallback(async () => {
     setMainPhase('generating');
     setGenError(null);
+    setBlockedMessage(null);
     setWordResults(null);
     setWordCategories(new Map());
     setActiveRecordingWordId(null);
-    setAnalysisPhase('idle');
-    setAnalysisError(null);
-    setAnalysisErrorTechnical(null);
+    setAnalysis({ phase: 'idle' });
     setTtsPhase('idle');
     setPlaybackPlaying(false);
 
@@ -451,14 +460,32 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       });
       const json = await resp.json();
       if (!mountedRef.current) return;
-      if (!resp.ok || !json.text) {
+
+      if (!resp.ok) {
+        if (json.code === 'FEATURE_DISABLED' || json.code === 'DAILY_LIMIT_REACHED') {
+          setBlockedMessage(json.message ?? ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday);
+          setMainPhase('blocked');
+          return;
+        }
         setGenError(json.message ?? 'Não foi possível gerar o texto. Tente novamente.');
         setMainPhase('gen-error');
         return;
       }
+
+      setSessionId(json.sessionId as string);
+      setSessionStatus(json.status as SessionStatus);
       setGeneratedText(json.text as string);
       setUserLevel(json.level as string ?? null);
-      setMainPhase('ready');
+
+      if (json.status === 'completed' && json.result) {
+        const result = json.result as PronunciationNormalizedResult;
+        const { aligned } = buildWordAlignment(json.text as string, result.rawSegments);
+        setWordResults(aligned);
+        setAnalysis({ phase: 'completed', result });
+        setMainPhase('results');
+      } else {
+        setMainPhase('ready');
+      }
     } catch {
       if (mountedRef.current) {
         setGenError('Erro de conexão. Verifique sua internet e tente novamente.');
@@ -466,22 +493,6 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       }
     }
   }, []);
-
-  function handleGenerateNew() {
-    const hasRecording = recorder.phase === 'recording' || recorder.phase === 'done';
-    const hasResults   = wordResults !== null;
-    if ((hasRecording || hasResults) && !window.confirm('Isso vai descartar sua gravação e análise atuais. Continuar?')) return;
-
-    cancelAnalysisRef.current?.();
-    cancelAnalysisRef.current = null;
-    recorder.deleteRecording();
-    playbackAudioRef.current?.pause();
-    setPlaybackPlaying(false);
-    sharedAudioRef.current?.pause();
-    setTtsPhase('idle');
-    if (ttsUrlRef.current) { URL.revokeObjectURL(ttsUrlRef.current); ttsUrlRef.current = null; }
-    doGenerateText();
-  }
 
   async function handlePlayFullText() {
     if (!generatedText) return;
@@ -533,58 +544,41 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     audio.play().catch(() => { if (mountedRef.current) setPlaybackPlaying(false); });
   }
 
-  async function handleAnalyzeFull() {
-    const audioBlob = recorder.audioBlob;
-    const audioDurationMs = recorder.durationMs;
-    const refText = generatedText;
-    if (!refText || !audioBlob || recorder.phase !== 'done') return;
-    if (analysisPhase === 'preparing' || analysisPhase === 'analyzing') return;
+  const handleAnalyzeFull = useCallback(() => {
+    if (flowLockRef.current) return;
+    if (sessionStatus === 'completed') return; // frontend guard only — backend re-checks and blocks regardless
+    if (recorder.phase !== 'done' || !recorder.audioBlob) return;
+    flowLockRef.current = true;
 
-    setAnalysisPhase('preparing');
-    setAnalysisError(null);
+    const attemptId = crypto.randomUUID();
     sharedAudioRef.current?.pause();
     setTtsPhase('idle');
     playbackAudioRef.current?.pause();
     setPlaybackPlaying(false);
 
-    try {
-      const { token, region } = await fetchAzureToken();
-      setAnalysisPhase('analyzing');
+    void runTrainingAnalysisFlow(
+      { attemptId, audioBlob: recorder.audioBlob, audioDurationMs: recorder.durationMs },
+      flowRefs,
+      (state) => {
+        if (!mountedRef.current) return;
+        setAnalysis(state);
+        if (state.phase === 'completed' && state.result) {
+          setSessionStatus('completed');
+          const { aligned } = buildWordAlignment(generatedText ?? '', state.result.rawSegments);
+          setWordResults(aligned);
+          setWordCategories(new Map());
+          setActiveRecordingWordId(null);
+          setMainPhase('results');
+        }
+      },
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionStatus, recorder.phase, recorder.audioBlob, recorder.durationMs, generatedText]);
 
-      const wavFile = await convertToWavPcm(audioBlob);
-      const session = createRecognitionSession({ token, region, referenceText: refText, wavFile, audioDurationMs });
-      cancelAnalysisRef.current = session.cancel;
-      const result: PronunciationNormalizedResult = await session.run();
-      cancelAnalysisRef.current = null;
-      if (!mountedRef.current) return;
-
-      const { aligned } = buildWordAlignment(refText, result.rawSegments);
-      setWordResults(aligned);
-      setWordCategories(new Map());
-      setActiveRecordingWordId(null);
-      setMainPhase('results');
-      setAnalysisPhase('idle');
-    } catch (err) {
-      cancelAnalysisRef.current = null;
-      if (!mountedRef.current) return;
-      const { userMessage, technicalMessage } = getAnalysisErrorInfo(err);
-      setAnalysisError(userMessage);
-      setAnalysisErrorTechnical(technicalMessage);
-      setAnalysisPhase('error');
-    }
-  }
-
-  function handleRerecordFull() {
-    playbackAudioRef.current?.pause();
-    setPlaybackPlaying(false);
-    recorder.deleteRecording();
-    setWordResults(null);
-    setWordCategories(new Map());
-    setActiveRecordingWordId(null);
-    setAnalysisPhase('idle');
-    setAnalysisError(null);
-    setAnalysisErrorTechnical(null);
-    setMainPhase('ready');
+  function handleRetryAnalysis() {
+    sessionIdRef.current = null;
+    attemptIdRef.current = null;
+    setAnalysis({ phase: 'idle' });
   }
 
   const handleWordCategoryUpdate = useCallback((wordId: string, cat: TrainingCategory) => {
@@ -602,7 +596,25 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
   // ── Derived state ─────────────────────────────────────────────────────────
 
-  const isAnalyzing = analysisPhase === 'preparing' || analysisPhase === 'analyzing';
+  const isSubmitting =
+    analysis.phase === 'preparing_audio' ||
+    analysis.phase === 'reserving'       ||
+    analysis.phase === 'analyzing'       ||
+    analysis.phase === 'saving_result';
+
+  const isCompletedToday = sessionStatus === 'completed';
+
+  // Once a text exists for today there is, by design, never a second one —
+  // "Gerar outro texto" stays disabled for the rest of the day regardless of
+  // whether the evaluation itself has been submitted yet.
+  const generateNewDisabled = sessionId !== null;
+
+  const canSubmit =
+    recorder.phase === 'done'    &&
+    recorder.audioBlob !== null  &&
+    !isSubmitting                &&
+    analysis.phase !== 'completed' &&
+    !isCompletedToday;
 
   const practiceWords = (wordResults ?? []).filter(w => needsPractice(w));
 
@@ -643,6 +655,14 @@ export default function PronunciationTrainingView({ onBack }: Props) {
         </div>
       )}
 
+      {/* ── Blocked by plan (feature off, or a hypothetical 0/day limit) ─── */}
+      {mainPhase === 'blocked' && (
+        <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 text-center space-y-2">
+          <Lock className="w-6 h-6 text-amber-400 mx-auto" />
+          <p className="text-sm text-slate-300">{blockedMessage ?? ENTITLEMENT_MESSAGES.featureUnavailable}</p>
+        </div>
+      )}
+
       {/* ── Generation error ────────────────────────────────────────────── */}
       {mainPhase === 'gen-error' && (
         <div className="bg-red-900/30 border border-red-700 rounded-xl p-5 text-center">
@@ -660,18 +680,23 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       {/* ── Training session ─────────────────────────────────────────────── */}
       {(mainPhase === 'ready' || mainPhase === 'results') && generatedText && (
         <>
-          {/* Level + Generate new button */}
-          <div className="flex items-center justify-between mb-4">
+          {/* Level + Generate new button (always disabled once today's text exists) */}
+          <div className="flex items-center justify-between mb-1">
             <span className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full bg-blue-900/40 border border-blue-700 text-blue-300">
               Nível {userLevel ?? '—'}
             </span>
             <button
-              onClick={handleGenerateNew}
-              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-100 transition-colors"
+              disabled={generateNewDisabled}
+              aria-disabled={generateNewDisabled}
+              title={generateNewDisabled ? ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday : undefined}
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Gerar outro texto
             </button>
           </div>
+          {generateNewDisabled && (
+            <p className="text-xs text-slate-500 mb-4">{ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday}</p>
+          )}
 
           {/* Generated text (plain or annotated) */}
           <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
@@ -733,109 +758,117 @@ export default function PronunciationTrainingView({ onBack }: Props) {
             )}
           </div>
 
-          {/* Recording section */}
-          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
-            <h2 className="text-sm font-semibold text-slate-200 mb-3">Sua leitura</h2>
+          {/* ── Daily evaluation already completed: saved result only, no re-record ── */}
+          {isCompletedToday && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4 flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-green-400 shrink-0" aria-hidden="true" />
+              <p className="text-sm text-slate-200">{ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted}</p>
+            </div>
+          )}
 
-            {isAnalyzing ? (
-              <div className="flex items-center gap-3 py-3">
-                <Loader2 className="w-5 h-5 text-blue-400 animate-spin shrink-0" />
-                <span className="text-sm text-slate-300">
-                  {analysisPhase === 'preparing' ? 'Preparando análise…' : 'Analisando pronúncia…'}
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {(recorder.phase === 'idle' || recorder.phase === 'error') && (
-                  <button
-                    onClick={recorder.startRecording}
-                    className="flex items-center gap-2 px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white text-sm rounded-lg transition-colors"
-                    aria-label="Gravar leitura do texto"
-                  >
-                    <Mic className="w-4 h-4" />
-                    {recorder.phase === 'error' ? 'Tentar novamente' : 'Gravar leitura'}
-                  </button>
-                )}
+          {/* Recording section — only while today's evaluation isn't completed yet */}
+          {!isCompletedToday && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+              <h2 className="text-sm font-semibold text-slate-200 mb-3">Sua leitura</h2>
 
-                {recorder.phase === 'requesting' && (
-                  <div className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-slate-400 text-sm rounded-lg w-fit">
-                    <Loader2 className="w-4 h-4 animate-spin" /> Aguardando microfone…
-                  </div>
-                )}
-
-                {recorder.phase === 'recording' && (
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span
-                      className="flex items-center gap-2 px-3 py-2 bg-rose-900/40 border border-rose-700 rounded-lg text-rose-300 text-xs font-mono"
-                      aria-live="polite"
-                      aria-label={`Gravando: ${formatTime(recorder.elapsedMs)}`}
-                    >
-                      <span className="w-2 h-2 bg-rose-400 rounded-full animate-pulse" aria-hidden="true" />
-                      {formatTime(recorder.elapsedMs)}
-                    </span>
+              {isSubmitting ? (
+                <div className="flex items-center gap-3 py-3">
+                  <Loader2 className="w-5 h-5 text-blue-400 animate-spin shrink-0" />
+                  <span className="text-sm text-slate-300">{TRAINING_PHASE_MESSAGES[analysis.phase]}</span>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {(recorder.phase === 'idle' || recorder.phase === 'error') && (
                     <button
-                      onClick={recorder.stopRecording}
+                      onClick={recorder.startRecording}
                       className="flex items-center gap-2 px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white text-sm rounded-lg transition-colors"
-                      aria-label="Parar gravação"
+                      aria-label="Gravar leitura do texto"
                     >
-                      <Square className="w-4 h-4" /> Parar gravação
+                      <Mic className="w-4 h-4" />
+                      {recorder.phase === 'error' ? 'Tentar novamente' : 'Gravar leitura'}
                     </button>
-                  </div>
-                )}
+                  )}
 
-                {recorder.phase === 'done' && analysisPhase !== 'error' && (
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={handlePlayMyRecording}
-                      className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
-                      aria-label={playbackPlaying ? 'Parar reprodução da sua gravação' : 'Ouvir sua gravação'}
-                    >
-                      {playbackPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                      {playbackPlaying ? 'Parar' : 'Ouvir gravação'}
-                    </button>
-                    <button
-                      onClick={() => { playbackAudioRef.current?.pause(); setPlaybackPlaying(false); recorder.deleteRecording(); setAnalysisPhase('idle'); setAnalysisError(null); setAnalysisErrorTechnical(null); }}
-                      className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
-                      aria-label="Gravar novamente"
-                    >
-                      <RotateCcw className="w-4 h-4" /> Gravar novamente
-                    </button>
-                    <button
-                      onClick={handleAnalyzeFull}
-                      className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white text-sm font-medium rounded-lg transition-all shadow-lg shadow-blue-900/30"
-                      aria-label="Enviar gravação para análise de pronúncia"
-                    >
-                      <Send className="w-4 h-4" /> Enviar para análise
-                    </button>
-                  </div>
-                )}
-
-                {recorder.errorMessage && (
-                  <p className="text-xs text-red-400">{recorder.errorMessage}</p>
-                )}
-                {analysisPhase === 'error' && analysisError && (
-                  <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 space-y-3">
-                    <div>
-                      <p className="text-sm font-semibold text-red-300">Não foi possível analisar a gravação</p>
-                      <p className="text-sm text-red-200 mt-1">{analysisError}</p>
-                      {analysisErrorTechnical && analysisErrorTechnical !== analysisError && (
-                        <details className="mt-2">
-                          <summary className="text-xs text-red-400 cursor-pointer hover:text-red-300 select-none">Detalhes do erro</summary>
-                          <p className="text-xs text-red-400/80 mt-1 font-mono break-all whitespace-pre-wrap">{analysisErrorTechnical}</p>
-                        </details>
-                      )}
+                  {recorder.phase === 'requesting' && (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-slate-400 text-sm rounded-lg w-fit">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Aguardando microfone…
                     </div>
-                    <button
-                      onClick={handleRerecordFull}
-                      className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
-                    >
-                      <RotateCcw className="w-4 h-4" /> Gravar novamente
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+                  )}
+
+                  {recorder.phase === 'recording' && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span
+                        className="flex items-center gap-2 px-3 py-2 bg-rose-900/40 border border-rose-700 rounded-lg text-rose-300 text-xs font-mono"
+                        aria-live="polite"
+                        aria-label={`Gravando: ${formatTime(recorder.elapsedMs)}${maxRecordingMs ? ` de ${formatTime(maxRecordingMs)}` : ''}`}
+                      >
+                        <span className="w-2 h-2 bg-rose-400 rounded-full animate-pulse" aria-hidden="true" />
+                        {formatTime(recorder.elapsedMs)}{maxRecordingMs ? ` / ${formatTime(maxRecordingMs)}` : ''}
+                      </span>
+                      <button
+                        onClick={recorder.stopRecording}
+                        className="flex items-center gap-2 px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white text-sm rounded-lg transition-colors"
+                        aria-label="Parar gravação"
+                      >
+                        <Square className="w-4 h-4" /> Parar gravação
+                      </button>
+                    </div>
+                  )}
+
+                  {recorder.phase === 'done' && analysis.phase !== 'failed' && (
+                    <div className="space-y-3">
+                      {recorder.stoppedByMaxDuration && pronunciation && !pronunciation.maxRecordingUnlimited && (
+                        <p className="text-xs text-amber-400">
+                          {ENTITLEMENT_MESSAGES.recordingLimitReached(pronunciation.maxRecordingSeconds)}
+                        </p>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={handlePlayMyRecording}
+                          className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
+                          aria-label={playbackPlaying ? 'Parar reprodução da sua gravação' : 'Ouvir sua gravação'}
+                        >
+                          {playbackPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                          {playbackPlaying ? 'Parar' : 'Ouvir gravação'}
+                        </button>
+                        <button
+                          onClick={recorder.startRecording}
+                          className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
+                          aria-label="Descartar gravação atual e gravar novamente"
+                        >
+                          <RotateCcw className="w-4 h-4" /> Gravar novamente
+                        </button>
+                        <button
+                          onClick={handleAnalyzeFull}
+                          disabled={!canSubmit}
+                          aria-disabled={!canSubmit}
+                          className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white text-sm font-medium rounded-lg transition-all shadow-lg shadow-blue-900/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                          aria-label="Enviar gravação para análise de pronúncia"
+                        >
+                          <Send className="w-4 h-4" /> Enviar para análise
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {recorder.errorMessage && (
+                    <p className="text-xs text-red-400">{recorder.errorMessage}</p>
+                  )}
+                  {analysis.phase === 'failed' && analysis.errorMessage && (
+                    <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 space-y-3">
+                      <p className="text-sm text-red-200">{analysis.errorMessage}</p>
+                      <button
+                        onClick={handleRetryAnalysis}
+                        className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
+                      >
+                        <RotateCcw className="w-4 h-4" /> Gravar novamente
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── Results ──────────────────────────────────────────────────── */}
           {mainPhase === 'results' && wordResults && summaryCounts && (
@@ -854,16 +887,6 @@ export default function PronunciationTrainingView({ onBack }: Props) {
                   <div className="text-2xl font-bold text-red-400">{summaryCounts['pratique']}</div>
                   <div className="text-xs text-red-500 mt-0.5">Pratique</div>
                 </div>
-              </div>
-
-              {/* Re-record full text */}
-              <div className="flex justify-center mb-6">
-                <button
-                  onClick={handleRerecordFull}
-                  className="flex items-center gap-2 text-sm text-slate-400 hover:text-slate-100 transition-colors"
-                >
-                  <RotateCcw className="w-4 h-4" /> Gravar novamente o texto completo
-                </button>
               </div>
 
               {/* Word practice area */}
