@@ -61,22 +61,23 @@ public class LemonWebChromeClient extends BridgeWebChromeClient {
     @Override
     public void onPermissionRequest(final PermissionRequest request) {
         String origin = request.getOrigin() != null ? request.getOrigin().toString() : "";
-        String normalizedOrigin = origin.endsWith("/") ? origin.substring(0, origin.length() - 1) : origin;
 
-        boolean wantsAudio = false;
-        for (String resource : request.getResources()) {
-            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
-                wantsAudio = true;
-            }
-        }
-
-        if (!allowedOrigin.equals(normalizedOrigin) || !wantsAudio) {
+        if (!isAllowedMediaRequest(allowedOrigin, origin, request.getResources())) {
             Log.w(TAG, "Denying media permission request from unauthorized origin or resource");
             request.deny();
             return;
         }
 
-        String[] needed = { Manifest.permission.RECORD_AUDIO };
+        // RECORD_AUDIO alone is not enough: Chromium's Android audio backend
+        // (audio_manager_android.cc) also requires MODIFY_AUDIO_SETTINGS to open a
+        // recording device, or it fails with "Unable to select audio device!" ->
+        // getUserMedia() rejects with NotReadableError even though RECORD_AUDIO was
+        // granted. MODIFY_AUDIO_SETTINGS is a normal-protection permission (declared
+        // in AndroidManifest.xml, auto-granted at install, never prompted here) —
+        // included in this array only so hasPermissions()/the launcher account for
+        // it the same way BridgeWebChromeClient's own default onPermissionRequest
+        // already does for AUDIO_CAPTURE.
+        String[] needed = { Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS };
         if (PermissionHelper.hasPermissions(bridge.getContext(), needed)) {
             request.grant(new String[] { PermissionRequest.RESOURCE_AUDIO_CAPTURE });
             return;
@@ -84,5 +85,34 @@ public class LemonWebChromeClient extends BridgeWebChromeClient {
 
         this.pendingRequest = request;
         this.micPermissionLauncher.launch(needed);
+    }
+
+    /**
+     * Pure origin+resource check, factored out of onPermissionRequest so it's
+     * testable with plain JUnit (no PermissionRequest/WebView instance needed)
+     * — see LemonWebChromeClientTest. Exact-match only: no subdomains, no
+     * scheme/port other than what allowedOrigin already encodes, same
+     * convention as LemonOriginValidator/LemonWebViewClient use elsewhere.
+     * Returns true only if the origin matches exactly AND audio capture was
+     * one of the requested resources (a page asking for audio+video still
+     * passes here — the caller grants only RESOURCE_AUDIO_CAPTURE regardless
+     * of what else was requested; a video-only request is rejected).
+     */
+    static boolean isAllowedMediaRequest(String allowedOrigin, String requestOrigin, String[] resources) {
+        String normalizedOrigin = requestOrigin == null ? "" : requestOrigin;
+        if (normalizedOrigin.endsWith("/")) {
+            normalizedOrigin = normalizedOrigin.substring(0, normalizedOrigin.length() - 1);
+        }
+
+        boolean wantsAudio = false;
+        if (resources != null) {
+            for (String resource : resources) {
+                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                    wantsAudio = true;
+                }
+            }
+        }
+
+        return allowedOrigin.equals(normalizedOrigin) && wantsAudio;
     }
 }

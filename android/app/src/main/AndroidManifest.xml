@@ -41,4 +41,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Chromium's Android audio backend (audio_manager_android.cc) refuses to open
+         a recording device without this, even once RECORD_AUDIO is granted — see
+         LemonWebChromeClient.java for how this was diagnosed (NotReadableError /
+         "Unable to select audio device!"). Normal protection level: granted at
+         install time, no runtime prompt. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 </manifest>

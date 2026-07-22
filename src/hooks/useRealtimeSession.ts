@@ -87,13 +87,26 @@ function stopStream(stream: MediaStream | null) {
   stream.getTracks().forEach((t) => { try { t.stop(); } catch { /* ignore */ } });
 }
 
-function getMicErrorMessage(err: unknown): { message: string; code: string } {
+export function getMicErrorMessage(err: unknown): { message: string; code: string } {
+  // Dev-safe diagnostic only: the DOMException name/message describes the
+  // capture failure itself (e.g. "NotReadableError: Could not start audio
+  // source"), never audio content, session, or credentials — never shown to
+  // the user (see the generic fallback message below).
+  if (err instanceof DOMException) {
+    console.error('[mic] getUserMedia failed', { name: err.name, message: err.message });
+  } else {
+    console.error('[mic] getUserMedia failed with a non-DOMException error', err);
+  }
+
   if (err instanceof DOMException) {
     if (err.name === 'NotAllowedError') {
       return { message: 'Permissão do microfone negada.', code: 'MIC_PERMISSION_DENIED' };
     }
     if (err.name === 'NotFoundError') {
       return { message: 'Nenhum microfone foi encontrado.', code: 'MIC_NOT_FOUND' };
+    }
+    if (err.name === 'NotReadableError') {
+      return { message: 'O microfone está sendo usado por outro app ou não pôde ser iniciado. Feche outros apps que usem o microfone e tente novamente.', code: 'MIC_NOT_READABLE' };
     }
   }
   return { message: 'Não foi possível acessar o microfone.', code: 'MIC_ERROR' };
