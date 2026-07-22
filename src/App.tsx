@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
+import { isNativeApp, isPluginAvailable } from './lib/runtimeEnvironment';
 import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
@@ -85,20 +85,23 @@ export default function App() {
     supabase.auth.signOut();
   }
 
-  // Android hardware back button — the app has no URL-based navigation history,
-  // so Capacitor's default (WebView goBack / exit) would just close the app from
-  // any screen. Walk the same hierarchy a user would tap through: close menu,
-  // close day view, return to home, then exit on a second press from home.
+  // Android hardware back button — priority order: close an open modal/menu,
+  // then WebView navigation history (canGoBack, relevant now that the remote
+  // site could push real history entries), then the app's own view stack,
+  // then exit only from the root. Capacitor's default (no listener at all)
+  // would just close the app from any screen.
   const backButtonStateRef = useRef({ menuOpen, view, prevView });
   backButtonStateRef.current = { menuOpen, view, prevView };
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
+    if (!isNativeApp || !isPluginAvailable('App')) return;
 
-    const listenerPromise = CapacitorApp.addListener('backButton', () => {
+    const listenerPromise = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
       const { menuOpen: isMenuOpen, view: currentView, prevView: previousView } = backButtonStateRef.current;
       if (isMenuOpen) {
         setMenuOpen(false);
+      } else if (canGoBack) {
+        window.history.back();
       } else if (currentView === 'day') {
         setView(previousView);
       } else if (currentView !== 'home') {

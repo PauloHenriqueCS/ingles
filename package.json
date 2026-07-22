@@ -33,7 +33,8 @@
     "listening:audit": "npx tsx scripts/listening-audit.ts",
     "ai-gateway:reconcile-event": "npx tsx scripts/ai-gateway-reconcile-event.ts",
     "ai-gateway:reconcile-day": "npx tsx scripts/ai-gateway-reconcile-day.ts",
-    "cap:sync": "vite build --mode mobile && npx cap sync android",
+    "cap:sync": "vite build && npx cap sync android",
+    "cap:sync:bundled": "vite build --mode mobile && cross-env CAPACITOR_MODE=bundled npx cap sync android",
     "cap:open:android": "npx cap open android"
   },
   "dependencies": {
@@ -57,6 +58,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
+    "cross-env": "10.1.0",
     "dotenv": "^17.4.2",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",
