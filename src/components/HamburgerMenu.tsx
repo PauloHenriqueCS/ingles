@@ -1,32 +1,25 @@
 import {
   House, CalendarDays,
-  History, TrendingUp, BookOpen, BotMessageSquare, Volume2, LogOut, X, Lock,
+  History, TrendingUp, BookOpen, Volume2, Settings, LogOut, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import type { View } from '../types';
-import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
-import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 
 interface MenuItem {
   view: View;
   label: string;
   icon: LucideIcon;
-  /** Plan-gated feature key this item maps to, if any — checked against
-   *  entitlements before navigating, same source of truth HomePage uses.
-   *  Keeps this drawer from ever offering a route the home screen would
-   *  have blocked with a lock icon. */
-  gatedFeature?: 'conversation';
 }
 
 const MENU_ITEMS: MenuItem[] = [
-  { view: 'home',         label: 'Página inicial',   icon: House },
-  { view: 'month',        label: 'Calendário',       icon: CalendarDays },
-  { view: 'history',      label: 'Histórico',        icon: History },
-  { view: 'evolution',    label: 'Evolução',         icon: TrendingUp },
-  { view: 'memory',       label: 'Revisão',          icon: BookOpen },
-  { view: 'conversation',   label: 'Conversar com IA',       icon: BotMessageSquare, gatedFeature: 'conversation' },
-  { view: 'audio-settings', label: 'Configurações de áudio', icon: Volume2 },
+  { view: 'home',           label: 'Página inicial',          icon: House },
+  { view: 'month',          label: 'Calendário',              icon: CalendarDays },
+  { view: 'history',        label: 'Histórico',                icon: History },
+  { view: 'evolution',      label: 'Evolução',                 icon: TrendingUp },
+  { view: 'memory',         label: 'Revisão',                  icon: BookOpen },
+  { view: 'audio-settings', label: 'Configurações de áudio',   icon: Volume2 },
+  { view: 'settings',       label: 'Configurações',            icon: Settings },
 ];
 
 interface Props {
@@ -37,20 +30,7 @@ interface Props {
 }
 
 export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }: Props) {
-  const { data: entitlements, isLoading } = usePlanEntitlements();
-
-  function isDisabledByPlan(item: MenuItem): boolean {
-    if (!item.gatedFeature) return false;
-    if (isLoading || !entitlements) return false; // never flash a blocked item before the plan is known
-    if (item.gatedFeature === 'conversation') return !entitlements.conversation.enabled;
-    return false;
-  }
-
   function handleItemClick(item: MenuItem) {
-    if (isDisabledByPlan(item)) {
-      window.alert(ENTITLEMENT_MESSAGES.featureUnavailable);
-      return;
-    }
     onNavigate(item.view);
     onClose();
   }
@@ -82,27 +62,20 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
         </div>
 
         <div className="flex-1 overflow-y-auto py-2">
-          {MENU_ITEMS.map((item) => {
-            const blocked = isDisabledByPlan(item);
-            return (
-              <button
-                key={item.view}
-                onClick={() => handleItemClick(item)}
-                aria-disabled={blocked}
-                className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left transition-all duration-150 ${
-                  current === item.view
-                    ? 'bg-blue-600/20 text-white'
-                    : blocked
-                      ? 'text-slate-500 hover:bg-slate-700/60'
-                      : 'text-slate-400 hover:bg-slate-700 hover:text-slate-200'
-                }`}
-              >
-                <AppIcon icon={item.icon} />
-                <span className="flex-1">{item.label}</span>
-                {blocked && <AppIcon icon={Lock} className="w-3.5 h-3.5 shrink-0 text-slate-500" />}
-              </button>
-            );
-          })}
+          {MENU_ITEMS.map((item) => (
+            <button
+              key={item.view}
+              onClick={() => handleItemClick(item)}
+              className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left transition-all duration-150 ${
+                current === item.view
+                  ? 'bg-blue-600/20 text-white'
+                  : 'text-slate-400 hover:bg-slate-700 hover:text-slate-200'
+              }`}
+            >
+              <AppIcon icon={item.icon} />
+              <span className="flex-1">{item.label}</span>
+            </button>
+          ))}
         </div>
 
         <div className="border-t border-slate-700 p-4 shrink-0">

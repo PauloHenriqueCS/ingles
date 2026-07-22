@@ -34,3 +34,15 @@ export function getSupabaseServiceCredentials(): SupabaseCredentials {
 export function getSupabaseAnonCredentials(): SupabaseCredentials {
   return { url: readEnv('VITE_SUPABASE_URL'), key: readEnv('VITE_SUPABASE_ANON_KEY') };
 }
+
+/**
+ * Server-only secret for deterministic HMAC-SHA256 hashing of communication
+ * destinations (email/phone/push token) before they are stored in
+ * user_communication_blocks.destination_hash — never a plain SHA of the raw
+ * value, which would be brute-forceable for predictable inputs like emails.
+ * Empty string when unset; callers must treat that as "hashing unavailable"
+ * and never fall back to storing the raw destination.
+ */
+export function getCommunicationSuppressionHmacSecret(): string {
+  return readEnv('COMMUNICATION_SUPPRESSION_HMAC_SECRET');
+}

@@ -13,7 +13,10 @@ export type ApiErrorCode =
   | 'RATE_LIMITED'
   | 'AI_TIMEOUT'
   | 'AI_UNAVAILABLE'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'ACCOUNT_DEACTIVATED'
+  | 'BILLING_BLOCKED_ACCOUNT_DEACTIVATED'
+  | 'COMMUNICATION_BLOCKED';
 
 // ── Payload size limits (bytes) ───────────────────────────────────────────────
 
@@ -26,6 +29,7 @@ export const PAYLOAD_LIMITS = {
   PREVIEW:       2_048,   //   2 KB — voice + pace
   TTS:          16_384,   //  16 KB — TTS text payload
   WEBRTC_SDP:   32_768,   //  32 KB — SDP offer (audio-only, but leaves headroom for extra ICE/codec lines)
+  ACCOUNT_ACTION: 1_024,  //   1 KB — account deactivation takes no meaningful body, just a floor against abuse
 } as const;
 
 // ── Timeout values (ms) ───────────────────────────────────────────────────────

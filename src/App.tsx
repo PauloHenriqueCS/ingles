@@ -5,6 +5,8 @@ import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { supabase } from './lib/supabase';
+import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
+import { endSessionAfterAccountDeletion } from './lib/accountSessionCleanup';
 import {
   fetchLearningSettings,
   fetchActiveDayOverrides,
@@ -24,10 +26,15 @@ import ConversationView from './components/ConversationView';
 import ListeningView from './components/ListeningView';
 import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
+import SettingsView from './components/SettingsView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
 import LoginPage from './components/LoginPage';
+
+// Installed once at module load — reacts to ACCOUNT_DEACTIVATED from any
+// authenticated API call, from anywhere in the app, by ending the session.
+installAccountDeactivationGuard();
 
 export default function App() {
   const today = getTodaySP();
@@ -83,6 +90,10 @@ export default function App() {
       localStorage.removeItem(`english-calendar-entries-v2-${user.id}`);
     }
     supabase.auth.signOut();
+  }
+
+  async function handleAccountDeleted() {
+    await endSessionAfterAccountDeletion();
   }
 
   // Android hardware back button — priority order: close an open modal/menu,
@@ -246,6 +257,9 @@ export default function App() {
         )}
         {view === 'pronunciation-training' && (
           <PronunciationTrainingView onBack={() => setView('home')} />
+        )}
+        {view === 'settings' && (
+          <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
         )}
       </main>
     </div>

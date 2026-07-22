@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { consumeAccountSessionNotice } from '../lib/accountSessionCleanup';
 
 type Mode = 'login' | 'signup';
 type State = 'idle' | 'loading' | 'error' | 'signup_sent';
@@ -11,6 +12,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [state, setState] = useState<State>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  // Read once per mount so the message shows exactly once, right after the
+  // redirect that follows a self-deletion or a mid-session block.
+  const [sessionNotice] = useState(() => consumeAccountSessionNotice());
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -78,6 +82,20 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="max-w-sm w-full space-y-6">
+        {sessionNotice === 'deleted' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
+            <p className="text-sm text-slate-200 font-medium">Sua conta foi excluída.</p>
+            <p className="text-xs text-slate-400 mt-1">
+              Seu acesso foi encerrado e você não receberá novas comunicações pelo Lemon.
+            </p>
+          </div>
+        )}
+        {sessionNotice === 'blocked' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
+            <p className="text-sm text-slate-300">Esta conta não está mais disponível.</p>
+          </div>
+        )}
+
         <div className="text-center space-y-1">
           <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
             <img
