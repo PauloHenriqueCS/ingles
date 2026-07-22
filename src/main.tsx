@@ -2,8 +2,11 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { StatusBar, Style } from '@capacitor/status-bar'
 import { isNativeApp, isPluginAvailable, runtimeAttribute } from './lib/runtimeEnvironment'
+import { installChunkReloadRecovery } from './lib/chunkReloadRecovery'
 import './index.css'
 import App from './App.tsx'
+
+installChunkReloadRecovery()
 
 document.documentElement.dataset.runtime = runtimeAttribute()
 
