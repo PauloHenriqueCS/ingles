@@ -577,6 +577,49 @@ describe('prepareListeningSubtitles — with database', () => {
     ).rejects.toThrow(ListeningTranslationCorrectionFailedError);
   });
 
+  // Case 38b
+  it('repairs a single missing cue by re-translating only that cue, then proceeds without failing the episode', async () => {
+    const db = makeSupabase();
+    const partialTranslation = JSON.stringify(makeRawTranslation({
+      block1Cues: [], // block 1's only cue is missing entirely
+    }));
+    const missingCueRepairResponse = JSON.stringify({
+      cues: [{ cueKey: 'b1-c001', textPtBr: 'A raposa ágil sentou.' }],
+    });
+    const callAI = makeAI([
+      partialTranslation,        // 1. initial translation: block 1 cue missing
+      missingCueRepairResponse,  // 2. targeted repair: only the missing cue
+      VALIDATOR_SUCCESS_JSON,    // 3. AI semantic validation block 1
+      VALIDATOR_SUCCESS_JSON,    // 4. AI semantic validation block 2
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    expect(result.englishCueCount).toBe(2);
+    expect(result.portugueseCueCount).toBe(2);
+    expect(callAI).toHaveBeenCalledTimes(4);
+
+    // The repair call must ask for only the missing cue, not the full set.
+    const repairPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
+    expect(repairPrompt).toContain('b1-c001');
+  });
+
+  // Case 38c
+  it('does not repair indefinitely: gives up after the repair round limit and marks the episode failed', async () => {
+    const db = makeSupabase();
+    const alwaysPartial = JSON.stringify(makeRawTranslation({ block1Cues: [] }));
+    const repairStillEmpty = JSON.stringify({ cues: [] }); // repair keeps omitting the cue
+    const callAI = makeAI([alwaysPartial, repairStillEmpty, repairStillEmpty, repairStillEmpty]);
+
+    await expect(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    ).rejects.toThrow(SubtitleTranslationValidationError);
+
+    // 1 initial translation + 2 bounded repair rounds = 3 calls, never unbounded.
+    expect(callAI).toHaveBeenCalledTimes(3);
+  });
+
   // Case 38
   it('does not insert subtitle cues when dryRun is true even with a supabase client', async () => {
     const db = makeSupabase();

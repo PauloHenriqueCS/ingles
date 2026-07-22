@@ -5,9 +5,10 @@ import type { GroupGenerationStatusResult, GroupGenerationStatus } from './liste
 import {
   STEP_LABELS, STEP_PROGRESS, NEXT_STATUS, TERMINAL_STATUSES,
   STEP_LOCK_MS, GroupJobNotFoundError, GroupJobLockedError,
-  GroupJobTerminalError, GroupJobDurationError, toPublicGroupJobResult,
+  GroupJobTerminalError, GroupJobDurationError, GroupJobEpisodeIntegrityError, toPublicGroupJobResult,
 } from './listening-group-generation-types';
-import { generateListeningStory, createDefaultAICallFn } from '../generate-listening-story';
+import { generateListeningStory, createDefaultAICallFn, buildIdempotencyKey } from '../generate-listening-story';
+import { findListeningEpisodeByGenerationKey } from '../persist-listening-story';
 import { generateListeningQuestions, createQuestionAICallFn } from '../generate-listening-questions';
 import { prepareListeningSubtitles, createSubtitleAICallFn } from '../prepare-listening-subtitles';
 import { generateListeningSsml } from '../generate-listening-ssml';
@@ -168,21 +169,53 @@ async function stepGeneratingBlock1(
   jobId: string,
   job: { target_level: string; episode_id: string | null },
 ): Promise<void> {
-  // Idempotency: if an episode already exists (e.g. a step after this one
-  // failed and we retried into this step's neighbor), skip generation.
+  const cefrLevel = job.target_level as CEFRLevel;
+  const idempotencyKey = buildIdempotencyKey({ cefrLevel });
+
+  // get-or-create by generation_key: a previous attempt for this exact
+  // (level, theme, seed, prompt/content version) may have already persisted
+  // an episode before failing at a later step (e.g. subtitle translation).
+  // generation_key is UNIQUE in the DB, so generating fresh content and
+  // inserting again would fail the constraint — reuse it instead.
+  const existingByKey = await findListeningEpisodeByGenerationKey(serviceClient, idempotencyKey);
+
+  // Idempotency: if the job is already linked to an episode (e.g. a step
+  // after this one failed and we retried into this step's neighbor), skip
+  // generation — but first confirm it's still the same episode generation_key
+  // resolves to, so a corrupted/mismatched link fails loudly instead of
+  // silently operating on the wrong content.
   if (job.episode_id) {
+    if (existingByKey && existingByKey.id !== job.episode_id) {
+      throw new GroupJobEpisodeIntegrityError(jobId, job.episode_id, existingByKey.id);
+    }
     const { data: ep } = await serviceClient
       .from('listening_episodes')
       .select('id, status')
       .eq('id', job.episode_id)
       .maybeSingle();
     if (ep) {
-      await advanceJob(serviceClient, jobId, 'validating_block_1');
+      const episodeStatus = (ep as { status: string }).status;
+      await advanceJob(serviceClient, jobId, episodeStatus === 'published' ? 'ready' : 'validating_block_1');
       return;
     }
   }
 
-  const cefrLevel = job.target_level as CEFRLevel;
+  if (existingByKey) {
+    log('reusing_existing_episode', jobId, { episodeId: existingByKey.id, episodeStatus: existingByKey.status });
+    if (existingByKey.status === 'published') {
+      // Nothing left for this job to do — content generation, subtitles and
+      // audio for this generation_key are already done and live. Fast-forward
+      // to ready instead of re-running (and failing) content steps against an
+      // episode prepareListeningSubtitles/publishListeningEpisode both treat
+      // as immutable. Per-user assignment happens downstream in the existing
+      // daily flow, same as any other published episode.
+      await advanceJob(serviceClient, jobId, 'ready', { episode_id: existingByKey.id });
+      return;
+    }
+    await advanceJob(serviceClient, jobId, 'validating_block_1', { episode_id: existingByKey.id });
+    return;
+  }
+
   const openaiKey = requireEnv('OPENAI_API_KEY');
   const callAI = createDefaultAICallFn(openaiKey);
 

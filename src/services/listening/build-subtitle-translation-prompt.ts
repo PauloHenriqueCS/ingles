@@ -159,6 +159,62 @@ export function buildValidatorUserPrompt(input: ValidationPromptInput): string {
   return lines.join('\n');
 }
 
+export interface MissingCuesPromptInput {
+  episodeId: string;
+  title: string;
+  synopsis: string | null;
+  cefrLevel: CEFRLevel;
+  missingByBlock: Map<1 | 2, { blockTextEn: string; cues: EnglishCueDraft[] }>;
+  glossary?: Record<string, string>;
+}
+
+/**
+ * Targeted repair prompt for LISTENING_TRANSLATION_MISSING_CUE: asks for a
+ * translation of ONLY the cues a previous pass omitted, identified by the
+ * same stable cueKey used everywhere else — never re-requests the full set.
+ */
+export function buildMissingCuesUserPrompt(input: MissingCuesPromptInput): string {
+  const { episodeId, title, synopsis, cefrLevel, missingByBlock, glossary } = input;
+  const lines: string[] = [
+    `Episode ID: ${episodeId}`,
+    `Title: ${title}`,
+    synopsis ? `Synopsis: ${synopsis}` : '',
+    `CEFR Level: ${cefrLevel}`,
+    '',
+    'A previous translation pass omitted some cues. Translate ONLY the missing cues listed below.',
+    'Do not return any cue that is not explicitly listed here.',
+    '',
+  ];
+
+  if (glossary && Object.keys(glossary).length > 0) {
+    lines.push('=== GLOSSARY (mandatory terms) ===');
+    for (const [en, pt] of Object.entries(glossary)) {
+      lines.push(`  ${en} → ${pt}`);
+    }
+    lines.push('');
+  }
+
+  const allCueKeys: string[] = [];
+  for (const [blockOrder, data] of missingByBlock) {
+    lines.push(`=== BLOCK ${blockOrder} — FULL ENGLISH TEXT (context) ===`);
+    lines.push(data.blockTextEn);
+    lines.push('');
+    lines.push(`--- Block ${blockOrder} MISSING cues to translate ---`);
+    for (const cue of data.cues) {
+      lines.push(`[${cue.cueKey}] (source: ${cue.sourceSentenceKeys.join(', ')}) ${cue.text}`);
+      allCueKeys.push(cue.cueKey);
+    }
+    lines.push('');
+  }
+
+  lines.push('Return ONLY the JSON below. Replace <…> placeholders with actual translations. Include EVERY cueKey listed here, and nothing else:');
+  lines.push(JSON.stringify({
+    cues: allCueKeys.map(cueKey => ({ cueKey, textPtBr: '<tradução aqui>' })),
+  }, null, 2));
+
+  return lines.filter(l => l !== undefined).join('\n');
+}
+
 export interface CorrectionPromptInput {
   episodeId: string;
   cefrLevel: CEFRLevel;

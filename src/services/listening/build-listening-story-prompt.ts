@@ -94,7 +94,10 @@ JSON schema (exactly this, nothing more):
 RULES:
 - Rewrite the COMPLETE block, preserving all key events, characters, and continuity.
 - Remove redundant phrases, over-description, and filler while maintaining narrative flow.
-- The word count MUST be between the minimum and maximum stated in the user prompt.`;
+- Cut AT LEAST the number of words stated in the user prompt — cutting more is fine, cutting less is not.
+- The word count MUST be between the minimum and maximum stated in the user prompt. If you are unsure whether you are under the maximum, cut more words — being under the target is acceptable, being over the maximum is not.
+- Do not add new scenes, dialogue, or events to compensate — only remove.
+- Count the words in your rewritten text_en before returning. Do not return JSON until you have verified the count is within range.`;
 
 // ── User prompt helpers ───────────────────────────────────────────────────────
 
@@ -168,10 +171,12 @@ export function buildCondenseBlockUserPrompt(
   currentWords: number,
 ): string {
   const range = WORD_COUNT_RANGES[opts.cefrLevel];
+  const wordsToCut = Math.max(1, currentWords - range.target);
   const lines: string[] = [
     `CEFR Level: ${opts.cefrLevel}`,
     `Block: Part ${blockNum}`,
     `Current word count: ${currentWords} (ABOVE MAXIMUM of ${range.max} — must condense)`,
+    `You must cut AT LEAST ${wordsToCut} words to reach the ${range.target}-word target (hard maximum: ${range.max}).`,
     '',
     `CURRENT PART ${blockNum} TEXT (rewrite and condense this):`,
     currentText,

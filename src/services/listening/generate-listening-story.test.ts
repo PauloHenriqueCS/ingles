@@ -548,6 +548,68 @@ describe('generateListeningStory — block 2 too short triggers expansion', () =
   });
 });
 
+// ── Group 9b: block 2 too long — deterministic fallback after AI condense exhaustion ──
+
+describe('generateListeningStory — block 2 too long triggers condense, then deterministic fallback', () => {
+  function makeSentenceBlock(sentenceCount: number, wordsPerSentence: number): string {
+    return Array.from({ length: sentenceCount }, (_, i) =>
+      `Sentence number ${i + 1} has some extra ${Array.from({ length: wordsPerSentence - 6 }, (_, w) => `w${w}`).join(' ')} words.`
+    ).join(' ');
+  }
+
+  it('condenses only block 2 without regenerating block 1 (reparo direcionado, not full regeneration)', async () => {
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(440)) // block1: valid, must stay untouched
+      .mockResolvedValueOnce(makeBlock2Response(600))  // block2: 600 words (A1 max 475)
+      .mockResolvedValueOnce(makeBlock2Response(440)); // condense: 440 (valid)
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(result.story.blocks[0].wordCount).toBe(440); // block 1 unchanged
+    expect(result.story.blocks[1].wordCount).toBe(440);
+    const [firstSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    expect(firstSystem).toBe(BLOCK1_SYSTEM_PROMPT);
+    const [thirdSystem] = (callAI as ReturnType<typeof vi.fn>).mock.calls[2] as [string, string];
+    expect(thirdSystem).toBe(CONDENSE_BLOCK_SYSTEM_PROMPT);
+  });
+
+  it('reproduces the reported failure (779 words, A1 max 475): AI condense exhausted, deterministic trim repairs it within [min,max] with no extra AI calls', async () => {
+    const overLongBlock2 = makeSentenceBlock(80, 10); // 800 words, well-formed sentences
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(440))                              // block1: valid
+      .mockResolvedValueOnce(JSON.stringify({ text_en: overLongBlock2 }))          // block2 initial: 800 words
+      .mockResolvedValueOnce(JSON.stringify({ text_en: overLongBlock2 }))          // condense attempt 1: still 800
+      .mockResolvedValueOnce(JSON.stringify({ text_en: overLongBlock2 }));         // condense attempt 2: still 800
+
+    const result = await generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI);
+
+    // Exactly 4 AI calls total (1 block1 + 1 initial block2 + 2 condense retries) —
+    // the deterministic repair adds zero further AI/OpenAI calls.
+    expect(callAI).toHaveBeenCalledTimes(4);
+    expect(result.story.blocks[1].wordCount).toBeGreaterThanOrEqual(400); // A1 min
+    expect(result.story.blocks[1].wordCount).toBeLessThanOrEqual(475);   // A1 max
+    // Deterministic trim only ever removes trailing sentences — never fabricates
+    // content, so the repaired text must be an exact prefix of the AI's last draft.
+    expect(overLongBlock2.startsWith(result.story.blocks[1].textEn)).toBe(true);
+  });
+
+  it('throws StoryBlockTooLongError when even deterministic trim cannot find a valid prefix', async () => {
+    // A single giant run-on sentence: no sentence boundary to trim at, so the
+    // deterministic fallback cannot produce a shorter whole-sentence text.
+    const oneGiantSentence = `This is one single sentence with ${Array.from({ length: 700 }, (_, i) => `word${i}`).join(' ')} words in it and no other punctuation`;
+    const callAI: AICallFn = vi.fn()
+      .mockResolvedValueOnce(makeBlock1Response(440))
+      .mockResolvedValueOnce(JSON.stringify({ text_en: oneGiantSentence }))
+      .mockResolvedValueOnce(JSON.stringify({ text_en: oneGiantSentence }))
+      .mockResolvedValueOnce(JSON.stringify({ text_en: oneGiantSentence }));
+
+    await expect(
+      generateListeningStory({ cefrLevel: 'A1', dryRun: true }, callAI)
+    ).rejects.toThrow(StoryBlockTooLongError);
+    expect(callAI).toHaveBeenCalledTimes(4); // still respects MAX_BLOCK_ATTEMPTS — no extra AI calls from the fallback attempt
+  });
+});
+
 // ── Group 10: block 2 continuity ─────────────────────────────────────────────
 
 describe('generateListeningStory — block 2 receives block 1 context', () => {

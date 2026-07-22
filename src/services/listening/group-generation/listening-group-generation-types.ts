@@ -144,6 +144,18 @@ export class GroupJobDurationError extends Error {
   }
 }
 
+export class GroupJobEpisodeIntegrityError extends Error {
+  readonly code = 'LISTENING_GROUP_JOB_EPISODE_INTEGRITY';
+  readonly retryable = false;
+  constructor(readonly jobId: string, readonly jobEpisodeId: string, readonly generationKeyEpisodeId: string) {
+    super(
+      `Job ${jobId} is linked to episode ${jobEpisodeId}, but its generation_key resolves to a ` +
+      `different episode ${generationKeyEpisodeId}. Refusing to silently repoint the job.`
+    );
+    this.name = 'GroupJobEpisodeIntegrityError';
+  }
+}
+
 export interface GroupGenerationStatusResult {
   jobId: string;
   levelGroup: ListeningLevelGroup;

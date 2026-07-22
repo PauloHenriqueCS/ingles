@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const {
   mockGenerateListeningStory, mockGenerateListeningQuestions, mockPrepareListeningSubtitles,
   mockGenerateListeningSsml, mockSynthesizeListeningEpisode, mockSynchronizeListeningEpisode,
-  mockPublishListeningEpisode, mockTranslateListeningSynopsis,
+  mockPublishListeningEpisode, mockTranslateListeningSynopsis, mockFindListeningEpisodeByGenerationKey,
 } = vi.hoisted(() => ({
   mockGenerateListeningStory: vi.fn(),
   mockGenerateListeningQuestions: vi.fn(),
@@ -13,11 +13,16 @@ const {
   mockSynchronizeListeningEpisode: vi.fn(),
   mockPublishListeningEpisode: vi.fn(),
   mockTranslateListeningSynopsis: vi.fn(),
+  mockFindListeningEpisodeByGenerationKey: vi.fn(),
 }));
 
 vi.mock('../generate-listening-story', () => ({
   generateListeningStory: mockGenerateListeningStory,
   createDefaultAICallFn: vi.fn(() => vi.fn()),
+  buildIdempotencyKey: vi.fn((opts: { cefrLevel: string }) => `${opts.cefrLevel}|||listening-story-v2|1`),
+}));
+vi.mock('../persist-listening-story', () => ({
+  findListeningEpisodeByGenerationKey: mockFindListeningEpisodeByGenerationKey,
 }));
 vi.mock('../generate-listening-questions', () => ({
   generateListeningQuestions: mockGenerateListeningQuestions,
@@ -148,6 +153,9 @@ function makeGroupSupabase(job: JobFixture, otherTables: Record<string, { data: 
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.OPENAI_API_KEY = 'test-key';
+  process.env.AZURE_SPEECH_KEY = 'test-azure-key';
+  process.env.AZURE_SPEECH_REGION = 'test-azure-region';
+  mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null);
 });
 
 describe('processListeningGroupGenerationStep — lock handling', () => {
@@ -214,6 +222,108 @@ describe('processListeningGroupGenerationStep — generating_block_1', () => {
   });
 });
 
+describe('processListeningGroupGenerationStep — generating_block_1 get-or-create by generation_key', () => {
+  const EXISTING_EPISODE_ID = 'dddddddd-0000-0000-0000-000000000009';
+
+  it('reuses an episode already persisted under this generation_key instead of generating fresh content (retry after a downstream failure)', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: EXISTING_EPISODE_ID, status: 'content_ready', cefrLevel: 'A1',
+    });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+    expect(result.episodeId).toBe(EXISTING_EPISODE_ID);
+    expect(result.status).toBe('validating_block_1');
+  });
+
+  it('generates fresh content when no episode exists for this generation_key', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null);
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockGenerateListeningStory).toHaveBeenCalledTimes(1);
+    expect(result.episodeId).toBe(EPISODE_ID);
+  });
+
+  it('two retries into this step for the same job both resolve to the same reused episode_id (no duplicate story)', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: EXISTING_EPISODE_ID, status: 'content_ready', cefrLevel: 'A1',
+    });
+
+    const supabase1 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    const first = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase1);
+
+    const supabase2 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    const second = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase2);
+
+    expect(first.episodeId).toBe(EXISTING_EPISODE_ID);
+    expect(second.episodeId).toBe(EXISTING_EPISODE_ID);
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+  });
+
+  it('fails the job with LISTENING_GROUP_JOB_EPISODE_INTEGRITY, non-retryable, when the job is already linked to a DIFFERENT episode than generation_key resolves to', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: 'some-other-episode-id', status: 'content_ready', cefrLevel: 'A1',
+    });
+    const supabase = makeGroupSupabase(
+      { status: 'generating_block_1', targetLevel: 'A1', episodeId: EPISODE_ID },
+      { listening_episodes: { data: { id: EPISODE_ID, status: 'content_ready' }, error: null } },
+    );
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(result.status).toBe('failed');
+    expect(result.errorCode).toBe('LISTENING_GROUP_JOB_EPISODE_INTEGRITY');
+    expect(result.retryable).toBe(false);
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+  });
+
+  it('fast-forwards straight to ready when the reused episode is already published (nothing left to generate)', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: EXISTING_EPISODE_ID, status: 'published', cefrLevel: 'A1',
+    });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+    expect(result.episodeId).toBe(EXISTING_EPISODE_ID);
+    expect(result.status).toBe('ready');
+  });
+
+  it('fast-forwards to ready when the job.episode_id link itself already points to a published episode', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: EPISODE_ID, status: 'published', cefrLevel: 'A1',
+    });
+    const supabase = makeGroupSupabase(
+      { status: 'generating_block_1', targetLevel: 'A1', episodeId: EPISODE_ID },
+      { listening_episodes: { data: { id: EPISODE_ID, status: 'published' }, error: null } },
+    );
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(result.status).toBe('ready');
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a matching job.episode_id / generation_key episode as an integrity conflict', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: EPISODE_ID, status: 'content_ready', cefrLevel: 'A1',
+    });
+    const supabase = makeGroupSupabase(
+      { status: 'generating_block_1', targetLevel: 'A1', episodeId: EPISODE_ID },
+      { listening_episodes: { data: { id: EPISODE_ID, status: 'content_ready' }, error: null } },
+    );
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(result.status).toBe('validating_block_1');
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+  });
+});
+
 describe('processListeningGroupGenerationStep — preparing_description', () => {
   it('translates the synopsis via the shared helper under the group-specific endpoint', async () => {
     mockTranslateListeningSynopsis.mockResolvedValue({ translated: true, synopsisPt: 'x' });
@@ -224,6 +334,43 @@ describe('processListeningGroupGenerationStep — preparing_description', () => 
       supabase,
     );
     expect(result.status).toBe('preparing_subtitles');
+  });
+});
+
+describe('processListeningGroupGenerationStep — preparing_subtitles (content validation gate)', () => {
+  it('does not call Azure synthesis when subtitle/cue validation fails', async () => {
+    mockPrepareListeningSubtitles.mockRejectedValue(new Error('LISTENING_TRANSLATION_MISSING_CUE'));
+    const supabase = makeGroupSupabase({ status: 'preparing_subtitles', episodeId: EPISODE_ID });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(result.status).toBe('failed');
+    expect(mockSynthesizeListeningEpisode).not.toHaveBeenCalled();
+  });
+
+  it('advances to generating_audio_block_1 only once subtitles are validated', async () => {
+    mockPrepareListeningSubtitles.mockResolvedValue({ status: 'ready' });
+    const supabase = makeGroupSupabase({ status: 'preparing_subtitles', episodeId: EPISODE_ID });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockSynthesizeListeningEpisode).not.toHaveBeenCalled(); // this step itself never synthesizes
+    expect(result.status).toBe('generating_audio_block_1');
+  });
+});
+
+describe('processListeningGroupGenerationStep — generating_audio_block_1', () => {
+  it('synthesizes exactly block 1 audio, once, only after content validation has already passed', async () => {
+    mockSynthesizeListeningEpisode.mockResolvedValue(undefined);
+    const supabase = makeGroupSupabase({ status: 'generating_audio_block_1', episodeId: EPISODE_ID });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockSynthesizeListeningEpisode).toHaveBeenCalledTimes(1);
+    expect(mockSynthesizeListeningEpisode).toHaveBeenCalledWith(
+      { episodeId: EPISODE_ID, blockFilter: 1 },
+      supabase,
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(result.status).toBe('generating_audio_block_2');
   });
 });
 

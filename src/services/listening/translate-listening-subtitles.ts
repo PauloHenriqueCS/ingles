@@ -15,6 +15,7 @@ import {
   buildTranslationUserPrompt,
   buildValidatorUserPrompt,
   buildCorrectionUserPrompt,
+  buildMissingCuesUserPrompt,
 } from './build-subtitle-translation-prompt';
 import type { BlockCueData } from './build-subtitle-translation-prompt';
 
@@ -120,34 +121,41 @@ export function validateTranslationDeterministic(
       );
     }
 
-    const enKeyMap = new Map(enCues.map((c, i) => [c.cueKey, { cue: c, index: i }]));
+    // Identity-based matching from here on — by cueKey, never by array
+    // position. A response containing the right set of cues in a different
+    // order must not be rejected as a mismatch.
+    const enKeyMap = new Map(enCues.map(c => [c.cueKey, c]));
+    const ptKeyMap = new Map<string, RawTranslatedCue>();
+    for (const raw of ptCues) {
+      const ptCue = raw as unknown as RawTranslatedCue;
+      if (ptKeyMap.has(ptCue.cueKey)) {
+        throw new SubtitleTranslationValidationError(
+          'LISTENING_TRANSLATION_DUPLICATE_CUE',
+          `Block ${blockOrder}: cue key "${ptCue.cueKey}" appears more than once`
+        );
+      }
+      ptKeyMap.set(ptCue.cueKey, ptCue);
+    }
+
+    const unknownKey = [...ptKeyMap.keys()].find(k => !enKeyMap.has(k));
+    if (unknownKey !== undefined) {
+      throw new SubtitleTranslationValidationError(
+        'LISTENING_TRANSLATION_KEY_MISMATCH',
+        `Block ${blockOrder}: unknown cue key "${unknownKey}"`
+      );
+    }
+
+    // Same count + no duplicates + every pt key is a known en key ⇒ the pt
+    // key set is exactly the en key set. Safe to iterate en cues in their
+    // canonical order — the output order never depends on the model's.
     const validated: ValidatedTranslatedCue[] = [];
-
-    for (let i = 0; i < ptCues.length; i++) {
-      const ptCue = ptCues[i] as unknown as RawTranslatedCue;
-      const expectedKey = enCues[i].cueKey;
-
-      if (ptCue.cueKey !== expectedKey) {
-        throw new SubtitleTranslationValidationError(
-          'LISTENING_TRANSLATION_KEY_MISMATCH',
-          `Block ${blockOrder} cue ${i + 1}: expected key "${expectedKey}", got "${ptCue.cueKey}"`
-        );
-      }
-
-      if (!enKeyMap.has(ptCue.cueKey)) {
-        throw new SubtitleTranslationValidationError(
-          'LISTENING_TRANSLATION_KEY_MISMATCH',
-          `Block ${blockOrder}: unknown cue key "${ptCue.cueKey}"`
-        );
-      }
-
-      const enEntry = enKeyMap.get(ptCue.cueKey)!;
-      const enCue = enEntry.cue;
+    for (const enCue of enCues) {
+      const ptCue = ptKeyMap.get(enCue.cueKey)!;
 
       if (!ptCue.textPtBr || typeof ptCue.textPtBr !== 'string' || ptCue.textPtBr.trim() === '') {
         throw new SubtitleTranslationValidationError(
           'LISTENING_TRANSLATION_INVALID_JSON',
-          `Block ${blockOrder} cue "${ptCue.cueKey}": empty translation`
+          `Block ${blockOrder} cue "${enCue.cueKey}": empty translation`
         );
       }
 
@@ -160,7 +168,7 @@ export function validateTranslationDeterministic(
         if (!ptNumSet.has(n)) {
           throw new SubtitleTranslationValidationError(
             'LISTENING_TRANSLATION_NUMBER_MISMATCH',
-            `Block ${blockOrder} cue "${ptCue.cueKey}": number "${n}" missing in translation`
+            `Block ${blockOrder} cue "${enCue.cueKey}": number "${n}" missing in translation`
           );
         }
       }
@@ -169,12 +177,12 @@ export function validateTranslationDeterministic(
       if (detectLanguage(ptCue.textPtBr) === 'likely-en') {
         throw new SubtitleTranslationValidationError(
           'LISTENING_TRANSLATION_INVALID_JSON',
-          `Block ${blockOrder} cue "${ptCue.cueKey}": translation appears to still be in English`
+          `Block ${blockOrder} cue "${enCue.cueKey}": translation appears to still be in English`
         );
       }
 
       validated.push({
-        cueKey: ptCue.cueKey,
+        cueKey: enCue.cueKey,
         cueOrder: enCue.cueOrder,
         blockOrder,
         sourceSentenceKeys: enCue.sourceSentenceKeys,
@@ -184,6 +192,114 @@ export function validateTranslationDeterministic(
     }
 
     result.set(blockOrder, validated);
+  }
+
+  return result;
+}
+
+// ─── Targeted repair for missing/omitted cues ────────────────────────────────
+// Used when validateTranslationDeterministic throws LISTENING_TRANSLATION_MISSING_CUE:
+// rather than re-translating the whole episode, find exactly which cueKeys
+// have no usable pt-BR entry and re-request only those.
+
+/**
+ * Pure diff against the raw AI response — which EN cues in each block have
+ * no corresponding non-empty pt-BR entry. Independent of
+ * validateTranslationDeterministic's throw/hard-fail checks (duplicate/unknown
+ * keys), so it works even against a response that is otherwise malformed,
+ * as long as it has a `blocks[].cues[]` shape.
+ */
+export function findMissingCueKeys(
+  raw: unknown,
+  englishCuesByBlock: Map<1 | 2, EnglishCueDraft[]>,
+): Map<1 | 2, EnglishCueDraft[]> {
+  const missing = new Map<1 | 2, EnglishCueDraft[]>();
+  const r = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {};
+  const blocks = Array.isArray(r.blocks) ? (r.blocks as Array<Record<string, unknown>>) : [];
+
+  for (const [blockOrder, enCues] of englishCuesByBlock) {
+    const rawBlock = blocks.find(b => b.blockOrder === blockOrder);
+    const ptCues = Array.isArray(rawBlock?.cues) ? (rawBlock!.cues as Array<Record<string, unknown>>) : [];
+
+    const usableKeys = new Set<string>();
+    for (const c of ptCues) {
+      if (typeof c.cueKey === 'string' && typeof c.textPtBr === 'string' && c.textPtBr.trim() !== '') {
+        usableKeys.add(c.cueKey);
+      }
+    }
+
+    const blockMissing = enCues.filter(c => !usableKeys.has(c.cueKey));
+    if (blockMissing.length > 0) missing.set(blockOrder, blockMissing);
+  }
+
+  return missing;
+}
+
+/** Merges repaired cues into a raw translation response, by cueKey, per block. */
+export function mergeRepairedCues(
+  raw: RawTranslationResponse,
+  repairedByBlock: Map<1 | 2, RawTranslatedCue[]>,
+): RawTranslationResponse {
+  return {
+    ...raw,
+    blocks: raw.blocks.map(block => {
+      const repaired = repairedByBlock.get(block.blockOrder as 1 | 2);
+      if (!repaired || repaired.length === 0) return block;
+      const byKey = new Map(block.cues.map(c => [c.cueKey, c]));
+      for (const rc of repaired) byKey.set(rc.cueKey, rc);
+      return { ...block, cues: [...byKey.values()] };
+    }),
+  };
+}
+
+export interface MissingCueRepairInput {
+  episodeId: string;
+  title: string;
+  synopsis: string | null;
+  cefrLevel: CEFRLevel;
+  missingByBlock: Map<1 | 2, EnglishCueDraft[]>;
+  blockTextEnByOrder: Map<1 | 2, string>;
+  callAI: AICallWithUsageFn;
+  glossary?: Record<string, string>;
+}
+
+/** Requests translations for ONLY the given missing cues (never the full episode). */
+export async function translateMissingCues(
+  input: MissingCueRepairInput,
+): Promise<Map<1 | 2, RawTranslatedCue[]>> {
+  const { episodeId, title, synopsis, cefrLevel, missingByBlock, blockTextEnByOrder, callAI, glossary } = input;
+
+  const missingByBlockWithText = new Map<1 | 2, { blockTextEn: string; cues: EnglishCueDraft[] }>();
+  for (const [blockOrder, cues] of missingByBlock) {
+    missingByBlockWithText.set(blockOrder, { blockTextEn: blockTextEnByOrder.get(blockOrder) ?? '', cues });
+  }
+
+  const userPrompt = buildMissingCuesUserPrompt({
+    episodeId, title, synopsis, cefrLevel, missingByBlock: missingByBlockWithText, glossary,
+  });
+
+  const { text } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt);
+  const parsed = extractJson(text);
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).cues)) {
+    throw new SubtitleTranslationParseError('AI missing-cue repair response contains no valid JSON cues array');
+  }
+
+  const rawCues = (parsed as { cues: Array<Record<string, unknown>> }).cues;
+  const bySourceKey = new Map<string, EnglishCueDraft>();
+  for (const cues of missingByBlock.values()) {
+    for (const c of cues) bySourceKey.set(c.cueKey, c);
+  }
+
+  const result = new Map<1 | 2, RawTranslatedCue[]>();
+  for (const rc of rawCues) {
+    const cueKey = rc.cueKey;
+    const textPtBr = rc.textPtBr;
+    if (typeof cueKey !== 'string' || typeof textPtBr !== 'string' || !textPtBr.trim()) continue;
+    const source = bySourceKey.get(cueKey);
+    if (!source) continue; // ignore cues we did not ask to be repaired
+    const list = result.get(source.blockOrder) ?? [];
+    list.push({ cueKey, sourceSentenceKeys: source.sourceSentenceKeys, textPtBr: textPtBr.trim() });
+    result.set(source.blockOrder, list);
   }
 
   return result;

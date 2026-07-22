@@ -13,11 +13,15 @@ import {
   validateTranslationDeterministic,
   validateBlockTranslationWithAI,
   correctBlockTranslation,
+  findMissingCueKeys,
+  mergeRepairedCues,
+  translateMissingCues,
   SubtitleTranslationParseError,
   SubtitleTranslationValidationError,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
 } from './translate-listening-subtitles';
+import type { RawTranslationResponse } from './listening-subtitle-schema';
 import { persistListeningSubtitles } from './persist-listening-subtitles';
 import type { EnglishCueDraft, ValidatedTranslatedCue } from './listening-subtitle-schema';
 import type { BlockCueData } from './build-subtitle-translation-prompt';
@@ -483,7 +487,7 @@ export async function prepareListeningSubtitles(
     },
   ] as [BlockCueData, BlockCueData];
 
-  let rawTranslation: Awaited<ReturnType<typeof translateSubtitles>>;
+  let rawTranslation: RawTranslationResponse;
   try {
     rawTranslation = await translateSubtitles(
       blocksForTranslation,
@@ -501,16 +505,58 @@ export async function prepareListeningSubtitles(
     throw err;
   }
 
-  // ── 8. Deterministic validation ───────────────────────────────────────────────
-  let translatedCues: Map<1 | 2, ValidatedTranslatedCue[]>;
-  try {
-    translatedCues = validateTranslationDeterministic(rawTranslation, englishCuesByBlock);
-  } catch (err) {
-    if (supabase && !dryRun) {
-      await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+  // ── 8. Deterministic validation, with targeted repair of missing cues ─────────
+  // A missing cue does not fail the episode outright: re-request a
+  // translation for exactly those cueKeys (never the whole set) and merge by
+  // identity, bounded by MAX_MISSING_CUE_REPAIR_ROUNDS. Any other structural
+  // problem (duplicate/unknown key, malformed JSON) is not auto-repaired here.
+  const MAX_MISSING_CUE_REPAIR_ROUNDS = 2;
+  let translatedCues: Map<1 | 2, ValidatedTranslatedCue[]> | undefined;
+  for (let attempt = 0; translatedCues === undefined; attempt++) {
+    try {
+      translatedCues = validateTranslationDeterministic(rawTranslation, englishCuesByBlock);
+    } catch (err) {
+      if (!(err instanceof SubtitleTranslationValidationError) || err.code !== 'LISTENING_TRANSLATION_MISSING_CUE') {
+        if (supabase && !dryRun) {
+          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+        }
+        throw err;
+      }
+      // err: SubtitleTranslationValidationError with code === MISSING_CUE from here on.
+
+      if (attempt >= MAX_MISSING_CUE_REPAIR_ROUNDS) {
+        if (supabase && !dryRun) {
+          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+        }
+        throw err;
+      }
+
+      const missingByBlock = findMissingCueKeys(rawTranslation, englishCuesByBlock);
+
+      console.error(JSON.stringify({
+        event: 'listening_subtitle_missing_cue_repair',
+        episodeId,
+        attempt: attempt + 1,
+        maxAttempts: MAX_MISSING_CUE_REPAIR_ROUNDS,
+        previousErrorCode: err.code,
+        missingCueKeys: [...missingByBlock.values()].flat().map(c => c.cueKey),
+        t: Date.now(),
+      }));
+
+      const repaired = await translateMissingCues({
+        episodeId,
+        title: episode?.title ?? '',
+        synopsis: episode?.synopsis ?? null,
+        cefrLevel,
+        missingByBlock,
+        blockTextEnByOrder,
+        callAI: aiCallFn,
+      });
+
+      rawTranslation = mergeRepairedCues(rawTranslation, repaired);
     }
-    throw err;
   }
+  if (!translatedCues) throw new Error('unreachable: translatedCues not resolved');
 
   // ── 9. AI semantic validation per block (with optional correction) ────────────
   for (const blockOrder of [1, 2] as const) {

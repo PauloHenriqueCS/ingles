@@ -18,8 +18,9 @@ import {
   StoryParseError, StoryValidationError,
 } from './validate-listening-story';
 import { segmentListeningText, SentenceSegmentationError } from './segment-listening-story-text';
+import { condenseBlockDeterministically } from './condense-listening-story-block';
 import { persistListeningStory, StoryPersistError } from './persist-listening-story';
-import { WORD_COUNT_RANGES } from './listening-level-config';
+import { WORD_COUNT_RANGES, countWords } from './listening-level-config';
 import type { ValidatedStory, ValidatedBlock } from './listening-story-schema';
 
 export { StoryParseError, StoryValidationError, StoryPersistError };
@@ -118,6 +119,28 @@ function handleAIError(err: unknown): never {
   if (isTimeoutError(err)) throw new StoryAITimeoutError();
   if (isUnavailableError(err)) throw new StoryAIUnavailableError();
   throw new StoryAIUnavailableError(`AI call failed: ${String(err)}`);
+}
+
+// Records, for each physical AI call in the block1/block2 repair loop, why
+// that specific attempt is happening (fresh generation vs. expand vs.
+// condense vs. retry-after-error) so a failed job's history is diagnosable
+// from logs alone, without re-deriving it from the final error message.
+function logBlockAttempt(
+  blockNum: 1 | 2,
+  attempt: number,
+  reason: 'initial' | 'expand' | 'condense' | 'retry_after_error',
+  detail: Record<string, unknown> = {},
+): void {
+  console.error(JSON.stringify({
+    service: 'listening-story-generation',
+    event: 'block_attempt',
+    blockNum,
+    attempt,
+    maxAttempts: MAX_BLOCK_ATTEMPTS,
+    reason,
+    ...detail,
+    t: Date.now(),
+  }));
 }
 
 // ── Metric extractor — reads from SDK response, never invents values ──────────
@@ -245,10 +268,13 @@ async function generateBlock1(
     let rawText: string;
     try {
       if (adjustText === null) {
+        logBlockAttempt(1, attempt, attempt === 1 ? 'initial' : 'retry_after_error');
         rawText = await callAI(BLOCK1_SYSTEM_PROMPT, buildBlock1UserPrompt(opts));
       } else if (adjustText.wordCount < range.min) {
+        logBlockAttempt(1, attempt, 'expand', { previousWordCount: adjustText.wordCount, minWords: range.min });
         rawText = await callAI(EXPAND_BLOCK_SYSTEM_PROMPT, buildExpandBlockUserPrompt(opts, 1, adjustText.textEn, adjustText.wordCount));
       } else {
+        logBlockAttempt(1, attempt, 'condense', { previousWordCount: adjustText.wordCount, maxWords: range.max });
         rawText = await callAI(CONDENSE_BLOCK_SYSTEM_PROMPT, buildCondenseBlockUserPrompt(opts, 1, adjustText.textEn, adjustText.wordCount));
       }
     } catch (err) {
@@ -297,6 +323,23 @@ async function generateBlock1(
     }
   }
 
+  // Last resort: the AI condense retries are exhausted and the block is still
+  // over the maximum. Try a zero-cost, zero-AI-call deterministic trim
+  // (whole-sentence prefix, same segmenter used for timing) before giving up
+  // — never applied to a too-short result, since trimming cannot fabricate
+  // missing content.
+  if (lastError instanceof StoryBlockTooLongError && adjustText !== null && block1Meta !== null) {
+    const repaired = condenseBlockDeterministically(adjustText.textEn, 1, range.min, range.max);
+    if (repaired !== null) {
+      logBlockAttempt(1, MAX_BLOCK_ATTEMPTS, 'condense', {
+        repair: 'deterministic_sentence_trim',
+        previousWordCount: adjustText.wordCount,
+        repairedWordCount: countWords(repaired),
+      });
+      return { ...block1Meta, textEn: repaired, wordCount: countWords(repaired) };
+    }
+  }
+
   throw lastError ?? new StoryBlock1TooShortError(0, range.min);
 }
 
@@ -315,10 +358,13 @@ async function generateBlock2(
     let rawText: string;
     try {
       if (adjustText === null) {
+        logBlockAttempt(2, attempt, attempt === 1 ? 'initial' : 'retry_after_error');
         rawText = await callAI(BLOCK2_SYSTEM_PROMPT, buildBlock2UserPrompt(opts, context));
       } else if (adjustText.wordCount < range.min) {
+        logBlockAttempt(2, attempt, 'expand', { previousWordCount: adjustText.wordCount, minWords: range.min });
         rawText = await callAI(EXPAND_BLOCK_SYSTEM_PROMPT, buildExpandBlockUserPrompt(opts, 2, adjustText.textEn, adjustText.wordCount));
       } else {
+        logBlockAttempt(2, attempt, 'condense', { previousWordCount: adjustText.wordCount, maxWords: range.max });
         rawText = await callAI(CONDENSE_BLOCK_SYSTEM_PROMPT, buildCondenseBlockUserPrompt(opts, 2, adjustText.textEn, adjustText.wordCount));
       }
     } catch (err) {
@@ -346,6 +392,19 @@ async function generateBlock2(
     lastError = wordCount < range.min
       ? new StoryBlock2TooShortError(wordCount, range.min)
       : new StoryBlockTooLongError(2, wordCount, range.max);
+  }
+
+  // Same last-resort deterministic trim as block 1 — see comment there.
+  if (lastError instanceof StoryBlockTooLongError && adjustText !== null) {
+    const repaired = condenseBlockDeterministically(adjustText.textEn, 2, range.min, range.max);
+    if (repaired !== null) {
+      logBlockAttempt(2, MAX_BLOCK_ATTEMPTS, 'condense', {
+        repair: 'deterministic_sentence_trim',
+        previousWordCount: adjustText.wordCount,
+        repairedWordCount: countWords(repaired),
+      });
+      return { textEn: repaired, wordCount: countWords(repaired) };
+    }
   }
 
   throw lastError ?? new StoryBlock2TooShortError(0, range.min);
