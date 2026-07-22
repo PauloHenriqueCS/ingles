@@ -18,6 +18,8 @@ export const ENTITLEMENT_MESSAGES = {
     'Você já recebeu o texto de pronúncia de hoje.',
   pronunciationTrainingDailyEvaluationCompleted:
     'Avaliação diária concluída. Volte amanhã para um novo texto e uma nova avaliação.',
+  pronunciationTrainingUnlimitedReadyForAnotherRound:
+    'Avaliação concluída! Seu plano permite treinar sem limite — gere um novo texto para continuar.',
   conversationMinutesExhausted:
     'Seus minutos de conversação deste mês acabaram. Sua conversa foi preservada.',
   conversationExtraPurchaseAvailable:

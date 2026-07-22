@@ -354,6 +354,12 @@ export default function PronunciationTrainingView({ onBack }: Props) {
   const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
     ? pronunciation.maxRecordingSeconds * 1000
     : undefined;
+  // Sole source of truth for whether this account can keep training past the
+  // one-round-per-day default — always the backend-resolved entitlement,
+  // never inferred from local state. See handleGenerateText's `wantsNewRound`
+  // (api/pronunciation-training/[...slug].ts), which independently re-checks
+  // this same flag server-side before honoring `forceNew`.
+  const unlimitedTraining = pronunciation?.evaluations.unlimited ?? false;
 
   const [mainPhase, setMainPhase]           = useState<MainPhase>('generating');
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
@@ -441,7 +447,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const doGenerateText = useCallback(async () => {
+  const doGenerateText = useCallback(async (forceNew = false) => {
     setMainPhase('generating');
     setGenError(null);
     setBlockedMessage(null);
@@ -451,12 +457,14 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     setAnalysis({ phase: 'idle' });
     setTtsPhase('idle');
     setPlaybackPlaying(false);
+    recorder.deleteRecording(); // never carry a previous round's recording into a fresh text
 
     try {
       const headers = await getAuthHeader();
       const resp = await fetch(apiUrl('/api/pronunciation-training/generate-text'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ forceNew }),
       });
       const json = await resp.json();
       if (!mountedRef.current) return;
@@ -492,6 +500,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
         setMainPhase('gen-error');
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handlePlayFullText() {
@@ -604,10 +613,15 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
   const isCompletedToday = sessionStatus === 'completed';
 
-  // Once a text exists for today there is, by design, never a second one —
+  // Once a text exists for today there is, by default, never a second one —
   // "Gerar outro texto" stays disabled for the rest of the day regardless of
-  // whether the evaluation itself has been submitted yet.
-  const generateNewDisabled = sessionId !== null;
+  // whether the evaluation itself has been submitted yet. The one exception:
+  // an unlimited-plan account that already finished today's round may start
+  // another — the backend independently re-verifies
+  // pronunciation.evaluations.unlimited before honoring this (never trusts
+  // this frontend flag alone).
+  const canStartAnotherRound = unlimitedTraining && isCompletedToday;
+  const generateNewDisabled = sessionId !== null && !canStartAnotherRound;
 
   const canSubmit =
     recorder.phase === 'done'    &&
@@ -669,7 +683,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
           <AlertCircle className="w-6 h-6 text-red-400 mx-auto mb-2" />
           <p className="text-sm text-red-300 mb-4">{genError}</p>
           <button
-            onClick={doGenerateText}
+            onClick={() => doGenerateText()}
             className="px-5 py-2 bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm rounded-lg transition-colors"
           >
             Tentar novamente
@@ -680,12 +694,13 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       {/* ── Training session ─────────────────────────────────────────────── */}
       {(mainPhase === 'ready' || mainPhase === 'results') && generatedText && (
         <>
-          {/* Level + Generate new button (always disabled once today's text exists) */}
+          {/* Level + Generate new button (disabled once today's text exists, unless the plan allows unlimited rounds) */}
           <div className="flex items-center justify-between mb-1">
             <span className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full bg-blue-900/40 border border-blue-700 text-blue-300">
               Nível {userLevel ?? '—'}
             </span>
             <button
+              onClick={() => doGenerateText(true)}
               disabled={generateNewDisabled}
               aria-disabled={generateNewDisabled}
               title={generateNewDisabled ? ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday : undefined}
@@ -762,7 +777,11 @@ export default function PronunciationTrainingView({ onBack }: Props) {
           {isCompletedToday && (
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4 flex items-center gap-3">
               <CheckCircle className="w-5 h-5 text-green-400 shrink-0" aria-hidden="true" />
-              <p className="text-sm text-slate-200">{ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted}</p>
+              <p className="text-sm text-slate-200">
+                {canStartAnotherRound
+                  ? ENTITLEMENT_MESSAGES.pronunciationTrainingUnlimitedReadyForAnotherRound
+                  : ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted}
+              </p>
             </div>
           )}
 

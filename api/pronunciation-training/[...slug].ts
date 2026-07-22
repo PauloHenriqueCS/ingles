@@ -220,12 +220,25 @@ async function handleGenerateText(req: any, res: any) {
     safeLog('pronunciation-training/generate-text', 'existing_lookup_error', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar o texto de hoje. Tente novamente.');
   }
-  if (existing) {
+
+  // Unlimited-plan "new round" reset — the ONLY case where an already-
+  // 'completed' session for today is not simply returned as-is. `forceNew`
+  // is a client-supplied UX hint (the user clicked "Gerar outro texto"); the
+  // actual authorization is `entitlements.pronunciation.evaluations.unlimited`,
+  // resolved server-side above and never trusted from the request body — a
+  // limited-plan account sending forceNew:true still gets the existing
+  // completed row back unchanged, exactly like today. See migration
+  // 20260724020000_pronunciation_training_unlimited_daily_reset.
+  const { forceNew } = (req.body ?? {}) as { forceNew?: unknown };
+  const existingRow = existing as TrainingSessionRow | null;
+  const wantsNewRound = Boolean(forceNew) && entitlements.pronunciation.evaluations.unlimited && existingRow?.status === 'completed';
+
+  if (existingRow && !wantsNewRound) {
     safeLog('pronunciation-training/generate-text', 'returned_existing', 200);
-    return res.status(200).json(buildGenerateTextResponse(existing as TrainingSessionRow));
+    return res.status(200).json(buildGenerateTextResponse(existingRow));
   }
 
-  if (!dailyPronunciationTrainingAllowedByPlan(entitlements)) {
+  if (!existingRow && !dailyPronunciationTrainingAllowedByPlan(entitlements)) {
     return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday);
   }
 
@@ -277,7 +290,7 @@ async function handleGenerateText(req: any, res: any) {
     // here — never two sessions for the same user+day, even under a real
     // race between two simultaneous requests.
     const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
-      p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
+      p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text, p_force_new: wantsNewRound,
     });
     if (createError) {
       safeLog('pronunciation-training/generate-text', 'persist_rpc_error', 500);
