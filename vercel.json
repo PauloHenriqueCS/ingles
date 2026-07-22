@@ -8,6 +8,7 @@
     }
   },
   "rewrites": [
+    { "source": "/api/account/deactivate", "destination": "/api/grammar-explanation?__lemonRoute=account-deactivate" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "headers": [

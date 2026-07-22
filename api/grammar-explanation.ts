@@ -10,6 +10,7 @@ import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
+import { handleAccountDeactivateRoute } from './_account/deactivate-route-handler';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -133,6 +134,15 @@ function extractGrammarMetrics(completion: ChatCompletion): GatewayUsageMetric[]
 }
 
 export default async function handler(req: any, res: any) {
+  // Rewritten here from POST /api/account/deactivate (see vercel.json) —
+  // purely to stay within the Vercel Hobby plan's 12-serverless-function
+  // cap. Completely unrelated to grammar explanations; the branch has its
+  // own full guard chain and returns immediately, never touching anything
+  // below. This route's own behavior/URL is otherwise untouched.
+  if (req.query?.__lemonRoute === 'account-deactivate') {
+    return handleAccountDeactivateRoute(req, res);
+  }
+
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.GRAMMAR)) return;
 

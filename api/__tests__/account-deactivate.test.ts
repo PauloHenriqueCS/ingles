@@ -1,5 +1,8 @@
 /**
- * POST /api/account/deactivate (api/account/deactivate.ts).
+ * POST /api/account/deactivate (api/_account/deactivate-route-handler.ts,
+ * reached via a vercel.json rewrite through api/grammar-explanation.ts to
+ * stay within the Vercel Hobby plan's 12-function cap — see that file's
+ * top-of-handler branch and the rewrite entry for the mechanics).
  *
  * Covers the request-shape/security contract described in the task:
  *  - Only POST is allowed
@@ -29,7 +32,7 @@ vi.mock('../_rateLimit', () => ({ applyRateLimit: mockApplyRateLimit, RATE_LIMIT
 vi.mock('../_account/deactivate-account', () => ({ deactivateAccount: mockDeactivateAccount }));
 vi.mock('../_account/audit', () => ({ recordAccountAuditEvent: mockRecordAccountAuditEvent }));
 
-import handler from '../account/deactivate';
+import { handleAccountDeactivateRoute as handler } from '../_account/deactivate-route-handler';
 
 function makeRes() {
   let _status = 200;
