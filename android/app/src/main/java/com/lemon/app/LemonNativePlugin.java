@@ -1,8 +1,10 @@
 package com.lemon.app;
 
+import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.provider.Settings;
 import android.util.Log;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -58,6 +60,36 @@ public class LemonNativePlugin extends Plugin {
             result.put("appStoreBilling", false);
             result.put("pushNotifications", false);
             call.resolve(result);
+        });
+    }
+
+    /**
+     * Opens Settings > Apps > Lemon > Permissions — the only way for a user
+     * to restore microphone access once Android has permanently suppressed
+     * the runtime permission dialog after a prior denial (confirmed on a
+     * physical device: after one explicit "Negar", the dialog stops
+     * appearing at all — see GrantPermissionsViewModel entries in Logcat).
+     * Does not touch mic-permission grant logic itself, which lives entirely
+     * in LemonWebChromeClient and is unrelated to this method.
+     */
+    @PluginMethod
+    public void openAppSettings(PluginCall call) {
+        getBridge().executeOnMainThread(() -> {
+            if (!isTrustedOrigin()) {
+                Log.w(TAG, "Rejected openAppSettings() call from an untrusted WebView origin");
+                call.reject("UNTRUSTED_ORIGIN");
+                return;
+            }
+
+            try {
+                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.fromParts("package", getContext().getPackageName(), null));
+                getActivity().startActivity(intent);
+                call.resolve();
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to open app settings: " + e.getClass().getSimpleName());
+                call.reject("OPEN_SETTINGS_FAILED");
+            }
         });
     }
 

@@ -3,11 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // vi.mock factories are hoisted above imports by vitest; vi.hoisted() makes
 // these mock fns available inside the factory below (see pronunciationRecorder.test.ts
 // for the same pattern used elsewhere in this repo).
-const { mockIsNativePlatform, mockIsPluginAvailable, mockGetCapabilities, mockRegisterPlugin } = vi.hoisted(() => {
+const { mockIsNativePlatform, mockIsPluginAvailable, mockGetCapabilities, mockOpenAppSettings, mockRegisterPlugin } = vi.hoisted(() => {
   return {
     mockIsNativePlatform: vi.fn(),
     mockIsPluginAvailable: vi.fn(),
     mockGetCapabilities: vi.fn(),
+    mockOpenAppSettings: vi.fn(),
     mockRegisterPlugin: vi.fn(),
   };
 });
@@ -19,10 +20,11 @@ vi.mock('@capacitor/core', () => ({
   },
   registerPlugin: mockRegisterPlugin.mockReturnValue({
     getCapabilities: mockGetCapabilities,
+    openAppSettings: mockOpenAppSettings,
   }),
 }));
 
-import { getLemonNativeCapabilities } from './lemonNative';
+import { getLemonNativeCapabilities, openAndroidAppSettings } from './lemonNative';
 
 describe('getLemonNativeCapabilities — browser/web fallback', () => {
   beforeEach(() => {
@@ -157,5 +159,49 @@ describe('getLemonNativeCapabilities — successful native resolution', () => {
       appStoreBilling: false,
       pushNotifications: false,
     });
+  });
+});
+
+describe('openAndroidAppSettings', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns false without calling the native plugin when not on a native platform', async () => {
+    mockIsNativePlatform.mockReturnValue(false);
+
+    const result = await openAndroidAppSettings();
+
+    expect(result).toBe(false);
+    expect(mockOpenAppSettings).not.toHaveBeenCalled();
+  });
+
+  it('returns false without calling the native plugin when LemonNative is unavailable (older app build)', async () => {
+    mockIsNativePlatform.mockReturnValue(true);
+    mockIsPluginAvailable.mockReturnValue(false);
+
+    const result = await openAndroidAppSettings();
+
+    expect(result).toBe(false);
+    expect(mockOpenAppSettings).not.toHaveBeenCalled();
+  });
+
+  it('returns true when the native call resolves', async () => {
+    mockIsNativePlatform.mockReturnValue(true);
+    mockIsPluginAvailable.mockReturnValue(true);
+    mockOpenAppSettings.mockResolvedValue(undefined);
+
+    const result = await openAndroidAppSettings();
+
+    expect(result).toBe(true);
+    expect(mockOpenAppSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed (returns false, never throws) when the native call rejects, e.g. UNTRUSTED_ORIGIN', async () => {
+    mockIsNativePlatform.mockReturnValue(true);
+    mockIsPluginAvailable.mockReturnValue(true);
+    mockOpenAppSettings.mockRejectedValue(new Error('UNTRUSTED_ORIGIN'));
+
+    await expect(openAndroidAppSettings()).resolves.toBe(false);
   });
 });

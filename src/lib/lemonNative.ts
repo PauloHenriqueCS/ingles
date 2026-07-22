@@ -17,6 +17,7 @@ export interface LemonNativeCapabilities {
 
 export interface LemonNativePlugin {
   getCapabilities(): Promise<LemonNativeCapabilities>;
+  openAppSettings(): Promise<void>;
 }
 
 /**
@@ -65,5 +66,28 @@ export async function getLemonNativeCapabilities(): Promise<LemonNativeCapabilit
     return await LemonNative.getCapabilities();
   } catch {
     return WEB_FALLBACK_CAPABILITIES;
+  }
+}
+
+/**
+ * Opens the OS-native "App info" screen for this app (Settings > Apps >
+ * Lemon > Permissions) — the only way to restore microphone access once
+ * Android has permanently suppressed the runtime permission dialog after a
+ * prior denial (see LemonNativePlugin.java's openAppSettings, added
+ * alongside this — LemonWebChromeClient/the mic permission flow itself is
+ * untouched). Fails closed like getLemonNativeCapabilities: resolves false
+ * outside a native Android app, on a missing/older plugin, or if the native
+ * call rejects, instead of throwing.
+ */
+export async function openAndroidAppSettings(): Promise<boolean> {
+  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('LemonNative')) {
+    return false;
+  }
+
+  try {
+    await LemonNative.openAppSettings();
+    return true;
+  } catch {
+    return false;
   }
 }

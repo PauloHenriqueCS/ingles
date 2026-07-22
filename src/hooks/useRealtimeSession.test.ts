@@ -20,6 +20,12 @@ describe('getMicErrorMessage', () => {
     expect(result.message).not.toMatch(/NotAllowedError/);
   });
 
+  it('gives NotAllowedError a recovery-guidance message instead of the old bare "permissão negada" text', () => {
+    const result = getMicErrorMessage(new DOMException('denied', 'NotAllowedError'));
+    expect(result.message).not.toBe('Permissão do microfone negada.');
+    expect(result.message.length).toBeGreaterThan('Permissão do microfone negada.'.length);
+  });
+
   it('classifies NotFoundError as no microphone available', () => {
     const result = getMicErrorMessage(new DOMException('no device', 'NotFoundError'));
     expect(result.code).toBe('MIC_NOT_FOUND');

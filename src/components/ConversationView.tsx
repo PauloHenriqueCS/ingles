@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
+import { isAndroidApp } from '../lib/runtimeEnvironment';
+import { openAndroidAppSettings } from '../lib/lemonNative';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import { useConversationCaptions } from '../hooks/useConversationCaptions';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
@@ -257,6 +259,7 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
 
   // Error visual helpers
   const isMicError    = isError && (session.errorCode?.startsWith('MIC') ?? false);
+  const isMicPermissionDenied = isError && session.errorCode === 'MIC_PERMISSION_DENIED';
   const isConfigError = isError && (session.errorCode === 'OPENAI_INVALID_SESSION' || session.errorCode === 'OPENAI_AUTH_FAILED' || session.errorCode === 'OPENAI_NOT_CONFIGURED');
   const isRateError   = isError && session.errorCode === 'OPENAI_RATE_LIMITED';
   const ErrorIcon     = isMicError ? Mic : isRateError ? AlertTriangle : isConfigError ? Settings : XCircle;
@@ -396,6 +399,15 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
                   <ErrorIcon className="w-5 h-5 shrink-0" strokeWidth={2} aria-hidden="true" />
                   <p className={`text-sm leading-relaxed ${errorText}`}>{session.errorMessage}</p>
                 </div>
+                {isMicPermissionDenied && isAndroidApp && (
+                  <button
+                    onClick={() => { void openAndroidAppSettings(); }}
+                    className="mt-3 ml-7 flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus:underline"
+                  >
+                    <Settings className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                    Abrir configurações
+                  </button>
+                )}
               </div>
             )}
 

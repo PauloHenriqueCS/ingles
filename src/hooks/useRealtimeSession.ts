@@ -11,6 +11,7 @@ import {
   type RecordingLimitReason,
 } from '../lib/realtimeGatewayReporting';
 import { shouldAutoStopForCommercialLimit, pickStopMessage, pickStopEndReason, scheduleGracefulFinish } from './realtimeAutoStop';
+import { getMicPermissionDeniedMessage } from '../lib/micPermissionGuidance';
 
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
 
@@ -100,7 +101,7 @@ export function getMicErrorMessage(err: unknown): { message: string; code: strin
 
   if (err instanceof DOMException) {
     if (err.name === 'NotAllowedError') {
-      return { message: 'Permissão do microfone negada.', code: 'MIC_PERMISSION_DENIED' };
+      return { message: getMicPermissionDeniedMessage(), code: 'MIC_PERMISSION_DENIED' };
     }
     if (err.name === 'NotFoundError') {
       return { message: 'Nenhum microfone foi encontrado.', code: 'MIC_NOT_FOUND' };

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { getMicPermissionDeniedMessage } from '../lib/micPermissionGuidance';
 
 export type RecorderPhase = 'idle' | 'requesting' | 'recording' | 'done' | 'error';
 
@@ -11,6 +12,13 @@ export interface UseAudioRecorderReturn {
   errorMessage: string | null;
   /** True when this recording was auto-stopped by maxDurationMs, not by the user. */
   stoppedByMaxDuration: boolean;
+  /**
+   * True when the last error was specifically a mic-permission denial
+   * (as opposed to no device found, recorder crash, etc.) — the caller uses
+   * this to decide whether to also offer a native "open settings" action,
+   * since retrying alone can't recover from a denial.
+   */
+  micPermissionDenied: boolean;
   startRecording: () => Promise<void>;
   stopRecording: () => void;
   deleteRecording: () => void;
@@ -25,10 +33,15 @@ function detectMimeType(): string {
   return '';
 }
 
+function isMicPermissionDeniedError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : '';
+  return name === 'NotAllowedError' || name === 'PermissionDeniedError';
+}
+
 function classifyError(err: unknown): string {
   const name = err instanceof Error ? err.name : '';
-  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-    return 'O acesso ao microfone foi negado. No iPhone, abra Ajustes > Chrome > Microfone, autorize o acesso e tente novamente.';
+  if (isMicPermissionDeniedError(err)) {
+    return getMicPermissionDeniedMessage();
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'NotReadableError' || name === 'TrackStartError') {
     return 'Não foi possível encontrar ou acessar um microfone disponível.';
@@ -52,6 +65,7 @@ export function useAudioRecorder(maxDurationMs?: number): UseAudioRecorderReturn
   const [durationMs, setDurationMs] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [stoppedByMaxDuration, setStoppedByMaxDuration] = useState(false);
+  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const maxDurationRef = useRef<number | undefined>(maxDurationMs);
   maxDurationRef.current = maxDurationMs;
 
@@ -113,6 +127,7 @@ export function useAudioRecorder(maxDurationMs?: number): UseAudioRecorderReturn
     setElapsedMs(0);
     setErrorMessage(null);
     setStoppedByMaxDuration(false);
+    setMicPermissionDenied(false);
     setPhase('requesting');
 
     // Request microphone immediately — must happen directly in the user gesture on iOS
@@ -127,6 +142,7 @@ export function useAudioRecorder(maxDurationMs?: number): UseAudioRecorderReturn
       });
     } catch (err) {
       if (!isMountedRef.current) return;
+      setMicPermissionDenied(isMicPermissionDeniedError(err));
       setErrorMessage(classifyError(err));
       setPhase('error');
       return;
@@ -237,8 +253,9 @@ export function useAudioRecorder(maxDurationMs?: number): UseAudioRecorderReturn
     setElapsedMs(0);
     setErrorMessage(null);
     setStoppedByMaxDuration(false);
+    setMicPermissionDenied(false);
     setPhase('idle');
   }, []);
 
-  return { phase, elapsedMs, audioBlob, audioUrl, durationMs, errorMessage, stoppedByMaxDuration, startRecording, stopRecording, deleteRecording };
+  return { phase, elapsedMs, audioBlob, audioUrl, durationMs, errorMessage, stoppedByMaxDuration, micPermissionDenied, startRecording, stopRecording, deleteRecording };
 }

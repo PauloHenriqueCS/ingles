@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, Lock } from 'lucide-react';
+import { Mic, Lock, Settings } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
+import { isAndroidApp } from '../lib/runtimeEnvironment';
+import { openAndroidAppSettings } from '../lib/lemonNative';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import ConfirmPronunciationModal from './ConfirmPronunciationModal';
@@ -425,12 +427,23 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
               {recorder.phase === 'error' && (
                 <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-2">
                   <p className="text-sm text-red-300 leading-relaxed">{recorder.errorMessage}</p>
-                  <button
-                    onClick={recorder.startRecording}
-                    className="text-xs text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus:underline"
-                  >
-                    Tentar novamente
-                  </button>
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={recorder.startRecording}
+                      className="text-xs text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus:underline"
+                    >
+                      Tentar novamente
+                    </button>
+                    {recorder.micPermissionDenied && isAndroidApp && (
+                      <button
+                        onClick={() => { void openAndroidAppSettings(); }}
+                        className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus:underline"
+                      >
+                        <Settings className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                        Abrir configurações
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </>

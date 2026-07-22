@@ -29,10 +29,17 @@ describe('LemonNativePlugin.java — registration', () => {
     expect(pluginSrc).toMatch(/@CapacitorPlugin\(name\s*=\s*"LemonNative"\)/);
   });
 
-  it('exposes exactly one @PluginMethod: getCapabilities (no other native methods yet)', () => {
+  it('exposes exactly two @PluginMethods: getCapabilities and openAppSettings', () => {
     const methodMatches = pluginSrc.match(/@PluginMethod/g) ?? [];
-    expect(methodMatches).toHaveLength(1);
+    expect(methodMatches).toHaveLength(2);
     expect(pluginSrc).toMatch(/@PluginMethod[\s\S]{0,40}public void getCapabilities\(PluginCall call\)/);
+    expect(pluginSrc).toMatch(/@PluginMethod[\s\S]{0,40}public void openAppSettings\(PluginCall call\)/);
+  });
+
+  it('gates openAppSettings behind the same trusted-origin check as getCapabilities', () => {
+    const openAppSettingsMatch = pluginSrc.match(/public void openAppSettings\(PluginCall call\)[\s\S]{0,400}/);
+    expect(openAppSettingsMatch, 'openAppSettings method body not found').not.toBeNull();
+    expect(openAppSettingsMatch?.[0]).toMatch(/isTrustedOrigin\(\)/);
   });
 
   it('is registered in MainActivity before super.onCreate(), so it is available in the Bridge for the initial page load', () => {
