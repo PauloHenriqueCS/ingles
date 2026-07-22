@@ -56,6 +56,11 @@ public class MainActivity extends BridgeActivity {
         // first frame is drawn), intentionally, see the class doc above.
         SplashScreen.installSplashScreen(this);
 
+        // Custom plugins (not installed via npm/capacitor.settings.gradle) must be
+        // registered before super.onCreate(), which is when Capacitor builds the
+        // Bridge and loads plugins for the initial page.
+        registerPlugin(LemonNativePlugin.class);
+
         super.onCreate(savedInstanceState);
 
         splashOverlay = buildSplashOverlay();
