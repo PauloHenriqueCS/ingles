@@ -14,7 +14,7 @@ type AudioAssetRow = {
   block_id: string;
   ssml_hash: string;
   audio_hash: string;
-  staging_path: string;
+  audio_path: string;
   published_path: string | null;
   file_size_bytes: number | null;
   duration_ms: number | null;
@@ -80,10 +80,10 @@ export async function publishListeningAudioAsset(
   episodeId: string,
   contentVersion: number,
 ): Promise<PublishedListeningBlockResult> {
-  if (!asset.staging_path) {
+  if (!asset.audio_path) {
     throw new ListeningPublicationError(
       LISTENING_ERRORS.AUDIO_MISSING,
-      `Bloco ${block.block_order} sem staging_path.`,
+      `Bloco ${block.block_order} sem audio_path.`,
       episodeId,
       block.id,
     );
@@ -108,7 +108,7 @@ export async function publishListeningAudioAsset(
     };
   }
 
-  await copyFileInStorage(supabase, asset.staging_path, publishedPath);
+  await copyFileInStorage(supabase, asset.audio_path, publishedPath);
   await validatePublishedFile(supabase, publishedPath, asset.file_size_bytes);
 
   const now = new Date().toISOString();

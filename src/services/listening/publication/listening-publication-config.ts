@@ -1,6 +1,9 @@
 import type { ListeningSignedUrlConfig } from './listening-publication-types';
 
-export const LISTENING_BUCKET = 'lemon-listening';
+// Matches AUDIO_STORAGE_BUCKET in ../audio/listening-audio-config.ts — the
+// synthesis pipeline writes audio into this exact bucket, so publication
+// (which copies staging → published within it) must reference the same one.
+export const LISTENING_BUCKET = 'listening-audio';
 
 export const SIGNED_URL_CONFIG: ListeningSignedUrlConfig = {
   expiresInSeconds: 3600,

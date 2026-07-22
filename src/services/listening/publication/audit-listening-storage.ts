@@ -18,7 +18,7 @@ export async function auditListeningStorageConsistency(): Promise<ListeningStora
 
   const { data: assets, error: assetError } = await supabase
     .from('listening_audio_assets')
-    .select('id, episode_id, block_id, audio_hash, staging_path, published_path, file_size_bytes, status');
+    .select('id, episode_id, block_id, audio_hash, audio_path, published_path, file_size_bytes, status');
 
   if (assetError || !assets) {
     return {
@@ -52,23 +52,23 @@ export async function auditListeningStorageConsistency(): Promise<ListeningStora
     }
 
     // Verificar staging path no Storage
-    if (asset.staging_path) {
-      const stagingExists = await fileExistsInStorage(supabase, asset.staging_path);
+    if (asset.audio_path) {
+      const stagingExists = await fileExistsInStorage(supabase, asset.audio_path);
       if (!stagingExists.exists) {
         issues.push({
           type: 'record_without_file',
-          path: asset.staging_path,
+          path: asset.audio_path,
           episodeId: asset.episode_id,
           blockId: asset.block_id,
-          details: `staging_path registrado mas arquivo não encontrado: ${asset.staging_path}`,
+          details: `staging_path registrado mas arquivo não encontrado: ${asset.audio_path}`,
         });
       } else if (stagingExists.sizeBytes === 0) {
         issues.push({
           type: 'empty_file',
-          path: asset.staging_path,
+          path: asset.audio_path,
           episodeId: asset.episode_id,
           blockId: asset.block_id,
-          details: `Arquivo de staging vazio: ${asset.staging_path}`,
+          details: `Arquivo de staging vazio: ${asset.audio_path}`,
         });
       }
 
@@ -76,10 +76,10 @@ export async function auditListeningStorageConsistency(): Promise<ListeningStora
       if (publishedIds.has(asset.episode_id) && stagingExists.exists) {
         issues.push({
           type: 'stale_staging',
-          path: asset.staging_path,
+          path: asset.audio_path,
           episodeId: asset.episode_id,
           blockId: asset.block_id,
-          details: `Staging não removido após publicação: ${asset.staging_path}`,
+          details: `Staging não removido após publicação: ${asset.audio_path}`,
         });
       }
     }
@@ -168,11 +168,11 @@ async function fileExistsInStorage(
 async function auditStorageFolder(
   supabase: ReturnType<typeof getListeningServiceClient>,
   prefix: string,
-  assets: { staging_path: string | null; published_path: string | null; episode_id: string; block_id: string }[],
+  assets: { audio_path: string | null; published_path: string | null; episode_id: string; block_id: string }[],
   issues: ListeningStorageAuditIssue[],
 ): Promise<void> {
   const allPaths = new Set([
-    ...assets.map((a) => a.staging_path).filter(Boolean) as string[],
+    ...assets.map((a) => a.audio_path).filter(Boolean) as string[],
     ...assets.map((a) => a.published_path).filter(Boolean) as string[],
   ]);
 

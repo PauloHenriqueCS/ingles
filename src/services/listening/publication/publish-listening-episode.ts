@@ -142,7 +142,7 @@ export async function publishListeningEpisode(
 
   const { data: assets } = await supabase
     .from('listening_audio_assets')
-    .select('id, block_id, ssml_hash, audio_hash, staging_path, published_path, file_size_bytes, duration_ms, content_type, status')
+    .select('id, block_id, ssml_hash, audio_hash, audio_path, published_path, file_size_bytes, duration_ms, content_type, status')
     .eq('episode_id', episodeId);
 
   if (!blocks || blocks.length !== 2 || !assets || assets.length !== 2) {

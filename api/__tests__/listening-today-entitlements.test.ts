@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockGetListeningToday } = vi.hoisted(() => ({
+const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockGetListeningToday, mockGetListeningServiceClient } = vi.hoisted(() => ({
   mockRequireAuth: vi.fn(),
   mockGetCurrentUserPlanEntitlements: vi.fn(),
   mockGetListeningToday: vi.fn(),
+  mockGetListeningServiceClient: vi.fn(),
 }));
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
@@ -13,6 +14,9 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
 }));
 vi.mock('../../src/services/listening/daily/get-listening-today', () => ({
   getListeningToday: mockGetListeningToday,
+}));
+vi.mock('../../src/services/listening/publication/_supabase', () => ({
+  getListeningServiceClient: mockGetListeningServiceClient,
 }));
 
 import handler from '../listening/[...slug]';
@@ -69,12 +73,13 @@ describe('GET /api/listening/today — plan entitlements', () => {
     });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
     mockGetListeningToday.mockResolvedValue({ status: 'assigned', assignmentId: 'a1', episodeId: 'e1', activityDate: '2026-07-18' });
+    mockGetListeningServiceClient.mockReturnValue({ from: vi.fn(() => makeChain({ data: null, error: null })) });
   });
 
   it('passes through to getListeningToday when listening is enabled with stories remaining', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
-    expect(mockGetListeningToday).toHaveBeenCalledWith(expect.anything(), USER_ID);
+    expect(mockGetListeningToday).toHaveBeenCalledWith(expect.anything(), USER_ID, expect.anything());
     expect(res._status()).toBe(200);
   });
 

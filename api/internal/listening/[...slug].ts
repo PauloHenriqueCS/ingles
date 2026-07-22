@@ -25,18 +25,17 @@ import {
 } from '../../_realtime-constants';
 import { getJobsServiceClient } from '../../../src/services/listening/jobs/_supabase';
 import { recoverStuckListeningJobs } from '../../../src/services/listening/jobs/recover-stuck-listening-jobs';
+import { recoverStuckListeningGroupJobs } from '../../../src/services/listening/group-generation/recover-stuck-listening-group-jobs';
 import { processNextListeningJob } from '../../../src/services/listening/jobs/process-listening-job';
 import {
   TEXT_JOB_TYPES, AZURE_JOB_TYPES, SYNC_JOB_TYPES, PUBLISH_JOB_TYPES,
   JOB_CONCURRENCY, RETENTION_DAYS,
 } from '../../../src/services/listening/jobs/listening-job-config';
 import type { ListeningJobType } from '../../../src/services/listening/jobs/listening-job-types';
-import { ensureListeningInventory } from '../../../src/services/listening/inventory/ensure-listening-inventory';
 import { auditListeningInventory } from '../../../src/services/listening/inventory/audit-listening-inventory';
 import { getListeningInventoryStatus } from '../../../src/services/listening/inventory/get-listening-inventory-status';
 import { auditListeningStorageConsistency } from '../../../src/services/listening/publication/audit-listening-storage';
 import { repairListeningPipeline } from '../../../src/services/listening/pipeline/repair-listening-pipeline';
-import type { CEFRLevel } from '../../../src/domain/curriculum/cefr';
 
 const BATCH_SIZE = 3;
 const VALID_LEVELS = new Set(['A1', 'A2', 'B1', 'B2', 'C1', 'C2']);
@@ -93,9 +92,25 @@ async function handleRepair(req: any, res: any): Promise<void> {
   if (!methodGuard(req, res, ['GET'])) return;
   try {
     const supabase = getJobsServiceClient();
-    const result = await recoverStuckListeningJobs(supabase);
-    safeLog('internal/listening/repair', 'repair_completed', 200, { recovered: result.recoveredCount });
-    return res.status(200).json({ recovered: result.recoveredCount, jobIds: result.jobIds });
+    // Two independent recovery mechanisms share this one cron slot
+    // (listening-repair-stuck-jobs, every 10 min — see
+    // supabase/migrations/20260715240000_create_listening_cron_jobs.sql):
+    // the legacy per-user on-demand sessions, and the shared level_group
+    // jobs added by the group-generation pipeline. No new cron is created.
+    const [onDemandResult, groupResult] = await Promise.all([
+      recoverStuckListeningJobs(supabase),
+      recoverStuckListeningGroupJobs(supabase),
+    ]);
+    safeLog('internal/listening/repair', 'repair_completed', 200, {
+      recovered: onDemandResult.recoveredCount,
+      groupRecovered: groupResult.recoveredCount,
+    });
+    return res.status(200).json({
+      recovered: onDemandResult.recoveredCount,
+      jobIds: onDemandResult.jobIds,
+      groupRecovered: groupResult.recoveredCount,
+      groupJobIds: groupResult.jobIds,
+    });
   } catch (err) {
     safeLog('internal/listening/repair', 'repair_error', 500, { error: err instanceof Error ? err.message : String(err) });
     return res.status(500).json({ error: 'Repair error' });
@@ -103,18 +118,27 @@ async function handleRepair(req: any, res: any): Promise<void> {
 }
 
 // ── GET /api/internal/listening/inventory/ensure ─────────────────────────────
+// Preventive stock generation is DISABLED. Shared Listening content is now
+// generated strictly on demand, per level_group, the first time a user of
+// that group actually needs a story and none is available for reuse — see
+// getOrCreateListeningGroupJob, wired into getListeningToday. This route
+// (and the 'generate' action of /supply below) are kept as safe no-ops
+// rather than deleted so the still-scheduled pg_cron target
+// (listening-ensure-inventory — unscheduled in
+// supabase/migrations/20260722110000_disable_listening_inventory_preventive_generation.sql,
+// but a manual caller could still hit this URL with the cron secret) and any
+// external monitoring get a clear 200 instead of a 404 or a resurrected
+// preventive pipeline.
 
 async function handleInventoryEnsure(req: any, res: any): Promise<void> {
   if (!methodGuard(req, res, ['GET'])) return;
-  try {
-    const supabase = getJobsServiceClient();
-    const result = await ensureListeningInventory(supabase, { source: 'inventory_cron' });
-    safeLog('internal/listening/inventory/ensure', 'inventory_ensure_completed', 200, { created: result.created });
-    return res.status(200).json({ pipelinesCreated: result.created, levels: result.levels });
-  } catch (err) {
-    safeLog('internal/listening/inventory/ensure', 'inventory_ensure_error', 500, { error: err instanceof Error ? err.message : String(err) });
-    return res.status(500).json({ error: 'Inventory ensure error' });
-  }
+  safeLog('internal/listening/inventory/ensure', 'inventory_ensure_disabled', 200, {});
+  return res.status(200).json({
+    disabled: true,
+    reason: 'Preventive inventory generation was replaced by on-demand shared level-group generation (src/services/listening/group-generation).',
+    pipelinesCreated: 0,
+    levels: [],
+  });
 }
 
 // ── GET /api/internal/listening/audit ────────────────────────────────────────
@@ -209,19 +233,19 @@ async function handleSupply(req: any, res: any): Promise<void> {
     const { action, level, episodeId } = body;
 
     if (action === 'generate') {
+      // Preventive stock generation is disabled — see handleInventoryEnsure
+      // above. Shared content now comes exclusively from
+      // getOrCreateListeningGroupJob, triggered on demand from
+      // getListeningToday.
       if (level && !VALID_LEVELS.has(level)) {
         return res.status(400).json({ success: false, error: `Invalid level. Use: ${[...VALID_LEVELS].join(', ')}` });
       }
-      try {
-        const t0 = Date.now();
-        const result = await ensureListeningInventory(supabase, { targetLevel: level as CEFRLevel | undefined, source: 'admin' });
-        const durationMs = Date.now() - t0;
-        safeLog('supply', 'generation_triggered', 200, { level: level ?? 'all', created: result.created, levels: result.levels.join(','), durationMs });
-        return res.status(200).json({ success: true, action: 'generate', level: level ?? 'all', pipelinesCreated: result.created, levelsAffected: result.levels, durationMs });
-      } catch (err) {
-        safeLog('supply', 'generation_error', 500, { level: level ?? 'all', error: String(err) });
-        return res.status(500).json({ success: false, error: 'Generation failed.', detail: String(err) });
-      }
+      safeLog('supply', 'generation_disabled', 200, { level: level ?? 'all' });
+      return res.status(200).json({
+        success: true, action: 'generate', disabled: true,
+        reason: 'Preventive inventory generation was replaced by on-demand shared level-group generation (src/services/listening/group-generation).',
+        level: level ?? 'all', pipelinesCreated: 0, levelsAffected: [],
+      });
     }
 
     if (action === 'repair') {

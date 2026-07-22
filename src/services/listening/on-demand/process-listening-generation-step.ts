@@ -1,9 +1,5 @@
-import OpenAI from 'openai';
-import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GenerationStatusResult, GenerationSessionStatus } from './listening-on-demand-types';
-import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../../../../api/_ai-gateway/index';
-import type { GatewayUsageMetric } from '../../../../api/_ai-gateway/index';
 import {
   STEP_LABELS, STEP_PROGRESS, NEXT_STATUS, TERMINAL_STATUSES,
   STEP_LOCK_MS, OnDemandSessionNotFoundError, OnDemandSessionLockedError,
@@ -17,14 +13,15 @@ import { generateListeningSsml } from '../generate-listening-ssml';
 import { synthesizeListeningEpisode } from '../audio/synthesize-listening-episode';
 import { synchronizeListeningEpisode } from '../timing/synchronize-listening-episode';
 import { publishListeningEpisode } from '../publication/publish-listening-episode';
+import { translateListeningSynopsis } from '../translate-listening-synopsis';
 
-const SYNOPSIS_TRANSLATION_SYSTEM_PROMPT = 'You are a professional translator. Translate the English text to natural Brazilian Portuguese. Preserve the tone and brevity. Return ONLY the translated text, nothing else.';
-
-// Duration thresholds
-const BLOCK_MIN_MS = 270_000; // 4m30s
-const BLOCK_MAX_MS = 330_000; // 5m30s
-const TOTAL_MIN_MS = 540_000; // 9m
-const TOTAL_MAX_MS = 660_000; // 11m
+// Duration thresholds — exported so the shared level-group pipeline
+// (group-generation/process-listening-group-generation-step.ts) validates
+// against the exact same rule instead of duplicating these literals.
+export const BLOCK_MIN_MS = 270_000; // 4m30s
+export const BLOCK_MAX_MS = 330_000; // 5m30s
+export const TOTAL_MIN_MS = 540_000; // 9m
+export const TOTAL_MAX_MS = 660_000; // 11m
 
 function requireEnv(name: string): string {
   const val = process.env[name];
@@ -34,56 +31,6 @@ function requireEnv(name: string): string {
 
 function log(event: string, sessionId: string, extra?: Record<string, unknown>) {
   console.error(JSON.stringify({ service: 'listening-on-demand', event, sessionId, t: Date.now(), ...extra }));
-}
-
-// ── Metric extractor — reads from SDK response, never invents values ──────────
-
-function extractSynopsisMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
-  const metrics: GatewayUsageMetric[] = [];
-
-  metrics.push({
-    metricKey: 'provider_requests',
-    unitType: 'request',
-    quantity: 1,
-    isBillable: false,
-    measurementSource: 'provider_response',
-  });
-
-  const usage = completion.usage;
-  if (!usage) return metrics;
-
-  if (usage.prompt_tokens != null) {
-    metrics.push({
-      metricKey: 'input_text_tokens',
-      unitType: 'token',
-      quantity: usage.prompt_tokens,
-      isBillable: true,
-      measurementSource: 'provider_response',
-    });
-  }
-
-  if (usage.completion_tokens != null) {
-    metrics.push({
-      metricKey: 'output_text_tokens',
-      unitType: 'token',
-      quantity: usage.completion_tokens,
-      isBillable: true,
-      measurementSource: 'provider_response',
-    });
-  }
-
-  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
-  if (cachedTokens != null && cachedTokens > 0) {
-    metrics.push({
-      metricKey: 'cached_input_tokens',
-      unitType: 'token',
-      quantity: cachedTokens,
-      isBillable: true,
-      measurementSource: 'provider_response',
-    });
-  }
-
-  return metrics;
 }
 
 // ── Lock acquisition ──────────────────────────────────────────────────────────
@@ -300,64 +247,11 @@ async function stepPreparingDescription(
   session: { episode_id: string | null },
 ): Promise<void> {
   if (!session.episode_id) throw new Error('episode_id is missing at preparing_description');
-  const episodeId = session.episode_id;
 
-  // Load synopsis in English from episode
-  const { data: episode } = await serviceClient
-    .from('listening_episodes')
-    .select('synopsis, synopsis_pt')
-    .eq('id', episodeId)
-    .maybeSingle();
-
-  // Only generate PT if not already done (idempotency)
-  if (episode && !episode.synopsis_pt && episode.synopsis) {
-    const openaiKey = requireEnv('OPENAI_API_KEY');
-    const client = new OpenAI({ apiKey: openaiKey, timeout: 30_000, maxRetries: 1 });
-
-    const gatewayDeps = getProductionDeps();
-    const response = await executeAiGatewayCall<ChatCompletion>(
-      {
-        featureKey: 'listening.episode_translate_synopsis',
-        provider: 'openai',
-        service: 'chat.completions',
-        model: 'gpt-4o-mini',
-        actorType: 'system',
-        executionLocation: 'system',
-        correlationId: gatewayDeps.uuidGen(),
-        attemptNumber: 1,
-        callSequence: 1,
-        resourceType: 'listening_episode',
-        resourceId: episodeId,
-        technicalMetadata: {
-          endpoint: 'listening/on-demand/process-next',
-          flowType: 'preparing_description',
-        },
-        estimatedMetrics: estimateTextTokens(SYNOPSIS_TRANSLATION_SYSTEM_PROMPT.length + episode.synopsis.length, 200),
-      },
-      () => client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: SYNOPSIS_TRANSLATION_SYSTEM_PROMPT,
-          },
-          { role: 'user', content: episode.synopsis },
-        ],
-        max_tokens: 200,
-        temperature: 0.3,
-      }),
-      gatewayDeps,
-      extractSynopsisMetrics,
-    );
-
-    const synopsisPt = response.choices[0]?.message?.content?.trim() ?? '';
-    if (synopsisPt) {
-      await serviceClient
-        .from('listening_episodes')
-        .update({ synopsis_pt: synopsisPt, updated_at: new Date().toISOString() })
-        .eq('id', session.episode_id);
-    }
-  }
+  await translateListeningSynopsis(
+    { episodeId: session.episode_id, endpoint: 'listening/on-demand/process-next' },
+    serviceClient,
+  );
 
   await advanceSession(serviceClient, sessionId, 'preparing_subtitles');
 }
@@ -432,7 +326,7 @@ async function stepValidatingDuration(
     .from('listening_audio_assets')
     .select('block_id, duration_ms, status')
     .eq('episode_id', session.episode_id)
-    .in('status', ['staged', 'published']);
+    .in('status', ['validated', 'published']);
 
   if (!assets || assets.length < 2) {
     throw new OnDemandDurationError(

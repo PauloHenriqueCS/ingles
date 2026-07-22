@@ -112,6 +112,46 @@ export function abandonSession(sessionId: string): Promise<void> {
   });
 }
 
+// ── Shared level-group generation ──────────────────────────────────────────
+// Mirrors src/services/listening/group-generation/listening-group-generation-types.ts.
+// Never per-user: at most one of these jobs is active per level_group
+// (A1_A2 | B1_B2 | C1_C2) at a time — see getOrCreateListeningGroupJob.
+
+export type GroupGenerationStatus =
+  | 'created'
+  | 'generating_block_1' | 'validating_block_1'
+  | 'generating_block_2' | 'validating_block_2'
+  | 'generating_questions' | 'preparing_description' | 'preparing_subtitles'
+  | 'generating_audio_block_1' | 'generating_audio_block_2'
+  | 'validating_duration' | 'finalizing' | 'ready' | 'failed' | 'cancelled';
+
+export type ListeningGroupGenerationSummary = {
+  jobId: string;
+  status: GroupGenerationStatus;
+  currentStep: string | null;
+  progressPercent: number;
+  attempts: number;
+  maxAttempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  retryable: boolean;
+};
+
+export type GroupGenerationStatusResult = {
+  jobId: string | null;
+  levelGroup: 'A1_A2' | 'B1_B2' | 'C1_C2';
+  targetLevel: string | null;
+  status: GroupGenerationStatus;
+  currentStep: string | null;
+  progressPercent: number;
+  episodeId: string | null;
+  attempts: number;
+  maxAttempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  retryable: boolean;
+};
+
 export type TodayListeningResult =
   | {
       status: 'assigned' | 'in_progress' | 'completed';
@@ -121,7 +161,13 @@ export type TodayListeningResult =
       session: EpisodeSessionResponse;
     }
   | { status: 'empty_inventory' }
-  | { status: 'story_completed'; assignmentId: string; activityDate: string };
+  | { status: 'story_completed'; assignmentId: string; activityDate: string }
+  | {
+      status: 'group_generating';
+      levelGroup: 'A1_A2' | 'B1_B2' | 'C1_C2';
+      targetLevel: string;
+      groupJob: ListeningGroupGenerationSummary;
+    };
 
 export type ByDateListeningResult = {
   status: 'assigned' | 'in_progress' | 'completed';
@@ -313,5 +359,24 @@ export function retryListeningGeneration(sessionId: string): Promise<GenerationS
   return apiFetch<GenerationStatusResult>('/api/listening/on-demand/retry', {
     method: 'POST',
     body: JSON.stringify({ sessionId }),
+  });
+}
+
+// ── Shared level-group generation (polling) ────────────────────────────────
+// No job id is ever sent by the client — the server always resolves the
+// caller's own level_group and drives (or reuses) that group's one active
+// job. Safe to call repeatedly: see api/listening/[...slug].ts.
+
+export function processNextGroupListeningStep(): Promise<GroupGenerationStatusResult> {
+  return apiFetch<GroupGenerationStatusResult>('/api/listening/group/process-next', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function retryGroupListeningGeneration(): Promise<GroupGenerationStatusResult> {
+  return apiFetch<GroupGenerationStatusResult>('/api/listening/group/retry', {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
 }

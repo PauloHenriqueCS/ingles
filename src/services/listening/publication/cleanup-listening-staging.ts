@@ -54,7 +54,7 @@ export async function cleanupPublishedListeningStaging(
   // Carregar assets e confirmar arquivos definitivos existem
   const { data: assets, error: assetError } = await supabase
     .from('listening_audio_assets')
-    .select('id, block_id, staging_path, published_path, audio_hash, status, file_size_bytes')
+    .select('id, block_id, audio_path, published_path, audio_hash, status, file_size_bytes')
     .eq('episode_id', episodeId);
 
   if (assetError || !assets) {
@@ -66,14 +66,14 @@ export async function cleanupPublishedListeningStaging(
   }
 
   for (const asset of assets) {
-    if (!asset.staging_path) {
+    if (!asset.audio_path) {
       result.skippedPaths.push('(no staging path)');
       continue;
     }
 
     // Confirmar arquivo definitivo antes de remover staging
     if (!asset.published_path) {
-      result.skippedPaths.push(asset.staging_path);
+      result.skippedPaths.push(asset.audio_path);
       result.errors.push(`Bloco ${asset.block_id}: published_path ausente, staging mantido.`);
       continue;
     }
@@ -87,14 +87,14 @@ export async function cleanupPublishedListeningStaging(
 
     const pubFile = pubFiles?.find((f) => f.name === filename);
     if (!pubFile) {
-      result.skippedPaths.push(asset.staging_path);
+      result.skippedPaths.push(asset.audio_path);
       result.errors.push(`Arquivo definitivo não encontrado: ${asset.published_path}. Staging mantido.`);
       continue;
     }
 
     const pubSize = Number((pubFile.metadata as any)?.size ?? 0);
     if (pubSize === 0) {
-      result.skippedPaths.push(asset.staging_path);
+      result.skippedPaths.push(asset.audio_path);
       result.errors.push(`Arquivo definitivo vazio: ${asset.published_path}. Staging mantido.`);
       continue;
     }
@@ -102,13 +102,13 @@ export async function cleanupPublishedListeningStaging(
     // Remover staging
     const { error: removeError } = await supabase.storage
       .from(LISTENING_BUCKET)
-      .remove([asset.staging_path]);
+      .remove([asset.audio_path]);
 
     if (removeError) {
-      result.skippedPaths.push(asset.staging_path);
-      result.errors.push(`Erro ao remover ${asset.staging_path}: ${removeError.message}`);
+      result.skippedPaths.push(asset.audio_path);
+      result.errors.push(`Erro ao remover ${asset.audio_path}: ${removeError.message}`);
     } else {
-      result.removedPaths.push(asset.staging_path);
+      result.removedPaths.push(asset.audio_path);
     }
   }
 

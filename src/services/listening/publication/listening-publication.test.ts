@@ -42,7 +42,6 @@ function buildMockClients(overrides: {
   questions_public?: unknown[];
   subtitle_cues?: unknown[];
   audio_assets?: unknown[];
-  timing_artifacts?: unknown[];
   publication_log?: unknown[];
   storageListResult?: unknown[];
   storageListError?: { message: string } | null;
@@ -56,7 +55,6 @@ function buildMockClients(overrides: {
     listening_questions_public: overrides.questions_public ?? [],
     listening_subtitle_cues: overrides.subtitle_cues ?? [],
     listening_audio_assets: overrides.audio_assets ?? [],
-    listening_timing_artifacts: overrides.timing_artifacts ?? [],
     listening_publication_log: overrides.publication_log ?? [],
   };
 
@@ -120,8 +118,6 @@ const Q1_ID = 'q1000000-0000-0000-0000-000000000001';
 const Q2_ID = 'q1000000-0000-0000-0000-000000000002';
 const A1_ID = 'a1000000-0000-0000-0000-000000000001';
 const A2_ID = 'a1000000-0000-0000-0000-000000000002';
-const T1_ID = 't1000000-0000-0000-0000-000000000001';
-const T2_ID = 't1000000-0000-0000-0000-000000000002';
 
 const SSML_HASH_1 = 'ssmlhash1';
 const SSML_HASH_2 = 'ssmlhash2';
@@ -194,31 +190,26 @@ function makeCue(blockId: string, lang: 'en' | 'pt-BR', order: number) {
 function makeAsset(blockId: string, order: 1 | 2, overrides: Record<string, unknown> = {}) {
   const ssmlHash = order === 1 ? SSML_HASH_1 : SSML_HASH_2;
   const audioHash = order === 1 ? AUDIO_HASH_1 : AUDIO_HASH_2;
+  const timingHash = order === 1 ? TIMING_HASH_1 : TIMING_HASH_2;
   return {
     id: order === 1 ? A1_ID : A2_ID,
     episode_id: EP_ID,
     block_id: blockId,
     ssml_hash: ssmlHash,
     audio_hash: audioHash,
-    staging_path: order === 1 ? STAGING_PATH_1 : STAGING_PATH_2,
+    // audio_path is the real column synthesis writes (persist-listening-audio.ts) —
+    // it plays the "staging" role validation/publication copy from.
+    audio_path: order === 1 ? STAGING_PATH_1 : STAGING_PATH_2,
     published_path: null,
     file_size_bytes: 1024,
     duration_ms: 295000,
     content_type: 'audio/mpeg',
-    status: 'ready',
-    ...overrides,
-  };
-}
-
-function makeTiming(assetId: string, blockId: string, order: 1 | 2, overrides: Record<string, unknown> = {}) {
-  return {
-    id: order === 1 ? T1_ID : T2_ID,
-    audio_asset_id: assetId,
-    block_id: blockId,
-    ssml_hash: order === 1 ? SSML_HASH_1 : SSML_HASH_2,
-    audio_hash: order === 1 ? AUDIO_HASH_1 : AUDIO_HASH_2,
-    timing_hash: order === 1 ? TIMING_HASH_1 : TIMING_HASH_2,
-    status: 'ready',
+    // 'validated' is the status persist-listening-audio.ts actually sets on
+    // successful synthesis — not 'ready' (that value is never written).
+    status: 'validated',
+    // timing_hash is written directly onto the asset by
+    // persist-listening-timings.ts — there is no separate timing-artifact row.
+    timing_hash: timingHash,
     ...overrides,
   };
 }
@@ -235,10 +226,6 @@ function fullValidMockData() {
       makeCue(B2_ID, 'pt-BR', 1), makeCue(B2_ID, 'pt-BR', 2),
     ],
     audio_assets: [makeAsset(B1_ID, 1), makeAsset(B2_ID, 2)],
-    timing_artifacts: [
-      makeTiming(A1_ID, B1_ID, 1),
-      makeTiming(A2_ID, B2_ID, 2),
-    ],
   };
 }
 
@@ -384,24 +371,34 @@ describe('validateListeningEpisodeForPublication', () => {
     expect(result.errors.some((e) => e.code === 'AUDIO_ASSET_MISSING')).toBe(true);
   });
 
-  it('rejeita timing ausente', async () => {
-    buildMockClients({ ...fullValidMockData(), timing_artifacts: [makeTiming(A2_ID, B2_ID, 2)] });
+  it('rejeita timing ausente (asset sem timing_hash — persist-listening-timings.ts nunca rodou)', async () => {
+    buildMockClients({
+      ...fullValidMockData(),
+      audio_assets: [makeAsset(B1_ID, 1), makeAsset(B2_ID, 2, { timing_hash: null })],
+    });
     const result = await validateListeningEpisodeForPublication(EP_ID);
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.code === 'TIMING_MISSING')).toBe(true);
   });
 
-  it('rejeita hash divergente (timing.audio_hash != asset.audio_hash)', async () => {
+  it('rejeita hash divergente (bloco.ssml_content_hash != audio_asset.ssml_hash)', async () => {
     buildMockClients({
       ...fullValidMockData(),
-      timing_artifacts: [
-        makeTiming(A1_ID, B1_ID, 1, { audio_hash: 'WRONG_HASH' }),
-        makeTiming(A2_ID, B2_ID, 2),
-      ],
+      blocks: [makeBlock(1, { ssml_content_hash: 'DIFFERENT_HASH' }), makeBlock(2)],
     });
     const result = await validateListeningEpisodeForPublication(EP_ID);
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.code === 'HASH_MISMATCH_AUDIO')).toBe(true);
+    expect(result.errors.some((e) => e.code === 'HASH_MISMATCH_SSML_BLOCK_ASSET')).toBe(true);
+  });
+
+  it('rejeita audio asset com status != validated/published', async () => {
+    buildMockClients({
+      ...fullValidMockData(),
+      audio_assets: [makeAsset(B1_ID, 1), makeAsset(B2_ID, 2, { status: 'uploaded' })],
+    });
+    const result = await validateListeningEpisodeForPublication(EP_ID);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.code === 'AUDIO_ASSET_NOT_READY')).toBe(true);
   });
 
   it('rejeita arquivo de staging vazio', async () => {

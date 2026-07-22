@@ -308,7 +308,7 @@ export interface ListeningAudioAsset {
   blockId: string;
   ssmlHash: string;
   audioHash: string;
-  stagingPath: string | null;
+  audioPath: string | null;
   publishedPath: string | null;
   fileSizeBytes: number | null;
   durationMs: number | null;

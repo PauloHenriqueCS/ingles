@@ -1,0 +1,284 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const {
+  mockGenerateListeningStory, mockGenerateListeningQuestions, mockPrepareListeningSubtitles,
+  mockGenerateListeningSsml, mockSynthesizeListeningEpisode, mockSynchronizeListeningEpisode,
+  mockPublishListeningEpisode, mockTranslateListeningSynopsis,
+} = vi.hoisted(() => ({
+  mockGenerateListeningStory: vi.fn(),
+  mockGenerateListeningQuestions: vi.fn(),
+  mockPrepareListeningSubtitles: vi.fn(),
+  mockGenerateListeningSsml: vi.fn(),
+  mockSynthesizeListeningEpisode: vi.fn(),
+  mockSynchronizeListeningEpisode: vi.fn(),
+  mockPublishListeningEpisode: vi.fn(),
+  mockTranslateListeningSynopsis: vi.fn(),
+}));
+
+vi.mock('../generate-listening-story', () => ({
+  generateListeningStory: mockGenerateListeningStory,
+  createDefaultAICallFn: vi.fn(() => vi.fn()),
+}));
+vi.mock('../generate-listening-questions', () => ({
+  generateListeningQuestions: mockGenerateListeningQuestions,
+  createQuestionAICallFn: vi.fn(() => vi.fn()),
+}));
+vi.mock('../prepare-listening-subtitles', () => ({
+  prepareListeningSubtitles: mockPrepareListeningSubtitles,
+  createSubtitleAICallFn: vi.fn(() => vi.fn()),
+}));
+vi.mock('../generate-listening-ssml', () => ({
+  generateListeningSsml: mockGenerateListeningSsml,
+}));
+vi.mock('../audio/synthesize-listening-episode', () => ({
+  synthesizeListeningEpisode: mockSynthesizeListeningEpisode,
+}));
+vi.mock('../timing/synchronize-listening-episode', () => ({
+  synchronizeListeningEpisode: mockSynchronizeListeningEpisode,
+}));
+vi.mock('../publication/publish-listening-episode', () => ({
+  publishListeningEpisode: mockPublishListeningEpisode,
+}));
+vi.mock('../translate-listening-synopsis', () => ({
+  translateListeningSynopsis: mockTranslateListeningSynopsis,
+}));
+
+import { processListeningGroupGenerationStep } from './process-listening-group-generation-step';
+import { GroupJobNotFoundError, GroupJobLockedError, GroupJobTerminalError } from './listening-group-generation-types';
+
+const JOB_ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+const EPISODE_ID = 'cccccccc-0000-0000-0000-000000000002';
+const WORKER_ID = 'test-worker-1';
+
+function makeAwaitableChain(result: { data: unknown; error: unknown }) {
+  const p: any = Promise.resolve(result);
+  for (const m of ['select', 'insert', 'update', 'eq', 'or', 'order', 'in', 'not']) {
+    p[m] = vi.fn().mockReturnValue(p);
+  }
+  p.limit = vi.fn().mockReturnValue(p);
+  p.single = vi.fn().mockReturnValue(Promise.resolve(result));
+  p.maybeSingle = vi.fn().mockReturnValue(Promise.resolve(result));
+  return p;
+}
+
+type JobFixture = {
+  status: string;
+  levelGroup?: string;
+  targetLevel?: string;
+  episodeId?: string | null;
+  attempts?: number;
+  maxAttempts?: number;
+};
+
+/**
+ * Stateful fake for listening_generation_jobs, tracking whatever the step
+ * processor writes via update(...) so the final fetch (and later assertions)
+ * reflect what actually happened, not a hardcoded fixture. Other tables
+ * default to a per-test override map so each test only wires the rows it
+ * actually touches.
+ */
+function makeGroupSupabase(job: JobFixture, otherTables: Record<string, { data: unknown; error: unknown }> = {}) {
+  let jobsCall = 0;
+  const state = {
+    status: job.status,
+    levelGroup: job.levelGroup ?? 'B1_B2',
+    targetLevel: job.targetLevel ?? 'B1',
+    episodeId: job.episodeId ?? null,
+    attempts: job.attempts ?? 0,
+    maxAttempts: job.maxAttempts ?? 3,
+    currentStep: 'x',
+    progressPercent: 10,
+    errorCode: null as string | null,
+    errorMessage: null as string | null,
+    retryable: false,
+  };
+  const calledTables: string[] = [];
+  const updatePayloads: Record<string, unknown>[] = [];
+
+  const from = vi.fn((table: string) => {
+    calledTables.push(table);
+    if (table === 'listening_generation_jobs') {
+      jobsCall += 1;
+      if (jobsCall === 1) {
+        // acquireLock
+        return makeAwaitableChain({
+          data: {
+            id: JOB_ID, status: state.status, level_group: state.levelGroup, target_level: state.targetLevel,
+            episode_id: state.episodeId, attempts: state.attempts, max_attempts: state.maxAttempts,
+          },
+          error: null,
+        });
+      }
+      const chain: any = {};
+      for (const m of ['select', 'insert', 'eq', 'or', 'order', 'in', 'not']) {
+        chain[m] = vi.fn().mockReturnValue(chain);
+      }
+      chain.limit = vi.fn().mockReturnValue(chain);
+      chain.update = vi.fn((payload: Record<string, unknown>) => {
+        updatePayloads.push(payload);
+        if (typeof payload.status === 'string') state.status = payload.status;
+        if ('episode_id' in payload) state.episodeId = payload.episode_id as string | null;
+        if ('attempts' in payload) state.attempts = payload.attempts as number;
+        if ('error_code' in payload) state.errorCode = payload.error_code as string | null;
+        if ('error_message' in payload) state.errorMessage = payload.error_message as string | null;
+        if ('retryable' in payload) state.retryable = payload.retryable as boolean;
+        if (typeof payload.current_step === 'string') state.currentStep = payload.current_step;
+        if (typeof payload.progress_percent === 'number') state.progressPercent = payload.progress_percent;
+        return chain;
+      });
+      chain.single = vi.fn(() => Promise.resolve({
+        data: {
+          id: JOB_ID, level_group: state.levelGroup, target_level: state.targetLevel, status: state.status,
+          current_step: state.currentStep, progress_percent: state.progressPercent, episode_id: state.episodeId,
+          attempts: state.attempts, max_attempts: state.maxAttempts, error_code: state.errorCode,
+          error_message: state.errorMessage, retryable: state.retryable,
+        },
+        error: null,
+      }));
+      chain.maybeSingle = chain.single;
+      chain.then = (resolve: (v: unknown) => void) => resolve({ data: null, error: null });
+      return chain;
+    }
+    return makeAwaitableChain(otherTables[table] ?? { data: null, error: null });
+  });
+
+  return { from, calledTables, updatePayloads, state } as any;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  process.env.OPENAI_API_KEY = 'test-key';
+});
+
+describe('processListeningGroupGenerationStep — lock handling', () => {
+  it('throws GroupJobNotFoundError when the job does not exist', async () => {
+    const supabase = { from: vi.fn(() => makeAwaitableChain({ data: null, error: null })) };
+    await expect(processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase as any))
+      .rejects.toThrow(GroupJobNotFoundError);
+  });
+
+  it('throws GroupJobLockedError when the job is currently locked by another worker', async () => {
+    let call = 0;
+    const supabase = {
+      from: vi.fn(() => {
+        call += 1;
+        if (call === 1) return makeAwaitableChain({ data: null, error: null }); // lock update matched nothing
+        return makeAwaitableChain({ data: { id: JOB_ID }, error: null }); // job exists -> locked, not missing
+      }),
+    };
+    await expect(processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase as any))
+      .rejects.toThrow(GroupJobLockedError);
+  });
+
+  it('throws GroupJobTerminalError and releases the lock for an already-ready job', async () => {
+    const supabase = makeGroupSupabase({ status: 'ready' });
+    await expect(processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase))
+      .rejects.toThrow(GroupJobTerminalError);
+    const releaseCall = supabase.updatePayloads.find((p: any) => p.locked_by === null);
+    expect(releaseCall).toBeTruthy();
+  });
+});
+
+describe('processListeningGroupGenerationStep — created', () => {
+  it('is a pure transition to generating_block_1: no story generation call', async () => {
+    const supabase = makeGroupSupabase({ status: 'created' });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+    expect(result.status).toBe('generating_block_1');
+  });
+});
+
+describe('processListeningGroupGenerationStep — generating_block_1', () => {
+  it('generates the story using the job target_level as cefrLevel and persists episode_id', async () => {
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'B2', episodeId: null });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(mockGenerateListeningStory).toHaveBeenCalledWith(
+      expect.objectContaining({ cefrLevel: 'B2' }),
+      expect.anything(),
+      supabase,
+    );
+    expect(result.episodeId).toBe(EPISODE_ID);
+    expect(result.status).toBe('validating_block_1');
+  });
+
+  it('is idempotent: skips regeneration when an episode already exists on the job', async () => {
+    const supabase = makeGroupSupabase(
+      { status: 'generating_block_1', episodeId: EPISODE_ID },
+      { listening_episodes: { data: { id: EPISODE_ID, status: 'content_ready' }, error: null } },
+    );
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+    expect(result.status).toBe('validating_block_1');
+    expect(result.episodeId).toBe(EPISODE_ID);
+  });
+});
+
+describe('processListeningGroupGenerationStep — preparing_description', () => {
+  it('translates the synopsis via the shared helper under the group-specific endpoint', async () => {
+    mockTranslateListeningSynopsis.mockResolvedValue({ translated: true, synopsisPt: 'x' });
+    const supabase = makeGroupSupabase({ status: 'preparing_description', episodeId: EPISODE_ID });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(mockTranslateListeningSynopsis).toHaveBeenCalledWith(
+      { episodeId: EPISODE_ID, endpoint: 'listening/on-demand/group/process-next' },
+      supabase,
+    );
+    expect(result.status).toBe('preparing_subtitles');
+  });
+});
+
+describe('processListeningGroupGenerationStep — finalizing', () => {
+  it('publishes the shared episode and never writes a per-user assignment', async () => {
+    mockSynchronizeListeningEpisode.mockResolvedValue(undefined);
+    mockPublishListeningEpisode.mockResolvedValue({ episodeId: EPISODE_ID, publicationStatus: 'published' });
+    const supabase = makeGroupSupabase({ status: 'finalizing', episodeId: EPISODE_ID });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockPublishListeningEpisode).toHaveBeenCalledWith({
+      episodeId: EPISODE_ID,
+      publishedBy: 'listening-group-generation',
+      publicationSource: 'system',
+    });
+    expect(supabase.calledTables).not.toContain('user_listening_assignments');
+    expect(result.status).toBe('ready');
+  });
+});
+
+describe('processListeningGroupGenerationStep — failure and attempts accounting', () => {
+  it('marks the job failed, increments attempts, and stays retryable below max_attempts', async () => {
+    mockTranslateListeningSynopsis.mockRejectedValue(new Error('boom'));
+    const supabase = makeGroupSupabase({ status: 'preparing_description', episodeId: EPISODE_ID, attempts: 0, maxAttempts: 3 });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(result.status).toBe('failed');
+    expect(result.attempts).toBe(1);
+    expect(result.retryable).toBe(true);
+  });
+
+  it('marks the job non-retryable once attempts reach max_attempts', async () => {
+    mockTranslateListeningSynopsis.mockRejectedValue(new Error('boom'));
+    const supabase = makeGroupSupabase({ status: 'preparing_description', episodeId: EPISODE_ID, attempts: 2, maxAttempts: 3 });
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+    expect(result.status).toBe('failed');
+    expect(result.attempts).toBe(3);
+    expect(result.retryable).toBe(false);
+  });
+
+  it('does not duplicate story generation on a retried generating_block_1 step once episode_id is set', async () => {
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+    // First attempt: no episode yet -> generates.
+    const supabase1 = makeGroupSupabase({ status: 'generating_block_1', episodeId: null });
+    const first = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase1);
+    expect(mockGenerateListeningStory).toHaveBeenCalledTimes(1);
+    expect(first.episodeId).toBe(EPISODE_ID);
+
+    // Simulated retry back into the same step after the episode already exists.
+    mockGenerateListeningStory.mockClear();
+    const supabase2 = makeGroupSupabase(
+      { status: 'generating_block_1', episodeId: EPISODE_ID },
+      { listening_episodes: { data: { id: EPISODE_ID, status: 'content_ready' }, error: null } },
+    );
+    const second = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase2);
+    expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+    expect(second.episodeId).toBe(EPISODE_ID);
+  });
+});

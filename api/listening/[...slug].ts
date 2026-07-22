@@ -27,6 +27,17 @@ import {
   OnDemandSessionLockedError,
   OnDemandSessionTerminalError,
 } from '../../src/services/listening/on-demand/listening-on-demand-types';
+import { levelGroupForCefr } from '../../src/services/listening/listening-level-group';
+import { resolveUserListeningLevel } from '../../src/services/listening/daily/resolve-user-listening-level';
+import { getOrCreateListeningGroupJob } from '../../src/services/listening/group-generation/get-or-create-listening-group-job';
+import { processListeningGroupGenerationStep } from '../../src/services/listening/group-generation/process-listening-group-generation-step';
+import { retryListeningGroupGeneration } from '../../src/services/listening/group-generation/retry-listening-group-generation';
+import {
+  GroupJobNotFoundError,
+  GroupJobLockedError,
+  GroupJobTerminalError,
+  toPublicGroupJobResult,
+} from '../../src/services/listening/group-generation/listening-group-generation-types';
 import {
   generateStorySession,
   decodeAnswerToken,
@@ -339,7 +350,8 @@ async function handleToday(req: any, res: any) {
   }
 
   try {
-    const result = await getListeningToday(supabase, userId);
+    const serviceClient = getListeningServiceClient();
+    const result = await getListeningToday(supabase, userId, serviceClient);
     res.setHeader('Cache-Control', 'private, no-store');
     safeLog('listening/today', 'today_delivered', 200, { status: result.status });
     return res.status(200).json(result);
@@ -829,6 +841,126 @@ async function handleOnDemandRetry(req: any, res: any) {
   }
 }
 
+// ─── POST /api/listening/group/process-next ──────────────────────────────────
+// Shared-content counterpart of on-demand/process-next: advances the ONE
+// listening_generation_jobs pipeline for the caller's own level_group by
+// exactly one step. Unlike on-demand, the client never supplies a job id —
+// the job to drive is always derived server-side from the authenticated
+// user's own resolved CEFR level (resolveUserListeningLevel -> level_group),
+// so this route can never be pointed at an arbitrary internal job. Safe to
+// poll repeatedly: getOrCreateListeningGroupJob is idempotent (reuses any
+// already-active job or already-published story instead of creating a
+// second one), so a page reload or overlapping polls from two users in the
+// same group never start a duplicate OpenAI/Azure pipeline.
+
+async function handleGroupProcessNext(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+
+  const listeningAccessCheck = await checkListeningEnabled(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const cefrLevel = await resolveUserListeningLevel(supabase, userId);
+    const levelGroup = levelGroupForCefr(cefrLevel);
+    const groupResult = await getOrCreateListeningGroupJob(serviceClient, levelGroup);
+
+    if (groupResult.kind === 'reused') {
+      // A published story for this group/level became available (e.g. a
+      // concurrent poller just finished it) — nothing to advance.
+      safeLog('listening/group/process-next', 'content_reused', 200, { levelGroup });
+      return res.status(200).json({
+        jobId: null, levelGroup, targetLevel: null, status: 'ready',
+        currentStep: null, progressPercent: 100, episodeId: groupResult.episodeId,
+        attempts: 0, maxAttempts: 0, errorCode: null, errorMessage: null, retryable: false,
+      });
+    }
+
+    const workerId = `user-${userId.slice(0, 8)}`;
+    const result = await processListeningGroupGenerationStep(groupResult.job.id, workerId, serviceClient);
+    res.setHeader('Cache-Control', 'private, no-store');
+    safeLog('listening/group/process-next', 'step_processed', 200, { levelGroup, status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof GroupJobNotFoundError) {
+      return jsonError(res, 404, 'LISTENING_GROUP_JOB_NOT_FOUND', 'Job de geração não encontrado.');
+    }
+    if (err instanceof GroupJobLockedError || err instanceof GroupJobTerminalError) {
+      // Another poller (this user or another member of the same group) is
+      // mid-step, or the job just reached a terminal state — return the
+      // current status instead of erroring so polling stays smooth.
+      try {
+        const serviceClient = getListeningServiceClient();
+        const cefrLevel = await resolveUserListeningLevel(supabase, userId);
+        const levelGroup = levelGroupForCefr(cefrLevel);
+        const { data: job } = await serviceClient
+          .from('listening_generation_jobs')
+          .select('id, level_group, target_level, status, current_step, progress_percent, episode_id, attempts, max_attempts, error_code, error_message, retryable')
+          .eq('level_group', levelGroup)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (job) return res.status(200).json(toPublicGroupJobResult(job as any));
+      } catch {
+        // fall through to the generic 409 below
+      }
+      return jsonError(res, 409, 'LISTENING_GROUP_JOB_BUSY', 'Geração ocupada. Tente novamente.');
+    }
+    safeLog('listening/group/process-next', 'internal_error', 500, { error: String(err) });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao processar geração compartilhada.');
+  }
+}
+
+// ─── POST /api/listening/group/retry ─────────────────────────────────────────
+// Retries the most recent shared job for the caller's own level_group — only
+// meaningful (and only mutates anything) when that job is 'failed' and
+// retryable; retryListeningGroupGeneration itself is the source of truth for
+// that check, this route only resolves *which* job to hand it, the same way
+// handleGroupProcessNext does (never a client-supplied job id).
+
+async function handleGroupRetry(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 64)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId, supabase } = auth;
+
+  const listeningAccessCheck = await checkListeningEnabled(userId);
+  if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const cefrLevel = await resolveUserListeningLevel(supabase, userId);
+    const levelGroup = levelGroupForCefr(cefrLevel);
+
+    const { data: latest } = await serviceClient
+      .from('listening_generation_jobs')
+      .select('id, status')
+      .eq('level_group', levelGroup)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!latest) {
+      return jsonError(res, 404, 'LISTENING_GROUP_JOB_NOT_FOUND', 'Nenhuma geração encontrada para este grupo.');
+    }
+
+    const result = await retryListeningGroupGeneration(latest.id, serviceClient);
+    safeLog('listening/group/retry', 'retry_requested', 200, { levelGroup, status: result.status });
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof GroupJobNotFoundError) {
+      return jsonError(res, 404, 'LISTENING_GROUP_JOB_NOT_FOUND', 'Job de geração não encontrado.');
+    }
+    safeLog('listening/group/retry', 'internal_error', 500, {});
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro ao tentar novamente.');
+  }
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -853,6 +985,8 @@ export default async function handler(req: any, res: any) {
     case 'on-demand/status':           return handleOnDemandStatus(req, res);
     case 'on-demand/process-next':     return handleOnDemandProcessNext(req, res);
     case 'on-demand/retry':            return handleOnDemandRetry(req, res);
+    case 'group/process-next':         return handleGroupProcessNext(req, res);
+    case 'group/retry':                return handleGroupRetry(req, res);
     default:                           return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

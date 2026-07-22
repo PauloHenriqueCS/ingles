@@ -220,10 +220,14 @@ export async function validateListeningEpisodeForPublication(
   checks.subtitlesValid = subtitlesOk;
 
   // ── Áudio assets ──────────────────────────────────────────────────────────
+  // Reads the real shape synthesis writes (persist-listening-audio.ts): the
+  // synthesized file lives at audio_path (an in-bucket staging-style path)
+  // until publishListeningAudioAsset copies it to published_path; the
+  // "ready to publish" status synthesis sets is 'validated', not 'ready'.
 
   const { data: assets, error: assetError } = await client
     .from('listening_audio_assets')
-    .select('id, block_id, ssml_hash, audio_hash, staging_path, published_path, file_size_bytes, duration_ms, status')
+    .select('id, block_id, ssml_hash, audio_hash, audio_path, published_path, file_size_bytes, duration_ms, status, timing_hash')
     .eq('episode_id', episodeId);
 
   if (assetError || !assets) {
@@ -240,12 +244,12 @@ export async function validateListeningEpisodeForPublication(
       audioOk = false;
       continue;
     }
-    if (asset.status !== 'ready') {
+    if (asset.status !== 'validated' && asset.status !== 'published') {
       errors.push(err('AUDIO_ASSET_NOT_READY', `Audio asset do bloco ${block.block_order} status=${asset.status}.`, episodeId, block.id));
       audioOk = false;
     }
-    if (!asset.staging_path) {
-      errors.push(err('AUDIO_STAGING_PATH_MISSING', `Bloco ${block.block_order} sem staging_path.`, episodeId, block.id));
+    if (!asset.audio_path) {
+      errors.push(err('AUDIO_STAGING_PATH_MISSING', `Bloco ${block.block_order} sem audio_path.`, episodeId, block.id));
       audioOk = false;
     }
     if (!asset.ssml_hash) {
@@ -261,70 +265,42 @@ export async function validateListeningEpisodeForPublication(
   checks.audioValid = audioOk;
 
   // ── Timings ───────────────────────────────────────────────────────────────
+  // The real timing pipeline (src/services/listening/timing) never writes a
+  // separate artifact row — synchronizeListeningEpisode persists directly
+  // onto the audio asset (timing_hash) via persist-listening-timings.ts.
+  // "Timing ready" is exactly that column being populated.
 
   let timingsOk = true;
 
-  if (assets.length > 0) {
-    const assetIds = assets.map((a) => a.id);
-    const { data: timings, error: timingError } = await client
-      .from('listening_timing_artifacts')
-      .select('id, audio_asset_id, block_id, ssml_hash, audio_hash, timing_hash, status')
-      .in('audio_asset_id', assetIds);
-
-    if (timingError || !timings) {
-      errors.push(err('TIMINGS_LOAD_FAILED', 'Erro ao carregar timing artifacts.', episodeId));
+  for (const block of blocks) {
+    const asset = assets.find((a) => a.block_id === block.id);
+    if (!asset) continue;
+    if (!asset.timing_hash) {
+      errors.push(err('TIMING_MISSING', `Bloco ${block.block_order} sem timing_hash.`, episodeId, block.id));
       timingsOk = false;
-    } else {
-      for (const block of blocks) {
-        const asset = assets.find((a) => a.block_id === block.id);
-        if (!asset) continue;
-        const timing = timings.find((t) => t.audio_asset_id === asset.id);
-        if (!timing) {
-          errors.push(err('TIMING_MISSING', `Bloco ${block.block_order} sem timing artifact.`, episodeId, block.id));
-          timingsOk = false;
-          continue;
-        }
-        if (timing.status !== 'ready') {
-          errors.push(err('TIMING_NOT_READY', `Timing do bloco ${block.block_order} status=${timing.status}.`, episodeId, block.id));
-          timingsOk = false;
-        }
-      }
-
-      // ── Hashes ─────────────────────────────────────────────────────────────
-
-      let hashesOk = true;
-
-      for (const block of blocks) {
-        const asset = assets.find((a) => a.block_id === block.id);
-        if (!asset) continue;
-
-        // bloco.ssml_content_hash == audio_asset.ssml_hash
-        if (block.ssml_content_hash && asset.ssml_hash && block.ssml_content_hash !== asset.ssml_hash) {
-          errors.push(err('HASH_MISMATCH_SSML_BLOCK_ASSET', `bloco.ssml_content_hash ≠ audio_asset.ssml_hash no bloco ${block.block_order}.`, episodeId, block.id));
-          hashesOk = false;
-        }
-
-        const timing = timings.find((t) => t.audio_asset_id === asset.id);
-        if (!timing) continue;
-
-        // timing.audio_hash == audio_asset.audio_hash
-        if (timing.audio_hash !== asset.audio_hash) {
-          errors.push(err('HASH_MISMATCH_AUDIO', `timing.audio_hash ≠ audio_asset.audio_hash no bloco ${block.block_order}.`, episodeId, block.id));
-          hashesOk = false;
-        }
-
-        // timing.ssml_hash == audio_asset.ssml_hash
-        if (timing.ssml_hash !== asset.ssml_hash) {
-          errors.push(err('HASH_MISMATCH_SSML', `timing.ssml_hash ≠ audio_asset.ssml_hash no bloco ${block.block_order}.`, episodeId, block.id));
-          hashesOk = false;
-        }
-      }
-
-      checks.hashesValid = hashesOk;
     }
   }
 
   checks.timingsValid = timingsOk;
+
+  // ── Hashes ─────────────────────────────────────────────────────────────
+  // Only cross-table hash invariant left once timing lives on the asset
+  // itself: the block's SSML content hash must match the hash the asset was
+  // actually synthesized from.
+
+  let hashesOk = true;
+
+  for (const block of blocks) {
+    const asset = assets.find((a) => a.block_id === block.id);
+    if (!asset) continue;
+
+    if (block.ssml_content_hash && asset.ssml_hash && block.ssml_content_hash !== asset.ssml_hash) {
+      errors.push(err('HASH_MISMATCH_SSML_BLOCK_ASSET', `bloco.ssml_content_hash ≠ audio_asset.ssml_hash no bloco ${block.block_order}.`, episodeId, block.id));
+      hashesOk = false;
+    }
+  }
+
+  checks.hashesValid = hashesOk;
 
   // ── Existência dos arquivos no Storage ────────────────────────────────────
 
@@ -332,14 +308,14 @@ export async function validateListeningEpisodeForPublication(
 
   for (const asset of assets) {
     const block = blocks.find((b) => b.id === asset.block_id);
-    if (!asset.staging_path) continue;
+    if (!asset.audio_path) continue;
 
-    const { exists, sizeBytes } = await storageFileExists(client, asset.staging_path);
+    const { exists, sizeBytes } = await storageFileExists(client, asset.audio_path);
     if (!exists) {
-      errors.push(err('STORAGE_FILE_NOT_FOUND', `Arquivo de staging não encontrado: ${asset.staging_path}`, episodeId, block?.id));
+      errors.push(err('STORAGE_FILE_NOT_FOUND', `Arquivo de staging não encontrado: ${asset.audio_path}`, episodeId, block?.id));
       storageOk = false;
     } else if (sizeBytes === 0) {
-      errors.push(err('STORAGE_FILE_EMPTY', `Arquivo de staging vazio: ${asset.staging_path}`, episodeId, block?.id));
+      errors.push(err('STORAGE_FILE_EMPTY', `Arquivo de staging vazio: ${asset.audio_path}`, episodeId, block?.id));
       storageOk = false;
     }
   }
