@@ -574,15 +574,31 @@ export async function prepareListeningSubtitles(
         t: Date.now(),
       }));
 
-      const repaired = await translateMissingCues({
-        episodeId,
-        title: episode?.title ?? '',
-        synopsis: episode?.synopsis ?? null,
-        cefrLevel,
-        missingByBlock,
-        blockTextEnByOrder,
-        callAI: aiCallFn,
-      });
+      let repaired: Awaited<ReturnType<typeof translateMissingCues>>;
+      try {
+        repaired = await translateMissingCues({
+          episodeId,
+          title: episode?.title ?? '',
+          synopsis: episode?.synopsis ?? null,
+          cefrLevel,
+          missingByBlock,
+          blockTextEnByOrder,
+          callAI: aiCallFn,
+        });
+      } catch (repairErr) {
+        // Same partial-state trap as step 7: this call can throw (timeout,
+        // malformed JSON) from inside the outer catch block above, which
+        // would otherwise escape without ever marking subtitles_status
+        // 'failed'.
+        if (supabase && !dryRun) {
+          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+        }
+        if (isTimeoutError(repairErr)) throw new ListeningTranslationTimeoutError(episodeId);
+        if (!(repairErr instanceof SubtitleTranslationParseError)) {
+          throw new ListeningTranslationProviderError(episodeId, `Missing-cue repair AI call failed: ${String(repairErr)}`);
+        }
+        throw repairErr;
+      }
 
       rawTranslation = mergeRepairedCues(rawTranslation, repaired);
     }
@@ -630,7 +646,18 @@ export async function prepareListeningSubtitles(
         );
       }
 
-      blockCues = await correctBlockTranslation(blockOrder, blockTextEn, blockCues, validation, cefrLevel, episodeId, aiCallFn);
+      try {
+        blockCues = await correctBlockTranslation(blockOrder, blockTextEn, blockCues, validation, cefrLevel, episodeId, aiCallFn);
+      } catch (correctErr) {
+        // Same partial-state trap as steps 7-8: correctBlockTranslation can
+        // throw (AI call failure, or reassertCorrectedCuesDeterministically
+        // rejecting a correction that dropped a number / left text empty) —
+        // must not leave subtitles_status stuck at 'processing'.
+        if (supabase && !dryRun) {
+          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+        }
+        throw correctErr;
+      }
     }
 
     translatedCues.set(blockOrder, blockCues);

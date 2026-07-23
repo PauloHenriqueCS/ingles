@@ -706,6 +706,22 @@ describe('prepareListeningSubtitles — with database', () => {
     expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
   });
 
+  // Case 38e
+  it('marks subtitles_status failed (not stuck at processing) when the missing-cue repair AI call itself throws — the exact failure seen live in production', async () => {
+    const db = makeSupabase();
+    const alwaysPartial = JSON.stringify(makeRawTranslation({ block1Cues: [] }));
+    const callAI = makeAI([alwaysPartial, 'this is not valid json at all, no braces']);
+
+    await expect(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    ).rejects.toThrow();
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
   // Case 38
   it('does not insert subtitle cues when dryRun is true even with a supabase client', async () => {
     const db = makeSupabase();
