@@ -12,8 +12,12 @@ import {
   SubtitleTranslationValidationError,
   SubtitleQualityValidatorMalformedResponseError,
   SubtitleTranslationParseError,
+  SubtitleTranslationOutputTruncatedError,
   BATCH_TRANSLATION_MAX_TOKENS,
   BATCH_TRANSLATION_TIMEOUT_MS,
+  MAX_BATCH_SUBDIVISION_DEPTH,
+  MAX_BATCH_TRANSLATION_CALLS_PER_BATCH,
+  translateCueRangeWithAdaptiveSubdivision,
 } from './translate-listening-subtitles';
 import type { EnglishCueDraft, RawTranslationResponse, ValidatedTranslatedCue, SubtitleQualityValidationResult } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
@@ -634,14 +638,17 @@ describe('translateSubtitles — batching', () => {
     expect(retryKey).toBe(firstAttemptKey);
   });
 
-  it('a truncated (cut-off mid-object) JSON response throws SubtitleTranslationParseError', async () => {
+  it('cut-off mid-object JSON WITHOUT finish_reason=length throws SubtitleTranslationParseError, not SubtitleTranslationOutputTruncatedError — truncation is only ever inferred from finish_reason, never from the shape of the text alone', async () => {
     const block1 = makeBlockCueData(1, 1);
     const block2 = makeBlockCueData(2, 1);
-    // No closing brace — simulates a response cut short by a token ceiling.
+    // No closing brace — LOOKS like a token-limit cutoff, but finishReason
+    // is not 'length' (e.g. undefined/'stop'), so it must NOT be classified
+    // as truncation.
     const callAI: AICallWithUsageFn = vi.fn(async () => ({
       text: '{"cues": [{"cueKey": "b1-c001", "textPtBr": "ol',
       usage: makeUsage(),
       requestId: null,
+      finishReason: 'stop',
     }));
 
     await expect(
@@ -672,3 +679,304 @@ describe('translateSubtitles — batching', () => {
     ).rejects.toThrow(/block 1, batch 1/);
   });
 });
+
+// ── Adaptive subdivision on output truncation ─────────────────────────────────
+// Found live (episode 23a7db4d, block 2 batch 2/4, after the max_tokens fix
+// landed): the batch that used to hang for 241s instead came back in 17.2s
+// with completionTokens===BATCH_TRANSLATION_MAX_TOKENS and
+// finish_reason==='length' — proof the model genuinely wants more output for
+// this specific batch than any sibling batch. Raising max_tokens further just
+// moves the same problem; splitting the batch is the structural fix.
+
+function makeCue(cueKey: string, cueOrder: number, blockOrder: 1 | 2, text: string): EnglishCueDraft {
+  return { cueKey, cueOrder, blockOrder, sourceSentenceKeys: [`b${blockOrder}s${String(cueOrder).padStart(2, '0')}`], text };
+}
+
+function makeCueRange(blockOrder: 1 | 2, count: number, startAt = 1): EnglishCueDraft[] {
+  return Array.from({ length: count }, (_, i) =>
+    makeCue(`b${blockOrder}-c${String(startAt + i).padStart(3, '0')}`, startAt + i, blockOrder, `Cue number ${startAt + i}.`));
+}
+
+/**
+ * Each entry in `script` answers ONE physical call, in order. `truncated:
+ * true` returns finish_reason='length' with no usable cues array (matching
+ * what a real cut-off completion looks like: text that doesn't parse as
+ * complete JSON). Otherwise, responds successfully with a textPtBr for every
+ * cueKey the call actually receives (read from the prompt) unless
+ * `cueMap` narrows it — letting most tests avoid hand-listing every cueKey.
+ */
+function makeScriptedAI(script: Array<{ truncated?: boolean; cueMap?: Record<string, string> }>): AICallWithUsageFn {
+  let i = 0;
+  return vi.fn(async (_system: string, userPrompt: string) => {
+    const step = script[i] ?? script[script.length - 1];
+    i++;
+    if (step.truncated) {
+      return {
+        text: '{"cues": [{"cueKey": "trunc', // deliberately unparseable — real cutoffs never close their JSON
+        usage: makeUsage(),
+        requestId: null,
+        finishReason: 'length',
+      };
+    }
+    const requestedKeys = [...userPrompt.matchAll(/\[(b\d-c\d+)\]/g)].map(m => m[1]);
+    const cueMap = step.cueMap ?? Object.fromEntries(requestedKeys.map(k => [k, `trad-${k}`]));
+    return {
+      text: JSON.stringify({ cues: Object.entries(cueMap).map(([cueKey, textPtBr]) => ({ cueKey, textPtBr })) }),
+      usage: makeUsage(),
+      requestId: null,
+      finishReason: 'stop',
+    };
+  });
+}
+
+function makeAdaptiveContext(blockOrder: 1 | 2, callAI: AICallWithUsageFn) {
+  return {
+    episodeId: 'ep1', title: 'Title', synopsis: null, cefrLevel: 'A1' as const,
+    blockOrder, blockTextEn: `Full block ${blockOrder} text.`,
+    callAI, originalBatchIndex: 0, originalBatchCount: 1,
+  };
+}
+
+describe('translateSubtitles — adaptive subdivision on output truncation', () => {
+  it('1. a normal response needs no subdivision — exactly one call, no truncation', async () => {
+    const cues = makeCueRange(1, 5);
+    const callAI = makeScriptedAI([{}]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    expect(callAI).toHaveBeenCalledTimes(1);
+    expect(result.map(c => c.cueKey)).toEqual(['b1-c001', 'b1-c002', 'b1-c003', 'b1-c004', 'b1-c005']);
+  });
+
+  it('2. finish_reason=length on a 20-cue batch splits into two successful sub-batches (10+10)', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([
+      { truncated: true }, // original 20-cue attempt
+      {}, // first half (10 cues) succeeds
+      {}, // second half (10 cues) succeeds
+    ]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(result).toHaveLength(20);
+  });
+
+  it('3. the 10+10 split sends exactly the first 10 and last 10 cueKeys to each half', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([{ truncated: true }, {}, {}]);
+
+    await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    const calls = (callAI as ReturnType<typeof vi.fn>).mock.calls;
+    const firstHalfPrompt = calls[1][1] as string;
+    const secondHalfPrompt = calls[2][1] as string;
+    expect(firstHalfPrompt).toContain('[b1-c001]');
+    expect(firstHalfPrompt).toContain('[b1-c010]');
+    expect(firstHalfPrompt).not.toContain('[b1-c011]');
+    expect(secondHalfPrompt).toContain('[b1-c011]');
+    expect(secondHalfPrompt).toContain('[b1-c020]');
+    expect(secondHalfPrompt).not.toContain('[b1-c010]');
+  });
+
+  it('4. only one half needs a further split (5+5) after the first split — the already-succeeded half is not re-called', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([
+      { truncated: true }, // original 20 cues
+      {},                  // first half (10 cues) succeeds immediately
+      { truncated: true }, // second half (10 cues) truncates
+      {},                  // second half's first sub-half (5 cues) succeeds
+      {},                  // second half's second sub-half (5 cues) succeeds
+    ]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    expect(callAI).toHaveBeenCalledTimes(5);
+    expect(result).toHaveLength(20);
+
+    const calls = (callAI as ReturnType<typeof vi.fn>).mock.calls;
+    // The first-half call (call index 1) requested exactly cues 1-10 — assert
+    // no LATER call ever re-requests that same range (i.e. it was never
+    // re-translated after the second half needed extra work).
+    const firstHalfPrompt = calls[1][1] as string;
+    expect(firstHalfPrompt).toContain('[b1-c001]');
+    expect(firstHalfPrompt).toContain('[b1-c010]');
+    for (let i = 2; i < calls.length; i++) {
+      expect(calls[i][1] as string).not.toContain('[b1-c001]');
+    }
+  });
+
+  it('5. merge preserves cueKey order across sub-batches', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([{ truncated: true }, {}, {}]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    expect(result.map(c => c.cueKey)).toEqual(cues.map(c => c.cueKey));
+  });
+
+  it('6. no cue is missing after subdivision', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([{ truncated: true }, {}, {}]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    const resultKeys = new Set(result.map(c => c.cueKey));
+    for (const c of cues) expect(resultKeys.has(c.cueKey)).toBe(true);
+  });
+
+  it('7. no cue is duplicated after subdivision', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([{ truncated: true }, {}, {}]);
+
+    const result = await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    const keys = result.map(c => c.cueKey);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('8. an earlier, already-succeeded top-level batch is never re-called when a later batch needs subdivision', async () => {
+    // block1: 25 cues -> 2 top-level batches (20 + 5, per TRANSLATION_BATCH_SIZE).
+    // Batch 1 (20 cues) succeeds immediately; batch 2 (5 cues) truncates and splits into 3+2.
+    const block1 = { blockOrder: 1 as const, blockTextEn: 'Full block 1 text.', cues: makeCueRange(1, 25) };
+    const block2 = { blockOrder: 2 as const, blockTextEn: 'Full block 2 text.', cues: makeCueRange(2, 1) };
+
+    const callAI = makeScriptedAI([
+      {},                  // batch 1 (cues 1-20) succeeds
+      { truncated: true }, // batch 2 (cues 21-25) truncates
+      {},                  // batch 2 first half (21-23) succeeds
+      {},                  // batch 2 second half (24-25) succeeds
+      {},                  // block 2's single cue succeeds
+    ]);
+
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+
+    expect(callAI).toHaveBeenCalledTimes(5);
+    const block1Result = result.blocks.find(b => b.blockOrder === 1)!;
+    expect(block1Result.cues).toHaveLength(25);
+
+    // The first call (batch 1, cues 1-20) must appear exactly once across
+    // every call this test made — proof it was never redone when batch 2
+    // needed extra work.
+    const calls = (callAI as ReturnType<typeof vi.fn>).mock.calls;
+    const callsContainingFirstBatch = calls.filter(c => (c[1] as string).includes('[b1-c001]'));
+    expect(callsContainingFirstBatch).toHaveLength(1);
+  });
+
+  it('9. idempotency keys of sub-batches are stable across independent retries, and differ between the two halves', async () => {
+    const cues = makeCueRange(1, 20);
+
+    const callAI1 = makeScriptedAI([{ truncated: true }, {}, {}]);
+    await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI1),
+    );
+    const keysRun1 = (callAI1 as ReturnType<typeof vi.fn>).mock.calls.map(c => (c[2] as { idempotencyKey: string }).idempotencyKey);
+
+    const callAI2 = makeScriptedAI([{ truncated: true }, {}, {}]);
+    await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI2),
+    );
+    const keysRun2 = (callAI2 as ReturnType<typeof vi.fn>).mock.calls.map(c => (c[2] as { idempotencyKey: string }).idempotencyKey);
+
+    // Stable across independent runs (same content -> same keys, in the same order).
+    expect(keysRun1).toEqual(keysRun2);
+    // The two halves (first 10 vs last 10 cues) never share a key.
+    expect(keysRun1[1]).not.toBe(keysRun1[2]);
+    // The original (pre-split) attempt's key differs from either half's.
+    expect(keysRun1[0]).not.toBe(keysRun1[1]);
+    expect(keysRun1[0]).not.toBe(keysRun1[2]);
+  });
+
+  it('10. exceeding the maximum subdivision depth fails with a clear diagnostic instead of looping', async () => {
+    // 40 cues, always truncating: the leftmost recursion path (mid=ceil(n/2)
+    // taken as the "first half" each time) reaches depth 5 with 2 cues still
+    // remaining — hitting the depth ceiling before the single-cue ceiling.
+    // 40 -> 20 -> 10 -> 5 -> 3 -> 2 (depth 5, 2 cues, still truncating).
+    const cues = makeCueRange(1, 40);
+    const callAI = makeScriptedAI([{ truncated: true }]); // every call truncates
+
+    const rejection = await getRejection(() => translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: 100 },
+      makeAdaptiveContext(1, callAI),
+    ));
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect((rejection as SubtitleTranslationOutputTruncatedError).reason).toBe('max_depth_exceeded');
+  });
+
+  it('11. a single cue that still truncates fails terminally with a clear diagnostic, not another subdivision attempt', async () => {
+    const cues = makeCueRange(1, 1);
+    const callAI = makeScriptedAI([{ truncated: true }]);
+
+    const rejection = await getRejection(() => translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, MAX_BATCH_SUBDIVISION_DEPTH - 1, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    ));
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect((rejection as SubtitleTranslationOutputTruncatedError).reason).toBe('single_cue_truncated');
+    expect(callAI).toHaveBeenCalledTimes(1); // no further recursion attempted
+  });
+
+  it('exceeding the total call budget for one original batch fails with a clear diagnostic', async () => {
+    const cues = makeCueRange(1, 20);
+    const callAI = makeScriptedAI([{ truncated: true }]); // every call truncates, forcing endless splitting
+
+    const rejection = await getRejection(() => translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: 2 }, // budget exhausted almost immediately
+      makeAdaptiveContext(1, callAI),
+    ));
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect((rejection as SubtitleTranslationOutputTruncatedError).reason).toBe('max_calls_exceeded');
+    // budget=2 allows exactly 2 physical calls (root + first recursive split)
+    // before the 3rd attempted call is refused outright.
+    expect(callAI).toHaveBeenCalledTimes(2);
+  });
+
+  it('12. finish_reason other than "length" (e.g. malformed non-truncated output) is never classified as truncation', async () => {
+    const cues = makeCueRange(1, 5);
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: 'this is not JSON at all',
+      usage: makeUsage(),
+      requestId: null,
+      finishReason: 'stop',
+    }));
+
+    const rejection = await getRejection(() => translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    ));
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationParseError);
+    expect(rejection).not.toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect(callAI).toHaveBeenCalledTimes(1); // no subdivision attempted for a non-truncation parse failure
+  });
+});
+
+async function getRejection(fn: () => Promise<unknown>): Promise<unknown> {
+  try { await fn(); return null; } catch (e) { return e; }
+}

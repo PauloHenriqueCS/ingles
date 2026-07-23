@@ -18,6 +18,7 @@ import {
   translateMissingCues,
   SubtitleTranslationParseError,
   SubtitleTranslationValidationError,
+  SubtitleTranslationOutputTruncatedError,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
 } from './translate-listening-subtitles';
@@ -26,7 +27,7 @@ import { persistListeningSubtitles } from './persist-listening-subtitles';
 import type { EnglishCueDraft, ValidatedTranslatedCue } from './listening-subtitle-schema';
 import type { BlockCueData } from './build-subtitle-translation-prompt';
 
-export { SubtitleTranslationParseError, SubtitleTranslationValidationError };
+export { SubtitleTranslationParseError, SubtitleTranslationValidationError, SubtitleTranslationOutputTruncatedError };
 export { TRANSLATION_PROMPT_VERSION, VALIDATOR_PROMPT_VERSION };
 export type { AICallWithUsageFn, AICallResult };
 
@@ -271,6 +272,7 @@ export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
         durationMs: Date.now() - start,
       },
       requestId: (resp as unknown as Record<string, unknown>)._request_id as string | null ?? null,
+      finishReason: resp.choices[0]?.finish_reason ?? null,
     };
   };
 }
@@ -550,7 +552,11 @@ export async function prepareListeningSubtitles(
       await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
     }
     if (isTimeoutError(err)) throw new ListeningTranslationTimeoutError(episodeId);
-    if (!(err instanceof SubtitleTranslationParseError)) {
+    // SubtitleTranslationOutputTruncatedError (adaptive subdivision exhausted
+    // its depth/call budget while the model kept truncating) carries its own
+    // specific code/retryable flag — must propagate as-is, same as the parse
+    // error, not get flattened into the generic provider-error wrapper below.
+    if (!(err instanceof SubtitleTranslationParseError) && !(err instanceof SubtitleTranslationOutputTruncatedError)) {
       throw new ListeningTranslationProviderError(episodeId, `Translation AI call failed: ${String(err)}`);
     }
     throw err;

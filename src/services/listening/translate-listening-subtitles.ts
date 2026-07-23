@@ -48,29 +48,57 @@ export const TRANSLATION_BATCH_SIZE = 20;
 export const BATCH_TRANSLATION_MAX_TOKENS = 1800;
 export const BATCH_TRANSLATION_TIMEOUT_MS = 45_000;
 
+// Found live (episode 23a7db4d, block 2 batch 2/4, again after the max_tokens
+// fix landed): the batch that used to hang for 241s instead came back in
+// 17.2s with completionTokens===1800 (exactly the ceiling) and
+// finish_reason==='length' — the model genuinely wants to produce far more
+// output for this specific batch than any sibling batch (~650-725 tokens).
+// Raising max_tokens just moves the same problem to a higher ceiling; the
+// structural fix is to shrink the batch itself when this happens, not the
+// budget. Halving is bounded on two independent axes so a pathological
+// batch can never loop indefinitely: depth (a 20-cue batch reaches a
+// 1-cue leaf in at most 5 halvings) and total physical calls spent
+// recovering one original batch.
+export const MAX_BATCH_SUBDIVISION_DEPTH = 5;
+export const MAX_BATCH_TRANSLATION_CALLS_PER_BATCH = 20;
+
 function chunkCues(cues: EnglishCueDraft[], size: number): EnglishCueDraft[][] {
   const batches: EnglishCueDraft[][] = [];
   for (let i = 0; i < cues.length; i += size) batches.push(cues.slice(i, i + size));
   return batches.length > 0 ? batches : [[]];
 }
 
+function cueKeyRangeLabel(cues: EnglishCueDraft[]): string {
+  if (cues.length === 0) return 'empty';
+  if (cues.length === 1) return cues[0].cueKey;
+  return `${cues[0].cueKey}..${cues[cues.length - 1].cueKey}`;
+}
+
+function hashCueContent(cues: EnglishCueDraft[]): string {
+  const contentDigest = cues.map(c => `${c.cueKey}:${c.text}`).join('␟');
+  return createHash('sha256').update(contentDigest, 'utf8').digest('hex').slice(0, 16);
+}
+
 /**
- * Deterministic identity for one batch-translation call: same episode,
- * block, batch position, and exact cue content (cueKey+text) always
- * produces the same key, so the AI Gateway's dedupe/reservation layer can
- * recognize a retry of the same operation as the same operation. Deliberately
+ * Deterministic identity for one (sub-)batch translation call: same episode,
+ * block, ORIGINAL batch position, the exact cueKey range covered, and the
+ * exact cue content (via hash) always produce the same key, so the AI
+ * Gateway's dedupe/reservation layer — and a retry of this same sub-batch —
+ * recognize it as the same operation. The cueKey range is carried as its own
+ * readable segment (not just folded into the hash) so a key is
+ * human-diagnosable in gateway logs without reversing the hash. Deliberately
  * excludes attempt number, timestamp, and userId — those would make every
  * retry look like a brand-new operation, defeating the point.
  */
 function buildBatchTranslationIdempotencyKey(
   episodeId: string,
   blockOrder: 1 | 2,
-  batchIndex: number,
+  originalBatchIndex: number,
   cues: EnglishCueDraft[],
 ): string {
-  const contentDigest = cues.map(c => `${c.cueKey}:${c.text}`).join('␟');
-  const hash = createHash('sha256').update(contentDigest, 'utf8').digest('hex').slice(0, 16);
-  return `listening-subtitle-translate:${episodeId}:b${blockOrder}:batch${batchIndex}:${TRANSLATION_PROMPT_VERSION}:${hash}`;
+  const range = cueKeyRangeLabel(cues);
+  const hash = hashCueContent(cues);
+  return `listening-subtitle-translate:${episodeId}:b${blockOrder}:batch${originalBatchIndex}:${range}:${TRANSLATION_PROMPT_VERSION}:${hash}`;
 }
 
 export { TRANSLATION_PROMPT_VERSION, VALIDATOR_PROMPT_VERSION };
@@ -104,6 +132,35 @@ export class SubtitleTranslationValidationError extends Error {
     super(message);
     this.name = 'SubtitleTranslationValidationError';
     this.code = code;
+  }
+}
+
+/**
+ * The model's response was cut off by the token ceiling (finish_reason ===
+ * 'length'), confirmed live: episode 23a7db4d block 2 batch 2/4 returned
+ * completionTokens===BATCH_TRANSLATION_MAX_TOKENS with finish_reason
+ * 'length' — the model genuinely wants to produce more output for this
+ * batch than the ceiling allows. Distinct from SubtitleTranslationParseError
+ * (which covers JSON that is malformed/empty for reasons OTHER than hitting
+ * the token limit) so the two are never confused: adaptive subdivision only
+ * ever reacts to THIS error's underlying signal (finish_reason), never to
+ * "the JSON didn't parse" in general. Thrown only when subdivision has been
+ * exhausted (a single cue still truncates, or a depth/call-count safety
+ * limit was hit) — retryable, like a timeout, since this is a transient/
+ * capacity problem, not a permanent content judgment.
+ */
+export class SubtitleTranslationOutputTruncatedError extends Error {
+  readonly code = 'LISTENING_TRANSLATION_OUTPUT_TRUNCATED';
+  readonly retryable = true;
+  constructor(
+    readonly blockOrder: 1 | 2,
+    readonly batchIndex: number,
+    readonly cueCount: number,
+    readonly reason: 'single_cue_truncated' | 'max_depth_exceeded' | 'max_calls_exceeded',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SubtitleTranslationOutputTruncatedError';
   }
 }
 
@@ -620,14 +677,178 @@ export async function correctBlockTranslation(
 
 // ─── Main translation call ────────────────────────────────────────────────────
 
+/** Parses one call's raw text against the cues it was asked to translate, merging by cueKey. Shared by the top-level batch and every subdivided sub-batch — a cue a response omits or returns with an unrecognized cueKey is simply not included; the existing missing-cue repair loop in prepareListeningSubtitles (step 8) already re-requests exactly those. */
+function parseAndMergeTranslatedCues(
+  text: string,
+  sourceCues: EnglishCueDraft[],
+  blockOrder: 1 | 2,
+  originalBatchIndex: number,
+  originalBatchCount: number,
+): RawTranslatedCue[] {
+  if (!text || text.trim() === '') {
+    throw new SubtitleTranslationParseError(
+      `AI translation response was empty (block ${blockOrder}, batch ${originalBatchIndex + 1}/${originalBatchCount})`
+    );
+  }
+
+  const parsed = extractJson(text);
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).cues)) {
+    throw new SubtitleTranslationParseError(
+      `AI translation response contains no valid JSON cues array (block ${blockOrder}, batch ${originalBatchIndex + 1}/${originalBatchCount})`
+    );
+  }
+
+  const byKey = new Map(sourceCues.map(c => [c.cueKey, c]));
+  const result: RawTranslatedCue[] = [];
+  for (const raw of (parsed as { cues: Array<Record<string, unknown>> }).cues) {
+    if (typeof raw.cueKey !== 'string' || typeof raw.textPtBr !== 'string' || !raw.textPtBr.trim()) continue;
+    const source = byKey.get(raw.cueKey);
+    if (!source) continue; // ignore any cueKey outside this (sub-)batch
+    result.push({ cueKey: raw.cueKey, sourceSentenceKeys: source.sourceSentenceKeys, textPtBr: raw.textPtBr.trim() });
+  }
+  return result;
+}
+
+export interface AdaptiveBatchContext {
+  episodeId: string;
+  title: string;
+  synopsis: string | null;
+  cefrLevel: CEFRLevel;
+  blockOrder: 1 | 2;
+  blockTextEn: string;
+  callAI: AICallWithUsageFn;
+  glossary?: Record<string, string>;
+  originalBatchIndex: number;
+  originalBatchCount: number;
+}
+
+/**
+ * Translates one cue range (the full original batch, or — after a
+ * truncation — one half of it) and, if the model's response is cut off by
+ * the token ceiling (finish_reason === 'length'), recovers by splitting the
+ * range roughly in half and recursing on each half instead of just failing
+ * or raising max_tokens further. Order is preserved (first half's results
+ * always precede the second half's). Bounded on two independent axes so a
+ * pathological batch can never loop indefinitely:
+ *   - depth: MAX_BATCH_SUBDIVISION_DEPTH halvings is enough to reach a
+ *     single cue from a full TRANSLATION_BATCH_SIZE (20) batch.
+ *   - callBudget: total physical AI calls spent recovering ONE original
+ *     batch, shared across the whole recursion tree via a mutable counter.
+ * If a single cue is still truncated, or either limit is hit while more
+ * than one cue remains, throws SubtitleTranslationOutputTruncatedError with
+ * a diagnostic reason instead of subdividing further or looping.
+ */
+export async function translateCueRangeWithAdaptiveSubdivision(
+  cues: EnglishCueDraft[],
+  precedingCueText: string | undefined,
+  followingCueText: string | undefined,
+  depth: number,
+  callBudget: { remaining: number },
+  ctx: AdaptiveBatchContext,
+): Promise<RawTranslatedCue[]> {
+  const { blockOrder, originalBatchIndex, originalBatchCount } = ctx;
+
+  if (callBudget.remaining <= 0) {
+    throw new SubtitleTranslationOutputTruncatedError(
+      blockOrder, originalBatchIndex, cues.length, 'max_calls_exceeded',
+      `Block ${blockOrder} batch ${originalBatchIndex + 1}/${originalBatchCount}: exceeded the maximum number of calls ` +
+      `(${MAX_BATCH_TRANSLATION_CALLS_PER_BATCH}) spent recovering from output truncation.`
+    );
+  }
+  callBudget.remaining -= 1;
+
+  const userPrompt = buildTranslationBatchUserPrompt({
+    episodeId: ctx.episodeId, title: ctx.title, synopsis: ctx.synopsis, cefrLevel: ctx.cefrLevel,
+    blockOrder, blockTextEn: ctx.blockTextEn,
+    cues, precedingCueText, followingCueText,
+    batchIndex: originalBatchIndex, batchCount: originalBatchCount, glossary: ctx.glossary,
+  });
+
+  const idempotencyKey = buildBatchTranslationIdempotencyKey(ctx.episodeId, blockOrder, originalBatchIndex, cues);
+  const result = await ctx.callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, {
+    temperature: 0.2,
+    jsonMode: true,
+    maxTokens: BATCH_TRANSLATION_MAX_TOKENS,
+    timeoutMs: BATCH_TRANSLATION_TIMEOUT_MS,
+    idempotencyKey,
+  });
+
+  console.error(JSON.stringify({
+    event: 'listening_subtitle_token_usage',
+    stage: 'listening_subtitle_translation',
+    provider: 'openai',
+    promptVersion: TRANSLATION_PROMPT_VERSION,
+    promptTokens: result.usage.promptTokens,
+    completionTokens: result.usage.completionTokens,
+    totalTokens: result.usage.totalTokens,
+    durationMs: result.usage.durationMs,
+    episodeId: ctx.episodeId,
+    blockOrder,
+    batch: originalBatchIndex + 1,
+    batchCount: originalBatchCount,
+    cueCount: cues.length,
+    subdivisionDepth: depth,
+    t: Date.now(),
+  }));
+
+  // finish_reason is the authoritative truncation signal — never inferred
+  // from completionTokens alone (a batch could legitimately use exactly
+  // BATCH_TRANSLATION_MAX_TOKENS worth of natural output on 'stop').
+  if (result.finishReason === 'length') {
+    console.error(JSON.stringify({
+      event: 'listening_subtitle_batch_truncated',
+      episodeId: ctx.episodeId,
+      blockOrder,
+      batch: originalBatchIndex + 1,
+      batchCount: originalBatchCount,
+      cueCount: cues.length,
+      completionTokens: result.usage.completionTokens,
+      maxTokens: BATCH_TRANSLATION_MAX_TOKENS,
+      finishReason: result.finishReason,
+      batchHash: hashCueContent(cues),
+      subdivisionDepth: depth,
+      t: Date.now(),
+    }));
+
+    if (cues.length <= 1) {
+      throw new SubtitleTranslationOutputTruncatedError(
+        blockOrder, originalBatchIndex, cues.length, 'single_cue_truncated',
+        `Block ${blockOrder} batch ${originalBatchIndex + 1}/${originalBatchCount}: a single cue ` +
+        `("${cues[0]?.cueKey}") still hit the output token limit (finish_reason=length) — cannot subdivide further.`
+      );
+    }
+    if (depth >= MAX_BATCH_SUBDIVISION_DEPTH) {
+      throw new SubtitleTranslationOutputTruncatedError(
+        blockOrder, originalBatchIndex, cues.length, 'max_depth_exceeded',
+        `Block ${blockOrder} batch ${originalBatchIndex + 1}/${originalBatchCount}: reached the maximum subdivision ` +
+        `depth (${MAX_BATCH_SUBDIVISION_DEPTH}) with ${cues.length} cues still truncating (finish_reason=length).`
+      );
+    }
+
+    const mid = Math.ceil(cues.length / 2);
+    const firstHalf = cues.slice(0, mid);
+    const secondHalf = cues.slice(mid);
+
+    const firstResults = await translateCueRangeWithAdaptiveSubdivision(
+      firstHalf, precedingCueText, secondHalf[0]?.text, depth + 1, callBudget, ctx,
+    );
+    const secondResults = await translateCueRangeWithAdaptiveSubdivision(
+      secondHalf, firstHalf[firstHalf.length - 1]?.text, followingCueText, depth + 1, callBudget, ctx,
+    );
+    return [...firstResults, ...secondResults];
+  }
+
+  return parseAndMergeTranslatedCues(result.text, cues, blockOrder, originalBatchIndex, originalBatchCount);
+}
+
 /**
  * Translates both blocks' cues, in batches of TRANSLATION_BATCH_SIZE per
  * block. Returns the same RawTranslationResponse shape a single whole-block
  * call used to — validateTranslationDeterministic and everything downstream
- * is unaware batching happens at all. A cue a batch's response omits or
- * returns with an unrecognized cueKey is simply not included in that
- * block's result; the existing missing-cue repair loop in
- * prepareListeningSubtitles (step 8) already re-requests exactly those.
+ * is unaware batching (or adaptive subdivision within a batch) happens at
+ * all. Each top-level batch's AI call happens exactly once per loop
+ * iteration — a later batch failing never re-invokes an earlier, already-
+ * succeeded batch within this same call.
  */
 export async function translateSubtitles(
   blocks: [BlockCueData, BlockCueData],
@@ -649,53 +870,18 @@ export async function translateSubtitles(
       const precedingCueText = i > 0 ? batches[i - 1][batches[i - 1].length - 1]?.text : undefined;
       const followingCueText = i < batches.length - 1 ? batches[i + 1][0]?.text : undefined;
 
-      const userPrompt = buildTranslationBatchUserPrompt({
-        episodeId, title, synopsis, cefrLevel,
-        blockOrder: block.blockOrder, blockTextEn: block.blockTextEn,
-        cues: batch, precedingCueText, followingCueText,
-        batchIndex: i, batchCount: batches.length, glossary,
-      });
+      const batchResults = await translateCueRangeWithAdaptiveSubdivision(
+        batch, precedingCueText, followingCueText, 0,
+        { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+        {
+          episodeId, title, synopsis, cefrLevel,
+          blockOrder: block.blockOrder, blockTextEn: block.blockTextEn,
+          callAI, glossary,
+          originalBatchIndex: i, originalBatchCount: batches.length,
+        },
+      );
 
-      const idempotencyKey = buildBatchTranslationIdempotencyKey(episodeId, block.blockOrder, i, batch);
-      const { text, usage } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, {
-        temperature: 0.2,
-        jsonMode: true,
-        maxTokens: BATCH_TRANSLATION_MAX_TOKENS,
-        timeoutMs: BATCH_TRANSLATION_TIMEOUT_MS,
-        idempotencyKey,
-      });
-
-      console.error(JSON.stringify({
-        event: 'listening_subtitle_token_usage',
-        stage: 'listening_subtitle_translation',
-        provider: 'openai',
-        promptVersion: TRANSLATION_PROMPT_VERSION,
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens,
-        totalTokens: usage.totalTokens,
-        durationMs: usage.durationMs,
-        episodeId,
-        blockOrder: block.blockOrder,
-        batch: i + 1,
-        batchCount: batches.length,
-        cueCount: batch.length,
-        t: Date.now(),
-      }));
-
-      const parsed = extractJson(text);
-      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).cues)) {
-        throw new SubtitleTranslationParseError(
-          `AI translation response contains no valid JSON cues array (block ${block.blockOrder}, batch ${i + 1}/${batches.length})`
-        );
-      }
-
-      const byKey = new Map(batch.map(c => [c.cueKey, c]));
-      for (const raw of (parsed as { cues: Array<Record<string, unknown>> }).cues) {
-        if (typeof raw.cueKey !== 'string' || typeof raw.textPtBr !== 'string' || !raw.textPtBr.trim()) continue;
-        const source = byKey.get(raw.cueKey);
-        if (!source) continue; // ignore any cueKey outside this batch
-        translatedCues.push({ cueKey: raw.cueKey, sourceSentenceKeys: source.sourceSentenceKeys, textPtBr: raw.textPtBr.trim() });
-      }
+      translatedCues.push(...batchResults);
     }
 
     resultBlocks.push({ blockOrder: block.blockOrder, cues: translatedCues });

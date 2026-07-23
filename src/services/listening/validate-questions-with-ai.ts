@@ -14,6 +14,8 @@ export interface AICallResult {
   text: string;
   usage: AIUsage;
   requestId: string | null;
+  /** The provider's stop reason ('stop', 'length', 'content_filter', ...), when the callAI implementation exposes it. 'length' means the response was cut off by a token ceiling — the authoritative signal for truncation, not something to infer from token counts. */
+  finishReason?: string | null;
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   ListeningTranslationCorrectionFailedError,
   ListeningEnglishReconstructionFailedError,
   ListeningTranslationTimeoutError,
+  SubtitleTranslationOutputTruncatedError,
   TRANSLATION_PROMPT_VERSION,
 } from './prepare-listening-subtitles';
 import type { AICallWithUsageFn } from './prepare-listening-subtitles';
@@ -43,6 +44,16 @@ function makeAI(responses: string[]): AICallWithUsageFn {
     const text = responses[callCount] ?? responses[responses.length - 1];
     callCount++;
     return { text, usage: makeUsage(), requestId: null };
+  });
+}
+
+/** Like makeAI, but each entry can also set finishReason — needed to drive the batch-translation output-truncation/adaptive-subdivision path, which only ever reacts to finish_reason, never to response text alone. */
+function makeAIWithFinishReason(responses: Array<{ text: string; finishReason?: string }>): AICallWithUsageFn {
+  let callCount = 0;
+  return vi.fn(async () => {
+    const r = responses[callCount] ?? responses[responses.length - 1];
+    callCount++;
+    return { text: r.text, usage: makeUsage(), requestId: null, finishReason: r.finishReason ?? 'stop' };
   });
 }
 
@@ -140,7 +151,12 @@ interface MockSupabaseOptions {
   noSentencesForBlock2?: boolean;
   blockTextMismatch?: boolean;
   existingCues?: Array<{ language: string; cue_order: number }>;
+  /** Block 1 gets 2 sentences (long enough not to merge into one cue) instead of 1, so its single top-level batch has 2 cues — needed to exercise adaptive subdivision (2 -> 1+1) with both halves succeeding, not just the terminal single-cue-truncation failure. */
+  block1TwoSentences?: boolean;
 }
+
+const BLOCK_1_SENTENCE_A = 'Ana walked slowly through the quiet park near her house today.';
+const BLOCK_1_SENTENCE_B = 'Tom found a small dog resting under the old wooden bridge nearby.';
 
 function makeSupabase(opts: MockSupabaseOptions = {}) {
   const episodeRow = {
@@ -154,7 +170,11 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
     subtitle_prompt_version: opts.subtitlePromptVersion ?? null,
   };
 
-  const block1TextEn = opts.blockTextMismatch ? 'Something entirely different.' : BLOCK_1_TEXT;
+  const block1TextEn = opts.blockTextMismatch
+    ? 'Something entirely different.'
+    : opts.block1TwoSentences
+      ? `${BLOCK_1_SENTENCE_A} ${BLOCK_1_SENTENCE_B}`
+      : BLOCK_1_TEXT;
 
   const blockRows = (() => {
     if (opts.noBlocks) return [];
@@ -165,10 +185,17 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
     ];
   })();
 
+  const block1SentenceRows = opts.block1TwoSentences
+    ? [
+        { block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_SENTENCE_A },
+        { block_id: BLOCK_1_ID, sentence_key: 'b1s02', sentence_order: 2, speaker: null, text_en: BLOCK_1_SENTENCE_B },
+      ]
+    : [{ block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_TEXT }];
+
   const sentenceRows = opts.noSentencesForBlock2
-    ? [{ block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_TEXT }]
+    ? block1SentenceRows
     : [
-        { block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_TEXT },
+        ...block1SentenceRows,
         { block_id: BLOCK_2_ID, sentence_key: 'b2s01', sentence_order: 1, speaker: null, text_en: BLOCK_2_TEXT },
       ];
 
@@ -812,6 +839,78 @@ describe('prepareListeningSubtitles — with database', () => {
     expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
     const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
     expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
+  // Case 38g — the real production scenario after the max_tokens fix
+  // landed (episode 23a7db4d, block 2 batch 2/4 again): the batch call no
+  // longer hangs, but comes back with finish_reason='length' and
+  // completionTokens===max_tokens. With only 1 cue per block in this
+  // fixture, adaptive subdivision has nowhere left to split — it must fail
+  // terminally (single_cue_truncated) rather than loop, and still mark
+  // subtitles_status failed cleanly.
+  it('marks subtitles_status failed (not stuck at processing) and throws SubtitleTranslationOutputTruncatedError when a single-cue batch is still truncated', async () => {
+    const db = makeSupabase();
+    const callAI = makeAIWithFinishReason([{ text: '{"cues": [{"cueKey": "trunc', finishReason: 'length' }]);
+
+    const rejection = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect((rejection as SubtitleTranslationOutputTruncatedError).code).toBe('LISTENING_TRANSLATION_OUTPUT_TRUNCATED');
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
+  // Case 38h — proves adaptive subdivision is fully transparent to the rest
+  // of the pipeline: block 1's single top-level batch (2 cues) truncates
+  // once, splits into two 1-cue calls that both succeed, and the pipeline
+  // proceeds through semantic validation/correction and all the way to
+  // 'ready' exactly as if no truncation had ever happened. Also the only
+  // test in this file with a 2-cue block 1, so it doubles as end-to-end
+  // proof that a successfully-recovered batch never loses/duplicates a cue
+  // on its way into persistence.
+  it('recovers from a truncated batch via subdivision and still reaches ready — semantic validation runs on the fully merged result', async () => {
+    const db = makeSupabase({ block1TwoSentences: true });
+    const callAI = makeAIWithFinishReason([
+      // Block 1's only top-level batch (b1-c001, b1-c002) truncates...
+      { text: '{"cues": [{"cueKey": "trunc', finishReason: 'length' },
+      // ...splits into two 1-cue calls, both succeed.
+      { text: JSON.stringify({ cues: [{ cueKey: 'b1-c001', textPtBr: 'Ana andou devagar pelo parque tranquilo perto de casa hoje.' }] }) },
+      { text: JSON.stringify({ cues: [{ cueKey: 'b1-c002', textPtBr: 'Tom encontrou um cachorro pequeno descansando sob a velha ponte de madeira.' }] }) },
+      // Block 2's single cue, unaffected.
+      { text: JSON.stringify({ cues: [{ cueKey: 'b2-c001', textPtBr: 'O cachorro correu para casa rápido.' }] }) },
+      // Semantic validation for both blocks — must see all 3 cueKeys.
+      {
+        text: JSON.stringify({
+          schemaVersion: '2.0',
+          cues: [
+            { cueKey: 'b1-c001', valid: true, issues: [] },
+            { cueKey: 'b1-c002', valid: true, issues: [] },
+          ],
+        }),
+      },
+      { text: VALIDATOR_SUCCESS_JSON },
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    expect(callAI).toHaveBeenCalledTimes(6);
+
+    // The persisted pt-BR cues for block 1 must contain BOTH of the
+    // recovered sub-batch halves, in order, with the actual translated text
+    // that each half's call returned — no loss, no duplication.
+    type Row = { cue_key: string; language: string; block_id: string; text: string };
+    const ptBlock1Rows = db._insertCalls
+      .flatMap(rows => rows as Row[])
+      .filter(r => r.block_id === BLOCK_1_ID && r.language === 'pt-BR');
+    expect(ptBlock1Rows.map(r => r.cue_key)).toEqual(['b1-c001', 'b1-c002']);
+    expect(ptBlock1Rows.find(r => r.cue_key === 'b1-c001')!.text).toBe('Ana andou devagar pelo parque tranquilo perto de casa hoje.');
+    expect(ptBlock1Rows.find(r => r.cue_key === 'b1-c002')!.text).toBe('Tom encontrou um cachorro pequeno descansando sob a velha ponte de madeira.');
   });
 
   // Case 38
