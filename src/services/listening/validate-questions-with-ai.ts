@@ -16,7 +16,18 @@ export interface AICallResult {
   requestId: string | null;
 }
 
-export type AICallWithUsageFn = (systemPrompt: string, userPrompt: string) => Promise<AICallResult>;
+/**
+ * Optional per-call overrides. Omitted entirely by every existing caller
+ * (question validation, etc.) — a callAI implementation that only reads its
+ * first two parameters remains a valid AICallWithUsageFn either way, so
+ * adding this never requires touching call sites that don't need it.
+ */
+export interface AICallOptions {
+  temperature?: number;
+  jsonMode?: boolean;
+}
+
+export type AICallWithUsageFn = (systemPrompt: string, userPrompt: string, options?: AICallOptions) => Promise<AICallResult>;
 
 export { VALIDATOR_PROMPT_VERSION };
 

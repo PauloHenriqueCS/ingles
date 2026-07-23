@@ -85,7 +85,22 @@ function makeRawTranslation(opts: { block1Cues?: unknown[]; block2Cues?: unknown
   };
 }
 
-const TRANSLATION_SUCCESS_JSON = JSON.stringify(makeRawTranslation());
+// translateSubtitles now calls once per block (each a "batch"), and each
+// call expects/returns the flat {cues:[{cueKey,textPtBr}]} shape (same as
+// the missing-cue-repair response) rather than the old single combined
+// {schemaVersion,episodeId,blocks:[...]} response. Includes both blocks'
+// keys so the same fixture answers whichever block's call is in flight —
+// the extra key for the other block is simply ignored by the caller.
+function makeTranslationBatchResponse(opts: { block1Cues?: unknown[]; block2Cues?: unknown[] } = {}) {
+  return {
+    cues: [
+      ...(opts.block1Cues ?? [{ cueKey: 'b1-c001', textPtBr: 'A raposa ágil sentou.' }]),
+      ...(opts.block2Cues ?? [{ cueKey: 'b2-c001', textPtBr: 'O cachorro correu para casa.' }]),
+    ],
+  };
+}
+
+const TRANSLATION_SUCCESS_JSON = JSON.stringify(makeTranslationBatchResponse());
 
 // Per-cue quality validator schema (v2) — includes both blocks' cue keys so
 // the same fixture answers whichever block is currently being validated;
@@ -535,12 +550,12 @@ describe('prepareListeningSubtitles — with database', () => {
   });
 
   // Case 33
-  it('calls AI translation once then validates each block — 3 total AI calls', async () => {
+  it('calls AI translation once per block (batched) then validates each block — 4 total AI calls', async () => {
     const db = makeSupabase();
-    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON]);
+    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, TRANSLATION_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON]);
     const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
     expect(result.status).toBe('ready');
-    expect(callAI).toHaveBeenCalledTimes(3);
+    expect(callAI).toHaveBeenCalledTimes(4);
   });
 
   // Case 34
@@ -555,8 +570,9 @@ describe('prepareListeningSubtitles — with database', () => {
   // Case 35
   it('makes a targeted correction cycle when block validation fails, then re-validates', async () => {
     const db = makeSupabase();
-    // Translation → validate b1 (fail) → correct b1 (targeted) → re-validate b1 (pass) → validate b2 (pass)
+    // Translate b1, translate b2 → validate b1 (fail) → correct b1 (targeted) → re-validate b1 (pass) → validate b2 (pass)
     const callAI = makeAI([
+      TRANSLATION_SUCCESS_JSON,
       TRANSLATION_SUCCESS_JSON,
       VALIDATOR_FAIL_JSON,
       CORRECTION_RESPONSE_JSON,
@@ -565,7 +581,7 @@ describe('prepareListeningSubtitles — with database', () => {
     ]);
     const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
     expect(result.status).toBe('ready');
-    expect(callAI).toHaveBeenCalledTimes(5);
+    expect(callAI).toHaveBeenCalledTimes(6);
   });
 
   // Case 35b
@@ -573,13 +589,14 @@ describe('prepareListeningSubtitles — with database', () => {
     const db = makeSupabase();
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON,
+      TRANSLATION_SUCCESS_JSON,
       VALIDATOR_FAIL_JSON,
       CORRECTION_RESPONSE_JSON,
       VALIDATOR_SUCCESS_JSON,
       VALIDATOR_SUCCESS_JSON,
     ]);
     await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
-    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[2][1] as string;
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[3][1] as string;
     expect(correctionPrompt).toContain('Meaning not fully preserved.');
     expect(correctionPrompt).toContain('b1-c001');
   });
@@ -588,6 +605,7 @@ describe('prepareListeningSubtitles — with database', () => {
   it('returns ready result after a successful targeted correction cycle', async () => {
     const db = makeSupabase();
     const callAI = makeAI([
+      TRANSLATION_SUCCESS_JSON,
       TRANSLATION_SUCCESS_JSON,
       VALIDATOR_FAIL_JSON,
       CORRECTION_RESPONSE_JSON,
@@ -606,7 +624,7 @@ describe('prepareListeningSubtitles — with database', () => {
     // b1 fails every round; MAX_QUALITY_CORRECTION_ROUNDS = 2, so: validate,
     // correct, validate, correct, validate (still failing) → give up.
     const callAI = makeAI([
-      TRANSLATION_SUCCESS_JSON,
+      TRANSLATION_SUCCESS_JSON, TRANSLATION_SUCCESS_JSON,
       VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
       VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
       VALIDATOR_FAIL_JSON,
@@ -617,7 +635,7 @@ describe('prepareListeningSubtitles — with database', () => {
     expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
     expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
     expect((err as ListeningTranslationCorrectionFailedError).message).toContain('Meaning not fully preserved.');
-    expect(callAI).toHaveBeenCalledTimes(6);
+    expect(callAI).toHaveBeenCalledTimes(7);
   });
 
   // Case 37b
@@ -626,19 +644,23 @@ describe('prepareListeningSubtitles — with database', () => {
     // b1: malformed → retried → pass. b2: pass immediately.
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON,
+      TRANSLATION_SUCCESS_JSON,
       VALIDATOR_MALFORMED_JSON,
       VALIDATOR_SUCCESS_JSON,
       VALIDATOR_SUCCESS_JSON,
     ]);
     const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
     expect(result.status).toBe('ready');
-    expect(callAI).toHaveBeenCalledTimes(4);
+    expect(callAI).toHaveBeenCalledTimes(5);
   });
 
   // Case 37c
   it('throws a distinct validator error (not a correction failure) when every validator attempt is malformed', async () => {
     const db = makeSupabase();
-    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, VALIDATOR_MALFORMED_JSON, VALIDATOR_MALFORMED_JSON]);
+    const callAI = makeAI([
+      TRANSLATION_SUCCESS_JSON, TRANSLATION_SUCCESS_JSON,
+      VALIDATOR_MALFORMED_JSON, VALIDATOR_MALFORMED_JSON,
+    ]);
     const err = await getRejection(
       prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
     );
@@ -649,17 +671,18 @@ describe('prepareListeningSubtitles — with database', () => {
   // Case 38b
   it('repairs a single missing cue by re-translating only that cue, then proceeds without failing the episode', async () => {
     const db = makeSupabase();
-    const partialTranslation = JSON.stringify(makeRawTranslation({
-      block1Cues: [], // block 1's only cue is missing entirely
-    }));
+    // Block 1's batch call omits its only cue; block 2's batch call (the
+    // same fixture reused) still resolves b2-c001 normally.
+    const partialTranslationBlock1 = JSON.stringify(makeTranslationBatchResponse({ block1Cues: [] }));
     const missingCueRepairResponse = JSON.stringify({
       cues: [{ cueKey: 'b1-c001', textPtBr: 'A raposa ágil sentou.' }],
     });
     const callAI = makeAI([
-      partialTranslation,        // 1. initial translation: block 1 cue missing
-      missingCueRepairResponse,  // 2. targeted repair: only the missing cue
-      VALIDATOR_SUCCESS_JSON,    // 3. AI semantic validation block 1
-      VALIDATOR_SUCCESS_JSON,    // 4. AI semantic validation block 2
+      partialTranslationBlock1, // 1. translate block 1: its only cue is missing
+      partialTranslationBlock1, // 2. translate block 2: b2-c001 resolves fine
+      missingCueRepairResponse, // 3. targeted repair: only the missing cue
+      VALIDATOR_SUCCESS_JSON,   // 4. AI semantic validation block 1
+      VALIDATOR_SUCCESS_JSON,   // 5. AI semantic validation block 2
     ]);
 
     const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
@@ -667,26 +690,26 @@ describe('prepareListeningSubtitles — with database', () => {
     expect(result.status).toBe('ready');
     expect(result.englishCueCount).toBe(2);
     expect(result.portugueseCueCount).toBe(2);
-    expect(callAI).toHaveBeenCalledTimes(4);
+    expect(callAI).toHaveBeenCalledTimes(5);
 
     // The repair call must ask for only the missing cue, not the full set.
-    const repairPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
+    const repairPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[2][1] as string;
     expect(repairPrompt).toContain('b1-c001');
   });
 
   // Case 38c
   it('does not repair indefinitely: gives up after the repair round limit and marks the episode failed', async () => {
     const db = makeSupabase();
-    const alwaysPartial = JSON.stringify(makeRawTranslation({ block1Cues: [] }));
+    const alwaysPartialBlock1 = JSON.stringify(makeTranslationBatchResponse({ block1Cues: [] }));
     const repairStillEmpty = JSON.stringify({ cues: [] }); // repair keeps omitting the cue
-    const callAI = makeAI([alwaysPartial, repairStillEmpty, repairStillEmpty, repairStillEmpty]);
+    const callAI = makeAI([alwaysPartialBlock1, alwaysPartialBlock1, repairStillEmpty, repairStillEmpty]);
 
     await expect(
       prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
     ).rejects.toThrow(SubtitleTranslationValidationError);
 
-    // 1 initial translation + 2 bounded repair rounds = 3 calls, never unbounded.
-    expect(callAI).toHaveBeenCalledTimes(3);
+    // 2 initial translation batches (one per block) + 2 bounded repair rounds = 4 calls, never unbounded.
+    expect(callAI).toHaveBeenCalledTimes(4);
   });
 
   // Case 38d
@@ -709,8 +732,8 @@ describe('prepareListeningSubtitles — with database', () => {
   // Case 38e
   it('marks subtitles_status failed (not stuck at processing) when the missing-cue repair AI call itself throws — the exact failure seen live in production', async () => {
     const db = makeSupabase();
-    const alwaysPartial = JSON.stringify(makeRawTranslation({ block1Cues: [] }));
-    const callAI = makeAI([alwaysPartial, 'this is not valid json at all, no braces']);
+    const alwaysPartialBlock1 = JSON.stringify(makeTranslationBatchResponse({ block1Cues: [] }));
+    const callAI = makeAI([alwaysPartialBlock1, alwaysPartialBlock1, 'this is not valid json at all, no braces']);
 
     await expect(
       prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
@@ -725,7 +748,7 @@ describe('prepareListeningSubtitles — with database', () => {
   // Case 38
   it('does not insert subtitle cues when dryRun is true even with a supabase client', async () => {
     const db = makeSupabase();
-    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON]);
+    const callAI = makeAI([TRANSLATION_SUCCESS_JSON, TRANSLATION_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON]);
     const result = await prepareListeningSubtitles(
       { episodeId: EPISODE_ID, dryRun: true },
       callAI,

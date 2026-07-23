@@ -2,6 +2,7 @@ import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type {
   EnglishCueDraft,
   RawTranslationResponse,
+  RawTranslatedBlock,
   RawTranslatedCue,
   CueQualityResult,
   SubtitleQualityValidationResult,
@@ -14,12 +15,28 @@ import {
   CORRECTION_SYSTEM_PROMPT,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
-  buildTranslationUserPrompt,
+  buildTranslationBatchUserPrompt,
   buildValidatorUserPrompt,
   buildCorrectionUserPrompt,
   buildMissingCuesUserPrompt,
 } from './build-subtitle-translation-prompt';
 import type { BlockCueData } from './build-subtitle-translation-prompt';
+
+// Grounded in real data, not a guess: buildEnglishSubtitleCues run against a
+// real generated A1 block (64 story sentences) produced 73 cues. Translating
+// that many tightly-scoped items precisely in a single completion is where
+// real episodes were losing specific cues (a dropped reaction beat, a
+// swapped pronoun) — never total failures, always a handful scattered
+// across a much larger set. Capping batches at 20 keeps each call's cue
+// count small enough to keep per-cue fidelity high while bounding call
+// count to a manageable ~4 calls for a 73-cue block.
+export const TRANSLATION_BATCH_SIZE = 20;
+
+function chunkCues(cues: EnglishCueDraft[], size: number): EnglishCueDraft[][] {
+  const batches: EnglishCueDraft[][] = [];
+  for (let i = 0; i < cues.length; i += size) batches.push(cues.slice(i, i + size));
+  return batches.length > 0 ? batches : [[]];
+}
 
 export { TRANSLATION_PROMPT_VERSION, VALIDATOR_PROMPT_VERSION };
 
@@ -304,7 +321,7 @@ export async function translateMissingCues(
     episodeId, title, synopsis, cefrLevel, missingByBlock: missingByBlockWithText, glossary,
   });
 
-  const { text } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt);
+  const { text } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, { temperature: 0.2, jsonMode: true });
   const parsed = extractJson(text);
   if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).cues)) {
     throw new SubtitleTranslationParseError('AI missing-cue repair response contains no valid JSON cues array');
@@ -499,7 +516,7 @@ export async function correctBlockTranslation(
     failingCues, validCues,
   });
 
-  const { text, usage } = await callAI(CORRECTION_SYSTEM_PROMPT, correctionPrompt);
+  const { text, usage } = await callAI(CORRECTION_SYSTEM_PROMPT, correctionPrompt, { temperature: 0.2, jsonMode: true });
 
   console.error(JSON.stringify({
     event: 'listening_subtitle_token_usage',
@@ -531,6 +548,15 @@ export async function correctBlockTranslation(
 
 // ─── Main translation call ────────────────────────────────────────────────────
 
+/**
+ * Translates both blocks' cues, in batches of TRANSLATION_BATCH_SIZE per
+ * block. Returns the same RawTranslationResponse shape a single whole-block
+ * call used to — validateTranslationDeterministic and everything downstream
+ * is unaware batching happens at all. A cue a batch's response omits or
+ * returns with an unrecognized cueKey is simply not included in that
+ * block's result; the existing missing-cue repair loop in
+ * prepareListeningSubtitles (step 8) already re-requests exactly those.
+ */
 export async function translateSubtitles(
   blocks: [BlockCueData, BlockCueData],
   episodeId: string,
@@ -540,28 +566,65 @@ export async function translateSubtitles(
   callAI: AICallWithUsageFn,
   glossary?: Record<string, string>,
 ): Promise<RawTranslationResponse> {
-  const userPrompt = buildTranslationUserPrompt({
-    episodeId, title, synopsis, cefrLevel, blocks, glossary,
-  });
+  const resultBlocks: RawTranslatedBlock[] = [];
 
-  const { text, usage } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt);
+  for (const block of blocks) {
+    const batches = chunkCues(block.cues, TRANSLATION_BATCH_SIZE);
+    const translatedCues: RawTranslatedCue[] = [];
 
-  console.error(JSON.stringify({
-    event: 'listening_subtitle_token_usage',
-    stage: 'listening_subtitle_translation',
-    provider: 'openai',
-    promptVersion: TRANSLATION_PROMPT_VERSION,
-    promptTokens: usage.promptTokens,
-    completionTokens: usage.completionTokens,
-    totalTokens: usage.totalTokens,
-    durationMs: usage.durationMs,
-    episodeId,
-    t: Date.now(),
-  }));
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const precedingCueText = i > 0 ? batches[i - 1][batches[i - 1].length - 1]?.text : undefined;
+      const followingCueText = i < batches.length - 1 ? batches[i + 1][0]?.text : undefined;
 
-  const parsed = extractJson(text);
-  if (!parsed) {
-    throw new SubtitleTranslationParseError('AI translation response contains no valid JSON');
+      const userPrompt = buildTranslationBatchUserPrompt({
+        episodeId, title, synopsis, cefrLevel,
+        blockOrder: block.blockOrder, blockTextEn: block.blockTextEn,
+        cues: batch, precedingCueText, followingCueText,
+        batchIndex: i, batchCount: batches.length, glossary,
+      });
+
+      const { text, usage } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, { temperature: 0.2, jsonMode: true });
+
+      console.error(JSON.stringify({
+        event: 'listening_subtitle_token_usage',
+        stage: 'listening_subtitle_translation',
+        provider: 'openai',
+        promptVersion: TRANSLATION_PROMPT_VERSION,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        durationMs: usage.durationMs,
+        episodeId,
+        blockOrder: block.blockOrder,
+        batch: i + 1,
+        batchCount: batches.length,
+        cueCount: batch.length,
+        t: Date.now(),
+      }));
+
+      const parsed = extractJson(text);
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).cues)) {
+        throw new SubtitleTranslationParseError(
+          `AI translation response contains no valid JSON cues array (block ${block.blockOrder}, batch ${i + 1}/${batches.length})`
+        );
+      }
+
+      const byKey = new Map(batch.map(c => [c.cueKey, c]));
+      for (const raw of (parsed as { cues: Array<Record<string, unknown>> }).cues) {
+        if (typeof raw.cueKey !== 'string' || typeof raw.textPtBr !== 'string' || !raw.textPtBr.trim()) continue;
+        const source = byKey.get(raw.cueKey);
+        if (!source) continue; // ignore any cueKey outside this batch
+        translatedCues.push({ cueKey: raw.cueKey, sourceSentenceKeys: source.sourceSentenceKeys, textPtBr: raw.textPtBr.trim() });
+      }
+    }
+
+    resultBlocks.push({ blockOrder: block.blockOrder, cues: translatedCues });
   }
-  return parsed as RawTranslationResponse;
+
+  return {
+    schemaVersion: '1.0',
+    episodeId,
+    blocks: resultBlocks,
+  };
 }

@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
-import type { AICallWithUsageFn, AICallResult } from './validate-questions-with-ai';
+import type { AICallWithUsageFn, AICallResult, AICallOptions } from './validate-questions-with-ai';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from '../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric } from '../../../api/_ai-gateway/index';
 import { buildEnglishSubtitleCues } from './build-english-subtitle-cues';
@@ -207,7 +207,7 @@ export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
   let correlationId: string | undefined;
   let physicalAttempt = 0;
 
-  return async (systemPrompt: string, userPrompt: string): Promise<AICallResult> => {
+  return async (systemPrompt: string, userPrompt: string, options?: AICallOptions): Promise<AICallResult> => {
     if (!gatewayDeps) {
       gatewayDeps = getProductionDeps();
       correlationId = gatewayDeps.uuidGen();
@@ -238,6 +238,8 @@ export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
+        ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+        ...(options?.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
       }),
       gatewayDeps,
       extractSubtitleMetrics,

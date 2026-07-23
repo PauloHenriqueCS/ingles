@@ -4,6 +4,8 @@ import {
   findMissingCueKeys,
   mergeRepairedCues,
   translateMissingCues,
+  translateSubtitles,
+  TRANSLATION_BATCH_SIZE,
   validateBlockTranslationWithAI,
   correctBlockTranslation,
   reassertCorrectedCuesDeterministically,
@@ -427,5 +429,109 @@ describe('reassertCorrectedCuesDeterministically', () => {
     const cues = [makeValidatedCue('b1-c001', 'The fox ran.', '')];
     expect(() => reassertCorrectedCuesDeterministically(1, cues))
       .toThrow(SubtitleTranslationValidationError);
+  });
+});
+
+// ── translateSubtitles — batching ──────────────────────────────────────────────
+// Grounded in real data: buildEnglishSubtitleCues run against a real
+// generated A1 block's actual sentences produced 73 cues (see the commit
+// this test was added in for the raw numbers). translateSubtitles now
+// batches each block's cues into calls of TRANSLATION_BATCH_SIZE (20) so no
+// single call has to hold that many cues at once.
+
+function makeBlockCueData(blockOrder: 1 | 2, cueCount: number, textPrefix = 'Sentence'): { blockOrder: 1 | 2; blockTextEn: string; cues: EnglishCueDraft[] } {
+  const cues = Array.from({ length: cueCount }, (_, i) =>
+    makeEnCue(`b${blockOrder}-c${String(i + 1).padStart(3, '0')}`, i + 1, blockOrder, `${textPrefix} ${i + 1}.`));
+  return { blockOrder, blockTextEn: cues.map(c => c.text).join(' '), cues };
+}
+
+function makeBatchAI(responsesPerCall: Array<Record<string, string>>): AICallWithUsageFn {
+  let i = 0;
+  return vi.fn(async () => {
+    const cueMap = responsesPerCall[i] ?? responsesPerCall[responsesPerCall.length - 1];
+    i++;
+    return {
+      text: JSON.stringify({ cues: Object.entries(cueMap).map(([cueKey, textPtBr]) => ({ cueKey, textPtBr })) }),
+      usage: makeUsage(),
+      requestId: null,
+    };
+  });
+}
+
+describe('translateSubtitles — batching', () => {
+  it('a block small enough to fit in one batch is translated in a single call', async () => {
+    const block1 = makeBlockCueData(1, 3);
+    const block2 = makeBlockCueData(2, 2);
+    const callAI = makeBatchAI([
+      { 'b1-c001': 'um', 'b1-c002': 'dois', 'b1-c003': 'três' },
+      { 'b2-c001': 'um', 'b2-c002': 'dois' },
+    ]);
+
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+
+    expect(callAI).toHaveBeenCalledTimes(2); // one call per block
+    expect(result.blocks.find(b => b.blockOrder === 1)!.cues).toHaveLength(3);
+    expect(result.blocks.find(b => b.blockOrder === 2)!.cues).toHaveLength(2);
+  });
+
+  it('a block with more cues than TRANSLATION_BATCH_SIZE is split across multiple calls, merged by cueKey', async () => {
+    const cueCount = TRANSLATION_BATCH_SIZE * 2 + 5; // forces 3 batches
+    const block1 = makeBlockCueData(1, cueCount);
+    const block2 = makeBlockCueData(2, 1);
+
+    const responses: Array<Record<string, string>> = [];
+    for (let start = 0; start < cueCount; start += TRANSLATION_BATCH_SIZE) {
+      const batchMap: Record<string, string> = {};
+      for (let i = start; i < Math.min(start + TRANSLATION_BATCH_SIZE, cueCount); i++) {
+        batchMap[`b1-c${String(i + 1).padStart(3, '0')}`] = `trad${i + 1}`;
+      }
+      responses.push(batchMap);
+    }
+    responses.push({ 'b2-c001': 'trad-b2' });
+
+    const callAI = makeBatchAI(responses);
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+
+    // 3 batches for block1 (20+20+5) + 1 call for block2 = 4 calls.
+    expect(callAI).toHaveBeenCalledTimes(4);
+    const block1Result = result.blocks.find(b => b.blockOrder === 1)!;
+    expect(block1Result.cues).toHaveLength(cueCount);
+    expect(block1Result.cues.map(c => c.cueKey)).toContain('b1-c001');
+    expect(block1Result.cues.map(c => c.cueKey)).toContain(`b1-c${String(cueCount).padStart(3, '0')}`);
+  });
+
+  it('passes low temperature and JSON mode on every translation call', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+
+    await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+
+    for (const call of (callAI as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(call[2]).toEqual({ temperature: 0.2, jsonMode: true });
+    }
+  });
+
+  it('a cue the batch response omits is simply absent from the block result (feeds the existing missing-cue repair loop, not a hard error here)', async () => {
+    const block1 = makeBlockCueData(1, 2);
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeBatchAI([
+      { 'b1-c001': 'um' }, // b1-c002 omitted by the model
+      { 'b2-c001': 'y' },
+    ]);
+
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+    const block1Result = result.blocks.find(b => b.blockOrder === 1)!;
+    expect(block1Result.cues.map(c => c.cueKey)).toEqual(['b1-c001']);
+  });
+
+  it('throws SubtitleTranslationParseError naming the block/batch when a batch response is malformed', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({ text: 'not json', usage: makeUsage(), requestId: null }));
+
+    await expect(
+      translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI)
+    ).rejects.toThrow(/block 1, batch 1/);
   });
 });
