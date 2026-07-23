@@ -197,7 +197,16 @@ function extractSubtitleMetrics(completion: ChatCompletion): GatewayUsageMetric[
 }
 
 export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
-  const client = new OpenAI({ apiKey, timeout: SUBTITLE_TIMEOUT_MS, maxRetries: 0 });
+  // maxRetries: 1 (not 0) — found live: a single validator call occasionally
+  // exceeds SUBTITLE_TIMEOUT_MS (OpenAI API latency spike on a ~6000-token
+  // prompt), and with zero retries that one slow call threw immediately,
+  // discarding every batch/round already completed in this request and
+  // failing the whole preparing_subtitles step with a generic timeout.
+  // The OpenAI SDK's built-in retry (exponential backoff) already covers
+  // exactly this failure mode elsewhere in this codebase (e.g.
+  // generate-listening-story.ts, translate-listening-synopsis.ts) — this
+  // client was the one outlier still at 0.
+  const client = new OpenAI({ apiKey, timeout: SUBTITLE_TIMEOUT_MS, maxRetries: 1 });
   // Lazy: getProductionDeps() (and the Supabase client it constructs) must not
   // run just because this factory was created — only when a physical call is
   // actually about to happen. Callers build this closure via `callAI ??
