@@ -613,13 +613,19 @@ export async function prepareListeningSubtitles(
   // single borderline cue can no longer fail the whole block, and a repair
   // round only ever re-requests the cues actually marked invalid.
   //
-  // 2 rounds (grounded in a real production run): round 1 fixed some cues but
-  // the re-validation surfaced a partly-different failing set (some newly
-  // fixed, some new) rather than converging to zero — consistent with the
-  // per-cue validator call itself having some run-to-run judgment variance,
-  // not just genuine remaining defects. 3 rounds gives a real correction one
-  // more chance to outlast that noise before the episode is failed outright.
-  const MAX_QUALITY_CORRECTION_ROUNDS = 3;
+  // 2 rounds. This was briefly raised to 3 on the theory that one more
+  // round would let a genuine correction outlast validator judgment noise —
+  // reverted after two consecutive real production runs: raising it did not
+  // reduce how often a block still had failing cues after its last round
+  // (the same cue, e.g. one stuck on a specific phrase, can survive 3
+  // rounds just as it survived 2), but it reliably added ~25s/round of
+  // validator+correction latency across up to 2 blocks, and both runs then
+  // hit this route's ~255s effective request budget (vercel.json
+  // maxDuration=300) and failed on a timeout instead of a normal, fast,
+  // immediately-retryable LISTENING_TRANSLATION_CORRECTION_FAILED. A slow
+  // failure is strictly worse than a fast one here, since both are
+  // equally retryable.
+  const MAX_QUALITY_CORRECTION_ROUNDS = 2;
   for (const blockOrder of [1, 2] as const) {
     let blockCues = translatedCues.get(blockOrder)!;
     const blockTextEn = blockTextEnByOrder.get(blockOrder) ?? '';
