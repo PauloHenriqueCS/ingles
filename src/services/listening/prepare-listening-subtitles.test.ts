@@ -17,6 +17,7 @@ import {
   ListeningSubtitlesAlreadyExistError,
   ListeningTranslationCorrectionFailedError,
   ListeningEnglishReconstructionFailedError,
+  ListeningTranslationTimeoutError,
   TRANSLATION_PROMPT_VERSION,
 } from './prepare-listening-subtitles';
 import type { AICallWithUsageFn } from './prepare-listening-subtitles';
@@ -785,6 +786,27 @@ describe('prepareListeningSubtitles — with database', () => {
     await expect(
       prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
     ).rejects.toThrow();
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
+  // Case 38f — the exact real-production scenario this fix targets (episode
+  // 23a7db4d, block 2 batch 2/4: the batch-translation call hung, and both
+  // the client's own 45s timeout and its one retry were exhausted).
+  it('marks subtitles_status failed (not stuck at processing) and throws ListeningTranslationTimeoutError when the batch-translation call times out', async () => {
+    const db = makeSupabase();
+    const timeoutError = new Error('Request timed out.');
+    timeoutError.name = 'AbortError';
+    const callAI = vi.fn(async () => { throw timeoutError; }) as unknown as AICallWithUsageFn;
+
+    const rejection = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+
+    expect(rejection).toBeInstanceOf(ListeningTranslationTimeoutError);
 
     const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
     expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);

@@ -25,6 +25,12 @@ export interface AICallResult {
 export interface AICallOptions {
   temperature?: number;
   jsonMode?: boolean;
+  /** Caps the provider's response length for this call only (request body param). */
+  maxTokens?: number;
+  /** Overrides the client's default request timeout for this call only. */
+  timeoutMs?: number;
+  /** Deterministic identity for this exact operation, forwarded to the AI Gateway's dedupe/reservation layer. Never derived from attempt count, timestamp, or userId. */
+  idempotencyKey?: string;
 }
 
 export type AICallWithUsageFn = (systemPrompt: string, userPrompt: string, options?: AICallOptions) => Promise<AICallResult>;

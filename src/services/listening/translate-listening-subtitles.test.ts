@@ -11,6 +11,9 @@ import {
   reassertCorrectedCuesDeterministically,
   SubtitleTranslationValidationError,
   SubtitleQualityValidatorMalformedResponseError,
+  SubtitleTranslationParseError,
+  BATCH_TRANSLATION_MAX_TOKENS,
+  BATCH_TRANSLATION_TIMEOUT_MS,
 } from './translate-listening-subtitles';
 import type { EnglishCueDraft, RawTranslationResponse, ValidatedTranslatedCue, SubtitleQualityValidationResult } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
@@ -359,6 +362,17 @@ describe('validateBlockTranslationWithAI', () => {
       validateBlockTranslationWithAI(1, 'The fox ran fast.', cues, 'A1', 'ep1', callAI)
     ).rejects.toThrow(SubtitleQualityValidatorMalformedResponseError);
   });
+
+  it('does NOT pass maxTokens/timeoutMs — the block-2-batch-2 hang fix is scoped to batch translation only, not the validator', async () => {
+    const callAI = makeQualityAI([JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }],
+    })]);
+    await validateBlockTranslationWithAI(1, 'The fox ran fast.', cues, 'A1', 'ep1', callAI);
+
+    const call = (callAI as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[2]).toBeUndefined();
+  });
 });
 
 describe('correctBlockTranslation', () => {
@@ -410,6 +424,22 @@ describe('correctBlockTranslation', () => {
     const result = await correctBlockTranslation(1, 'text', cues, validation, 'A1', 'ep1', callAI);
     expect(result.map(c => c.cueKey)).toEqual(['b1-c001', 'b1-c002', 'b1-c003']);
     expect(result.map(c => c.textPtBr)).toEqual(['A.', 'B corrigido.', 'C.']);
+  });
+
+  it('does NOT pass maxTokens/timeoutMs — the block-2-batch-2 hang fix is scoped to batch translation only, not correction', async () => {
+    const cues = [makeValidatedCue('b1-c001', 'The fox ran fast.', 'A raposa correu rápido.')];
+    const validation: SubtitleQualityValidationResult = {
+      schemaVersion: '2.0', overallValid: false,
+      cueResults: [{ cueKey: 'b1-c001', valid: false, issues: ['Loses the emphasis on speed.'] }],
+    };
+    const callAI = vi.fn(async () => ({
+      text: JSON.stringify({ 'b1-c001': 'A raposa correu MUITO rápido.' }), usage: makeUsage(), requestId: null,
+    }));
+
+    await correctBlockTranslation(1, 'Full block text.', cues, validation, 'A1', 'ep1', callAI);
+
+    const call = (callAI as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[2]).toEqual({ temperature: 0.2, jsonMode: true });
   });
 });
 
@@ -516,7 +546,7 @@ describe('translateSubtitles — batching', () => {
     expect(block1Result.cues.map(c => c.cueKey)).toContain(`b1-c${String(cueCount).padStart(3, '0')}`);
   });
 
-  it('passes low temperature and JSON mode on every translation call', async () => {
+  it('passes low temperature, JSON mode, a bounded max_tokens, and a 45s timeout on every translation call', async () => {
     const block1 = makeBlockCueData(1, 1);
     const block2 = makeBlockCueData(2, 1);
     const callAI = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
@@ -524,8 +554,99 @@ describe('translateSubtitles — batching', () => {
     await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
 
     for (const call of (callAI as ReturnType<typeof vi.fn>).mock.calls) {
-      expect(call[2]).toEqual({ temperature: 0.2, jsonMode: true });
+      expect(call[2]).toMatchObject({
+        temperature: 0.2,
+        jsonMode: true,
+        maxTokens: BATCH_TRANSLATION_MAX_TOKENS,
+        timeoutMs: BATCH_TRANSLATION_TIMEOUT_MS,
+      });
+      expect(typeof call[2].idempotencyKey).toBe('string');
+      expect(call[2].idempotencyKey.length).toBeGreaterThan(0);
     }
+  });
+
+  it('BATCH_TRANSLATION_MAX_TOKENS/BATCH_TRANSLATION_TIMEOUT_MS have the values found live to fix the block-2-batch-2 hang (1800 tokens, 45s)', () => {
+    // Pins the exact constants so a future edit can't silently drift them
+    // back toward "no cap" / the shared 120s timeout without a deliberate
+    // change to this test.
+    expect(BATCH_TRANSLATION_MAX_TOKENS).toBe(1800);
+    expect(BATCH_TRANSLATION_TIMEOUT_MS).toBe(45_000);
+  });
+
+  it('the same batch (same episode/block/position/content) produces the same idempotencyKey across independent calls', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+
+    const callAI1 = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+    await translateSubtitles([block1, block2], 'ep-same', 'Title', null, 'A1', callAI1);
+    const key1 = (callAI1 as ReturnType<typeof vi.fn>).mock.calls[0][2].idempotencyKey;
+
+    const callAI2 = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+    await translateSubtitles([block1, block2], 'ep-same', 'Title', null, 'A1', callAI2);
+    const key2 = (callAI2 as ReturnType<typeof vi.fn>).mock.calls[0][2].idempotencyKey;
+
+    expect(key1).toBe(key2);
+  });
+
+  it('a different batch position (block 1 vs block 2) produces a different idempotencyKey', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+
+    await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+    const calls = (callAI as ReturnType<typeof vi.fn>).mock.calls;
+
+    expect(calls[0][2].idempotencyKey).not.toBe(calls[1][2].idempotencyKey);
+  });
+
+  it('the same batch position with different cue content produces a different idempotencyKey', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1, 'Other');
+    const callAI = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+
+    await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+    const calls = (callAI as ReturnType<typeof vi.fn>).mock.calls;
+    const block1Key = calls[0][2].idempotencyKey;
+
+    // Re-run with the same episode/block/position but different source text.
+    const block1Changed = makeBlockCueData(1, 1, 'Different');
+    const callAI2 = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+    await translateSubtitles([block1Changed, block2], 'ep1', 'Title', null, 'A1', callAI2);
+    const block1KeyChanged = (callAI2 as ReturnType<typeof vi.fn>).mock.calls[0][2].idempotencyKey;
+
+    expect(block1Key).not.toBe(block1KeyChanged);
+  });
+
+  it('never includes attempt/timestamp/user identity in the idempotencyKey (calling twice does not shift it)', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+
+    await translateSubtitles([block1, block2], 'ep-retry', 'Title', null, 'A1', callAI);
+    const firstAttemptKey = (callAI as ReturnType<typeof vi.fn>).mock.calls[0][2].idempotencyKey;
+
+    // Simulate a retry: identical inputs, later wall-clock time.
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const callAIRetry = makeBatchAI([{ 'b1-c001': 'x' }, { 'b2-c001': 'y' }]);
+    await translateSubtitles([block1, block2], 'ep-retry', 'Title', null, 'A1', callAIRetry);
+    const retryKey = (callAIRetry as ReturnType<typeof vi.fn>).mock.calls[0][2].idempotencyKey;
+
+    expect(retryKey).toBe(firstAttemptKey);
+  });
+
+  it('a truncated (cut-off mid-object) JSON response throws SubtitleTranslationParseError', async () => {
+    const block1 = makeBlockCueData(1, 1);
+    const block2 = makeBlockCueData(2, 1);
+    // No closing brace — simulates a response cut short by a token ceiling.
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: '{"cues": [{"cueKey": "b1-c001", "textPtBr": "ol',
+      usage: makeUsage(),
+      requestId: null,
+    }));
+
+    await expect(
+      translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI)
+    ).rejects.toThrow(SubtitleTranslationParseError);
   });
 
   it('a cue the batch response omits is simply absent from the block result (feeds the existing missing-cue repair loop, not a hard error here)', async () => {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type {
   EnglishCueDraft,
@@ -32,10 +33,44 @@ import type { BlockCueData } from './build-subtitle-translation-prompt';
 // count to a manageable ~4 calls for a 73-cue block.
 export const TRANSLATION_BATCH_SIZE = 20;
 
+// Found live (episode 23a7db4d, block 2 batch 2/4): two independent attempts,
+// hours apart, both hung for ~241s (SUBTITLE_TIMEOUT_MS + its one retry) on
+// the exact same batch — content/size were statistically identical to 3
+// sibling batches that completed normally in 8-12s each, and the request
+// never even had max_tokens set, so nothing forced a runaway/degenerate
+// completion to cut short. 1800 is generous above the ~650-725 completion
+// tokens observed for a 20-cue batch. 45s is generous above the 8-12s every
+// successful batch call actually took — a genuine hang now fails fast
+// instead of eating up to 240s. Scoped to this call site only: the validator
+// and correction calls (different content/size profile, no live evidence of
+// this failure mode) keep the client's default SUBTITLE_TIMEOUT_MS and no
+// max_tokens cap.
+export const BATCH_TRANSLATION_MAX_TOKENS = 1800;
+export const BATCH_TRANSLATION_TIMEOUT_MS = 45_000;
+
 function chunkCues(cues: EnglishCueDraft[], size: number): EnglishCueDraft[][] {
   const batches: EnglishCueDraft[][] = [];
   for (let i = 0; i < cues.length; i += size) batches.push(cues.slice(i, i + size));
   return batches.length > 0 ? batches : [[]];
+}
+
+/**
+ * Deterministic identity for one batch-translation call: same episode,
+ * block, batch position, and exact cue content (cueKey+text) always
+ * produces the same key, so the AI Gateway's dedupe/reservation layer can
+ * recognize a retry of the same operation as the same operation. Deliberately
+ * excludes attempt number, timestamp, and userId — those would make every
+ * retry look like a brand-new operation, defeating the point.
+ */
+function buildBatchTranslationIdempotencyKey(
+  episodeId: string,
+  blockOrder: 1 | 2,
+  batchIndex: number,
+  cues: EnglishCueDraft[],
+): string {
+  const contentDigest = cues.map(c => `${c.cueKey}:${c.text}`).join('␟');
+  const hash = createHash('sha256').update(contentDigest, 'utf8').digest('hex').slice(0, 16);
+  return `listening-subtitle-translate:${episodeId}:b${blockOrder}:batch${batchIndex}:${TRANSLATION_PROMPT_VERSION}:${hash}`;
 }
 
 export { TRANSLATION_PROMPT_VERSION, VALIDATOR_PROMPT_VERSION };
@@ -621,7 +656,14 @@ export async function translateSubtitles(
         batchIndex: i, batchCount: batches.length, glossary,
       });
 
-      const { text, usage } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, { temperature: 0.2, jsonMode: true });
+      const idempotencyKey = buildBatchTranslationIdempotencyKey(episodeId, block.blockOrder, i, batch);
+      const { text, usage } = await callAI(TRANSLATION_SYSTEM_PROMPT, userPrompt, {
+        temperature: 0.2,
+        jsonMode: true,
+        maxTokens: BATCH_TRANSLATION_MAX_TOKENS,
+        timeoutMs: BATCH_TRANSLATION_TIMEOUT_MS,
+        idempotencyKey,
+      });
 
       console.error(JSON.stringify({
         event: 'listening_subtitle_token_usage',

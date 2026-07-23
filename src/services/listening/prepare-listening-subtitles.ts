@@ -240,16 +240,25 @@ export function createSubtitleAICallFn(apiKey: string): AICallWithUsageFn {
           physicalAttempt,
         },
         estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
+        idempotencyKey: options?.idempotencyKey,
       },
-      () => client.chat.completions.create({
-        model: AI_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
-        ...(options?.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
-      }),
+      () => client.chat.completions.create(
+        {
+          model: AI_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options?.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
+          ...(options?.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+        },
+        // Per-call override only — omitted entirely (falls back to the
+        // client's own SUBTITLE_TIMEOUT_MS) for every caller that doesn't
+        // pass timeoutMs, i.e. the validator and correction call sites are
+        // untouched.
+        options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined,
+      ),
       gatewayDeps,
       extractSubtitleMetrics,
     );
