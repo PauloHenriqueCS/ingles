@@ -5,19 +5,13 @@ import { resolveUserListeningLevel } from './resolve-user-listening-level';
 import { selectListeningEpisodeForUser } from './select-listening-episode-for-user';
 import { getOrCreateListeningAssignment } from './get-or-create-listening-assignment';
 import { updateListeningAssignmentStatus } from './update-listening-assignment-status';
-import { levelGroupForCefr } from '../listening-level-group';
-import { getOrCreateListeningGroupJob } from '../group-generation/get-or-create-listening-group-job';
 import type { TodayListeningResponse } from './listening-daily-types';
 
 export async function getListeningToday(
   supabase: SupabaseClient,
   userId: string,
-  /** Service-role client — required only on the branch that touches the
-   *  shared, service-role-only listening_generation_jobs table (see
-   *  supabase/migrations/20260722100000_create_listening_generation_jobs.sql).
-   *  The rest of this function keeps using the caller's RLS-scoped `supabase`
-   *  for the user's own assignment rows, same as before. */
-  serviceClient: SupabaseClient,
+  /** Unused by this function — kept so the call site (api/listening/[...slug].ts) doesn't need to change. */
+  _serviceClient: SupabaseClient,
 ): Promise<TodayListeningResponse> {
   const activityDate = resolveListeningActivityDate();
 
@@ -58,44 +52,10 @@ export async function getListeningToday(
       .filter((id: string | null): id is string => !!id);
     const cefrLevel = await resolveUserListeningLevel(supabase, userId);
     const selectedId = await selectListeningEpisodeForUser(supabase, userId, cefrLevel, excludeEpisodeIds);
-
-    let resolvedEpisodeId: string;
-    if (selectedId) {
-      resolvedEpisodeId = selectedId;
-    } else {
-      // No reusable published episode at this user's level: fall back to the
-      // shared level-group generation pipeline instead of generating
-      // per-user content — see src/services/listening/group-generation.
-      // getOrCreateListeningGroupJob is idempotent: it reuses any already-
-      // active job or already-published story for the group rather than
-      // starting a second concurrent OpenAI/Azure pipeline.
-      const levelGroup = levelGroupForCefr(cefrLevel);
-      const groupResult = await getOrCreateListeningGroupJob(serviceClient, levelGroup);
-
-      if (groupResult.kind !== 'reused') {
-        const job = groupResult.job;
-        return {
-          status: 'group_generating',
-          levelGroup,
-          targetLevel: job.targetLevel,
-          groupJob: {
-            jobId: job.id,
-            status: job.status,
-            currentStep: job.currentStep,
-            progressPercent: job.progressPercent,
-            attempts: job.attempts,
-            maxAttempts: job.maxAttempts,
-            errorCode: job.errorCode,
-            errorMessage: job.errorMessage,
-            retryable: job.retryable,
-          },
-        };
-      }
-      resolvedEpisodeId = groupResult.episodeId;
-    }
+    if (!selectedId) return { status: 'empty_inventory' };
 
     const { assignment } = await getOrCreateListeningAssignment(supabase, {
-      userId, episodeId: resolvedEpisodeId, activityDate,
+      userId, episodeId: selectedId, activityDate,
     });
     assignmentId  = assignment.id;
     episodeId     = assignment.episodeId;
