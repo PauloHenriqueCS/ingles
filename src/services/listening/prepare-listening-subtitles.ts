@@ -372,49 +372,61 @@ export async function prepareListeningSubtitles(
       .update({ subtitles_status: 'processing' })
       .eq('id', episodeId);
 
-    // 4. Load blocks
-    const { data: blocksData, error: blocksErr } = await supabase
-      .from('listening_blocks')
-      .select('id, block_order, text_en')
-      .eq('episode_id', episodeId)
-      .order('block_order');
+    // Steps 4-6 (load blocks/sentences, build+validate English cues) can
+    // each throw. Any of them leaving subtitles_status stuck at
+    // 'processing' would make a plain retry impossible (blocked by the
+    // idempotency guard above as LISTENING_SUBTITLES_ALREADY_EXIST) without
+    // forceRegeneration=true — the exact partial-state trap this whole
+    // function is meant to avoid. Mark failed on any error here, same as
+    // every later failure path in this function already does.
+    try {
+      // 4. Load blocks
+      const { data: blocksData, error: blocksErr } = await supabase
+        .from('listening_blocks')
+        .select('id, block_order, text_en')
+        .eq('episode_id', episodeId)
+        .order('block_order');
 
-    if (blocksErr || !blocksData || blocksData.length !== 2) {
-      throw new ListeningMissingBlocksError(episodeId, blocksData?.length ?? 0);
-    }
-    const blocks = blocksData as BlockRow[];
-    for (const b of blocks) blockIdByOrder.set(b.block_order, b.id);
-
-    // 5. Load sentences
-    const blockIds = blocks.map(b => b.id);
-    const { data: sentData, error: sentErr } = await supabase
-      .from('listening_sentences')
-      .select('block_id, sentence_key, sentence_order, speaker, text_en')
-      .in('block_id', blockIds)
-      .order('sentence_order');
-
-    if (sentErr) throw new Error(`Failed to load sentences: ${sentErr.message}`);
-    const sentences = (sentData ?? []) as SentenceRow[];
-
-    // 6. Build English cues per block
-    const cefrLevel = episode.cefr_level as CEFRLevel;
-    for (const b of blocks) {
-      const blockOrder = b.block_order as 1 | 2;
-      const blockSentences: CanonicalSentence[] = sentences
-        .filter(s => s.block_id === b.id)
-        .sort((a, c) => a.sentence_order - c.sentence_order)
-        .map(s => ({ sentenceKey: s.sentence_key, sentenceOrder: s.sentence_order, speaker: s.speaker, textEn: s.text_en }));
-
-      if (blockSentences.length === 0) throw new ListeningMissingSentencesError(episodeId, blockOrder);
-
-      try {
-        const enCues = buildEnglishSubtitleCues(blockSentences, blockOrder, cefrLevel);
-        validateEnglishReconstruction(b.text_en, enCues);
-        englishCuesByBlock.set(blockOrder, enCues);
-        blockTextEnByOrder.set(blockOrder, b.text_en);
-      } catch (err) {
-        throw new ListeningEnglishReconstructionFailedError(episodeId, blockOrder, String(err));
+      if (blocksErr || !blocksData || blocksData.length !== 2) {
+        throw new ListeningMissingBlocksError(episodeId, blocksData?.length ?? 0);
       }
+      const blocks = blocksData as BlockRow[];
+      for (const b of blocks) blockIdByOrder.set(b.block_order, b.id);
+
+      // 5. Load sentences
+      const blockIds = blocks.map(b => b.id);
+      const { data: sentData, error: sentErr } = await supabase
+        .from('listening_sentences')
+        .select('block_id, sentence_key, sentence_order, speaker, text_en')
+        .in('block_id', blockIds)
+        .order('sentence_order');
+
+      if (sentErr) throw new Error(`Failed to load sentences: ${sentErr.message}`);
+      const sentences = (sentData ?? []) as SentenceRow[];
+
+      // 6. Build English cues per block
+      const cefrLevel = episode.cefr_level as CEFRLevel;
+      for (const b of blocks) {
+        const blockOrder = b.block_order as 1 | 2;
+        const blockSentences: CanonicalSentence[] = sentences
+          .filter(s => s.block_id === b.id)
+          .sort((a, c) => a.sentence_order - c.sentence_order)
+          .map(s => ({ sentenceKey: s.sentence_key, sentenceOrder: s.sentence_order, speaker: s.speaker, textEn: s.text_en }));
+
+        if (blockSentences.length === 0) throw new ListeningMissingSentencesError(episodeId, blockOrder);
+
+        try {
+          const enCues = buildEnglishSubtitleCues(blockSentences, blockOrder, cefrLevel);
+          validateEnglishReconstruction(b.text_en, enCues);
+          englishCuesByBlock.set(blockOrder, enCues);
+          blockTextEnByOrder.set(blockOrder, b.text_en);
+        } catch (err) {
+          throw new ListeningEnglishReconstructionFailedError(episodeId, blockOrder, String(err));
+        }
+      }
+    } catch (err) {
+      await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+      throw err;
     }
   }
 
@@ -507,6 +519,16 @@ export async function prepareListeningSubtitles(
       aiCallFn,
     );
   } catch (err) {
+    // Mark failed before rethrowing — episode.subtitles_status was set to
+    // 'processing' in step 3, above. Without this, any error here (timeout,
+    // provider error, malformed JSON) left it stuck at 'processing' forever,
+    // which the idempotency guard in step "2. Idempotency check" reads as
+    // "already in progress" and refuses to retry
+    // (LISTENING_SUBTITLES_ALREADY_EXIST) without forceRegeneration=true —
+    // a partial state a plain retry could never recover from on its own.
+    if (supabase && !dryRun) {
+      await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+    }
     if (isTimeoutError(err)) throw new ListeningTranslationTimeoutError(episodeId);
     if (!(err instanceof SubtitleTranslationParseError)) {
       throw new ListeningTranslationProviderError(episodeId, `Translation AI call failed: ${String(err)}`);

@@ -157,6 +157,7 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
       ];
 
   const insertCalls: unknown[] = [];
+  const updateCalls: Array<{ table: string; data: unknown }> = [];
 
   const from = vi.fn((table: string) => ({
     select: (_fields: string) => ({
@@ -189,12 +190,13 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
       in: async () => ({ error: null }),
       eq: async () => ({ error: null }),
     }),
-    update: (_data: unknown) => ({
-      eq: async () => ({ error: null }),
-    }),
+    update: (data: unknown) => {
+      updateCalls.push({ table, data });
+      return { eq: async () => ({ error: null }) };
+    },
   }));
 
-  return { from, _insertCalls: insertCalls };
+  return { from, _insertCalls: insertCalls, _updateCalls: updateCalls };
 }
 
 type MockSupabaseClient = ReturnType<typeof makeSupabase>;
@@ -491,6 +493,18 @@ describe('prepareListeningSubtitles — with database', () => {
     ).rejects.toThrow(ListeningMissingSentencesError);
   });
 
+  // Case 30b
+  it('marks subtitles_status failed (not stuck at processing) when loading blocks/sentences/cues fails', async () => {
+    const db = makeSupabase({ noSentencesForBlock2: true });
+    await expect(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, vi.fn(), asSupabase(db))
+    ).rejects.toThrow(ListeningMissingSentencesError);
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
   // Case 31
   it('returns existing cue counts when subtitles are already ready at the same prompt version', async () => {
     const existingCues = [
@@ -673,6 +687,23 @@ describe('prepareListeningSubtitles — with database', () => {
 
     // 1 initial translation + 2 bounded repair rounds = 3 calls, never unbounded.
     expect(callAI).toHaveBeenCalledTimes(3);
+  });
+
+  // Case 38d
+  it('marks subtitles_status failed (not stuck at processing) when the translation AI call itself throws', async () => {
+    const db = makeSupabase();
+    const callAI = makeAI(['this is not valid json at all, no braces']);
+
+    await expect(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    ).rejects.toThrow();
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    // The critical assertion: a retry must not find the episode stuck at
+    // 'processing' (which would block it with LISTENING_SUBTITLES_ALREADY_EXIST).
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
   });
 
   // Case 38
