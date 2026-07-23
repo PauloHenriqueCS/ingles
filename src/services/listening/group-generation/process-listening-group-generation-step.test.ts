@@ -19,7 +19,11 @@ const {
 vi.mock('../generate-listening-story', () => ({
   generateListeningStory: mockGenerateListeningStory,
   createDefaultAICallFn: vi.fn(() => vi.fn()),
-  buildIdempotencyKey: vi.fn((opts: { cefrLevel: string }) => `${opts.cefrLevel}|||listening-story-v2|1`),
+  // Mirrors the real join logic (cefrLevel|theme|seed|version|contentVersion)
+  // closely enough for tests to observe that different seeds (job ids)
+  // produce different keys, and the same seed always produces the same one.
+  buildIdempotencyKey: vi.fn((opts: { cefrLevel: string; theme?: string | null; seed?: string | null }) =>
+    `${opts.cefrLevel}|${opts.theme ?? ''}|${opts.seed ?? ''}|listening-story-v2|1`),
 }));
 vi.mock('../persist-listening-story', () => ({
   findListeningEpisodeByGenerationKey: mockFindListeningEpisodeByGenerationKey,
@@ -321,6 +325,87 @@ describe('processListeningGroupGenerationStep — generating_block_1 get-or-crea
     const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
     expect(result.status).toBe('validating_block_1');
     expect(mockGenerateListeningStory).not.toHaveBeenCalled();
+  });
+});
+
+describe('processListeningGroupGenerationStep — generation_key is scoped to the job (not the whole CEFR level)', () => {
+  const OTHER_JOB_ID = 'bbbbbbbb-0000-0000-0000-000000000002';
+
+  it('retries of the same job resolve to the same generation_key', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null);
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+
+    const supabase1 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase1);
+    const key1 = mockFindListeningEpisodeByGenerationKey.mock.calls[0][1];
+
+    const supabase2 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase2);
+    const key2 = mockFindListeningEpisodeByGenerationKey.mock.calls[1][1];
+
+    expect(key1).toBe(key2);
+  });
+
+  it('two different jobs for the same CEFR level compute two different generation_keys', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null);
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+
+    const supabase1 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase1);
+    const key1 = mockFindListeningEpisodeByGenerationKey.mock.calls[0][1];
+
+    const supabase2 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    await processListeningGroupGenerationStep(OTHER_JOB_ID, WORKER_ID, supabase2);
+    const key2 = mockFindListeningEpisodeByGenerationKey.mock.calls[1][1];
+
+    expect(key1).not.toBe(key2);
+  });
+
+  it('passes the job id as the seed into generateListeningStory itself, not just the pre-check', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null);
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+
+    await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockGenerateListeningStory).toHaveBeenCalledWith(
+      expect.objectContaining({ cefrLevel: 'A1', seed: JOB_ID }),
+      expect.anything(),
+      supabase,
+    );
+  });
+
+  it('two legitimate A1 generations (two different jobs) can each persist their own episode without colliding', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue(null); // neither job's key has been used before
+    mockGenerateListeningStory
+      .mockResolvedValueOnce({ story: {}, episodeId: 'episode-from-job-1', idempotencyKey: 'k1' })
+      .mockResolvedValueOnce({ story: {}, episodeId: 'episode-from-job-2', idempotencyKey: 'k2' });
+
+    const supabase1 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    const first = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase1);
+
+    const supabase2 = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+    const second = await processListeningGroupGenerationStep(OTHER_JOB_ID, WORKER_ID, supabase2);
+
+    expect(first.episodeId).toBe('episode-from-job-1');
+    expect(second.episodeId).toBe('episode-from-job-2');
+    expect(first.episodeId).not.toBe(second.episodeId);
+  });
+});
+
+describe('processListeningGroupGenerationStep — a rejected episode is never reused', () => {
+  it('does not reuse an episode whose status is failed (rejected) even if its generation_key is found — generates fresh content instead', async () => {
+    mockFindListeningEpisodeByGenerationKey.mockResolvedValue({
+      id: 'rejected-episode-id', status: 'failed', cefrLevel: 'A1',
+    });
+    mockGenerateListeningStory.mockResolvedValue({ story: {}, episodeId: EPISODE_ID, idempotencyKey: 'k' });
+    const supabase = makeGroupSupabase({ status: 'generating_block_1', targetLevel: 'A1', episodeId: null });
+
+    const result = await processListeningGroupGenerationStep(JOB_ID, WORKER_ID, supabase);
+
+    expect(mockGenerateListeningStory).toHaveBeenCalledTimes(1);
+    expect(result.episodeId).toBe(EPISODE_ID);
+    expect(result.episodeId).not.toBe('rejected-episode-id');
   });
 });
 

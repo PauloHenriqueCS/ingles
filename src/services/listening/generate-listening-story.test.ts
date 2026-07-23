@@ -785,4 +785,29 @@ describe('buildIdempotencyKey', () => {
     const k = buildIdempotencyKey({ cefrLevel: 'A1' });
     expect(k).toContain('listening-story-v2');
   });
+
+  // The group-generation pipeline never sets theme, and uses the
+  // generating job's own id as the seed — these two cases are what make
+  // that scheme work: same job (same seed) always dedupes to the same key
+  // across retries, and a different job (different seed) never collides
+  // with it, so the whole CEFR level isn't permanently pinned to one story.
+  it('same seed (same job id, retried) produces the same key with no theme', () => {
+    const jobId = 'job-aaaa-1111';
+    const k1 = buildIdempotencyKey({ cefrLevel: 'A1', seed: jobId });
+    const k2 = buildIdempotencyKey({ cefrLevel: 'A1', seed: jobId });
+    expect(k1).toBe(k2);
+  });
+
+  it('different seeds (different job ids) for the same level produce different keys', () => {
+    const k1 = buildIdempotencyKey({ cefrLevel: 'A1', seed: 'job-aaaa-1111' });
+    const k2 = buildIdempotencyKey({ cefrLevel: 'A1', seed: 'job-bbbb-2222' });
+    expect(k1).not.toBe(k2);
+  });
+
+  it('with no seed and no theme, the key collapses to just the level (the pre-fix group-pipeline bug, kept as a regression marker)', () => {
+    const k1 = buildIdempotencyKey({ cefrLevel: 'A1' });
+    const k2 = buildIdempotencyKey({ cefrLevel: 'A1' });
+    expect(k1).toBe(k2);
+    expect(k1).toBe('A1|||listening-story-v2|1');
+  });
 });

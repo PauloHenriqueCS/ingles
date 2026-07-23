@@ -170,13 +170,20 @@ async function stepGeneratingBlock1(
   job: { target_level: string; episode_id: string | null },
 ): Promise<void> {
   const cefrLevel = job.target_level as CEFRLevel;
-  const idempotencyKey = buildIdempotencyKey({ cefrLevel });
+  // The seed is this job's own id — stable across every retry of THIS job
+  // (so retries always resolve to the same generation_key and reuse/dedupe
+  // correctly), but unique per job (so a future job generating another A1
+  // story gets its own key and its own episode, instead of every A1
+  // generation ever resolving to the single oldest one forever). Group jobs
+  // never set theme, so without a seed the key was just "A1|||v2|1" for
+  // every A1 job that will ever run — this is the fix for that.
+  const idempotencyKey = buildIdempotencyKey({ cefrLevel, seed: jobId });
 
-  // get-or-create by generation_key: a previous attempt for this exact
-  // (level, theme, seed, prompt/content version) may have already persisted
-  // an episode before failing at a later step (e.g. subtitle translation).
-  // generation_key is UNIQUE in the DB, so generating fresh content and
-  // inserting again would fail the constraint — reuse it instead.
+  // get-or-create by generation_key: a previous attempt for THIS job may
+  // have already persisted an episode before failing at a later step (e.g.
+  // subtitle translation). generation_key is UNIQUE in the DB, so
+  // generating fresh content and inserting again would fail the constraint
+  // — reuse it instead.
   const existingByKey = await findListeningEpisodeByGenerationKey(serviceClient, idempotencyKey);
 
   // Idempotency: if the job is already linked to an episode (e.g. a step
@@ -200,7 +207,14 @@ async function stepGeneratingBlock1(
     }
   }
 
-  if (existingByKey) {
+  // A rejected episode (status 'failed' — see markListeningEpisodeRejected)
+  // must never be silently reused for a new generation attempt, even in the
+  // extremely unlikely event its generation_key collided with this job's.
+  // In practice this can't happen once generation_key is job-scoped, but a
+  // job must never resurrect a defective episode by chance.
+  if (existingByKey && existingByKey.status === 'failed') {
+    log('ignoring_rejected_episode_for_reuse', jobId, { episodeId: existingByKey.id });
+  } else if (existingByKey) {
     log('reusing_existing_episode', jobId, { episodeId: existingByKey.id, episodeStatus: existingByKey.status });
     if (existingByKey.status === 'published') {
       // Nothing left for this job to do — content generation, subtitles and
@@ -219,7 +233,7 @@ async function stepGeneratingBlock1(
   const openaiKey = requireEnv('OPENAI_API_KEY');
   const callAI = createDefaultAICallFn(openaiKey);
 
-  const result = await generateListeningStory({ cefrLevel }, callAI, serviceClient);
+  const result = await generateListeningStory({ cefrLevel, seed: jobId }, callAI, serviceClient);
 
   await advanceJob(serviceClient, jobId, 'validating_block_1', {
     episode_id: result.episodeId,
