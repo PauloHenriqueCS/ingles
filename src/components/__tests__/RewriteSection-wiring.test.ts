@@ -84,3 +84,53 @@ describe('RewriteSection.tsx — primary evaluation path calls the canonical end
     expect(destructure).toMatch(/\breviewId\b/);
   });
 });
+
+describe('RewriteSection.tsx — bug fix: generateFinalText() must never fire after a failed/rejected evaluation', () => {
+  it('compare() validates content before calling the evaluation endpoint, and rejects without fetching', () => {
+    const compareBody = extractFunctionBody('compare');
+    expect(compareBody).toMatch(/validateRewriteText\(trimmedRewrite\)/);
+    // The validation check must appear before the fetch call, not after.
+    const validateIdx = compareBody.indexOf('validateRewriteText(trimmedRewrite)');
+    const fetchIdx = compareBody.indexOf(`fetch(apiUrl('/api/writing-rewrite-evaluate')`);
+    expect(validateIdx).toBeGreaterThan(-1);
+    expect(fetchIdx).toBeGreaterThan(-1);
+    expect(validateIdx).toBeLessThan(fetchIdx);
+  });
+
+  it('the file imports validateRewriteText from the shared domain validation module', () => {
+    expect(src).toMatch(/import \{ validateRewriteText \} from '\.\.\/domain\/writing-rewrite\/rewrite-text-validation'/);
+  });
+
+  it('generateFinalText(trimmedRewrite) is only reachable after setCompareState(\'done\') — never called unconditionally after the try/catch', () => {
+    const compareBody = extractFunctionBody('compare');
+    const doneIdx = compareBody.indexOf(`setCompareState('done')`);
+    const genIdx = compareBody.indexOf('generateFinalText(trimmedRewrite)');
+    const catchIdx = compareBody.indexOf('} catch (err) {');
+    expect(doneIdx).toBeGreaterThan(-1);
+    expect(genIdx).toBeGreaterThan(-1);
+    expect(catchIdx).toBeGreaterThan(-1);
+    // generateFinalText must be called strictly between the success marker
+    // and the catch block — i.e. inside the try's success path — not after
+    // the whole try/catch statement (which is what caused the original bug:
+    // both "comparison failed" and "final text failed" appearing together).
+    expect(genIdx).toBeGreaterThan(doneIdx);
+    expect(genIdx).toBeLessThan(catchIdx);
+  });
+
+  it('a failed HTTP response returns before reaching generateFinalText (early return on !res.ok)', () => {
+    const compareBody = extractFunctionBody('compare');
+    const notOkIdx = compareBody.indexOf('if (!res.ok)');
+    const returnAfterNotOk = compareBody.indexOf('return;', notOkIdx);
+    const genIdx = compareBody.indexOf('generateFinalText(trimmedRewrite)');
+    expect(notOkIdx).toBeGreaterThan(-1);
+    expect(returnAfterNotOk).toBeGreaterThan(notOkIdx);
+    expect(returnAfterNotOk).toBeLessThan(genIdx);
+  });
+
+  it('compare() and generateFinalText() surface the backend-provided message instead of a hardcoded generic string', () => {
+    const compareBody = extractFunctionBody('compare');
+    const finalTextBody = extractFunctionBody('generateFinalText');
+    expect(compareBody).toMatch(/data\?\.message/);
+    expect(finalTextBody).toMatch(/data\?\.message/);
+  });
+});

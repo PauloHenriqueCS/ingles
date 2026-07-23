@@ -8,6 +8,7 @@ import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
+import { validateRewriteText } from '../src/domain/writing-rewrite/rewrite-text-validation';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -231,6 +232,16 @@ export default async function handler(req: any, res: any) {
     if (!correctedText?.trim() || !rewriteText?.trim()) {
       return jsonError(res, 400, 'INVALID_REQUEST', 'correctedText e rewriteText são obrigatórios.');
     }
+
+    // Same authoritative content-quality gate as /api/writing-rewrite-evaluate
+    // — never trust the frontend check alone. Rejected before any AI call,
+    // so a garbage rewriteText never consumes an AI Gateway request here.
+    const contentCheck = validateRewriteText(rewriteText);
+    if (!contentCheck.valid) {
+      safeLog('compare-rewrite', 'invalid_content_rejected', 400, { reasonCode: contentCheck.reasonCode!, mode: 'final_text_only' });
+      return jsonError(res, 400, 'INVALID_REWRITE_TEXT', contentCheck.message!);
+    }
+
     if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
 
     // ── Gateway context — created only once auth/validation/rate-limit have
@@ -301,6 +312,12 @@ export default async function handler(req: any, res: any) {
     typeof rewriteText !== 'string' || rewriteText.length > 15_000
   ) {
     return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'O conteúdo enviado é maior que o permitido.');
+  }
+
+  const legacyContentCheck = validateRewriteText(rewriteText);
+  if (!legacyContentCheck.valid) {
+    safeLog('compare-rewrite', 'invalid_content_rejected', 400, { reasonCode: legacyContentCheck.reasonCode!, mode: 'compare_and_correct' });
+    return jsonError(res, 400, 'INVALID_REWRITE_TEXT', legacyContentCheck.message!);
   }
 
   if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;

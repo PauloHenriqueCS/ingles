@@ -15,7 +15,9 @@ CREATE TYPE rewrite_independence_assessment AS ENUM (
 CREATE TABLE writing_rewrite_evaluations (
   id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id                       UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  mission_id                    UUID REFERENCES writing_missions(id) ON DELETE SET NULL,
+  -- No FK to writing_missions(id) — see the same note in
+  -- writing_rewrite_attempts (20260722190000_create_writing_rewrite_attempts.sql).
+  mission_id                    UUID,
   original_submission_id        UUID NOT NULL REFERENCES english_reviews(id) ON DELETE CASCADE,
   rewrite_submission_id         UUID NOT NULL REFERENCES writing_rewrite_attempts(id) ON DELETE CASCADE,
   review_id                     UUID NOT NULL REFERENCES english_reviews(id) ON DELETE CASCADE,

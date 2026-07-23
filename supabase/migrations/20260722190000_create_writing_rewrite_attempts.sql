@@ -15,7 +15,13 @@ CREATE TYPE rewrite_status AS ENUM (
 CREATE TABLE writing_rewrite_attempts (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id                 UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  mission_id              UUID REFERENCES writing_missions(id) ON DELETE SET NULL,
+  -- No FK to writing_missions(id): that table (and its own dependency,
+  -- mission_pedagogical_plans) is a separate, not-yet-migrated epic.
+  -- mission_id is always NULL in the current call path (no caller passes
+  -- missionId) — kept as a plain nullable UUID so the constraint can be
+  -- added later, whenever writing_missions actually ships, without a
+  -- backfill.
+  mission_id              UUID,
   review_id               UUID NOT NULL REFERENCES english_reviews(id) ON DELETE CASCADE,
   rewrite_sequence        INTEGER NOT NULL DEFAULT 1,
   status                  rewrite_status NOT NULL DEFAULT 'draft',

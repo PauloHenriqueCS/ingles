@@ -5,6 +5,7 @@ import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
 import { mapRewriteEvaluationToComparisonResult } from '../lib/rewriteComparisonAdapter';
 import type { PublicWritingRewriteDTO } from '../domain/writing-rewrite/rewrite-public-dto';
+import { validateRewriteText } from '../domain/writing-rewrite/rewrite-text-validation';
 import V2AudioPlayer from './V2AudioPlayer';
 import CollapsibleBlock from './CollapsibleBlock';
 
@@ -36,13 +37,20 @@ export default function RewriteSection({
   const [compareState, setCompareState] = useState<CompareState>(initialV2Comparison ? 'done' : 'idle');
   const [result, setResult] = useState<RewriteComparisonResult | null>(initialV2Comparison ?? null);
   const [emptyWarning, setEmptyWarning] = useState(false);
+  const [compareErrorMessage, setCompareErrorMessage] = useState<string | null>(null);
   const [finalCorrectedText, setFinalCorrectedText] = useState<string | null>(initialV2FinalText ?? null);
   const [finalCorrectState, setFinalCorrectState] = useState<FinalCorrectState>(initialV2FinalText ? 'done' : 'idle');
+  const [finalCorrectErrorMessage, setFinalCorrectErrorMessage] = useState<string | null>(null);
   const isComparing = compareState === 'loading';
 
   async function generateFinalText(v2Text: string) {
-    if (!v2Text || !aiReview.correctedText) { setFinalCorrectState('error'); return; }
+    if (!v2Text || !aiReview.correctedText) {
+      setFinalCorrectErrorMessage(null);
+      setFinalCorrectState('error');
+      return;
+    }
     setFinalCorrectState('loading');
+    setFinalCorrectErrorMessage(null);
     try {
       const authHeader = await getAuthHeader();
       const res = await fetch(apiUrl('/api/compare-rewrite'), {
@@ -54,15 +62,33 @@ export default function RewriteSection({
           rewriteText: v2Text,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
-      const final = String(data.finalCorrectedText ?? '').trim();
+      // Parsed defensively — a non-JSON body (proxy/edge error page, etc.)
+      // must still fall through to the generic, safe message below rather
+      // than throwing an unhandled parse error out of this try block.
+      let data: any = null;
+      try { data = await res.json(); } catch { /* non-JSON body */ }
+      if (!res.ok) {
+        // The backend already writes a coherent, non-technical, pt-BR
+        // message per failure category (invalid text / temporary AI
+        // failure / plan or auth error / internal error with requestId
+        // logged server-side) — surface it as-is instead of a generic
+        // string so the user sees why it actually failed.
+        setFinalCorrectErrorMessage(
+          typeof data?.message === 'string' && data.message.trim()
+            ? data.message
+            : 'Não foi possível gerar a versão final corrigida agora. Tente novamente em instantes.'
+        );
+        setFinalCorrectState('error');
+        return;
+      }
+      const final = String(data?.finalCorrectedText ?? '').trim();
       if (!final) throw new Error('Resposta vazia');
       setFinalCorrectedText(final);
       setFinalCorrectState('done');
       onV2FinalText?.(final);
     } catch (err) {
       console.error('[generate-final-text]', err);
+      setFinalCorrectErrorMessage('Não foi possível gerar a versão final corrigida agora. Verifique sua conexão e tente novamente.');
       setFinalCorrectState('error');
     }
   }
@@ -76,8 +102,23 @@ export default function RewriteSection({
   // different feature (writing.correct_v2_text, unchanged) fired
   // independently, not a second evaluation.
   async function compare() {
-    if (!rewriteText.trim()) {
-      setEmptyWarning(true);
+    const trimmedRewrite = rewriteText.trim();
+
+    // Content-quality gate — UX only, mirrored authoritatively on the
+    // backend (writing-rewrite-evaluate.ts / compare-rewrite.ts), which
+    // never trusts this check alone. Rejects empty text and unambiguous
+    // gibberish (e.g. "5eysvduduud") before any network call, so an
+    // invalid submission never consumes quota or reaches the AI.
+    const contentCheck = validateRewriteText(trimmedRewrite);
+    if (!contentCheck.valid) {
+      if (contentCheck.reasonCode === 'EMPTY') {
+        setEmptyWarning(true);
+        setCompareErrorMessage(null);
+      } else {
+        setEmptyWarning(false);
+        setCompareErrorMessage(contentCheck.message ?? null);
+        setCompareState('error');
+      }
       return;
     }
     if (!reviewId) {
@@ -85,13 +126,14 @@ export default function RewriteSection({
       // other failure mode below — there is no fallback path to the legacy
       // endpoint (it no longer performs evaluation).
       console.error('[writing-rewrite-evaluate] missing reviewId — cannot evaluate');
+      setCompareErrorMessage(null);
       setCompareState('error');
       return;
     }
     setEmptyWarning(false);
+    setCompareErrorMessage(null);
     setCompareState('loading');
     setResult(null);
-    const trimmedRewrite = rewriteText.trim();
     try {
       const authHeader = await getAuthHeader();
       const res = await fetch(apiUrl('/api/writing-rewrite-evaluate'), {
@@ -99,22 +141,34 @@ export default function RewriteSection({
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ reviewId, rewriteText: trimmedRewrite }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
+      // Parsed defensively — see generateFinalText's identical comment.
+      let data: any = null;
+      try { data = await res.json(); } catch { /* non-JSON body */ }
+      if (!res.ok) {
+        setCompareErrorMessage(
+          typeof data?.message === 'string' && data.message.trim()
+            ? data.message
+            : 'Não foi possível comparar sua versão 2 agora. Tente novamente em instantes.'
+        );
+        setCompareState('error');
+        return;
+      }
       const dto = data.result as PublicWritingRewriteDTO;
       const comparison = mapRewriteEvaluationToComparisonResult(dto);
       setResult(comparison);
       setCompareState('done');
       onSaveV2?.(trimmedRewrite, comparison);
+
+      // Only reached once the evaluation above has actually succeeded.
+      // A failed or invalid-content-rejected evaluation must never trigger
+      // this second, independent call — that was the original bug: both
+      // error banners appeared together because this ran unconditionally.
+      generateFinalText(trimmedRewrite);
     } catch (err) {
       console.error('[writing-rewrite-evaluate]', err);
+      setCompareErrorMessage('Não foi possível comparar sua versão 2 agora. Verifique sua conexão e tente novamente.');
       setCompareState('error');
     }
-
-    // Independent of the evaluation above — its own visible loading/error/
-    // retry UI (not fire-and-forget). A failure here never blocks or hides
-    // the evaluation result already set above.
-    generateFinalText(trimmedRewrite);
   }
 
   const hasCompared = compareState === 'done' || !!(initialV2Comparison);
@@ -186,7 +240,7 @@ export default function RewriteSection({
       {/* Compare error */}
       {compareState === 'error' && (
         <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center space-y-2">
-          <p className="text-sm text-red-300">Não foi possível comparar sua versão 2 agora.</p>
+          <p className="text-sm text-red-300">{compareErrorMessage ?? 'Não foi possível comparar sua versão 2 agora.'}</p>
           <button onClick={compare} className="text-xs text-slate-400 hover:text-slate-200 transition-colors">
             Tentar novamente
           </button>
@@ -232,7 +286,7 @@ export default function RewriteSection({
       {/* Final correction error */}
       {finalCorrectState === 'error' && (
         <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 text-center space-y-2">
-          <p className="text-sm text-red-300">Não foi possível gerar a versão final corrigida.</p>
+          <p className="text-sm text-red-300">{finalCorrectErrorMessage ?? 'Não foi possível gerar a versão final corrigida.'}</p>
           <button
             onClick={() => generateFinalText(rewriteText.trim())}
             className="text-xs text-slate-400 hover:text-slate-200 transition-colors"

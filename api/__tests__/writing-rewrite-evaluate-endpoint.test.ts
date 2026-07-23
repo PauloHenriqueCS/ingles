@@ -389,3 +389,33 @@ describe('request validation', () => {
     expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
   });
 });
+
+// ── 8. Content-quality gate — rejects gibberish before any DB/AI work ────────
+
+describe('content-quality validation (invalid rewrite text)', () => {
+  it('the exact reported bug input ("5eysvduduud") is rejected with 400 INVALID_REWRITE_TEXT, no DB or orchestrator call', async () => {
+    const res = makeRes();
+    await handler(makeReq({ body: { reviewId: REVIEW_ID, rewriteText: '5eysvduduud' } }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_REWRITE_TEXT');
+    expect(mockSingle).not.toHaveBeenCalled();
+    expect(mockGetLatestRewriteAttempt).not.toHaveBeenCalled();
+    expect(mockCreateRewriteAttempt).not.toHaveBeenCalled();
+    expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
+  });
+
+  it('multi-token keyboard-mash gibberish is rejected with 400 INVALID_REWRITE_TEXT', async () => {
+    const res = makeRes();
+    await handler(makeReq({ body: { reviewId: REVIEW_ID, rewriteText: 'xkcd qzwe mnbv zxqw' } }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_REWRITE_TEXT');
+    expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
+  });
+
+  it('a short but legitimate sentence is NOT rejected by the content gate (reaches the orchestrator)', async () => {
+    const res = makeRes();
+    await handler(makeReq({ body: { reviewId: REVIEW_ID, rewriteText: 'I like cats.' } }), res);
+    expect(res._status()).toBe(200);
+    expect(mockEvaluateWritingRewrite).toHaveBeenCalledTimes(1);
+  });
+});

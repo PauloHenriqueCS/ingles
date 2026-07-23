@@ -672,3 +672,40 @@ describe('double-click behavior is unchanged (no new deduplication)', () => {
     expect(uniqueCorrelationIds.size).toBe(2);
   });
 });
+
+// ── 12. Content-quality gate — rejects gibberish before touching OpenAI/rate limit ──
+
+describe('content-quality validation (invalid rewrite text)', () => {
+  it('generateFinalTextOnly: the exact reported bug input is rejected with 400 INVALID_REWRITE_TEXT, no OpenAI call', async () => {
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, correctedText: 'Yesterday I went to the store.', rewriteText: '5eysvduduud' } }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_REWRITE_TEXT');
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockApplyRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('generateFinalTextOnly: multi-token gibberish is rejected with 400 INVALID_REWRITE_TEXT', async () => {
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, correctedText: 'Yesterday I went to the store.', rewriteText: 'xkcd qzwe mnbv zxqw' } }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_REWRITE_TEXT');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('generateFinalTextOnly: a short but legitimate sentence is NOT rejected by the content gate', async () => {
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, correctedText: 'Yesterday I went to the store.', rewriteText: 'I like cats.' } }), res);
+    expect(res._status()).toBe(200);
+    expect(mockCreate).toHaveBeenCalled();
+  });
+
+  it('LEGACY default mode: gibberish rewriteText is rejected with 400 INVALID_REWRITE_TEXT, no OpenAI call', async () => {
+    const res = makeRes();
+    await handler(makeReq({ body: { originalText: 'Yesterday I goed to the store.', correctedText: 'Yesterday I went to the store.', rewriteText: '5eysvduduud', mainMistakes: [] } }), res);
+    expect(res._status()).toBe(400);
+    expect((res._body() as any).code).toBe('INVALID_REWRITE_TEXT');
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockApplyRateLimit).not.toHaveBeenCalled();
+  });
+});

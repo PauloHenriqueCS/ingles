@@ -39,6 +39,7 @@ import { evaluateWritingRewrite } from '../src/lib/writingRewriteOrchestrator';
 import { getEvaluationForAttempt } from '../src/lib/writingRewriteEvaluationRepository';
 import { buildPublicRewriteDTO } from '../src/domain/writing-rewrite/rewrite-public-dto';
 import { hashText } from '../src/domain/writing-rewrite/rewrite-normalization';
+import { validateRewriteText } from '../src/domain/writing-rewrite/rewrite-text-validation';
 
 const MAX_REWRITE_TEXT_LENGTH = 15_000;
 const EVALUATION_VERSION = 1;
@@ -94,6 +95,18 @@ export default async function handler(req: any, res: any) {
   }
   if (typeof rewriteText !== 'string' || !rewriteText.trim() || rewriteText.length > MAX_REWRITE_TEXT_LENGTH) {
     return jsonError(res, 400, 'INVALID_REQUEST', `rewriteText é obrigatório e deve ter até ${MAX_REWRITE_TEXT_LENGTH} caracteres.`);
+  }
+
+  // Content-quality gate — the authoritative one. The frontend runs the same
+  // check (src/domain/writing-rewrite/rewrite-text-validation.ts) so a bad
+  // submission usually never reaches here at all, but this endpoint must
+  // reject it independently: never trust the client alone. Rejected here,
+  // before touching the DB or the AI Gateway — no attempt row, no AI call,
+  // no quota/cost consumed for a submission that was never evaluable.
+  const contentCheck = validateRewriteText(rewriteText);
+  if (!contentCheck.valid) {
+    safeLog('writing-rewrite-evaluate', 'invalid_content_rejected', 400, { reasonCode: contentCheck.reasonCode! });
+    return jsonError(res, 400, 'INVALID_REWRITE_TEXT', contentCheck.message!);
   }
 
   const supabase = getSharedServiceClient();
@@ -172,7 +185,11 @@ export default async function handler(req: any, res: any) {
     safeLog('writing-rewrite-evaluate', 'success', 200);
     return res.json({ result: dto });
   } catch (err) {
-    safeLog('writing-rewrite-evaluate', 'error', 500, { message: String(err instanceof Error ? err.message : err) });
-    return jsonError(res, 500, 'EVALUATION_FAILED', 'Não foi possível avaliar sua reescrita agora.');
+    // requestId ties this exact failure to the server log for support/
+    // debugging, without ever putting the real error (which can include
+    // Supabase/PostgREST internals) in front of the user.
+    const requestId = crypto.randomUUID();
+    safeLog('writing-rewrite-evaluate', 'error', 500, { requestId, message: String(err instanceof Error ? err.message : err) });
+    return jsonError(res, 500, 'EVALUATION_FAILED', 'Não foi possível avaliar sua reescrita agora. Tente novamente em instantes.', { requestId });
   }
 }
