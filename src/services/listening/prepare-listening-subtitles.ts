@@ -612,7 +612,14 @@ export async function prepareListeningSubtitles(
   // guaranteed by step 8 — this only judges linguistic quality, per cue, so a
   // single borderline cue can no longer fail the whole block, and a repair
   // round only ever re-requests the cues actually marked invalid.
-  const MAX_QUALITY_CORRECTION_ROUNDS = 2;
+  //
+  // 2 rounds (grounded in a real production run): round 1 fixed some cues but
+  // the re-validation surfaced a partly-different failing set (some newly
+  // fixed, some new) rather than converging to zero — consistent with the
+  // per-cue validator call itself having some run-to-run judgment variance,
+  // not just genuine remaining defects. 3 rounds gives a real correction one
+  // more chance to outlast that noise before the episode is failed outright.
+  const MAX_QUALITY_CORRECTION_ROUNDS = 3;
   for (const blockOrder of [1, 2] as const) {
     let blockCues = translatedCues.get(blockOrder)!;
     const blockTextEn = blockTextEnByOrder.get(blockOrder) ?? '';

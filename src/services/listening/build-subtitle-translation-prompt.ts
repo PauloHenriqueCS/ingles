@@ -39,6 +39,8 @@ STRUCTURE — never restructure the cue list itself:
 LANGUAGE QUALITY:
 - Use natural, idiomatic Brazilian Portuguese (pt-BR), NEVER European Portuguese (pt-PT).
 - When the English uses an idiom, translate the MEANING naturally in pt-BR rather than word-for-word — but never at the cost of dropping information the idiom carried.
+- Do not replace a concrete, specific noun with a generic idiom that changes what it refers to. If the English names one specific countable thing (e.g. "a suitcase", "a bag"), keep that specific thing in the translation — do not swap it for a generic set-phrase (e.g. do not turn "packs a suitcase" into the generic idiom "faz as malas", which implies packing for a trip in general, not literally packing that one suitcase).
+- Preserve contrastive and causal connectors ("but", "however", "because", "so") exactly as they link ideas in English — do not split a contrasted pair ("small, but good") into two disconnected statements that lose the contrast.
 - Maintain the emotional tone (humor, tension, warmth) of the original.
 - Match the terminal punctuation of the English cue: if it ends with "!", the translation must also end with "!" (never downgrade to "."); if it ends with "?", the translation must also end with "?"; preserve "..." the same way. An exclamation mark on a sign, exclamation, or excited line of dialogue carries tone that a period does not.
 
@@ -48,6 +50,8 @@ Examples of PROHIBITED behavior (do not do this):
 - EN cue "They check in and leave their bags in the room." → WRONG: "Eles vão para o quarto." (drops the check-in action). RIGHT: a translation that keeps BOTH the check-in and the leaving-bags actions.
 - EN cue "Painting Class, Saturday at 2 PM!" → WRONG: "Aula de pintura, sábado às 14h." (reformats "2 PM" into 24-hour time, so the digit "2" no longer appears). RIGHT: "Aula de pintura, sábado às 2 da tarde!" (keeps the digit "2" exactly as in the English).
 - EN cue "Join us and make friends!" → WRONG: "Junte-se a nós e faça amigos." (ends with "." instead of "!", losing the excited/inviting tone of the sign). RIGHT: "Junte-se a nós e faça amigos!" (ends with "!", matching the English).
+- EN cue "She packs a big suitcase and takes a bus to the city." → WRONG: "Ela faz as malas e pega um ônibus para a cidade." (the generic idiom "faz as malas" no longer refers specifically to the one big suitcase). RIGHT: "Ela arruma uma mala grande e pega um ônibus para a cidade." (keeps the specific, singular suitcase).
+- EN cue "Ana's apartment is small, but it is good for her." → WRONG: "O apartamento de Ana é pequeno. É bom para ela." (drops "but", turning a contrast into two flat statements). RIGHT: "O apartamento de Ana é pequeno, mas é bom para ela." (keeps the contrast).
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON. First character must be "{".`;
 
@@ -97,6 +101,7 @@ RULES:
 - Preserve grammatical gender/number and who is speaking/being addressed — use the full block text given as context to resolve ambiguous pronouns correctly.
 - Preserve every digit that appears in the English cue, using the EXACT SAME numerals. Never convert a 12-hour time to 24-hour format, never spell a digit out as a word, never drop a number, date, address, or measurement.
 - Match the terminal punctuation of the English cue exactly: "!" stays "!", "?" stays "?", "..." stays "...". Never downgrade an exclamation mark to a period — it is a common, real cause of a cue failing review, and dropping it silently while "fixing" a different stated problem does not count as fixing it.
+- Do not replace a concrete, specific noun with a generic idiom that changes what it refers to (e.g. do not turn "packs a suitcase" into the generic "faz as malas"). Preserve contrastive/causal connectors ("but", "however", "because", "so") exactly as they link ideas in English — do not split a contrasted pair into two disconnected statements.
 - Use natural, idiomatic Brazilian Portuguese (pt-BR), never European Portuguese — translate idioms by meaning, never word-for-word, without dropping information.
 - Return a translation for exactly the cueKeys you were asked to fix — never a cueKey you were not given, never a cueKey you were not asked to change.
 

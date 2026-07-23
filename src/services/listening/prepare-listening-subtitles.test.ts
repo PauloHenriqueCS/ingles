@@ -621,10 +621,11 @@ describe('prepareListeningSubtitles — with database', () => {
   // Case 37
   it('throws ListeningTranslationCorrectionFailedError with the exact failing cueKey/issue after exhausting the correction round limit', async () => {
     const db = makeSupabase();
-    // b1 fails every round; MAX_QUALITY_CORRECTION_ROUNDS = 2, so: validate,
-    // correct, validate, correct, validate (still failing) → give up.
+    // b1 fails every round; MAX_QUALITY_CORRECTION_ROUNDS = 3, so: validate,
+    // correct, validate, correct, validate, correct, validate (still failing) → give up.
     const callAI = makeAI([
       TRANSLATION_SUCCESS_JSON, TRANSLATION_SUCCESS_JSON,
+      VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
       VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
       VALIDATOR_FAIL_JSON, CORRECTION_RESPONSE_JSON,
       VALIDATOR_FAIL_JSON,
@@ -635,7 +636,7 @@ describe('prepareListeningSubtitles — with database', () => {
     expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
     expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
     expect((err as ListeningTranslationCorrectionFailedError).message).toContain('Meaning not fully preserved.');
-    expect(callAI).toHaveBeenCalledTimes(7);
+    expect(callAI).toHaveBeenCalledTimes(9);
   });
 
   // Case 37b
