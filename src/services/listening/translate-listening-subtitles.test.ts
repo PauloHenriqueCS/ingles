@@ -18,6 +18,8 @@ import {
   MAX_BATCH_SUBDIVISION_DEPTH,
   MAX_BATCH_TRANSLATION_CALLS_PER_BATCH,
   translateCueRangeWithAdaptiveSubdivision,
+  hasMissingQuestionMark,
+  normalizeQuestionPunctuation,
 } from './translate-listening-subtitles';
 import type { EnglishCueDraft, RawTranslationResponse, ValidatedTranslatedCue, SubtitleQualityValidationResult } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
@@ -475,10 +477,53 @@ describe('reassertCorrectedCuesDeterministically', () => {
       .toThrow(SubtitleTranslationValidationError);
   });
 
-  it('throws if a correction turns an English question into a pt-BR statement', () => {
+  it('no longer throws on a missing question mark — that defect now routes through prepareListeningSubtitles step 9 (deterministic normalize or targeted correction) instead of hard-failing the whole batch', () => {
     const cues = [makeValidatedCue('b1-c001', 'How can I help you?', 'Como posso ajudar você.')];
-    expect(() => reassertCorrectedCuesDeterministically(1, cues))
-      .toThrow(SubtitleTranslationValidationError);
+    expect(() => reassertCorrectedCuesDeterministically(1, cues)).not.toThrow();
+  });
+});
+
+// ── Question-mark handling (LISTENING_TRANSLATION_QUESTION_MISMATCH) ──────────
+// Found live (episode b9b43b4a, cue b1-c036, English "Do you know whose dog
+// this is?"): the old hard-throw on a missing "?" killed the whole batch
+// with no repair path. hasMissingQuestionMark/normalizeQuestionPunctuation
+// let prepareListeningSubtitles' step 9 loop react instead — see that
+// file's tests for the full Case 1 (deterministic)/Case 2 (targeted
+// correction) integration.
+
+describe('hasMissingQuestionMark', () => {
+  it('is true when the English cue is a question and the translation has no "?"', () => {
+    expect(hasMissingQuestionMark('Do you know whose dog this is?', 'Você sabe de quem é esse cachorro.')).toBe(true);
+  });
+
+  it('is false when the translation already has a "?"', () => {
+    expect(hasMissingQuestionMark('Do you know whose dog this is?', 'Você sabe de quem é esse cachorro?')).toBe(false);
+  });
+
+  it('is false when the English cue is not a question', () => {
+    expect(hasMissingQuestionMark('The dog is running fast.', 'O cachorro está correndo rápido.')).toBe(false);
+  });
+});
+
+describe('normalizeQuestionPunctuation', () => {
+  it('replaces a trailing period with "?"', () => {
+    expect(normalizeQuestionPunctuation('Você sabe de quem é esse cachorro.')).toBe('Você sabe de quem é esse cachorro?');
+  });
+
+  it('appends "?" when there is no trailing terminal punctuation at all', () => {
+    expect(normalizeQuestionPunctuation('Você sabe de quem é esse cachorro')).toBe('Você sabe de quem é esse cachorro?');
+  });
+
+  it('inserts "?" before a trailing closing quote, never after it', () => {
+    expect(normalizeQuestionPunctuation('"Você sabe de quem é esse cachorro."')).toBe('"Você sabe de quem é esse cachorro?"');
+  });
+
+  it('inserts "?" before a trailing closing parenthesis', () => {
+    expect(normalizeQuestionPunctuation('Você sabe de quem é esse cachorro.)')).toBe('Você sabe de quem é esse cachorro?)');
+  });
+
+  it('is idempotent — a string that already ends with "?" (ignoring trailing quotes) is returned unchanged', () => {
+    expect(normalizeQuestionPunctuation('"Você sabe de quem é esse cachorro?"')).toBe('"Você sabe de quem é esse cachorro?"');
   });
 });
 

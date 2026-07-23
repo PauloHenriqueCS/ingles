@@ -153,10 +153,18 @@ interface MockSupabaseOptions {
   existingCues?: Array<{ language: string; cue_order: number }>;
   /** Block 1 gets 2 sentences (long enough not to merge into one cue) instead of 1, so its single top-level batch has 2 cues — needed to exercise adaptive subdivision (2 -> 1+1) with both halves succeeding, not just the terminal single-cue-truncation failure. */
   block1TwoSentences?: boolean;
+  /** Block 1's single sentence is a question (the real cue b1-c036 text from episode b9b43b4a: "Do you know whose dog this is?") — needed to exercise the QUESTION_MISMATCH deterministic-normalize/targeted-correction path. */
+  block1IsQuestion?: boolean;
+  /** Block 1 gets 2 cues: a question (b1-c001) and an unrelated statement (b1-c002) — needed to prove a targeted question correction touches only its own cue and never the sibling. */
+  block1QuestionAndStatement?: boolean;
 }
 
 const BLOCK_1_SENTENCE_A = 'Ana walked slowly through the quiet park near her house today.';
 const BLOCK_1_SENTENCE_B = 'Tom found a small dog resting under the old wooden bridge nearby.';
+const BLOCK_1_QUESTION_TEXT = 'Do you know whose dog this is?';
+// 8 words — combined with BLOCK_1_QUESTION_TEXT's 7 words = 15 > B1's
+// maxWords (13), so buildEnglishSubtitleCues never merges them into one cue.
+const BLOCK_1_STATEMENT_TEXT = 'The man looks at the small brown dog.';
 
 function makeSupabase(opts: MockSupabaseOptions = {}) {
   const episodeRow = {
@@ -174,7 +182,11 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
     ? 'Something entirely different.'
     : opts.block1TwoSentences
       ? `${BLOCK_1_SENTENCE_A} ${BLOCK_1_SENTENCE_B}`
-      : BLOCK_1_TEXT;
+      : opts.block1QuestionAndStatement
+        ? `${BLOCK_1_QUESTION_TEXT} ${BLOCK_1_STATEMENT_TEXT}`
+        : opts.block1IsQuestion
+          ? BLOCK_1_QUESTION_TEXT
+          : BLOCK_1_TEXT;
 
   const blockRows = (() => {
     if (opts.noBlocks) return [];
@@ -185,12 +197,24 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
     ];
   })();
 
+  // Note: blockTextMismatch deliberately does NOT change this row — its
+  // whole point is that the block's own text_en ('Something entirely
+  // different.', set above) must NOT match its sentences' reconstructed
+  // text, to exercise ListeningEnglishReconstructionFailedError.
   const block1SentenceRows = opts.block1TwoSentences
     ? [
         { block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_SENTENCE_A },
         { block_id: BLOCK_1_ID, sentence_key: 'b1s02', sentence_order: 2, speaker: null, text_en: BLOCK_1_SENTENCE_B },
       ]
-    : [{ block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_TEXT }];
+    : opts.block1QuestionAndStatement
+      ? [
+          { block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null, text_en: BLOCK_1_QUESTION_TEXT },
+          { block_id: BLOCK_1_ID, sentence_key: 'b1s02', sentence_order: 2, speaker: null, text_en: BLOCK_1_STATEMENT_TEXT },
+        ]
+      : [{
+          block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null,
+          text_en: opts.block1IsQuestion ? BLOCK_1_QUESTION_TEXT : BLOCK_1_TEXT,
+        }];
 
   const sentenceRows = opts.noSentencesForBlock2
     ? block1SentenceRows
@@ -493,8 +517,13 @@ describe('validateTranslationDeterministic', () => {
     expect(() => validateTranslationDeterministic(raw, enCuesFragment)).not.toThrow();
   });
 
-  // Case 22d
-  it('throws LISTENING_TRANSLATION_QUESTION_MISMATCH when an English question translates to a pt-BR statement', () => {
+  // Case 22d — no longer a hard throw. Found live (episode b9b43b4a, cue
+  // b1-c036): this defect used to kill the entire preparing_subtitles step
+  // with no repair path of its own. It now passes step 8 unchanged and is
+  // handled in step 9 (deterministic normalize if the AI validator judges
+  // the cue semantically fine, targeted correction with an explicit
+  // diagnosis otherwise) — see the 'question-mark handling' describe block.
+  it('does NOT throw when an English question translates to a pt-BR statement — routed to step 9 instead of hard-failing here', () => {
     const enCuesQuestion = new Map<1 | 2, EnglishCueDraft[]>([
       [1, [makeEnCue('b1-c001', 1, 1, 'How can I help you?')]],
       [2, [makeEnCue('b2-c001', 1, 2, BLOCK_2_TEXT)]],
@@ -502,9 +531,7 @@ describe('validateTranslationDeterministic', () => {
     const raw = makeRawTranslation({ block1Cues: [
       { cueKey: 'b1-c001', sourceSentenceKeys: ['b1s01'], textPtBr: 'Como posso ajudar você.' },
     ]});
-    const err = getError(() => validateTranslationDeterministic(raw, enCuesQuestion));
-    expect(err).toBeInstanceOf(SubtitleTranslationValidationError);
-    expect((err as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_QUESTION_MISMATCH');
+    expect(() => validateTranslationDeterministic(raw, enCuesQuestion)).not.toThrow();
   });
 
   // Case 23
@@ -741,6 +768,160 @@ describe('prepareListeningSubtitles — with database', () => {
     );
     expect(err).not.toBeInstanceOf(ListeningTranslationCorrectionFailedError);
     expect((err as { code?: string }).code).toBe('LISTENING_TRANSLATION_VALIDATOR_MALFORMED_RESPONSE');
+  });
+
+  // ── Question-mark handling (LISTENING_TRANSLATION_QUESTION_MISMATCH) ─────────
+  // Found live (episode b9b43b4a, cue b1-c036, English "Do you know whose
+  // dog this is?"): the old hard-throw on a missing "?" killed the whole
+  // batch with no repair path. Step 9 now handles it in two cases.
+
+  // Case 1: deterministic normalization, no extra AI call.
+  it('Case 1 — a question missing only "?", judged semantically valid by the AI, is normalized deterministically with no extra AI call', async () => {
+    const db = makeSupabase({ block1IsQuestion: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'Você sabe de quem é esse cachorro.' }], // missing "?"
+    }));
+    const validatorBlock1Valid = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }],
+    });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorBlock1Valid, VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    // Exactly 2 translation + 2 validation calls — no 5th correction call.
+    expect(callAI).toHaveBeenCalledTimes(4);
+
+    const ptRow = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; text: string }>)
+      .find(r => r.language === 'pt-BR' && r.cue_key === 'b1-c001');
+    expect(ptRow!.text).toBe('Você sabe de quem é esse cachorro?');
+  });
+
+  it('a question that already ends with "?" is left untouched by the normalization pass', async () => {
+    const db = makeSupabase({ block1IsQuestion: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'Você sabe de quem é esse cachorro?' }],
+    }));
+    const callAI = makeAI([translationBlock1, translationBlock1, VALIDATOR_SUCCESS_JSON, VALIDATOR_SUCCESS_JSON]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    const ptRow = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; text: string }>)
+      .find(r => r.language === 'pt-BR' && r.cue_key === 'b1-c001');
+    expect(ptRow!.text).toBe('Você sabe de quem é esse cachorro?');
+  });
+
+  // Case 2: lost interrogative sense — never normalized blindly.
+  it('Case 2 — a translation the AI validator marks invalid is NOT blindly punctuated; it goes through targeted correction with an injected diagnosis', async () => {
+    const db = makeSupabase({ block1IsQuestion: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'Você sabe de quem é esse cachorro.' }], // became a statement
+    }));
+    const validatorBlock1Invalid = JSON.stringify({
+      schemaVersion: '2.0',
+      // Issue text deliberately does NOT mention "question" or "?", to prove
+      // the correction call gets the injected hint rather than relying on
+      // the validator having said it.
+      cues: [{ cueKey: 'b1-c001', valid: false, issues: ['Meaning drifted slightly from the source.'] }],
+    });
+    const correctionResponse = JSON.stringify({ 'b1-c001': 'Você sabe de quem é esse cachorro?' });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorBlock1Invalid, correctionResponse, VALIDATOR_SUCCESS_JSON,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[3][1] as string;
+    expect(correctionPrompt).toContain('b1-c001');
+    expect(correctionPrompt).toContain('Meaning drifted slightly from the source.');
+    expect(correctionPrompt).toContain('must remain a question');
+
+    const ptRow = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; text: string }>)
+      .find(r => r.language === 'pt-BR' && r.cue_key === 'b1-c001');
+    expect(ptRow!.text).toBe('Você sabe de quem é esse cachorro?');
+  });
+
+  it('a targeted question correction touches only the invalid cue — the sibling cue in the same block is untouched (merge preserves it)', async () => {
+    const db = makeSupabase({ block1QuestionAndStatement: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [
+        { cueKey: 'b1-c001', textPtBr: 'Você sabe de quem é esse cachorro.' }, // needs fixing
+        { cueKey: 'b1-c002', textPtBr: 'O homem olha para o cachorro.' }, // already correct
+      ],
+    }));
+    const validatorBlock1Fail = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [
+        { cueKey: 'b1-c001', valid: false, issues: ['Lost the interrogative meaning.'] },
+        { cueKey: 'b1-c002', valid: true, issues: [] },
+      ],
+    });
+    const correctionResponse = JSON.stringify({ 'b1-c001': 'Você sabe de quem é esse cachorro?' });
+    const validatorBlock1Pass = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [
+        { cueKey: 'b1-c001', valid: true, issues: [] },
+        { cueKey: 'b1-c002', valid: true, issues: [] },
+      ],
+    });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorBlock1Fail, correctionResponse, validatorBlock1Pass,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[3][1] as string;
+    expect(correctionPrompt).toContain('b1-c001');
+
+    const block1PtRows = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; block_id: string; text: string }>)
+      .filter(r => r.language === 'pt-BR' && r.block_id === BLOCK_1_ID);
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c001')!.text).toBe('Você sabe de quem é esse cachorro?');
+    // Untouched — proves the correction call and the merge never disturbed it.
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c002')!.text).toBe('O homem olha para o cachorro.');
+  });
+
+  it('exhausts MAX_QUALITY_CORRECTION_ROUNDS and throws ListeningTranslationCorrectionFailedError when a question cue keeps failing correction, marking subtitles_status failed (never stuck at processing)', async () => {
+    const db = makeSupabase({ block1IsQuestion: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'Você sabe de quem é esse cachorro.' }],
+    }));
+    const validatorBlock1Invalid = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: false, issues: ['Meaning drifted slightly from the source.'] }],
+    });
+    const correctionStillWrong = JSON.stringify({ 'b1-c001': 'Você sabe de quem é esse cachorro.' }); // never fixed
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorBlock1Invalid, correctionStillWrong,
+      validatorBlock1Invalid, correctionStillWrong,
+      validatorBlock1Invalid,
+    ]);
+
+    const err = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+
+    expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
   });
 
   // Case 38b

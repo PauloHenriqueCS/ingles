@@ -335,15 +335,17 @@ function assertCueContentValid(blockOrder: 1 | 2, cueKey: string, textEn: string
     );
   }
 
-  // Deterministic question-mark parity: a cue that IS a question in English
-  // must still read as a question in pt-BR. Presence-only check (not a
-  // count match) to stay lenient about natural rewording.
-  if (textEn.includes('?') && !textPtBr.includes('?')) {
-    throw new SubtitleTranslationValidationError(
-      'LISTENING_TRANSLATION_QUESTION_MISMATCH',
-      `Block ${blockOrder} cue "${cueKey}": English cue is a question but the translation has no "?"`
-    );
-  }
+  // Question-mark parity is deliberately NOT a hard throw here (unlike the
+  // checks above) — found live (episode b9b43b4a, cue b1-c036): a batch that
+  // hard-fails the whole preparing_subtitles step on this specific defect
+  // has no repair path of its own, unlike LISTENING_TRANSLATION_MISSING_CUE
+  // (translateMissingCues) — it just kills the entire step and burns a full
+  // job attempt on a single missing character. hasMissingQuestionMark/
+  // normalizeQuestionPunctuation below let callers (prepareListeningSubtitles
+  // step 9) route this into the existing per-cue semantic-validate + targeted
+  // -correct pipeline instead: a deterministic punctuation fix when the AI
+  // validator already judged the cue semantically fine (no extra AI call),
+  // or a targeted correction call with an explicit diagnosis when it hasn't.
 
   if (detectLanguage(textPtBr) === 'likely-en') {
     throw new SubtitleTranslationValidationError(
@@ -367,6 +369,42 @@ export function reassertCorrectedCuesDeterministically(
   for (const cue of cues) {
     assertCueContentValid(blockOrder, cue.cueKey, cue.textEn, cue.textPtBr);
   }
+}
+
+// ─── Question-mark handling (LISTENING_TRANSLATION_QUESTION_MISMATCH) ────────
+// Same presence-only check previously inlined in assertCueContentValid,
+// extracted so callers can react to it (Case 1: deterministic fix; Case 2:
+// targeted correction) instead of it hard-failing the whole batch.
+
+/** Same detection rule question-mismatch always used: presence-only, lenient about natural rewording. */
+export function hasMissingQuestionMark(textEn: string, textPtBr: string): boolean {
+  return textEn.includes('?') && !textPtBr.includes('?');
+}
+
+/**
+ * Appends '?' at the correct position in an otherwise-correct translation,
+ * preserving trailing closing quotes/parens/brackets and any whitespace
+ * before them. Replaces a trailing '.'/'!'/'…' (the model finished the
+ * sentence with the wrong terminal mark) rather than stacking punctuation;
+ * appends '?' outright when there is no trailing terminal mark to replace.
+ * Idempotent — a string that already ends with '?' (ignoring trailing
+ * wrappers) is returned unchanged, so calling this speculatively is safe.
+ */
+export function normalizeQuestionPunctuation(textPtBr: string): string {
+  const trimmed = textPtBr.trimEnd();
+  let end = trimmed.length;
+  while (end > 0 && /["'”’)\]]/.test(trimmed[end - 1])) end--;
+  const trailer = trimmed.slice(end);
+  let core = trimmed.slice(0, end);
+  if (core.endsWith('?')) {
+    // Already correct (defensive — callers only call this when
+    // hasMissingQuestionMark was true, but never double-punctuate).
+  } else if (/[.!…]$/.test(core)) {
+    core = core.slice(0, -1) + '?';
+  } else {
+    core = core + '?';
+  }
+  return core + trailer;
 }
 
 // ─── Targeted repair for missing/omitted cues ────────────────────────────────

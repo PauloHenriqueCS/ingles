@@ -19,6 +19,8 @@ import {
   SubtitleTranslationParseError,
   SubtitleTranslationValidationError,
   SubtitleTranslationOutputTruncatedError,
+  hasMissingQuestionMark,
+  normalizeQuestionPunctuation,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
 } from './translate-listening-subtitles';
@@ -650,6 +652,20 @@ export async function prepareListeningSubtitles(
   // failure is strictly worse than a fast one here, since both are
   // equally retryable.
   const MAX_QUALITY_CORRECTION_ROUNDS = 2;
+  // Found live (episode b9b43b4a, cue b1-c036): a question that lost its "?"
+  // used to hard-fail the whole batch at step 8 with no repair path. It now
+  // reaches here like any other cue, and is handled by whichever case
+  // applies once the AI validator has judged it:
+  //   Case 1 (no AI call) — validator says the cue is semantically fine;
+  //     only the punctuation is missing. Fix deterministically.
+  //   Case 2 — validator says the cue is invalid (or it's a statement that
+  //     never looked like a question). Goes through the existing targeted-
+  //     correction path below, with an explicit diagnosis appended so the
+  //     correction call is asked to preserve the question and end with "?"
+  //     even if the validator's own issue text never mentioned punctuation.
+  const QUESTION_MARK_CORRECTION_HINT =
+    'This cue must remain a question: the English source is a question, but the current translation does not read as one and/or is missing the closing "?". Rewrite it as a natural pt-BR question ending with "?".';
+
   for (const blockOrder of [1, 2] as const) {
     let blockCues = translatedCues.get(blockOrder)!;
     const blockTextEn = blockTextEnByOrder.get(blockOrder) ?? '';
@@ -665,9 +681,32 @@ export async function prepareListeningSubtitles(
         throw err;
       }
 
+      // Case 1: deterministic punctuation fix for cues the validator already
+      // approved. Never overrides the validator's own semantic judgment —
+      // only ever touches a cue it marked valid: true.
+      blockCues = blockCues.map(cue => {
+        if (!hasMissingQuestionMark(cue.textEn, cue.textPtBr)) return cue;
+        if (validation.cueResults.find(r => r.cueKey === cue.cueKey)?.valid !== true) return cue;
+        console.error(JSON.stringify({
+          event: 'listening_subtitle_question_mark_normalized',
+          episodeId, blockOrder, cueKey: cue.cueKey, round: round + 1, t: Date.now(),
+        }));
+        return { ...cue, textPtBr: normalizeQuestionPunctuation(cue.textPtBr) };
+      });
+
       if (validation.overallValid) break;
 
-      const failing = validation.cueResults.filter(r => !r.valid);
+      // Case 2 setup: enrich the diagnosis for any invalid cue that's also
+      // missing a required "?", without touching cues invalid for other
+      // reasons or duplicating a hint the validator already gave.
+      const cueResults = validation.cueResults.map(r => {
+        if (r.valid) return r;
+        const cue = blockCues.find(c => c.cueKey === r.cueKey);
+        if (!cue || !hasMissingQuestionMark(cue.textEn, cue.textPtBr)) return r;
+        if (r.issues.some(i => /\?|question/i.test(i))) return r;
+        return { ...r, issues: [...r.issues, QUESTION_MARK_CORRECTION_HINT] };
+      });
+      const failing = cueResults.filter(r => !r.valid);
 
       console.error(JSON.stringify({
         event: 'listening_subtitle_quality_repair',
@@ -686,7 +725,9 @@ export async function prepareListeningSubtitles(
       }
 
       try {
-        blockCues = await correctBlockTranslation(blockOrder, blockTextEn, blockCues, validation, cefrLevel, episodeId, aiCallFn);
+        blockCues = await correctBlockTranslation(
+          blockOrder, blockTextEn, blockCues, { ...validation, cueResults }, cefrLevel, episodeId, aiCallFn,
+        );
       } catch (correctErr) {
         // Same partial-state trap as steps 7-8: correctBlockTranslation can
         // throw (AI call failure, or reassertCorrectedCuesDeterministically
