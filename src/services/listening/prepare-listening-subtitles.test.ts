@@ -487,12 +487,14 @@ describe('validateTranslationDeterministic', () => {
   // Case 22b — real production defect (episode d9a49b3b, cue for "This can
   // be my new home," she says to herself.): the translation stopped after
   // "novo", never mentioning home/lar, even though the English cue is a
-  // complete sentence. Traced through translateSubtitles/correctBlockTranslation's
-  // merge code (no transformation beyond .trim() anywhere between the raw AI
-  // response and this check) — genuinely a model-output gap, not a
-  // parser/merge bug, so this is a deterministic safety net independent of
-  // the semantic validator.
-  it('throws LISTENING_TRANSLATION_INCOMPLETE_SENTENCE when a complete English cue translates to an unfinished pt-BR sentence', () => {
+  // complete sentence. No longer a hard throw here — found live again later
+  // (episode b9b43b4a, cue b1-c044): this defect used to kill the whole
+  // batch with no repair path, exactly like the question-mark defect. It
+  // now passes step 8 unchanged and is always forced into step 9's targeted
+  // correction (never a deterministic fix — finishing a truncated sentence
+  // requires knowing the missing content) — see prepareListeningSubtitles'
+  // 'sentence-completeness handling' tests.
+  it('does NOT throw when a complete English cue translates to an unfinished pt-BR sentence — routed to step 9 instead of hard-failing here', () => {
     const enCuesComplete = new Map<1 | 2, EnglishCueDraft[]>([
       [1, [makeEnCue('b1-c001', 1, 1, '"This can be my new home," she says to herself.')]],
       [2, [makeEnCue('b2-c001', 1, 2, BLOCK_2_TEXT)]],
@@ -500,9 +502,7 @@ describe('validateTranslationDeterministic', () => {
     const raw = makeRawTranslation({ block1Cues: [
       { cueKey: 'b1-c001', sourceSentenceKeys: ['b1s01'], textPtBr: '"Este pode ser meu novo", ela diz para si mesma' },
     ]});
-    const err = getError(() => validateTranslationDeterministic(raw, enCuesComplete));
-    expect(err).toBeInstanceOf(SubtitleTranslationValidationError);
-    expect((err as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_INCOMPLETE_SENTENCE');
+    expect(() => validateTranslationDeterministic(raw, enCuesComplete)).not.toThrow();
   });
 
   // Case 22c
@@ -909,6 +909,115 @@ describe('prepareListeningSubtitles — with database', () => {
       validatorBlock1Invalid, correctionStillWrong,
       validatorBlock1Invalid, correctionStillWrong,
       validatorBlock1Invalid,
+    ]);
+
+    const err = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+
+    expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    expect(episodeUpdates.some(c => (c.data as Record<string, unknown>).subtitles_status === 'processing')).toBe(true);
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
+  });
+
+  // ── Sentence-completeness handling (LISTENING_TRANSLATION_INCOMPLETE_SENTENCE) ─
+  // Found live (episode b9b43b4a, cue b1-c044, English '"No luck yet," he
+  // says.'): a genuinely truncated translation of a complete sentence.
+  // Unlike the question mark, there is no deterministic fix — always a
+  // targeted correction, and it must fire even when the AI validator
+  // itself missed the truncation (meaning/naturalness judgment isn't the
+  // same as noticing a cut-off ending).
+
+  it('a genuinely truncated translation is forced into correction even when the AI validator marked it valid', async () => {
+    const db = makeSupabase(); // default block 1: 'The quick fox sat down.' — a complete sentence
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'A raposa ágil' }], // truncated, no verb/ending
+    }));
+    const validatorMissedTruncation = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }],
+    });
+    const correctionResponse = JSON.stringify({ 'b1-c001': 'A raposa ágil sentou.' });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorMissedTruncation, correctionResponse, VALIDATOR_SUCCESS_JSON,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[3][1] as string;
+    expect(correctionPrompt).toContain('b1-c001');
+    expect(correctionPrompt).toContain('complete sentence');
+
+    const ptRow = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; text: string }>)
+      .find(r => r.language === 'pt-BR' && r.cue_key === 'b1-c001');
+    expect(ptRow!.text).toBe('A raposa ágil sentou.');
+  });
+
+  it('a targeted sentence-completeness correction touches only the truncated cue — the sibling cue in the same block is untouched', async () => {
+    const db = makeSupabase({ block1TwoSentences: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana andou' }, // truncated
+        { cueKey: 'b1-c002', textPtBr: 'Tom encontrou um cachorro pequeno descansando sob a velha ponte de madeira.' }, // already fine
+      ],
+    }));
+    const validatorMissedTruncation = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [
+        { cueKey: 'b1-c001', valid: true, issues: [] },
+        { cueKey: 'b1-c002', valid: true, issues: [] },
+      ],
+    });
+    const correctionResponse = JSON.stringify({ 'b1-c001': 'Ana andou devagar pelo parque tranquilo perto de casa hoje.' });
+    const validatorPass = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [
+        { cueKey: 'b1-c001', valid: true, issues: [] },
+        { cueKey: 'b1-c002', valid: true, issues: [] },
+      ],
+    });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorMissedTruncation, correctionResponse, validatorPass,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    const correctionPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[3][1] as string;
+    expect(correctionPrompt).toContain('b1-c001');
+
+    const block1PtRows = db._insertCalls
+      .flatMap(rows => rows as Array<{ cue_key: string; language: string; block_id: string; text: string }>)
+      .filter(r => r.language === 'pt-BR' && r.block_id === BLOCK_1_ID);
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c001')!.text).toBe('Ana andou devagar pelo parque tranquilo perto de casa hoje.');
+    // Untouched — proves the correction call and the merge never disturbed it.
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c002')!.text).toBe('Tom encontrou um cachorro pequeno descansando sob a velha ponte de madeira.');
+  });
+
+  it('exhausts MAX_QUALITY_CORRECTION_ROUNDS and throws ListeningTranslationCorrectionFailedError when a truncated sentence keeps failing correction, marking subtitles_status failed (never stuck at processing)', async () => {
+    const db = makeSupabase();
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [{ cueKey: 'b1-c001', textPtBr: 'A raposa' }],
+    }));
+    const validatorMissedTruncation = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }],
+    });
+    const correctionStillTruncated = JSON.stringify({ 'b1-c001': 'A raposa' }); // never fixed
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      validatorMissedTruncation, correctionStillTruncated,
+      validatorMissedTruncation, correctionStillTruncated,
+      validatorMissedTruncation,
     ]);
 
     const err = await getRejection(

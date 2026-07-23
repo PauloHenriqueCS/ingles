@@ -323,29 +323,25 @@ function assertCueContentValid(blockOrder: 1 | 2, cueKey: string, textEn: string
     }
   }
 
-  // Deterministic completeness check, independent of the semantic validator:
-  // if the English cue is unambiguously a finished sentence, the translation
-  // must look finished too. Only triggers when English itself ends with
-  // sentence-final punctuation, so a cue that is a genuine mid-clause
-  // fragment (e.g. ending in a comma) is never flagged.
-  if (endsWithSentenceFinalPunctuation(textEn) && !endsWithSentenceFinalPunctuation(textPtBr)) {
-    throw new SubtitleTranslationValidationError(
-      'LISTENING_TRANSLATION_INCOMPLETE_SENTENCE',
-      `Block ${blockOrder} cue "${cueKey}": translation does not end like a complete sentence, but the English cue does`
-    );
-  }
-
-  // Question-mark parity is deliberately NOT a hard throw here (unlike the
-  // checks above) — found live (episode b9b43b4a, cue b1-c036): a batch that
-  // hard-fails the whole preparing_subtitles step on this specific defect
-  // has no repair path of its own, unlike LISTENING_TRANSLATION_MISSING_CUE
-  // (translateMissingCues) — it just kills the entire step and burns a full
-  // job attempt on a single missing character. hasMissingQuestionMark/
+  // Sentence-completeness and question-mark parity are deliberately NOT hard
+  // throws here (unlike the checks above) — found live twice now (episode
+  // b9b43b4a: cue b1-c036 missing "?", then cue b1-c044's translation
+  // genuinely truncated): a batch that hard-fails the whole
+  // preparing_subtitles step on either defect has no repair path of its
+  // own, unlike LISTENING_TRANSLATION_MISSING_CUE (translateMissingCues) —
+  // it just kills the entire step and burns a full job attempt on one bad
+  // cue. hasIncompleteSentence/hasMissingQuestionMark/
   // normalizeQuestionPunctuation below let callers (prepareListeningSubtitles
-  // step 9) route this into the existing per-cue semantic-validate + targeted
-  // -correct pipeline instead: a deterministic punctuation fix when the AI
-  // validator already judged the cue semantically fine (no extra AI call),
-  // or a targeted correction call with an explicit diagnosis when it hasn't.
+  // step 9) route both into the existing per-cue semantic-validate +
+  // targeted-correct pipeline instead. Audited live (episode b9b43b4a, all
+  // 66 real cues in block 1) before removing the completeness throw:
+  // endsWithSentenceFinalPunctuation(textEn) already only gates cues that
+  // are genuinely whole sentences or the terminal half of a split/merge —
+  // every comma/mid-clause fragment (11 found) is already correctly
+  // excluded by construction (splitLongSentence never leaves trailing
+  // terminal punctuation on a non-final piece), so no fragment-vs-truncation
+  // ambiguity was found in practice; a cue this check flags is always a
+  // genuine translation defect, never a legitimate fragment.
 
   if (detectLanguage(textPtBr) === 'likely-en') {
     throw new SubtitleTranslationValidationError(
@@ -369,6 +365,19 @@ export function reassertCorrectedCuesDeterministically(
   for (const cue of cues) {
     assertCueContentValid(blockOrder, cue.cueKey, cue.textEn, cue.textPtBr);
   }
+}
+
+// ─── Sentence-completeness handling (LISTENING_TRANSLATION_INCOMPLETE_SENTENCE) ─
+// Same rule previously inlined in assertCueContentValid, extracted so callers
+// can react to it instead of it hard-failing the whole batch. No
+// deterministic "Case 1" fix exists here (unlike the question mark below) —
+// finishing a genuinely truncated sentence requires knowing the missing
+// content, which only the AI can supply, so any hasIncompleteSentence cue
+// always needs a targeted correction call.
+
+/** Same rule endsWithSentenceFinalPunctuation-gated check always used: only fires when the English cue itself is unambiguously a finished sentence. */
+export function hasIncompleteSentence(textEn: string, textPtBr: string): boolean {
+  return endsWithSentenceFinalPunctuation(textEn) && !endsWithSentenceFinalPunctuation(textPtBr);
 }
 
 // ─── Question-mark handling (LISTENING_TRANSLATION_QUESTION_MISMATCH) ────────

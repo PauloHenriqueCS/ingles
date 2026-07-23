@@ -20,6 +20,7 @@ import {
   translateCueRangeWithAdaptiveSubdivision,
   hasMissingQuestionMark,
   normalizeQuestionPunctuation,
+  hasIncompleteSentence,
 } from './translate-listening-subtitles';
 import type { EnglishCueDraft, RawTranslationResponse, ValidatedTranslatedCue, SubtitleQualityValidationResult } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
@@ -467,14 +468,13 @@ describe('reassertCorrectedCuesDeterministically', () => {
       .toThrow(SubtitleTranslationValidationError);
   });
 
-  it('throws if a correction still leaves a complete English sentence translated as an unfinished one', () => {
+  it('no longer throws when a correction still leaves a complete English sentence translated as an unfinished one — that defect now routes through prepareListeningSubtitles step 9 (always a targeted correction, no deterministic fix)', () => {
     const cues = [makeValidatedCue(
       'b1-c001',
       '"This can be my new home," she says to herself.',
       '"Este pode ser meu novo", ela diz para si mesma',
     )];
-    expect(() => reassertCorrectedCuesDeterministically(1, cues))
-      .toThrow(SubtitleTranslationValidationError);
+    expect(() => reassertCorrectedCuesDeterministically(1, cues)).not.toThrow();
   });
 
   it('no longer throws on a missing question mark — that defect now routes through prepareListeningSubtitles step 9 (deterministic normalize or targeted correction) instead of hard-failing the whole batch', () => {
@@ -524,6 +524,52 @@ describe('normalizeQuestionPunctuation', () => {
 
   it('is idempotent — a string that already ends with "?" (ignoring trailing quotes) is returned unchanged', () => {
     expect(normalizeQuestionPunctuation('"Você sabe de quem é esse cachorro?"')).toBe('"Você sabe de quem é esse cachorro?"');
+  });
+});
+
+// ── Sentence-completeness handling (LISTENING_TRANSLATION_INCOMPLETE_SENTENCE) ─
+// Found live (episode b9b43b4a, cue b1-c044, English '"No luck yet," he
+// says.'): a single, complete, unsplit sentence — the model's translation
+// genuinely stopped short. Audited all 66 real cues in that episode's block
+// 1 before removing the hard throw: every cue whose OWN English text ends
+// with "?"/"!"/"." is either a whole sentence or the terminal half of a
+// split/merge (including quote-split dialogue spanning two cues, e.g. "...
+// calls, "It's okay." / We won't hurt you.""); every genuine mid-clause
+// fragment (comma-ending) is already excluded by construction, since
+// splitLongSentence never leaves trailing terminal punctuation on a
+// non-final piece. No fragment-vs-truncation ambiguity found in practice.
+
+describe('hasIncompleteSentence', () => {
+  it('is true when a complete English sentence translates to an unfinished pt-BR one', () => {
+    expect(hasIncompleteSentence(
+      '"This can be my new home," she says to herself.',
+      '"Este pode ser meu novo", ela diz para si mesma',
+    )).toBe(true);
+  });
+
+  it('is false when both the English and the translation are complete', () => {
+    expect(hasIncompleteSentence('"No luck yet," he says.', '"Sem sorte ainda", ele diz.')).toBe(false);
+  });
+
+  it('is false for a genuine mid-clause fragment (English itself has no terminal punctuation)', () => {
+    expect(hasIncompleteSentence('After a long day at work,', 'Depois de um longo dia de trabalho,')).toBe(false);
+  });
+
+  it('is false for the non-final half of a quote split across two cues, even though the translation naturally continues past it', () => {
+    // Real production shape (episode b9b43b4a, b1-c020/b1-c021): the
+    // English piece itself ends with a period ("...It's okay."), so a
+    // complete-looking translation is correctly required and given here.
+    expect(hasIncompleteSentence(
+      'Leo crouches down and calls, "It\'s okay.',
+      'Leo se abaixa e diz, "Está tudo bem.',
+    )).toBe(false);
+  });
+
+  it('is true when that same quote-split cue\'s translation is cut off instead', () => {
+    expect(hasIncompleteSentence(
+      'Leo crouches down and calls, "It\'s okay.',
+      'Leo se abaixa e diz',
+    )).toBe(true);
   });
 });
 

@@ -21,6 +21,7 @@ import {
   SubtitleTranslationOutputTruncatedError,
   hasMissingQuestionMark,
   normalizeQuestionPunctuation,
+  hasIncompleteSentence,
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
 } from './translate-listening-subtitles';
@@ -665,6 +666,16 @@ export async function prepareListeningSubtitles(
   //     even if the validator's own issue text never mentioned punctuation.
   const QUESTION_MARK_CORRECTION_HINT =
     'This cue must remain a question: the English source is a question, but the current translation does not read as one and/or is missing the closing "?". Rewrite it as a natural pt-BR question ending with "?".';
+  // Found live (episode b9b43b4a, cue b1-c044): a genuinely truncated
+  // translation of a complete English sentence — same structural gap as the
+  // question mark (hard-fail at step 8, no repair path). Unlike the
+  // question mark, there is no deterministic fix: finishing a truncated
+  // sentence requires knowing the missing content, so this is ALWAYS forced
+  // into a targeted correction below, even on a round where the AI
+  // validator itself said the cue was valid (a validator judging meaning/
+  // naturalness cannot be trusted to always notice a cut-off ending).
+  const INCOMPLETE_SENTENCE_CORRECTION_HINT =
+    'This cue must be a complete sentence: the English source is a finished sentence, but the current translation stops before finishing the thought. Provide the FULL translation, including whatever content was cut off, ending with matching punctuation.';
 
   for (const blockOrder of [1, 2] as const) {
     let blockCues = translatedCues.get(blockOrder)!;
@@ -681,9 +692,9 @@ export async function prepareListeningSubtitles(
         throw err;
       }
 
-      // Case 1: deterministic punctuation fix for cues the validator already
-      // approved. Never overrides the validator's own semantic judgment —
-      // only ever touches a cue it marked valid: true.
+      // Case 1 (question mark only): deterministic punctuation fix for cues
+      // the validator already approved. Never overrides the validator's own
+      // semantic judgment — only ever touches a cue it marked valid: true.
       blockCues = blockCues.map(cue => {
         if (!hasMissingQuestionMark(cue.textEn, cue.textPtBr)) return cue;
         if (validation.cueResults.find(r => r.cueKey === cue.cueKey)?.valid !== true) return cue;
@@ -694,18 +705,34 @@ export async function prepareListeningSubtitles(
         return { ...cue, textPtBr: normalizeQuestionPunctuation(cue.textPtBr) };
       });
 
-      if (validation.overallValid) break;
-
-      // Case 2 setup: enrich the diagnosis for any invalid cue that's also
-      // missing a required "?", without touching cues invalid for other
-      // reasons or duplicating a hint the validator already gave.
+      // Effective per-cue verdicts: start from the AI validator's own
+      // judgment, then layer in deterministic overrides it cannot be
+      // trusted to always catch on its own. Recomputing overallValid from
+      // THIS array (not validation.overallValid) is what lets a truncated
+      // sentence force a correction round even when the validator itself
+      // approved the block.
       const cueResults = validation.cueResults.map(r => {
-        if (r.valid) return r;
         const cue = blockCues.find(c => c.cueKey === r.cueKey);
-        if (!cue || !hasMissingQuestionMark(cue.textEn, cue.textPtBr)) return r;
-        if (r.issues.some(i => /\?|question/i.test(i))) return r;
-        return { ...r, issues: [...r.issues, QUESTION_MARK_CORRECTION_HINT] };
+        if (!cue) return r;
+        let result = r;
+
+        if (!result.valid && hasMissingQuestionMark(cue.textEn, cue.textPtBr) && !result.issues.some(i => /\?|question/i.test(i))) {
+          result = { ...result, issues: [...result.issues, QUESTION_MARK_CORRECTION_HINT] };
+        }
+        if (hasIncompleteSentence(cue.textEn, cue.textPtBr)) {
+          const alreadyMentions = result.issues.some(i => /incomplete|truncat|unfinished|cut ?off/i.test(i));
+          result = {
+            cueKey: result.cueKey,
+            valid: false,
+            issues: alreadyMentions ? result.issues : [...result.issues, INCOMPLETE_SENTENCE_CORRECTION_HINT],
+          };
+        }
+        return result;
       });
+      const overallValid = cueResults.every(c => c.valid);
+
+      if (overallValid) break;
+
       const failing = cueResults.filter(r => !r.valid);
 
       console.error(JSON.stringify({
@@ -726,7 +753,7 @@ export async function prepareListeningSubtitles(
 
       try {
         blockCues = await correctBlockTranslation(
-          blockOrder, blockTextEn, blockCues, { ...validation, cueResults }, cefrLevel, episodeId, aiCallFn,
+          blockOrder, blockTextEn, blockCues, { ...validation, cueResults, overallValid }, cefrLevel, episodeId, aiCallFn,
         );
       } catch (correctErr) {
         // Same partial-state trap as steps 7-8: correctBlockTranslation can
