@@ -704,7 +704,15 @@ export default function PronunciationTrainingView({ onBack }: Props) {
               disabled={generateNewDisabled}
               aria-disabled={generateNewDisabled}
               title={generateNewDisabled ? ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday : undefined}
-              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
+              className={
+                canStartAnotherRound
+                  // Visually distinct from the (usually disabled) default state —
+                  // a muted grey button that happens to be enabled reads as
+                  // disabled to users, which is exactly what caused this to look
+                  // broken for an unlimited-plan account after the daily-cap fix.
+                  ? 'flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors shadow-sm shadow-blue-900/30'
+                  : 'flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400'
+              }
             >
               <RefreshCw className="w-3.5 h-3.5" /> Gerar outro texto
             </button>
