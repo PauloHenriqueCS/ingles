@@ -430,6 +430,22 @@ describe('reassertCorrectedCuesDeterministically', () => {
     expect(() => reassertCorrectedCuesDeterministically(1, cues))
       .toThrow(SubtitleTranslationValidationError);
   });
+
+  it('throws if a correction still leaves a complete English sentence translated as an unfinished one', () => {
+    const cues = [makeValidatedCue(
+      'b1-c001',
+      '"This can be my new home," she says to herself.',
+      '"Este pode ser meu novo", ela diz para si mesma',
+    )];
+    expect(() => reassertCorrectedCuesDeterministically(1, cues))
+      .toThrow(SubtitleTranslationValidationError);
+  });
+
+  it('throws if a correction turns an English question into a pt-BR statement', () => {
+    const cues = [makeValidatedCue('b1-c001', 'How can I help you?', 'Como posso ajudar você.')];
+    expect(() => reassertCorrectedCuesDeterministically(1, cues))
+      .toThrow(SubtitleTranslationValidationError);
+  });
 });
 
 // ── translateSubtitles — batching ──────────────────────────────────────────────

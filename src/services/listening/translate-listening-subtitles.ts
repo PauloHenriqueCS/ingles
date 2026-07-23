@@ -77,6 +77,21 @@ function extractNumbers(text: string): string[] {
   return (text.match(/\b\d[\d,.]*/g) ?? []).map(n => n.replace(/[,]/g, ''));
 }
 
+/**
+ * True when text ends with a sentence-final mark (. ! ? or an ellipsis),
+ * ignoring any trailing closing quote/paren. Used to catch a translation
+ * that stops mid-sentence — found live: a cue whose English was the
+ * complete "This can be my new home," she says to herself.' translated to
+ * a pt-BR string that just stopped after "novo" (no digits lost, valid
+ * non-empty JSON string, still genuinely incomplete — not a parser/merge
+ * bug, since nothing between the raw API response and this check applies
+ * any transformation beyond .trim()).
+ */
+function endsWithSentenceFinalPunctuation(text: string): boolean {
+  const stripped = text.trim().replace(/["'”’)\]]+$/, '');
+  return /[.!?…]$/.test(stripped);
+}
+
 function detectLanguage(text: string): 'likely-en' | 'unknown' {
   // Simple heuristic: if >40% of common English function words are present and
   // no common pt-BR function words, flag as likely English.
@@ -214,6 +229,28 @@ function assertCueContentValid(blockOrder: 1 | 2, cueKey: string, textEn: string
         `Block ${blockOrder} cue "${cueKey}": number "${n}" missing in translation`
       );
     }
+  }
+
+  // Deterministic completeness check, independent of the semantic validator:
+  // if the English cue is unambiguously a finished sentence, the translation
+  // must look finished too. Only triggers when English itself ends with
+  // sentence-final punctuation, so a cue that is a genuine mid-clause
+  // fragment (e.g. ending in a comma) is never flagged.
+  if (endsWithSentenceFinalPunctuation(textEn) && !endsWithSentenceFinalPunctuation(textPtBr)) {
+    throw new SubtitleTranslationValidationError(
+      'LISTENING_TRANSLATION_INCOMPLETE_SENTENCE',
+      `Block ${blockOrder} cue "${cueKey}": translation does not end like a complete sentence, but the English cue does`
+    );
+  }
+
+  // Deterministic question-mark parity: a cue that IS a question in English
+  // must still read as a question in pt-BR. Presence-only check (not a
+  // count match) to stay lenient about natural rewording.
+  if (textEn.includes('?') && !textPtBr.includes('?')) {
+    throw new SubtitleTranslationValidationError(
+      'LISTENING_TRANSLATION_QUESTION_MISMATCH',
+      `Block ${blockOrder} cue "${cueKey}": English cue is a question but the translation has no "?"`
+    );
   }
 
   if (detectLanguage(textPtBr) === 'likely-en') {

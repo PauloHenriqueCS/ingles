@@ -432,6 +432,53 @@ describe('validateTranslationDeterministic', () => {
     expect((err as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_NUMBER_MISMATCH');
   });
 
+  // Case 22b — real production defect (episode d9a49b3b, cue for "This can
+  // be my new home," she says to herself.): the translation stopped after
+  // "novo", never mentioning home/lar, even though the English cue is a
+  // complete sentence. Traced through translateSubtitles/correctBlockTranslation's
+  // merge code (no transformation beyond .trim() anywhere between the raw AI
+  // response and this check) — genuinely a model-output gap, not a
+  // parser/merge bug, so this is a deterministic safety net independent of
+  // the semantic validator.
+  it('throws LISTENING_TRANSLATION_INCOMPLETE_SENTENCE when a complete English cue translates to an unfinished pt-BR sentence', () => {
+    const enCuesComplete = new Map<1 | 2, EnglishCueDraft[]>([
+      [1, [makeEnCue('b1-c001', 1, 1, '"This can be my new home," she says to herself.')]],
+      [2, [makeEnCue('b2-c001', 1, 2, BLOCK_2_TEXT)]],
+    ]);
+    const raw = makeRawTranslation({ block1Cues: [
+      { cueKey: 'b1-c001', sourceSentenceKeys: ['b1s01'], textPtBr: '"Este pode ser meu novo", ela diz para si mesma' },
+    ]});
+    const err = getError(() => validateTranslationDeterministic(raw, enCuesComplete));
+    expect(err).toBeInstanceOf(SubtitleTranslationValidationError);
+    expect((err as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_INCOMPLETE_SENTENCE');
+  });
+
+  // Case 22c
+  it('does NOT flag a cue that is a genuine mid-clause fragment (English ends without terminal punctuation)', () => {
+    const enCuesFragment = new Map<1 | 2, EnglishCueDraft[]>([
+      [1, [makeEnCue('b1-c001', 1, 1, 'After a long day at work,')]],
+      [2, [makeEnCue('b2-c001', 1, 2, BLOCK_2_TEXT)]],
+    ]);
+    const raw = makeRawTranslation({ block1Cues: [
+      { cueKey: 'b1-c001', sourceSentenceKeys: ['b1s01'], textPtBr: 'Depois de um longo dia de trabalho,' },
+    ]});
+    expect(() => validateTranslationDeterministic(raw, enCuesFragment)).not.toThrow();
+  });
+
+  // Case 22d
+  it('throws LISTENING_TRANSLATION_QUESTION_MISMATCH when an English question translates to a pt-BR statement', () => {
+    const enCuesQuestion = new Map<1 | 2, EnglishCueDraft[]>([
+      [1, [makeEnCue('b1-c001', 1, 1, 'How can I help you?')]],
+      [2, [makeEnCue('b2-c001', 1, 2, BLOCK_2_TEXT)]],
+    ]);
+    const raw = makeRawTranslation({ block1Cues: [
+      { cueKey: 'b1-c001', sourceSentenceKeys: ['b1s01'], textPtBr: 'Como posso ajudar você.' },
+    ]});
+    const err = getError(() => validateTranslationDeterministic(raw, enCuesQuestion));
+    expect(err).toBeInstanceOf(SubtitleTranslationValidationError);
+    expect((err as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_QUESTION_MISMATCH');
+  });
+
   // Case 23
   it('throws when the translation appears to still be in English', () => {
     // ≥3 English function words and 0 Portuguese indicators

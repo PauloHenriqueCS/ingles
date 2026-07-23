@@ -24,6 +24,8 @@ COMPLETENESS — the most common source of errors, follow these exactly:
 - Every action, gesture, and line of dialogue in a cue must appear in its translation. A cue like "Maria nods." or "They check in." is a complete beat — translate it as one, never drop it or fold it silently into a neighboring cue's translation.
 - Do NOT summarize, shorten, or simplify the content to save space. A short English cue should produce a short — but COMPLETE — Portuguese cue, not a paraphrase that drops detail.
 - Do NOT invent content that is not in the English cue.
+- Never stop mid-sentence. If the English cue is a complete sentence (ends with ".", "!", or "?"), your translation must be a complete sentence too — finish the thought, do not cut it off after the first few words.
+- If the English cue is a question, your translation must also be phrased as a question, ending with "?".
 
 IDENTITY AND REFERENCE — do not let translation choices blur who did what to whom:
 - Preserve character names exactly (do not translate them, unless a well-known standard Brazilian Portuguese equivalent exists — e.g. real cities).
@@ -54,6 +56,7 @@ Examples of PROHIBITED behavior (do not do this):
 - EN cue "She packs a big suitcase and takes a bus to the city." → WRONG: "Ela faz as malas e pega um ônibus para a cidade." (the generic idiom "faz as malas" no longer refers specifically to the one big suitcase). RIGHT: "Ela arruma uma mala grande e pega um ônibus para a cidade." (keeps the specific, singular suitcase).
 - EN cue "Ana's apartment is small, but it is good for her." → WRONG: "O apartamento de Ana é pequeno. É bom para ela." (drops "but", turning a contrast into two flat statements). RIGHT: "O apartamento de Ana é pequeno, mas é bom para ela." (keeps the contrast).
 - EN cue "I am so excited to see you!" → WRONG: "Estou animada para te ver!" (drops "so", losing the intensity). RIGHT: "Estou tão animada para te ver!" or "Estou super animada para te ver!" (keeps the intensifier).
+- EN cue "\"This can be my new home,\" she says to herself." → WRONG: "\"Este pode ser meu novo\", ela diz para si mesma." (stops after "novo" — "home"/"lar" never appears; the sentence is left hanging). RIGHT: "\"Este pode ser meu novo lar\", ela diz para si mesma." (the sentence is finished, matching the complete English original).
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON. First character must be "{".`;
 
@@ -99,6 +102,7 @@ RULES:
 - Fix ONLY the cues listed as needing correction, using the exact problem stated for each. Do not change anything not called out in the stated problem.
 - The correction must still contain every action, gesture, and line of dialogue that was in the original English cue — fixing the stated problem must never introduce a NEW omission or a new identity/gender/name error.
 - Do not summarize or shorten the cue to "solve" the issue — produce a complete, accurate translation of the full English cue.
+- Never stop mid-sentence: if the English cue ends with ".", "!", or "?", your correction must be a complete sentence ending the same way — do not leave the last word or clause off. If the English is a question, the correction must also be phrased as a question.
 - Preserve character names exactly (do not translate them, unless a well-known standard Brazilian Portuguese equivalent exists).
 - Preserve grammatical gender/number and who is speaking/being addressed — use the full block text given as context to resolve ambiguous pronouns correctly.
 - Preserve every digit that appears in the English cue, using the EXACT SAME numerals. Never convert a 12-hour time to 24-hour format, never spell a digit out as a word, never drop a number, date, address, or measurement.
