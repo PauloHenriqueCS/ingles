@@ -13,6 +13,8 @@ import {
   validateTranslationDeterministic,
   validateBlockTranslationWithAI,
   correctBlockTranslation,
+  correctSentenceGroupTranslation,
+  reassertCorrectedCuesDeterministically,
   findMissingCueKeys,
   mergeRepairedCues,
   translateMissingCues,
@@ -25,6 +27,7 @@ import {
   TRANSLATION_PROMPT_VERSION,
   VALIDATOR_PROMPT_VERSION,
 } from './translate-listening-subtitles';
+import { groupCuesBySentence, reconstructCanonicalText } from './group-cues-by-sentence';
 import type { RawTranslationResponse } from './listening-subtitle-schema';
 import { persistListeningSubtitles } from './persist-listening-subtitles';
 import type { EnglishCueDraft, ValidatedTranslatedCue } from './listening-subtitle-schema';
@@ -677,14 +680,43 @@ export async function prepareListeningSubtitles(
   const INCOMPLETE_SENTENCE_CORRECTION_HINT =
     'This cue must be a complete sentence: the English source is a finished sentence, but the current translation stops before finishing the thought. Provide the FULL translation, including whatever content was cut off, ending with matching punctuation.';
 
+  // Collapses one block's cues, grouped by original sentence, into
+  // "validation units": a standalone (single-cue) group passes through as
+  // its own real cue, unchanged — a multi-cue group becomes ONE synthetic
+  // ("virtual") entry keyed by its first cueKey, whose textEn/textPtBr is
+  // the whole sentence reconstructed from its member cues. Presenting the
+  // group to validateBlockTranslationWithAI this way means the SAME
+  // per-cue validator already used everywhere else judges the group as one
+  // coherent unit — never as independent fragments — with no changes to
+  // the validator itself. The canonical text is always freshly derived
+  // from the current per-cue textPtBr values, never stored separately, so
+  // it can never drift out of sync with the cues it's built from.
+  function buildValidationUnits(cues: ValidatedTranslatedCue[]): { groups: ValidatedTranslatedCue[][]; units: ValidatedTranslatedCue[] } {
+    const groups = groupCuesBySentence(cues);
+    const units = groups.map(group => {
+      if (group.length === 1) return group[0];
+      return {
+        cueKey: group[0].cueKey,
+        cueOrder: group[0].cueOrder,
+        blockOrder: group[0].blockOrder,
+        sourceSentenceKeys: [...new Set(group.flatMap(c => c.sourceSentenceKeys))],
+        textEn: reconstructCanonicalText(group.map(c => ({ text: c.textEn }))),
+        textPtBr: reconstructCanonicalText(group.map(c => ({ text: c.textPtBr }))),
+      };
+    });
+    return { groups, units };
+  }
+
   for (const blockOrder of [1, 2] as const) {
     let blockCues = translatedCues.get(blockOrder)!;
     const blockTextEn = blockTextEnByOrder.get(blockOrder) ?? '';
 
     for (let round = 0; ; round++) {
+      let { groups, units } = buildValidationUnits(blockCues);
+
       let validation: Awaited<ReturnType<typeof validateBlockTranslationWithAI>>;
       try {
-        validation = await validateBlockTranslationWithAI(blockOrder, blockTextEn, blockCues, cefrLevel, episodeId, aiCallFn);
+        validation = await validateBlockTranslationWithAI(blockOrder, blockTextEn, units, cefrLevel, episodeId, aiCallFn);
       } catch (err) {
         if (supabase && !dryRun) {
           await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
@@ -692,34 +724,46 @@ export async function prepareListeningSubtitles(
         throw err;
       }
 
-      // Case 1 (question mark only): deterministic punctuation fix for cues
-      // the validator already approved. Never overrides the validator's own
-      // semantic judgment — only ever touches a cue it marked valid: true.
-      blockCues = blockCues.map(cue => {
-        if (!hasMissingQuestionMark(cue.textEn, cue.textPtBr)) return cue;
-        if (validation.cueResults.find(r => r.cueKey === cue.cueKey)?.valid !== true) return cue;
+      // Case 1 (question mark only): deterministic punctuation fix, judged
+      // at the GROUP level (the "?" belongs to the sentence, not to any one
+      // piece of it) but applied only to the LAST cue of the group — that
+      // is always where the sentence's own terminal punctuation lands, so
+      // rewriting just that piece's tail is equivalent to rewriting the
+      // whole canonical translation's tail. Never overrides the validator's
+      // own semantic judgment — only ever touches a group it marked valid.
+      const questionMarkFixes = new Map<string, string>();
+      for (const group of groups) {
+        const groupKey = group[0].cueKey;
+        const unit = units.find(u => u.cueKey === groupKey)!;
+        if (!hasMissingQuestionMark(unit.textEn, unit.textPtBr)) continue;
+        if (validation.cueResults.find(r => r.cueKey === groupKey)?.valid !== true) continue;
+        const lastCue = group[group.length - 1];
         console.error(JSON.stringify({
           event: 'listening_subtitle_question_mark_normalized',
-          episodeId, blockOrder, cueKey: cue.cueKey, round: round + 1, t: Date.now(),
+          episodeId, blockOrder, cueKey: lastCue.cueKey, groupKey, round: round + 1, t: Date.now(),
         }));
-        return { ...cue, textPtBr: normalizeQuestionPunctuation(cue.textPtBr) };
-      });
+        questionMarkFixes.set(lastCue.cueKey, normalizeQuestionPunctuation(lastCue.textPtBr));
+      }
+      if (questionMarkFixes.size > 0) {
+        blockCues = blockCues.map(cue => questionMarkFixes.has(cue.cueKey) ? { ...cue, textPtBr: questionMarkFixes.get(cue.cueKey)! } : cue);
+        ({ groups, units } = buildValidationUnits(blockCues));
+      }
 
-      // Effective per-cue verdicts: start from the AI validator's own
+      // Effective per-GROUP verdicts: start from the AI validator's own
       // judgment, then layer in deterministic overrides it cannot be
       // trusted to always catch on its own. Recomputing overallValid from
       // THIS array (not validation.overallValid) is what lets a truncated
       // sentence force a correction round even when the validator itself
       // approved the block.
-      const cueResults = validation.cueResults.map(r => {
-        const cue = blockCues.find(c => c.cueKey === r.cueKey);
-        if (!cue) return r;
+      const groupResults = validation.cueResults.map(r => {
+        const unit = units.find(u => u.cueKey === r.cueKey);
+        if (!unit) return r;
         let result = r;
 
-        if (!result.valid && hasMissingQuestionMark(cue.textEn, cue.textPtBr) && !result.issues.some(i => /\?|question/i.test(i))) {
+        if (!result.valid && hasMissingQuestionMark(unit.textEn, unit.textPtBr) && !result.issues.some(i => /\?|question/i.test(i))) {
           result = { ...result, issues: [...result.issues, QUESTION_MARK_CORRECTION_HINT] };
         }
-        if (hasIncompleteSentence(cue.textEn, cue.textPtBr)) {
+        if (hasIncompleteSentence(unit.textEn, unit.textPtBr)) {
           const alreadyMentions = result.issues.some(i => /incomplete|truncat|unfinished|cut ?off/i.test(i));
           result = {
             cueKey: result.cueKey,
@@ -729,16 +773,18 @@ export async function prepareListeningSubtitles(
         }
         return result;
       });
-      const overallValid = cueResults.every(c => c.valid);
+      const overallValid = groupResults.every(g => g.valid);
 
       if (overallValid) break;
 
-      const failing = cueResults.filter(r => !r.valid);
+      const failingGroupKeys = new Set(groupResults.filter(g => !g.valid).map(g => g.cueKey));
+      const failingGroups = groups.filter(g => failingGroupKeys.has(g[0].cueKey));
 
       console.error(JSON.stringify({
         event: 'listening_subtitle_quality_repair',
         episodeId, blockOrder, round: round + 1, maxRounds: MAX_QUALITY_CORRECTION_ROUNDS,
-        failingCueKeys: failing.map(f => f.cueKey),
+        failingGroupKeys: [...failingGroupKeys],
+        failingCueKeys: failingGroups.flatMap(g => g.map(c => c.cueKey)),
         t: Date.now(),
       }));
 
@@ -747,23 +793,81 @@ export async function prepareListeningSubtitles(
           await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
         }
         throw new ListeningTranslationCorrectionFailedError(
-          episodeId, blockOrder, failing.map(f => ({ cueKey: f.cueKey, issues: f.issues })),
+          episodeId, blockOrder,
+          failingGroups.flatMap(group => {
+            const issues = groupResults.find(g => g.cueKey === group[0].cueKey)!.issues;
+            return group.map(c => ({ cueKey: c.cueKey, issues }));
+          }),
         );
       }
 
-      try {
-        blockCues = await correctBlockTranslation(
-          blockOrder, blockTextEn, blockCues, { ...validation, cueResults, overallValid }, cefrLevel, episodeId, aiCallFn,
-        );
-      } catch (correctErr) {
-        // Same partial-state trap as steps 7-8: correctBlockTranslation can
-        // throw (AI call failure, or reassertCorrectedCuesDeterministically
-        // rejecting a correction that dropped a number / left text empty) —
-        // must not leave subtitles_status stuck at 'processing'.
-        if (supabase && !dryRun) {
-          await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+      // Dispatch by unit kind: a failing multi-cue sentence group is
+      // re-translated and re-segmented as ONE whole sentence (never patched
+      // cue-by-cue — that's the original bug); a failing standalone cue
+      // goes through the existing bulk per-cue correction call, same as
+      // before. Groups are corrected FIRST so that, when the standalone
+      // correction call runs afterward, any already-fixed group cues it
+      // sees as "valid" context are in fact the corrected text.
+      const failingMultiCueGroups = failingGroups.filter(g => g.length > 1);
+      const failingStandaloneKeys = new Set(failingGroups.filter(g => g.length === 1).map(g => g[0].cueKey));
+
+      for (const group of failingMultiCueGroups) {
+        const groupKey = group[0].cueKey;
+        const issues = groupResults.find(g => g.cueKey === groupKey)!.issues;
+        let corrected: Awaited<ReturnType<typeof correctSentenceGroupTranslation>>;
+        try {
+          corrected = await correctSentenceGroupTranslation({
+            episodeId, cefrLevel, blockOrder, blockTextEn,
+            cueKeys: group.map(c => c.cueKey),
+            sentenceTextEn: reconstructCanonicalText(group.map(c => ({ text: c.textEn }))),
+            currentCanonicalTranslation: reconstructCanonicalText(group.map(c => ({ text: c.textPtBr }))),
+            issues,
+            callAI: aiCallFn,
+          });
+        } catch (correctErr) {
+          if (supabase && !dryRun) {
+            await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+          }
+          throw correctErr;
         }
-        throw correctErr;
+        const segByKey = new Map(corrected.segments.map(s => [s.cueKey, s.textPtBr]));
+        blockCues = blockCues.map(c => segByKey.has(c.cueKey) ? { ...c, textPtBr: segByKey.get(c.cueKey)! } : c);
+      }
+
+      if (failingStandaloneKeys.size > 0) {
+        const standaloneValidation = {
+          ...validation,
+          cueResults: groupResults.filter(g => failingStandaloneKeys.has(g.cueKey)),
+          overallValid: false,
+        };
+        try {
+          blockCues = await correctBlockTranslation(
+            blockOrder, blockTextEn, blockCues, standaloneValidation, cefrLevel, episodeId, aiCallFn,
+          );
+        } catch (correctErr) {
+          // Same partial-state trap as steps 7-8: correctBlockTranslation can
+          // throw (AI call failure, or reassertCorrectedCuesDeterministically
+          // rejecting a correction that dropped a number / left text empty) —
+          // must not leave subtitles_status stuck at 'processing'.
+          if (supabase && !dryRun) {
+            await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+          }
+          throw correctErr;
+        }
+      } else {
+        // correctBlockTranslation reasserts determinism internally; when
+        // this round corrected ONLY sentence groups (no standalone cues),
+        // that call never runs, so the same re-check must happen here —
+        // otherwise a group correction that dropped a number or left a
+        // segment empty would go undetected.
+        try {
+          reassertCorrectedCuesDeterministically(blockOrder, blockCues);
+        } catch (reassertErr) {
+          if (supabase && !dryRun) {
+            await supabase.from('listening_episodes').update({ subtitles_status: 'failed' }).eq('id', episodeId);
+          }
+          throw reassertErr;
+        }
       }
     }
 

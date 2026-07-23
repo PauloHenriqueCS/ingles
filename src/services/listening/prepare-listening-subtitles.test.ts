@@ -23,6 +23,7 @@ import {
 } from './prepare-listening-subtitles';
 import type { AICallWithUsageFn } from './prepare-listening-subtitles';
 import type { EnglishCueDraft } from './listening-subtitle-schema';
+import { SENTENCE_GROUP_CORRECTION_SYSTEM_PROMPT, CORRECTION_SYSTEM_PROMPT } from './build-subtitle-translation-prompt';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -157,7 +158,15 @@ interface MockSupabaseOptions {
   block1IsQuestion?: boolean;
   /** Block 1 gets 2 cues: a question (b1-c001) and an unrelated statement (b1-c002) — needed to prove a targeted question correction touches only its own cue and never the sibling. */
   block1QuestionAndStatement?: boolean;
+  /** Block 1's single sentence is long enough that the REAL splitLongSentence (B1 max 13 words) splits it into 2 cues sharing one sentence_key — a genuine multi-cue sentence group, not two separate sentences. Confirmed empirically: buildEnglishSubtitleCues([{textEn: BLOCK_1_SPLIT_SENTENCE}], 1, 'B1') produces exactly b1-c001/b1-c002, both sourceSentenceKeys=['b1s01']. */
+  block1SplitSentence?: boolean;
 }
+
+// 19 words at B1 (max 13) — splits at " because " into exactly 2 cues
+// sharing sourceSentenceKeys=['b1s01'], verified via buildEnglishSubtitleCues.
+const BLOCK_1_SPLIT_SENTENCE = 'Ana knocks on the door and waits patiently because she wants to ask her neighbor about the missing cat.';
+const BLOCK_1_SPLIT_PART_A = 'Ana knocks on the door and waits patiently';
+const BLOCK_1_SPLIT_PART_B = 'because she wants to ask her neighbor about the missing cat.';
 
 const BLOCK_1_SENTENCE_A = 'Ana walked slowly through the quiet park near her house today.';
 const BLOCK_1_SENTENCE_B = 'Tom found a small dog resting under the old wooden bridge nearby.';
@@ -186,7 +195,9 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
         ? `${BLOCK_1_QUESTION_TEXT} ${BLOCK_1_STATEMENT_TEXT}`
         : opts.block1IsQuestion
           ? BLOCK_1_QUESTION_TEXT
-          : BLOCK_1_TEXT;
+          : opts.block1SplitSentence
+            ? BLOCK_1_SPLIT_SENTENCE
+            : BLOCK_1_TEXT;
 
   const blockRows = (() => {
     if (opts.noBlocks) return [];
@@ -213,7 +224,7 @@ function makeSupabase(opts: MockSupabaseOptions = {}) {
         ]
       : [{
           block_id: BLOCK_1_ID, sentence_key: 'b1s01', sentence_order: 1, speaker: null,
-          text_en: opts.block1IsQuestion ? BLOCK_1_QUESTION_TEXT : BLOCK_1_TEXT,
+          text_en: opts.block1IsQuestion ? BLOCK_1_QUESTION_TEXT : opts.block1SplitSentence ? BLOCK_1_SPLIT_SENTENCE : BLOCK_1_TEXT,
         }];
 
   const sentenceRows = opts.noSentencesForBlock2
@@ -1214,5 +1225,136 @@ describe('prepareListeningSubtitles — with database', () => {
     );
     expect(result.status).toBe('ready');
     expect(db._insertCalls).toHaveLength(0);
+  });
+
+  // ── Sentence-group translation (multi-cue sentences validated/corrected as ONE unit) ─
+  // Root cause traced across three real episodes (a01d96d0, 23a7db4d,
+  // b9b43b4a): repeated content between cues, dialogue misattributed to the
+  // wrong character, and corrections that never converged, all stemmed from
+  // treating a sentence split across cues as several independent linguistic
+  // units. block1SplitSentence's sentence is long enough (19 words, B1 max
+  // 13) that the REAL splitLongSentence produces a genuine 2-cue group
+  // (b1-c001/b1-c002, both sourceSentenceKeys=['b1s01']) — not two
+  // synthetic fixtures, the actual segmentation logic this pipeline runs in
+  // production.
+
+  it('the semantic validator judges a multi-cue sentence group as ONE unit — never as independent fragments', async () => {
+    const db = makeSupabase({ block1SplitSentence: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana bate na porta e espera pacientemente' },
+        { cueKey: 'b1-c002', textPtBr: 'porque ela quer perguntar à vizinha sobre o gato desaparecido.' },
+      ],
+    }));
+    const groupValidatorPass = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }], // ONE verdict, keyed by the group's first cueKey
+    });
+    const callAI = makeAI([translationBlock1, translationBlock1, groupValidatorPass, VALIDATOR_SUCCESS_JSON]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    const validatorPrompt = (callAI as ReturnType<typeof vi.fn>).mock.calls[2][1] as string;
+    // The whole reconstructed sentence, under the group's single representative key...
+    expect(validatorPrompt).toContain(`[b1-c001] EN: ${BLOCK_1_SPLIT_SENTENCE}`);
+    // ...and b1-c002 never appears as its own separately-judged entry.
+    expect(validatorPrompt).not.toContain('[b1-c002]');
+  });
+
+  it('a failing multi-cue sentence group is corrected via whole-sentence re-translation + re-segmentation, not per-cue patching', async () => {
+    const db = makeSupabase({ block1SplitSentence: true });
+    // Deliberately broken the way live failures actually looked: content
+    // repeated between the two cues instead of split cleanly.
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana bate na porta.' },
+        { cueKey: 'b1-c002', textPtBr: 'Ana bate na porta porque ela quer perguntar sobre o gato.' },
+      ],
+    }));
+    const groupValidatorFail = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: false, issues: ['Content repeated between cues; must read as one coherent sentence.'] }],
+    });
+    const groupCorrection = JSON.stringify({
+      canonicalTranslation: 'Ana bate na porta e espera pacientemente porque ela quer perguntar à vizinha sobre o gato desaparecido.',
+      segments: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana bate na porta e espera pacientemente' },
+        { cueKey: 'b1-c002', textPtBr: 'porque ela quer perguntar à vizinha sobre o gato desaparecido.' },
+      ],
+    });
+    const groupValidatorPass = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: true, issues: [] }],
+    });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      groupValidatorFail, groupCorrection, groupValidatorPass,
+      VALIDATOR_SUCCESS_JSON,
+    ]);
+
+    const result = await prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db));
+
+    expect(result.status).toBe('ready');
+    // Dispatched through the dedicated sentence-group correction prompt —
+    // never the legacy per-cue correction prompt (patching pieces
+    // independently is the exact bug this path exists to avoid).
+    expect((callAI as ReturnType<typeof vi.fn>).mock.calls[3][0]).toBe(SENTENCE_GROUP_CORRECTION_SYSTEM_PROMPT);
+    expect((callAI as ReturnType<typeof vi.fn>).mock.calls[3][0]).not.toBe(CORRECTION_SYSTEM_PROMPT);
+
+    type Row = { cue_key: string; language: string; block_id: string; text: string };
+    const block1PtRows = db._insertCalls
+      .flatMap(rows => rows as Row[])
+      .filter(r => r.block_id === BLOCK_1_ID && r.language === 'pt-BR');
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c001')!.text).toBe('Ana bate na porta e espera pacientemente');
+    expect(block1PtRows.find(r => r.cue_key === 'b1-c002')!.text).toBe('porque ela quer perguntar à vizinha sobre o gato desaparecido.');
+
+    // Block 2's untouched cue proves the group correction never bled into
+    // an unrelated block.
+    const block2PtRow = db._insertCalls
+      .flatMap(rows => rows as Row[])
+      .find(r => r.block_id === BLOCK_2_ID && r.language === 'pt-BR');
+    expect(block2PtRow!.text).toBe('O cachorro correu para casa.');
+  });
+
+  it('a sentence group that never converges exhausts MAX_QUALITY_CORRECTION_ROUNDS and fails the whole episode, naming every cueKey in the group', async () => {
+    const db = makeSupabase({ block1SplitSentence: true });
+    const translationBlock1 = JSON.stringify(makeTranslationBatchResponse({
+      block1Cues: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana bate na porta.' },
+        { cueKey: 'b1-c002', textPtBr: 'Ana bate na porta porque ela quer perguntar sobre o gato.' },
+      ],
+    }));
+    const groupValidatorFail = JSON.stringify({
+      schemaVersion: '2.0',
+      cues: [{ cueKey: 'b1-c001', valid: false, issues: ['Content repeated between cues.'] }],
+    });
+    // Still broken after "correction" — proves a correction that never
+    // converges terminates cleanly instead of looping forever.
+    const groupCorrectionStillBroken = JSON.stringify({
+      canonicalTranslation: 'Ana bate na porta. Ana bate na porta porque ela quer perguntar sobre o gato.',
+      segments: [
+        { cueKey: 'b1-c001', textPtBr: 'Ana bate na porta.' },
+        { cueKey: 'b1-c002', textPtBr: 'Ana bate na porta porque ela quer perguntar sobre o gato.' },
+      ],
+    });
+    const callAI = makeAI([
+      translationBlock1, translationBlock1,
+      groupValidatorFail, groupCorrectionStillBroken,
+      groupValidatorFail, groupCorrectionStillBroken,
+      groupValidatorFail,
+    ]);
+
+    const err = await getRejection(
+      prepareListeningSubtitles({ episodeId: EPISODE_ID }, callAI, asSupabase(db))
+    );
+
+    expect(err).toBeInstanceOf(ListeningTranslationCorrectionFailedError);
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c001');
+    expect((err as ListeningTranslationCorrectionFailedError).message).toContain('b1-c002');
+
+    const episodeUpdates = db._updateCalls.filter(c => c.table === 'listening_episodes');
+    const lastUpdate = episodeUpdates[episodeUpdates.length - 1];
+    expect((lastUpdate.data as Record<string, unknown>).subtitles_status).toBe('failed');
   });
 });

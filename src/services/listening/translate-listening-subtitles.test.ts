@@ -21,6 +21,7 @@ import {
   hasMissingQuestionMark,
   normalizeQuestionPunctuation,
   hasIncompleteSentence,
+  correctSentenceGroupTranslation,
 } from './translate-listening-subtitles';
 import type { EnglishCueDraft, RawTranslationResponse, ValidatedTranslatedCue, SubtitleQualityValidationResult } from './listening-subtitle-schema';
 import type { AICallWithUsageFn } from './validate-questions-with-ai';
@@ -1071,3 +1072,282 @@ describe('translateSubtitles — adaptive subdivision on output truncation', () 
 async function getRejection(fn: () => Promise<unknown>): Promise<unknown> {
   try { await fn(); return null; } catch (e) { return e; }
 }
+
+// ── Sentence-group translation ──────────────────────────────────────────────
+// Real evidence (episodes a01d96d0, 23a7db4d, b9b43b4a): translating each cue
+// of a multi-cue sentence independently produced repeated content between
+// adjacent cues, dialogue misattributed to the wrong character, and
+// corrections that never converged. These tests use the real b1s29 sentence
+// from b9b43b4a ("Hello, excuse me," Leo says to a man reading a book, "Do
+// you know whose dog this is?" — split into b1-c034/b1-c035/b1-c036) as the
+// primary fixture, since it's the exact sentence already documented as the
+// worked example in build-subtitle-translation-prompt.ts.
+
+function extractRequestedCueKeys(userPrompt: string): string[] {
+  return [...userPrompt.matchAll(/\[(b\d-c\d+)\]/g)].map(m => m[1]);
+}
+
+function makeGroupedCue(cueKey: string, cueOrder: number, sentenceKey: string, text: string): EnglishCueDraft {
+  return { cueKey, cueOrder, blockOrder: 1, sourceSentenceKeys: [sentenceKey], text };
+}
+
+const DOG_QUESTION_GROUP: EnglishCueDraft[] = [
+  makeGroupedCue('b1-c034', 34, 'b1s29', '"Hello, excuse me,"'),
+  makeGroupedCue('b1-c035', 35, 'b1s29', 'Leo says to a man reading a book,'),
+  makeGroupedCue('b1-c036', 36, 'b1s29', '"Do you know whose dog this is?"'),
+];
+
+describe('translateSubtitles — sentence-group-aware batching', () => {
+  it('14. a batch boundary never separates cues belonging to the same sentence group', async () => {
+    // 18 standalone cues + the real 3-cue group = 21 cues, one more than
+    // TRANSLATION_BATCH_SIZE (20). A plain count-based batcher would cut
+    // after cue 20 — stranding b1-c036 in a second batch without b1-c034/
+    // b1-c035. Group-aware batching must push the WHOLE group into batch 2.
+    const standalone = makeCueRange(1, TRANSLATION_BATCH_SIZE - 2, 1); // 18 cues: b1-c001..b1-c018
+    const block1: { blockOrder: 1; blockTextEn: string; cues: EnglishCueDraft[] } = {
+      blockOrder: 1,
+      blockTextEn: [...standalone, ...DOG_QUESTION_GROUP].map(c => c.text).join(' '),
+      cues: [...standalone, ...DOG_QUESTION_GROUP],
+    };
+    const block2 = makeBlockCueData(2, 1);
+
+    const seenKeysPerCall: string[][] = [];
+    const callAI: AICallWithUsageFn = vi.fn(async (_system: string, userPrompt: string) => {
+      const keys = extractRequestedCueKeys(userPrompt);
+      seenKeysPerCall.push(keys);
+      return {
+        text: JSON.stringify({ cues: keys.map(k => ({ cueKey: k, textPtBr: `trad-${k}` })) }),
+        usage: makeUsage(), requestId: null, finishReason: 'stop',
+      };
+    });
+
+    await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+
+    // block1 must have taken exactly 2 calls (18 standalone, then the group of 3).
+    const block1Calls = seenKeysPerCall.slice(0, seenKeysPerCall.length - 1); // last call is block2
+    expect(block1Calls).toHaveLength(2);
+    expect(block1Calls[0]).toEqual(standalone.map(c => c.cueKey));
+    expect(block1Calls[1]).toEqual(['b1-c034', 'b1-c035', 'b1-c036']);
+  });
+});
+
+describe('translateSubtitles — parsing sentenceGroups[] responses', () => {
+  function makeGroupResponseAI(canonicalTranslation: string, segments: Record<string, string>): AICallWithUsageFn {
+    return vi.fn(async () => ({
+      text: JSON.stringify({
+        cues: [],
+        sentenceGroups: [{
+          cueKeys: Object.keys(segments),
+          canonicalTranslation,
+          segments: Object.entries(segments).map(([cueKey, textPtBr]) => ({ cueKey, textPtBr })),
+        }],
+      }),
+      usage: makeUsage(), requestId: null, finishReason: 'stop',
+    }));
+  }
+
+  it('6. a well-segmented group response is merged into per-cue results, one entry per cueKey', async () => {
+    const block1: { blockOrder: 1; blockTextEn: string; cues: EnglishCueDraft[] } = {
+      blockOrder: 1, blockTextEn: DOG_QUESTION_GROUP.map(c => c.text).join(' '), cues: DOG_QUESTION_GROUP,
+    };
+    const block2 = makeBlockCueData(2, 1);
+    const callAI: AICallWithUsageFn = vi.fn()
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          cues: [],
+          sentenceGroups: [{
+            cueKeys: ['b1-c034', 'b1-c035', 'b1-c036'],
+            canonicalTranslation: '"Olá, com licença," Leo diz a um homem lendo um livro, "você sabe de quem é este cachorro?"',
+            segments: [
+              { cueKey: 'b1-c034', textPtBr: '"Olá, com licença,"' },
+              { cueKey: 'b1-c035', textPtBr: 'Leo diz a um homem lendo um livro,' },
+              { cueKey: 'b1-c036', textPtBr: '"você sabe de quem é este cachorro?"' },
+            ],
+          }],
+        }),
+        usage: makeUsage(), requestId: null, finishReason: 'stop',
+      })
+      .mockResolvedValueOnce({ text: JSON.stringify({ cues: [{ cueKey: 'b2-c001', textPtBr: 'y' }] }), usage: makeUsage(), requestId: null, finishReason: 'stop' });
+
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+    const block1Result = result.blocks.find(b => b.blockOrder === 1)!;
+    expect(block1Result.cues.map(c => c.cueKey)).toEqual(['b1-c034', 'b1-c035', 'b1-c036']);
+    expect(block1Result.cues.find(c => c.cueKey === 'b1-c036')!.textPtBr).toBe('"você sabe de quem é este cachorro?"');
+  });
+
+  it('7. segments whose concatenation does NOT reconstruct the canonical translation throw LISTENING_TRANSLATION_SEGMENTATION_MISMATCH', async () => {
+    const block1: { blockOrder: 1; blockTextEn: string; cues: EnglishCueDraft[] } = {
+      blockOrder: 1, blockTextEn: DOG_QUESTION_GROUP.map(c => c.text).join(' '), cues: DOG_QUESTION_GROUP,
+    };
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeGroupResponseAI(
+      '"Olá, com licença," Leo diz a um homem lendo um livro, "você sabe de quem é este cachorro?"',
+      {
+        'b1-c034': '"Olá, com licença,"',
+        'b1-c035': 'Leo diz a um homem lendo um livro,', // segments below omit the question entirely
+        'b1-c036': 'algo completamente diferente',
+      },
+    );
+
+    const rejection = await getRejection(() => translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI));
+    expect(rejection).toBeInstanceOf(SubtitleTranslationValidationError);
+    expect((rejection as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_SEGMENTATION_MISMATCH');
+  });
+
+  it('a group naming a cueKey outside the current batch is rejected wholesale (surfaces as missing, not a partial merge)', async () => {
+    const block1: { blockOrder: 1; blockTextEn: string; cues: EnglishCueDraft[] } = {
+      blockOrder: 1, blockTextEn: DOG_QUESTION_GROUP.map(c => c.text).join(' '), cues: DOG_QUESTION_GROUP,
+    };
+    const block2 = makeBlockCueData(2, 1);
+    const callAI = makeGroupResponseAI('x', { 'b1-c034': 'a', 'b1-c035': 'b', 'b1-c999': 'c' }); // c999 doesn't exist
+
+    const result = await translateSubtitles([block1, block2], 'ep1', 'Title', null, 'A1', callAI);
+    const block1Result = result.blocks.find(b => b.blockOrder === 1)!;
+    expect(block1Result.cues).toHaveLength(0); // whole group dropped, not partially merged
+  });
+});
+
+describe('translateCueRangeWithAdaptiveSubdivision — group-aware truncation recovery', () => {
+  it('9/13. subdividing a truncated batch never splits a sentence group across the two halves', async () => {
+    const standalone = makeCueRange(1, 6, 1); // b1-c001..b1-c006
+    const cues = [...standalone, ...DOG_QUESTION_GROUP];
+
+    let call = 0;
+    const seenKeysPerCall: string[][] = [];
+    const callAI: AICallWithUsageFn = vi.fn(async (_system: string, userPrompt: string) => {
+      const keys = extractRequestedCueKeys(userPrompt);
+      seenKeysPerCall.push(keys);
+      call++;
+      if (call === 1) {
+        return { text: '{"trunc', usage: makeUsage(), requestId: null, finishReason: 'length' };
+      }
+      return {
+        text: JSON.stringify({ cues: keys.map(k => ({ cueKey: k, textPtBr: `trad-${k}` })) }),
+        usage: makeUsage(), requestId: null, finishReason: 'stop',
+      };
+    });
+
+    await translateCueRangeWithAdaptiveSubdivision(
+      cues, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    );
+
+    // Every call after the first (the truncated root call) must either
+    // contain ALL of the group's cueKeys or NONE of them — never a partial
+    // slice of the group.
+    const groupKeys = new Set(DOG_QUESTION_GROUP.map(c => c.cueKey));
+    for (const keys of seenKeysPerCall.slice(1)) {
+      const present = keys.filter(k => groupKeys.has(k));
+      expect(present.length === 0 || present.length === groupKeys.size).toBe(true);
+    }
+  });
+
+  it('a single sentence group that still truncates on its own fails with reason single_sentence_group_truncated, not another split attempt', async () => {
+    const callAI = makeScriptedAI([{ truncated: true }]);
+
+    const rejection = await getRejection(() => translateCueRangeWithAdaptiveSubdivision(
+      DOG_QUESTION_GROUP, undefined, undefined, 0, { remaining: MAX_BATCH_TRANSLATION_CALLS_PER_BATCH },
+      makeAdaptiveContext(1, callAI),
+    ));
+
+    expect(rejection).toBeInstanceOf(SubtitleTranslationOutputTruncatedError);
+    expect((rejection as SubtitleTranslationOutputTruncatedError).reason).toBe('single_sentence_group_truncated');
+    expect(callAI).toHaveBeenCalledTimes(1); // no subdivision attempted — cannot split a single group
+  });
+});
+
+describe('correctSentenceGroupTranslation', () => {
+  const baseInput = {
+    episodeId: 'b9b43b4a-91c6-4e90-8126-e5c545ac9ac9',
+    cefrLevel: 'A1' as const,
+    blockOrder: 1 as const,
+    blockTextEn: DOG_QUESTION_GROUP.map(c => c.text).join(' '),
+    cueKeys: ['b1-c034', 'b1-c035', 'b1-c036'],
+    sentenceTextEn: '"Hello, excuse me," Leo says to a man reading a book, "Do you know whose dog this is?"',
+    currentCanonicalTranslation: '"Olá, com licença," Leo diz para um homem, "você sabe de quem é este cachorro"', // missing "?"
+    issues: ['Missing question mark: the English is a question.'],
+  };
+
+  it('15/11. re-translates and re-segments the whole sentence in one call, never touching other cues', async () => {
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: JSON.stringify({
+        canonicalTranslation: '"Olá, com licença," Leo diz para um homem, "você sabe de quem é este cachorro?"',
+        segments: [
+          { cueKey: 'b1-c034', textPtBr: '"Olá, com licença,"' },
+          { cueKey: 'b1-c035', textPtBr: 'Leo diz para um homem,' },
+          { cueKey: 'b1-c036', textPtBr: '"você sabe de quem é este cachorro?"' },
+        ],
+      }),
+      usage: makeUsage(), requestId: null,
+    }));
+
+    const result = await correctSentenceGroupTranslation({ ...baseInput, callAI });
+    expect(callAI).toHaveBeenCalledTimes(1);
+    expect(result.segments.find(s => s.cueKey === 'b1-c036')!.textPtBr).toContain('?');
+    expect(result.segments.map(s => s.cueKey)).toEqual(['b1-c034', 'b1-c035', 'b1-c036']);
+  });
+
+  it('7. a correction whose segments do not reconstruct its own canonicalTranslation throws LISTENING_TRANSLATION_SEGMENTATION_MISMATCH', async () => {
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: JSON.stringify({
+        canonicalTranslation: '"Olá, com licença," Leo diz para um homem, "você sabe de quem é este cachorro?"',
+        segments: [
+          { cueKey: 'b1-c034', textPtBr: '"Olá,"' }, // truncated piece, doesn't add up
+          { cueKey: 'b1-c035', textPtBr: 'Leo diz.' },
+          { cueKey: 'b1-c036', textPtBr: 'Fim.' },
+        ],
+      }),
+      usage: makeUsage(), requestId: null,
+    }));
+
+    const rejection = await getRejection(() => correctSentenceGroupTranslation({ ...baseInput, callAI }));
+    expect(rejection).toBeInstanceOf(SubtitleTranslationValidationError);
+    expect((rejection as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_SEGMENTATION_MISMATCH');
+  });
+
+  it('a response missing a segment for one of the requested cueKeys throws SubtitleTranslationParseError', async () => {
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: JSON.stringify({
+        canonicalTranslation: 'x',
+        segments: [{ cueKey: 'b1-c034', textPtBr: 'a' }, { cueKey: 'b1-c035', textPtBr: 'b' }], // b1-c036 missing
+      }),
+      usage: makeUsage(), requestId: null,
+    }));
+
+    await expect(correctSentenceGroupTranslation({ ...baseInput, callAI })).rejects.toThrow(SubtitleTranslationParseError);
+  });
+
+  it('a response that is still in English throws LISTENING_TRANSLATION_INVALID_JSON', async () => {
+    // detectLanguage is checked per-segment (same as every other cue in this
+    // codebase), so the English signal needs to land inside a SINGLE
+    // segment, not be spread thin across the whole sentence.
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: JSON.stringify({
+        canonicalTranslation: 'x The man is here and they are happy y',
+        segments: [
+          { cueKey: 'b1-c034', textPtBr: 'x' },
+          { cueKey: 'b1-c035', textPtBr: 'The man is here and they are happy' },
+          { cueKey: 'b1-c036', textPtBr: 'y' },
+        ],
+      }),
+      usage: makeUsage(), requestId: null,
+    }));
+
+    const rejection = await getRejection(() => correctSentenceGroupTranslation({ ...baseInput, callAI }));
+    expect(rejection).toBeInstanceOf(SubtitleTranslationValidationError);
+    expect((rejection as SubtitleTranslationValidationError).code).toBe('LISTENING_TRANSLATION_INVALID_JSON');
+  });
+
+  it('passes low temperature and JSON mode, through the AI Gateway like every other translation call', async () => {
+    const callAI: AICallWithUsageFn = vi.fn(async () => ({
+      text: JSON.stringify({
+        canonicalTranslation: 'x y z',
+        segments: [{ cueKey: 'b1-c034', textPtBr: 'x' }, { cueKey: 'b1-c035', textPtBr: 'y' }, { cueKey: 'b1-c036', textPtBr: 'z' }],
+      }),
+      usage: makeUsage(), requestId: null,
+    }));
+
+    await correctSentenceGroupTranslation({ ...baseInput, callAI });
+    expect((callAI as ReturnType<typeof vi.fn>).mock.calls[0][2]).toMatchObject({ temperature: 0.2, jsonMode: true });
+  });
+});

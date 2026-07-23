@@ -1,7 +1,15 @@
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { EnglishCueDraft } from './listening-subtitle-schema';
+import { groupCuesBySentence, reconstructCanonicalText } from './group-cues-by-sentence';
 
-export const TRANSLATION_PROMPT_VERSION = 'listening-subtitle-translation-v1';
+// v2: translation is now sentence-level for multi-cue groups (see
+// group-cues-by-sentence.ts) — found live across three episodes (a01d96d0,
+// 23a7db4d, b9b43b4a): treating every cue as an independent unit, even when
+// several cues were really one original sentence, produced repeated
+// content between adjacent cues, dialogue misattributed to the wrong
+// character, and corrections that never converged, because the model was
+// never told those cues had to read as one coherent whole.
+export const TRANSLATION_PROMPT_VERSION = 'listening-subtitle-translation-v2';
 export const VALIDATOR_PROMPT_VERSION = 'listening-subtitle-translation-validator-v2';
 
 // ─── System prompts ───────────────────────────────────────────────────────────
@@ -17,7 +25,15 @@ export const VALIDATOR_PROMPT_VERSION = 'listening-subtitle-translation-validato
 // completeness for brevity.
 export const TRANSLATION_SYSTEM_PROMPT = `You are a professional subtitle translator specialising in Brazilian Portuguese for English language learning applications.
 
-Your task is to translate a batch of English subtitle cues into natural Brazilian Portuguese (pt-BR). Each cue is a short, independent unit identified by a stable cueKey — you will also see the full English block text and possibly a cue immediately before/after your batch, but those are for CONTEXT ONLY, to help you translate naturally; never translate or return them.
+Your task is to translate a batch of English subtitle cues into natural Brazilian Portuguese (pt-BR). You will also see the full English block text and possibly a cue immediately before/after your batch, but those are for CONTEXT ONLY, to help you translate naturally; never translate or return them.
+
+SENTENCE GROUPS — read this before translating anything:
+Some cues are marked as belonging to a SENTENCE GROUP: several cueKeys that together make up ONE original English sentence (it was split across cues for subtitle timing/length, not because it is several separate thoughts). For a sentence group:
+- Read and translate the WHOLE group's sentence as one coherent unit first — do not translate each cueKey in the group in isolation, the way you would a standalone cue.
+- Produce ONE natural, complete pt-BR translation of the whole sentence (its "canonicalTranslation").
+- Then split that EXACT translation across the group's cueKeys, in order, so that joining the pieces back together (with a single space between them) reproduces the canonicalTranslation exactly — no cueKey's piece may duplicate another's, skip content, or invent content that is not in canonicalTranslation.
+- Every character, action, and line of dialogue in the group must appear exactly once across the pieces — never repeated in two pieces, never dropped from all of them.
+- A cue that is NOT marked as part of a sentence group is standalone — translate it independently as before.
 
 COMPLETENESS — the most common source of errors, follow these exactly:
 - Translate EVERY cue you are asked for. Never skip one, even if it looks trivial (a single reaction, a short gesture, a one-word reply).
@@ -34,7 +50,9 @@ IDENTITY AND REFERENCE — do not let translation choices blur who did what to w
 - Preserve every digit that appears in the English cue, using the EXACT SAME numerals in the translation. Never convert a 12-hour time to 24-hour format (a cue with "2 PM" must keep the digit "2" — e.g. "às 2 da tarde", never rewritten as "14h"), never spell a digit out as a word (keep "3", do not write "três"), and never drop a number, date, address, or measurement that was present in English.
 
 STRUCTURE — never restructure the cue list itself:
-- Return exactly one translation per cueKey you were given — never combine two cueKeys into one translation, never split one cueKey's translation across two entries.
+- Return every cueKey you were given exactly once, across the two response sections: standalone cues go in "cues", sentence-group cues go inside their group's "segments" in "sentenceGroups" — never both, never neither.
+- Within "cues", one entry per standalone cueKey — never combine two standalone cueKeys into one translation.
+- Within a sentence group's "segments", one entry per cueKey in that group, in the same order the group's cueKeys were given to you.
 - Never invent a new cueKey, never omit a cueKey you were given, never alter a cueKey's spelling.
 - Do NOT translate the cueKey itself — it is an identifier, not content.
 
@@ -57,6 +75,7 @@ Examples of PROHIBITED behavior (do not do this):
 - EN cue "Ana's apartment is small, but it is good for her." → WRONG: "O apartamento de Ana é pequeno. É bom para ela." (drops "but", turning a contrast into two flat statements). RIGHT: "O apartamento de Ana é pequeno, mas é bom para ela." (keeps the contrast).
 - EN cue "I am so excited to see you!" → WRONG: "Estou animada para te ver!" (drops "so", losing the intensity). RIGHT: "Estou tão animada para te ver!" or "Estou super animada para te ver!" (keeps the intensifier).
 - EN cue "\"This can be my new home,\" she says to herself." → WRONG: "\"Este pode ser meu novo\", ela diz para si mesma." (stops after "novo" — "home"/"lar" never appears; the sentence is left hanging). RIGHT: "\"Este pode ser meu novo lar\", ela diz para si mesma." (the sentence is finished, matching the complete English original).
+- Sentence group [b1-c034] "\"Hello, excuse me,\" Leo" + [b1-c035] "says to a man reading a book," + [b1-c036] "\"Do you know whose dog this is?\"" → WRONG: translating each cueKey independently, which is how content ends up repeated in one piece and dropped from another, or how "Leo" (the one asking) gets swapped for the man being asked. RIGHT: canonicalTranslation "\"Com licença,\" Leo diz a um homem lendo um livro, \"você sabe de quem é esse cachorro?\"", then split into b1-c034="\"Com licença,\" Leo", b1-c035="diz a um homem lendo um livro,", b1-c036="\"você sabe de quem é esse cachorro?\"" — joining the three with spaces reproduces canonicalTranslation exactly.
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON. First character must be "{".`;
 
@@ -186,9 +205,22 @@ export function buildTranslationBatchUserPrompt(input: TranslationBatchPromptInp
     lines.push('');
   }
 
-  lines.push(`--- Cues to translate, in order (${cues.length}) ---`);
-  for (const cue of cues) {
-    lines.push(`[${cue.cueKey}] ${cue.text}`);
+  const groups = groupCuesBySentence(cues);
+  const standaloneCues = groups.filter(g => g.length === 1).map(g => g[0]);
+  const sentenceGroups = groups.filter(g => g.length > 1);
+
+  lines.push(`--- Cues to translate, in order (${cues.length} total across ${groups.length} unit${groups.length === 1 ? '' : 's'}) ---`);
+  for (const group of groups) {
+    if (group.length === 1) {
+      lines.push(`[${group[0].cueKey}] ${group[0].text}`);
+      continue;
+    }
+    const cueKeys = group.map(c => c.cueKey);
+    lines.push('');
+    lines.push(`SENTENCE GROUP (cueKeys ${cueKeys.join(', ')} — together ONE original sentence, translate as one coherent unit, see SENTENCE GROUPS rules above):`);
+    lines.push(`  Full sentence: ${reconstructCanonicalText(group)}`);
+    for (const cue of group) lines.push(`  [${cue.cueKey}] ${cue.text}`);
+    lines.push('');
   }
   lines.push('');
 
@@ -198,9 +230,18 @@ export function buildTranslationBatchUserPrompt(input: TranslationBatchPromptInp
     lines.push('');
   }
 
-  lines.push(`Return ONLY the JSON below, with exactly ${cues.length} entries — one per cueKey listed above, nothing else. Replace <…> placeholders with actual translations:`);
+  lines.push(
+    `Return ONLY the JSON below. "cues" must have exactly ${standaloneCues.length} entries (the standalone cueKeys). ` +
+    `"sentenceGroups" must have exactly ${sentenceGroups.length} entries (one per SENTENCE GROUP above), each with a ` +
+    `"segments" array covering every cueKey in that group, in order. Replace <…> placeholders with actual content:`
+  );
   lines.push(JSON.stringify({
-    cues: cues.map(c => ({ cueKey: c.cueKey, textPtBr: '<tradução aqui>' })),
+    cues: standaloneCues.map(c => ({ cueKey: c.cueKey, textPtBr: '<tradução aqui>' })),
+    sentenceGroups: sentenceGroups.map(group => ({
+      cueKeys: group.map(c => c.cueKey),
+      canonicalTranslation: '<tradução completa e coerente da sentença aqui>',
+      segments: group.map(c => ({ cueKey: c.cueKey, textPtBr: '<parte correspondente da tradução aqui>' })),
+    })),
   }, null, 2));
 
   return lines.filter(l => l !== undefined).join('\n');
@@ -352,5 +393,73 @@ export function buildCorrectionUserPrompt(input: CorrectionPromptInput): string 
 
   lines.push('Return ONLY a JSON object mapping cue_key → corrected pt-BR text for the FAILING cues:');
   lines.push(`{ "<cueKey>": "<corrected translation>", … }`);
+  return lines.join('\n');
+}
+
+// ─── Sentence-group correction ─────────────────────────────────────────────
+// Used when a multi-cue sentence group fails quality review (evaluated as
+// ONE unit — see prepareListeningSubtitles step 9). Distinct from
+// buildCorrectionUserPrompt above (which corrects independent standalone
+// cues): a group correction must re-translate the WHOLE sentence and
+// re-segment it, never patch individual pieces in isolation — patching
+// pieces independently is exactly the failure mode (repeated/misattributed/
+// inconsistent content between cues of the same sentence) this whole
+// mechanism exists to prevent.
+
+export const SENTENCE_GROUP_CORRECTION_SYSTEM_PROMPT = `You are correcting a Brazilian Portuguese (pt-BR) translation of ONE complete English sentence that failed quality review. This sentence was originally split across several subtitle cues, but you must treat it as ONE sentence here.
+
+RULES:
+- Produce a corrected, complete, natural pt-BR translation of the WHOLE sentence, fixing the stated problem(s). Do not fix the problem by dropping other content — the correction must still contain every action, gesture, and line of dialogue that was in the original English sentence.
+- Never stop mid-sentence: if the English sentence ends with ".", "!", or "?", your correction must end the same way.
+- Preserve character names exactly, grammatical gender/number, and who is speaking/being addressed — use the given context to resolve ambiguous pronouns.
+- Preserve every digit exactly as in the English. Never convert 12-hour to 24-hour time, never spell a digit as a word, never drop a number/date/address/measurement.
+- Match the terminal punctuation of the English sentence exactly ("!" stays "!", "?" stays "?", "..." stays "...").
+- Use natural, idiomatic Brazilian Portuguese (pt-BR), never European Portuguese.
+- After producing the corrected canonicalTranslation, split that EXACT text across the given cueKeys, in order, so that joining the pieces with a single space reproduces canonicalTranslation exactly. No cueKey's piece may duplicate another's, skip content, or invent content.
+
+Return ONLY valid JSON, exactly this shape:
+{ "canonicalTranslation": "<corrected full sentence>", "segments": [{ "cueKey": "<cueKey>", "textPtBr": "<piece>" }] }`;
+
+export interface SentenceGroupCorrectionPromptInput {
+  episodeId: string;
+  cefrLevel: CEFRLevel;
+  blockOrder: 1 | 2;
+  blockTextEn: string;
+  cueKeys: string[];
+  sentenceTextEn: string;
+  currentCanonicalTranslation: string;
+  issues: string[];
+  glossary?: Record<string, string>;
+}
+
+export function buildSentenceGroupCorrectionPrompt(input: SentenceGroupCorrectionPromptInput): string {
+  const { episodeId, cefrLevel, blockOrder, blockTextEn, cueKeys, sentenceTextEn, currentCanonicalTranslation, issues, glossary } = input;
+  const lines: string[] = [
+    `Episode ID: ${episodeId}`,
+    `CEFR Level: ${cefrLevel}`,
+    `Block: ${blockOrder}`,
+    '',
+    `Full English block text (context only):`,
+    blockTextEn,
+    '',
+  ];
+
+  if (glossary && Object.keys(glossary).length > 0) {
+    lines.push('=== GLOSSARY ===');
+    for (const [en, pt] of Object.entries(glossary)) lines.push(`  ${en} → ${pt}`);
+    lines.push('');
+  }
+
+  lines.push(`cueKeys (in order): ${cueKeys.join(', ')}`);
+  lines.push(`Full English sentence: ${sentenceTextEn}`);
+  lines.push(`Current pt-BR translation: ${currentCanonicalTranslation}`);
+  lines.push(`Issues: ${issues.join('; ')}`);
+  lines.push('');
+  lines.push('Return ONLY the JSON below:');
+  lines.push(JSON.stringify({
+    canonicalTranslation: '<tradução completa e corrigida aqui>',
+    segments: cueKeys.map(cueKey => ({ cueKey, textPtBr: '<parte correspondente aqui>' })),
+  }, null, 2));
+
   return lines.join('\n');
 }

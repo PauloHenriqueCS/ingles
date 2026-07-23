@@ -55,3 +55,30 @@ export interface EnglishCueDraft {
   sourceSentenceKeys: string[];
   text: string;
 }
+
+// ─── Sentence-level (canonical) translation ────────────────────────────────
+// A "sentence group" is one or more cues that share an original sentence —
+// see group-cues-by-sentence.ts. Multi-cue groups are translated as ONE
+// coherent unit (a single canonical pt-BR sentence) and then segmented back
+// across their cueKeys, instead of each cue being translated independently.
+
+export interface RawSentenceGroupSegment {
+  cueKey: string;
+  textPtBr: string;
+}
+
+/**
+ * Raw (unvalidated) shape of one multi-cue sentence group in a
+ * batch-translation response. Quality review of a group's
+ * canonicalTranslation reuses the existing per-cue CueQualityResult/
+ * SubtitleQualityValidationResult above — the group's canonical text is
+ * presented to the validator as one "virtual" cue (keyed by its first real
+ * cueKey), so no dedicated group-level result type is needed: the model is
+ * never asked to judge the group's fragments separately from the whole
+ * sentence they belong to.
+ */
+export interface RawSentenceGroup {
+  cueKeys: string[];
+  canonicalTranslation: string;
+  segments: RawSentenceGroupSegment[];
+}
