@@ -40,12 +40,14 @@ LANGUAGE QUALITY:
 - Use natural, idiomatic Brazilian Portuguese (pt-BR), NEVER European Portuguese (pt-PT).
 - When the English uses an idiom, translate the MEANING naturally in pt-BR rather than word-for-word — but never at the cost of dropping information the idiom carried.
 - Maintain the emotional tone (humor, tension, warmth) of the original.
+- Match the terminal punctuation of the English cue: if it ends with "!", the translation must also end with "!" (never downgrade to "."); if it ends with "?", the translation must also end with "?"; preserve "..." the same way. An exclamation mark on a sign, exclamation, or excited line of dialogue carries tone that a period does not.
 
 Examples of PROHIBITED behavior (do not do this):
 - EN cue "Anna nods." → WRONG: omitting this cue's meaning, or merging it invisibly into the previous cue's translation. RIGHT: "Anna balança a cabeça." (or an equally complete natural equivalent) as its own translation for that cueKey.
 - EN cues about "the Botanical Garden and the Opera House" (two different-gender nouns) referred to later as "they" → WRONG: guessing a gender that contradicts Portuguese's actual agreement rule for the referents in context. RIGHT: use the full block text/context to work out what "they" refers to before choosing eles/elas.
 - EN cue "They check in and leave their bags in the room." → WRONG: "Eles vão para o quarto." (drops the check-in action). RIGHT: a translation that keeps BOTH the check-in and the leaving-bags actions.
 - EN cue "Painting Class, Saturday at 2 PM!" → WRONG: "Aula de pintura, sábado às 14h." (reformats "2 PM" into 24-hour time, so the digit "2" no longer appears). RIGHT: "Aula de pintura, sábado às 2 da tarde!" (keeps the digit "2" exactly as in the English).
+- EN cue "Join us and make friends!" → WRONG: "Junte-se a nós e faça amigos." (ends with "." instead of "!", losing the excited/inviting tone of the sign). RIGHT: "Junte-se a nós e faça amigos!" (ends with "!", matching the English).
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON. First character must be "{".`;
 
@@ -94,6 +96,7 @@ RULES:
 - Preserve character names exactly (do not translate them, unless a well-known standard Brazilian Portuguese equivalent exists).
 - Preserve grammatical gender/number and who is speaking/being addressed — use the full block text given as context to resolve ambiguous pronouns correctly.
 - Preserve every digit that appears in the English cue, using the EXACT SAME numerals. Never convert a 12-hour time to 24-hour format, never spell a digit out as a word, never drop a number, date, address, or measurement.
+- Match the terminal punctuation of the English cue exactly: "!" stays "!", "?" stays "?", "..." stays "...". Never downgrade an exclamation mark to a period — it is a common, real cause of a cue failing review, and dropping it silently while "fixing" a different stated problem does not count as fixing it.
 - Use natural, idiomatic Brazilian Portuguese (pt-BR), never European Portuguese — translate idioms by meaning, never word-for-word, without dropping information.
 - Return a translation for exactly the cueKeys you were asked to fix — never a cueKey you were not given, never a cueKey you were not asked to change.
 
