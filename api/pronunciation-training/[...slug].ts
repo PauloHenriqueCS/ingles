@@ -621,6 +621,18 @@ async function handlePlanEntitlements(req: any, res: any) {
   if (!(await applyRateLimit(res, userId, 'plan-entitlements'))) return;
   try {
     const snapshot = await getCurrentUserPlanEntitlements(userId);
+    // TEMP DIAGNOSTIC (remove after live investigation): no PII, only the
+    // resolved pronunciation-training gate values, to compare against the
+    // DB-confirmed plan_capability_values while chasing a live report that
+    // "Gerar outro texto" stays disabled despite unlimited=true in the DB.
+    safeLog('plan-entitlements', 'diag_pronunciation_snapshot', 200, {
+      planVersionId: snapshot.planVersionId,
+      pronunciationEnabled: snapshot.pronunciation.enabled,
+      evaluationsUnlimited: snapshot.pronunciation.evaluations.unlimited,
+      evaluationsState: snapshot.pronunciation.evaluations.state,
+      evaluationsLimit: snapshot.pronunciation.evaluations.limit,
+      evaluationsConsumed: snapshot.pronunciation.evaluations.consumed,
+    });
     return res.json(snapshot);
   } catch (err) {
     safeLog('plan-entitlements', 'resolve_failed', 500, {
