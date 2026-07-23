@@ -29,7 +29,7 @@ IDENTITY AND REFERENCE — do not let translation choices blur who did what to w
 - Preserve character names exactly (do not translate them, unless a well-known standard Brazilian Portuguese equivalent exists — e.g. real cities).
 - Preserve the grammatical gender and number implied by the English (he/she/they, singular/plural) — check the surrounding context (previous/next cue, full block text) if a pronoun's referent is ambiguous in isolation.
 - Preserve who is speaking and who is being addressed; do not swap subject and object.
-- Preserve all numbers, times, dates, addresses, and measurements exactly.
+- Preserve every digit that appears in the English cue, using the EXACT SAME numerals in the translation. Never convert a 12-hour time to 24-hour format (a cue with "2 PM" must keep the digit "2" — e.g. "às 2 da tarde", never rewritten as "14h"), never spell a digit out as a word (keep "3", do not write "três"), and never drop a number, date, address, or measurement that was present in English.
 
 STRUCTURE — never restructure the cue list itself:
 - Return exactly one translation per cueKey you were given — never combine two cueKeys into one translation, never split one cueKey's translation across two entries.
@@ -45,6 +45,7 @@ Examples of PROHIBITED behavior (do not do this):
 - EN cue "Anna nods." → WRONG: omitting this cue's meaning, or merging it invisibly into the previous cue's translation. RIGHT: "Anna balança a cabeça." (or an equally complete natural equivalent) as its own translation for that cueKey.
 - EN cues about "the Botanical Garden and the Opera House" (two different-gender nouns) referred to later as "they" → WRONG: guessing a gender that contradicts Portuguese's actual agreement rule for the referents in context. RIGHT: use the full block text/context to work out what "they" refers to before choosing eles/elas.
 - EN cue "They check in and leave their bags in the room." → WRONG: "Eles vão para o quarto." (drops the check-in action). RIGHT: a translation that keeps BOTH the check-in and the leaving-bags actions.
+- EN cue "Painting Class, Saturday at 2 PM!" → WRONG: "Aula de pintura, sábado às 14h." (reformats "2 PM" into 24-hour time, so the digit "2" no longer appears). RIGHT: "Aula de pintura, sábado às 2 da tarde!" (keeps the digit "2" exactly as in the English).
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON. First character must be "{".`;
 
@@ -92,7 +93,7 @@ RULES:
 - Do not summarize or shorten the cue to "solve" the issue — produce a complete, accurate translation of the full English cue.
 - Preserve character names exactly (do not translate them, unless a well-known standard Brazilian Portuguese equivalent exists).
 - Preserve grammatical gender/number and who is speaking/being addressed — use the full block text given as context to resolve ambiguous pronouns correctly.
-- Preserve all numbers, times, dates, and measurements exactly.
+- Preserve every digit that appears in the English cue, using the EXACT SAME numerals. Never convert a 12-hour time to 24-hour format, never spell a digit out as a word, never drop a number, date, address, or measurement.
 - Use natural, idiomatic Brazilian Portuguese (pt-BR), never European Portuguese — translate idioms by meaning, never word-for-word, without dropping information.
 - Return a translation for exactly the cueKeys you were asked to fix — never a cueKey you were not given, never a cueKey you were not asked to change.
 
