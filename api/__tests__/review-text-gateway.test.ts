@@ -186,6 +186,28 @@ function makeChain(result: { data: unknown; error: unknown }) {
   return c;
 }
 
+const DEFAULT_ATTEMPT_ID = 'dddddddd-1111-1111-1111-111111111111';
+const DEFAULT_REVIEW_ID = 'eeeeeeee-2222-2222-2222-222222222222';
+
+/** Default RPC behavior: reservation always granted, complete/fail/schedule succeed. Override per-test with a custom `rpc` fn. */
+function makeDefaultRpc() {
+  return vi.fn((name: string) => {
+    if (name === 'reserve_writing_review') {
+      return Promise.resolve({ data: { status: 'reserved', reservationId: 'reservation-1', fresh: true }, error: null });
+    }
+    if (name === 'complete_writing_review_reservation') {
+      return Promise.resolve({ data: { action: 'completed', reservationId: 'reservation-1' }, error: null });
+    }
+    if (name === 'fail_writing_review_reservation') {
+      return Promise.resolve({ data: { action: 'failed', reservationId: 'reservation-1' }, error: null });
+    }
+    if (name === 'apply_review_schedule') {
+      return Promise.resolve({ data: { applied: true }, error: null });
+    }
+    return Promise.resolve({ data: null, error: null });
+  });
+}
+
 function makeDefaultSupabase() {
   const from = vi.fn((table: string) => {
     if (table === 'writing_entries') {
@@ -210,13 +232,17 @@ function makeDefaultSupabase() {
     if (table === 'review_attempt_items') {
       return { insert: vi.fn().mockReturnValue(Promise.resolve({ data: null, error: null })) };
     }
+    if (table === 'english_reviews') {
+      return makeChain({ data: { id: DEFAULT_REVIEW_ID }, error: null });
+    }
     return makeChain({ data: null, error: null });
   });
-  const rpc = vi.fn().mockResolvedValue({ data: { applied: true }, error: null });
+  const rpc = makeDefaultRpc();
   return { from, rpc };
 }
 
 function makeReq(overrides: Record<string, unknown> = {}) {
+  const { body: bodyOverrides, ...rest } = overrides;
   return {
     method: 'POST',
     headers: { authorization: 'Bearer test-token' },
@@ -226,8 +252,10 @@ function makeReq(overrides: Record<string, unknown> = {}) {
       theme: 'A trip to the store',
       grammarGoal: 'Past Simple',
       mainTense: 'Past Simple',
+      attemptId: DEFAULT_ATTEMPT_ID,
+      ...(bodyOverrides as Record<string, unknown> | undefined),
     },
-    ...overrides,
+    ...rest,
   };
 }
 

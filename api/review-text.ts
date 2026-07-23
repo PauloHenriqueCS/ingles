@@ -8,6 +8,7 @@ import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkTextLength, checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
+import { isValidUuid } from '../src/lib/pronunciationAssessment';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -34,6 +35,40 @@ interface GroupItem {
   corrected_value: string;
   explanation: string | null;
   original_sentence: string | null;
+}
+
+interface EnglishReviewRow {
+  corrected_text: string | null;
+  score: number;
+  level: string;
+  grammar: number;
+  vocabulary: number;
+  naturalness: number;
+  fluency: number;
+  summary: string | null;
+  main_mistakes: unknown;
+  new_vocabulary: unknown;
+  objective_feedback: string | null;
+  next_practice: string | null;
+  created_at: string;
+}
+
+/** Rebuilds the `feedback` response shape from a stored english_reviews row — used for an idempotent retry of an already-completed attempt (never re-calls the AI provider). */
+function feedbackFromReviewRow(row: EnglishReviewRow): Record<string, unknown> {
+  return {
+    score: row.score,
+    level: row.level,
+    grammar: row.grammar,
+    vocabulary: row.vocabulary,
+    naturalness: row.naturalness,
+    fluency: row.fluency,
+    summary: row.summary,
+    correctedText: row.corrected_text,
+    mainMistakes: row.main_mistakes ?? [],
+    newVocabulary: row.new_vocabulary ?? [],
+    objectiveFeedback: row.objective_feedback,
+    nextPractice: row.next_practice,
+  };
 }
 
 // ── Normal mode system prompt ─────────────────────────────────────────────────
@@ -309,6 +344,10 @@ export default async function handler(req: any, res: any) {
     reviewGroupId,
     missionTitle,
     studentLevel,
+    attemptId,
+    reviewCategory,
+    reviewDifficulty,
+    missionSnapshot,
   } = req.body ?? {};
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
@@ -316,6 +355,9 @@ export default async function handler(req: any, res: any) {
   }
   if (originalText.length > 20_000) {
     return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'O conteúdo enviado é maior que o permitido.');
+  }
+  if (!isValidUuid(attemptId)) {
+    return jsonError(res, 400, 'INVALID_ATTEMPT_ID', 'O identificador de tentativa é inválido.');
   }
 
   if (!await applyRateLimit(res, userId, 'review-text')) return;
@@ -340,8 +382,73 @@ export default async function handler(req: any, res: any) {
     return jsonError(res, 413, lengthCheck.code!, lengthCheck.message!);
   }
   if (!entitlements.writing.reviews.canStart) {
+    // Cheap fast-path using the entitlements snapshot already in hand — never
+    // the authoritative check (see reserve_writing_review below), but avoids
+    // a DB round-trip for the common, obviously-exhausted case.
     const code = entitlements.writing.reviews.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
     return jsonError(res, 403, code, ENTITLEMENT_MESSAGES.writingReviewsExhausted);
+  }
+
+  // ── Reserve the daily slot atomically, BEFORE calling the AI provider ─────
+  // The authoritative gate: reserve_writing_review re-checks the limit inside
+  // a per-user advisory lock, so two simultaneous requests can never both
+  // slip through when only one slot remains — unlike the snapshot check
+  // above, which is a point-in-time read. attemptId (generated once per
+  // "Revisar com IA" click) makes a retried/duplicated request idempotent:
+  // the same attempt never consumes two slots, and never calls the AI
+  // provider twice.
+  const { data: reserveData, error: reserveError } = await supabase.rpc('reserve_writing_review', {
+    p_attempt_id: attemptId,
+    p_unlimited: entitlements.writing.reviews.unlimited,
+    p_limit: entitlements.writing.reviews.limit,
+  });
+  if (reserveError) {
+    safeLog('review-text', 'reserve_rpc_error', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao reservar a revisão.');
+  }
+  const reservation = (reserveData ?? {}) as { error?: string; status?: string; reviewId?: string; fresh?: boolean };
+  if (reservation.error === 'DAILY_LIMIT_REACHED') {
+    return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.writingReviewsExhausted);
+  }
+  if (reservation.error) {
+    safeLog('review-text', 'reserve_rejected', 500, { reserveErrorCode: reservation.error });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao reservar a revisão.');
+  }
+  if (reservation.status === 'in_progress') {
+    return jsonError(res, 409, 'REVIEW_IN_PROGRESS', 'Esta revisão já está sendo processada.');
+  }
+  if (reservation.status === 'completed') {
+    // Idempotent retry of an attempt that already succeeded — never call the
+    // AI provider again, just return the same result.
+    const { data: existingReview, error: existingReviewError } = await supabase
+      .from('english_reviews')
+      .select('corrected_text, score, level, grammar, vocabulary, naturalness, fluency, summary, main_mistakes, new_vocabulary, objective_feedback, next_practice, created_at')
+      .eq('id', reservation.reviewId)
+      .maybeSingle();
+    if (existingReviewError || !existingReview) {
+      safeLog('review-text', 'existing_review_lookup_failed', 500);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível recuperar a revisão já concluída.');
+    }
+    const row = existingReview as unknown as EnglishReviewRow;
+    return res.json({
+      feedback: feedbackFromReviewRow(row),
+      reviewedAt: row.created_at,
+      reviewSchedule: null,
+      reviewId: reservation.reviewId,
+    });
+  }
+
+  // From here on, a live reservation is held — every remaining failure path
+  // (including a malformed review-mode request that never reaches the AI
+  // provider) must release it before returning, so a blocked/failed attempt
+  // never counts against the daily limit. Best-effort: a release failure
+  // must never mask the real error being returned to the client.
+  async function releaseReservation(): Promise<void> {
+    try {
+      await supabase.rpc('fail_writing_review_reservation', { p_attempt_id: attemptId });
+    } catch (e) {
+      safeLog('review-text', 'release_reservation_failed', 500);
+    }
   }
 
   const isReviewMode =
@@ -362,6 +469,7 @@ export default async function handler(req: any, res: any) {
       .single();
 
     if (groupErr || !group) {
+      await releaseReservation();
       return res.status(403).json({ error: 'Grupo de revisão não encontrado ou não autorizado' });
     }
 
@@ -371,6 +479,7 @@ export default async function handler(req: any, res: any) {
       .eq('review_group_id', reviewGroupId);
 
     if (itemsErr || !items || items.length === 0) {
+      await releaseReservation();
       return res.status(400).json({ error: 'Itens do grupo de revisão não encontrados' });
     }
 
@@ -493,20 +602,24 @@ export default async function handler(req: any, res: any) {
       const { code, status } = sanitizeProviderError(err);
       if (code === 'AI_TIMEOUT') {
         safeLog('review-text', 'timeout', status);
+        await releaseReservation();
         return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
       }
       if (code === 'AI_UNAVAILABLE') {
         safeLog('review-text', 'provider_unavailable', status);
+        await releaseReservation();
         return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
       }
       lastError = 'Erro de validação';
       if (attempt === 2) {
+        await releaseReservation();
         return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível processar a revisão. Tente novamente.');
       }
     }
   }
 
   if (!feedback) {
+    await releaseReservation();
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível processar a revisão. Tente novamente.');
   }
 
@@ -543,6 +656,58 @@ export default async function handler(req: any, res: any) {
     } catch (dbErr) {
       console.error('Supabase update error:', dbErr);
     }
+  }
+
+  // ── Record the completed review (consumption) + complete the reservation ──
+  // Server-side, right after the AI result is validated — never before, never
+  // from the client. This is the "increment only after a valid review is
+  // completed" step (mirrors api/generate-theme.ts's generated_themes insert)
+  // that used to happen asynchronously from the browser (src/lib/reviews.ts,
+  // saveEnglishReview), decoupled from the request that actually consumed
+  // the AI — the structural cause of the daily limit not being respected.
+
+  const { data: insertedReview, error: insertReviewError } = await supabase
+    .from('english_reviews')
+    .insert({
+      user_id: userId,
+      original_text: originalText.trim(),
+      corrected_text: feedback.correctedText ?? null,
+      score: feedback.score,
+      level: feedback.level,
+      grammar: feedback.grammar,
+      vocabulary: feedback.vocabulary,
+      naturalness: feedback.naturalness,
+      fluency: feedback.fluency,
+      summary: feedback.summary ?? null,
+      main_mistakes: Array.isArray(feedback.mainMistakes) ? feedback.mainMistakes : [],
+      new_vocabulary: Array.isArray(feedback.newVocabulary) ? feedback.newVocabulary : [],
+      objective_feedback: feedback.objectiveFeedback ?? null,
+      next_practice: feedback.nextPractice ?? null,
+      category: typeof reviewCategory === 'string' ? reviewCategory : null,
+      difficulty: typeof reviewDifficulty === 'string' ? reviewDifficulty : null,
+      objective: typeof grammarGoal === 'string' && grammarGoal ? grammarGoal : null,
+      entry_date: typeof entryId === 'string' ? entryId : null,
+      mission_snapshot: missionSnapshot ?? null,
+    })
+    .select('id')
+    .single();
+
+  if (insertReviewError || !insertedReview) {
+    safeLog('review-text', 'english_reviews_insert_failed', 500);
+    await releaseReservation();
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar a revisão. Tente novamente.');
+  }
+  const reviewId = (insertedReview as { id: string }).id;
+
+  const { error: completeError } = await supabase.rpc('complete_writing_review_reservation', {
+    p_attempt_id: attemptId,
+    p_review_id: reviewId,
+  });
+  if (completeError) {
+    // The review is already saved and visible in history at this point —
+    // never fail the request over a bookkeeping error on the reservation
+    // ledger itself. Logged for investigation; does not affect the response.
+    safeLog('review-text', 'complete_reservation_failed', 500);
   }
 
   // ── Save review attempt + apply schedule (review mode only) ─────────────
@@ -603,5 +768,5 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  return res.json({ feedback, reviewedAt, reviewSchedule });
+  return res.json({ feedback, reviewedAt, reviewSchedule, reviewId });
 }

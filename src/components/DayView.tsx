@@ -7,7 +7,7 @@ import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-message
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
-import { saveEnglishReview, updateReviewV2, updateV2FinalText } from '../lib/reviews';
+import { updateReviewV2, updateV2FinalText } from '../lib/reviews';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
@@ -37,7 +37,7 @@ const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
 
 type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-type HistoryState = 'idle' | 'saving' | 'saved' | 'failed';
+type HistoryState = 'idle' | 'saved';
 
 export default function DayView({ date, entry, onSave, onBack, activeWeekdays = [1,2,3,4,5], onActivateDay }: Props) {
   const dow = new Date(date + 'T12:00:00').getDay();
@@ -166,6 +166,12 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     if (!originalText.trim()) return;
     setReviewState('loading');
     setReviewError(null);
+    // One id per submit action (this click) — reused only if the browser
+    // itself retries this exact fetch. The backend uses it to atomically
+    // reserve today's review slot before calling the AI, so a retry or a
+    // second overlapping request for this exact attempt never double-counts
+    // or double-charges.
+    const attemptId = crypto.randomUUID();
     try {
       const authHeader = await getAuthHeader();
       const res = await fetch(apiUrl('/api/review-text'), {
@@ -181,9 +187,13 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
           reviewGroupId: dailyTheme?.reviewGroupId ?? null,
           missionTitle: dailyTheme?.title ?? '',
           studentLevel: dailyTheme?.level ?? '',
+          attemptId,
+          reviewCategory: dailyTheme?.category || schedule?.theme || null,
+          reviewDifficulty: difficulty ?? dailyTheme?.difficulty ?? null,
+          missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : null,
         }),
       });
-      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewSchedule?: ReviewScheduleResult };
+      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewSchedule?: ReviewScheduleResult; reviewId?: string };
       try {
         data = await res.json();
       } catch {
@@ -192,6 +202,9 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
       if (!res.ok) {
         throw new Error(data.message ?? data.error ?? `Erro ${res.status}`);
       }
+      // The backend has already recorded the review (and its consumption)
+      // atomically by the time this response arrives — refetch now reflects
+      // the true, final count, never a stale pre-save snapshot.
       entitlements.refetch();
       const feedback = data.feedback!;
       const ts = data.reviewedAt ?? new Date().toISOString();
@@ -208,35 +221,21 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
       });
       setStatus('corrigido');
 
-      setHistoryState('saving');
-      saveEnglishReview({
-        originalText,
-        feedback,
-        category: dailyTheme?.category || schedule?.theme || undefined,
-        difficulty: difficulty ?? dailyTheme?.difficulty ?? undefined,
-        objective: dailyTheme?.objective || schedule?.grammarObjective || undefined,
-        entryDate: date,
-        missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : undefined,
-      }).then(({ id }) => {
-        setReviewId(id);
+      if (data.reviewId) {
+        setReviewId(data.reviewId);
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
         updateLearningMemory().catch((err) => console.error('Memory update failed:', err));
         if (feedback.mainMistakes.length > 0) {
           createReviewGroupFromReview({
-            reviewId: id,
+            reviewId: data.reviewId,
             mistakes: feedback.mainMistakes,
             entryDate: date,
             theme: dailyTheme?.themeEn || schedule?.theme || undefined,
             activeWeekdays,
           }).catch((err) => console.error('Review group creation failed:', err));
         }
-      }).catch((err) => {
-        console.error('Erro ao salvar revisão no histórico:', err);
-        setHistoryState('failed');
-        setReviewError(`Histórico: ${err instanceof Error ? err.message : String(err)}`);
-        setTimeout(() => { setHistoryState('idle'); setReviewError(null); }, 10000);
-      });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
       setReviewError(msg);
@@ -425,14 +424,8 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
           </button>
         </div>
 
-        {historyState === 'saving' && (
-          <p className="text-xs text-slate-500 text-center py-1">Salvando no histórico...</p>
-        )}
         {historyState === 'saved' && (
           <p className="text-xs text-green-500 text-center py-1">✓ Revisão salva no histórico.</p>
-        )}
-        {historyState === 'failed' && reviewError && (
-          <p className="text-xs text-amber-400 text-center py-1 break-all">{reviewError}</p>
         )}
 
         {reviewState === 'loading' && (

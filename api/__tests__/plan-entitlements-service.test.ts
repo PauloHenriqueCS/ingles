@@ -163,7 +163,7 @@ describe('getCurrentUserPlanEntitlements', () => {
           error: null,
         },
         generated_themes: { data: null, error: null, count: 2 },
-        english_reviews: { data: null, error: null, count: 0 },
+        writing_review_reservations: { data: null, error: null, count: 0 },
         pronunciation_assessments: { data: null, error: null, count: 0 },
         conversation_session_authorizations: {
           data: [
@@ -180,6 +180,96 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.writing.themeGenerations.limit).toBe(2);
     expect(snapshot.writing.themeGenerations.state).toBe('daily_limit_reached');
     expect(snapshot.writing.themeGenerations.canStart).toBe(false);
+  });
+
+  // "Revisão" (writing.reviews) consumption: counted from
+  // writing_review_reservations (the atomic reserve/complete ledger
+  // api/review-text.ts writes to), never from english_reviews.entry_date —
+  // entry_date is which diary day a review is ABOUT, not when it was
+  // consumed, and is written for history display only.
+  // The other writing.* capabilities (theme generations, max characters) are
+  // configured as unlimited so they never contribute a config_error that
+  // would cascade onto writing.reviews via the shared writingConfigError
+  // flag — these three tests are only about the reviews sub-feature.
+  const OTHER_WRITING_CAPS_UNLIMITED = [
+    { capability_key: 'writing.theme_generations_per_day.unlimited', value: true },
+    { capability_key: 'writing.max_characters_per_text.unlimited', value: true },
+  ];
+
+  it("counts writing.reviews consumption from writing_review_reservations, not english_reviews", async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'writing.enabled', value: true },
+            { capability_key: 'writing.reviews_per_day', value: 3 },
+            { capability_key: 'writing.reviews_per_day.unlimited', value: false },
+            ...OTHER_WRITING_CAPS_UNLIMITED,
+          ],
+          error: null,
+        },
+        writing_review_reservations: { data: null, error: null, count: 2 },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.reviews.consumed).toBe(2);
+    expect(snapshot.writing.reviews.limit).toBe(3);
+    expect(snapshot.writing.reviews.remaining).toBe(1);
+    expect(snapshot.writing.reviews.canStart).toBe(true);
+  });
+
+  it('blocks writing.reviews once consumed reaches the plan limit', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'writing.enabled', value: true },
+            { capability_key: 'writing.reviews_per_day', value: 1 },
+            { capability_key: 'writing.reviews_per_day.unlimited', value: false },
+            ...OTHER_WRITING_CAPS_UNLIMITED,
+          ],
+          error: null,
+        },
+        writing_review_reservations: { data: null, error: null, count: 1 },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.reviews.state).toBe('daily_limit_reached');
+    expect(snapshot.writing.reviews.canStart).toBe(false);
+  });
+
+  // A user with no active plan assignment: admin_resolve_effective_plan_v1
+  // (SQL, verified separately) falls back to the default (Free) plan and
+  // returns access_allowed=true with that plan's real id/version — from this
+  // function's perspective that is byte-identical to any other resolved
+  // plan row, so the Free plan's actual configured writing.reviews values
+  // apply exactly as they would for an explicit Free assignment. No special
+  // "no plan" code path exists or is needed here.
+  it('a resolved default (Free) plan for a user with no explicit assignment gets the same writing.reviews rules as an explicit Free assignment', async () => {
+    const supabase = makeMockSupabase({
+      planRow: { ...RESOLVED_PLAN, plan_code: 'free', plan_name: 'Gratuito' },
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'writing.enabled', value: true },
+            { capability_key: 'writing.reviews_per_day', value: 1 },
+            { capability_key: 'writing.reviews_per_day.unlimited', value: false },
+            ...OTHER_WRITING_CAPS_UNLIMITED,
+          ],
+          error: null,
+        },
+        writing_review_reservations: { data: null, error: null, count: 0 },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.planCode).toBe('free');
+    expect(snapshot.writing.reviews.limit).toBe(1);
+    expect(snapshot.writing.reviews.canStart).toBe(true);
   });
 
   it('unlocks available_with_extra_credits once the monthly conversation limit is exhausted but credits remain', async () => {

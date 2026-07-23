@@ -113,6 +113,39 @@ function makeChain(result: { data: unknown; error: unknown }) {
   return c;
 }
 
+const DEFAULT_ATTEMPT_ID = 'dddddddd-1111-1111-1111-111111111111';
+const DEFAULT_REVIEW_ID = 'eeeeeeee-2222-2222-2222-222222222222';
+
+const STORED_REVIEW_ROW = {
+  corrected_text: 'Yesterday I went to the store.',
+  score: 78, level: 'B1', grammar: 80, vocabulary: 75, naturalness: 78, fluency: 76,
+  summary: 'Bom trabalho!',
+  main_mistakes: [{ original: 'goed', correct: 'went', explanation: 'went é o passado de go.' }],
+  new_vocabulary: [{ word: 'store', meaningPtBr: 'loja', example: 'I went to the store.' }],
+  objective_feedback: 'Uso do Past Simple foi adequado.',
+  next_practice: 'Pratique mais tempos verbais irregulares.',
+  created_at: '2026-01-15T12:00:00Z',
+};
+
+/** Default RPC behavior: reservation always granted, complete/fail/schedule succeed. Override per-test via a fresh vi.fn(). */
+function makeDefaultRpc() {
+  return vi.fn((name: string) => {
+    if (name === 'reserve_writing_review') {
+      return Promise.resolve({ data: { status: 'reserved', reservationId: 'reservation-1', fresh: true }, error: null });
+    }
+    if (name === 'complete_writing_review_reservation') {
+      return Promise.resolve({ data: { action: 'completed', reservationId: 'reservation-1' }, error: null });
+    }
+    if (name === 'fail_writing_review_reservation') {
+      return Promise.resolve({ data: { action: 'failed', reservationId: 'reservation-1' }, error: null });
+    }
+    if (name === 'apply_review_schedule') {
+      return Promise.resolve({ data: { applied: true }, error: null });
+    }
+    return Promise.resolve({ data: null, error: null });
+  });
+}
+
 function makeDefaultSupabase() {
   const from = vi.fn((table: string) => {
     if (table === 'writing_entries') {
@@ -142,13 +175,20 @@ function makeDefaultSupabase() {
       // .insert([]) — terminal: .insert()
       return { insert: vi.fn().mockReturnValue(Promise.resolve({ data: null, error: null })) };
     }
+    if (table === 'english_reviews') {
+      // Serves both .insert({}).select('id').single() (record a completed
+      // review) and .select(...).eq('id', reviewId).maybeSingle() (idempotent
+      // replay lookup) — same terminal shape covers both.
+      return makeChain({ data: { id: DEFAULT_REVIEW_ID, ...STORED_REVIEW_ROW }, error: null });
+    }
     return makeChain({ data: null, error: null });
   });
-  const rpc = vi.fn().mockResolvedValue({ data: { applied: true }, error: null });
+  const rpc = makeDefaultRpc();
   return { from, rpc };
 }
 
 function makeReq(overrides: Record<string, unknown> = {}) {
+  const { body: bodyOverrides, ...rest } = overrides;
   return {
     method: 'POST',
     headers: { authorization: 'Bearer test-token' },
@@ -158,8 +198,10 @@ function makeReq(overrides: Record<string, unknown> = {}) {
       theme: 'A trip to the store',
       grammarGoal: 'Past Simple',
       mainTense: 'Past Simple',
+      attemptId: DEFAULT_ATTEMPT_ID,
+      ...(bodyOverrides as Record<string, unknown> | undefined),
     },
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -170,6 +212,7 @@ function makeRes() {
     status(code: number) { res._status = code; return res; },
     json(body: unknown) { res._body = body; return res; },
     end() { return res; },
+    setHeader() { return res; },
   };
   return res;
 }
@@ -377,7 +420,7 @@ describe('handler — autenticação', () => {
 describe('handler — validação do body', () => {
   it('retorna 400 quando originalText está ausente', async () => {
     const res = makeRes();
-    await handler(makeReq({ body: {} }), res);
+    await handler(makeReq({ body: { originalText: undefined } }), res);
     expect(res._status).toBe(400);
   });
 
@@ -397,12 +440,12 @@ describe('handler — validação do body', () => {
 // ── handler — chave de API ausente ───────────────────────────────────────────
 
 describe('handler — OPENAI_API_KEY ausente', () => {
-  it('retorna 500 quando a chave não está configurada', async () => {
+  it('retorna 503 quando a chave não está configurada', async () => {
     vi.unstubAllEnvs();
     vi.stubEnv('OPENAI_API_KEY', '');
     const res = makeRes();
     await handler(makeReq(), res);
-    expect(res._status).toBe(500);
+    expect(res._status).toBe(503);
     expect(mockCreate).not.toHaveBeenCalled();
   });
 });
@@ -574,5 +617,289 @@ describe('handler — isolamento entre usuários', () => {
     for (const uid of eqCalls) {
       expect(uid).not.toBe('evil-user');
     }
+  });
+});
+
+// ── handler — limites de plano (writing.reviews) ─────────────────────────────
+// Root cause under test: the daily review limit's consumption used to be
+// written by the FRONTEND (src/lib/reviews.ts, saveEnglishReview) as a
+// fire-and-forget call AFTER the AI had already answered — completely
+// decoupled from the request that actually consumed it. That let the limit
+// be bypassed (call the AI repeatedly, never trigger the client save) or
+// mis-recorded (client insert fails after the AI already ran, or races the
+// entitlements refetch). The fix moves recording server-side, atomically,
+// via reserve_writing_review (before the AI call) and
+// complete_writing_review_reservation (only after a valid result) — this
+// suite locks in that behavior directly against api/review-text.ts.
+
+function entitlementsWithReviews(overrides: {
+  unlimited?: boolean; limit?: number; consumed?: number; canStart?: boolean; enabled?: boolean;
+} = {}): PlanEntitlementsSnapshot {
+  const base = permissiveEntitlements();
+  const unlimited = overrides.unlimited ?? false;
+  const limit = overrides.limit ?? 1;
+  const consumed = overrides.consumed ?? 0;
+  const enabled = overrides.enabled ?? true;
+  const remaining = unlimited ? Number.POSITIVE_INFINITY : Math.max(limit - consumed, 0);
+  const canStart = overrides.canStart ?? (enabled && (unlimited || remaining > 0));
+  base.writing.enabled = enabled; // top-level "Escrita" gate — matches lockedSnapshot()'s shape for a no-plan/suspended user
+  base.writing.reviews = {
+    enabled, unlimited, limit, consumed, remaining,
+    period: 'day',
+    state: !enabled ? 'disabled_by_plan' : unlimited ? 'unlimited' : canStart ? 'available' : 'daily_limit_reached',
+    canStart,
+  };
+  return base;
+}
+
+function rpcSpy(overrides: Record<string, unknown> = {}) {
+  const calls: { name: string; params: unknown }[] = [];
+  const base = makeDefaultRpc();
+  const fn = vi.fn((name: string, params: unknown) => {
+    calls.push({ name, params });
+    if (name in overrides) return (overrides as any)[name](params);
+    return base(name, params);
+  });
+  return { fn, calls };
+}
+
+describe('handler — limites de plano (writing.reviews)', () => {
+  it('1) usuário Free dentro do limite: permite e reserva com os valores corretos do plano', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 1, consumed: 0 }));
+    const { fn: rpc, calls } = rpcSpy();
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const reserveCall = calls.find((c) => c.name === 'reserve_writing_review');
+    expect(reserveCall?.params).toMatchObject({ p_unlimited: false, p_limit: 1 });
+  });
+
+  it('2) usuário Free no último uso disponível (consumed = limit - 1): ainda permite', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 3, consumed: 2 }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('3) usuário Free com limite esgotado: bloqueia com DAILY_LIMIT_REACHED', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 1, consumed: 1, canStart: false }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status).toBe(403);
+    expect((res._body as any).code).toBe('DAILY_LIMIT_REACHED');
+  });
+
+  it('4) usuário de plano pago dentro do limite (limite maior que o Free): permite', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 5, consumed: 3 }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status).toBe(200);
+  });
+
+  it('5) usuário com plano ilimitado: várias revisões seguidas nunca são bloqueadas', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: true }));
+    for (let i = 0; i < 5; i++) {
+      const res = makeRes();
+      await handler(makeReq({ body: { attemptId: `ffffffff-0000-0000-0000-00000000000${i}` } }), res);
+      expect(res._status).toBe(200);
+    }
+    expect(mockCreate).toHaveBeenCalledTimes(5);
+  });
+
+  it('6) sem plano válido (entitlements resolve para o padrão travado): bloqueia sem chamar a IA, nunca como "limite atingido"', async () => {
+    // Mirrors lockedSnapshot() in plan-entitlements-service.ts — the shape a
+    // user with no resolvable/suspended plan actually gets. writing.enabled
+    // is false here; a genuine "no assignment" user instead resolves through
+    // admin_resolve_effective_plan_v1's own DB-level fallback to the default
+    // (Free) plan's real capability values, which scenario (1)-(4) above
+    // already exercise via entitlementsWithReviews — from review-text.ts's
+    // perspective the two cases are indistinguishable inputs.
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ enabled: false, canStart: false }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status).toBe(403);
+    expect((res._body as any).code).toBe('FEATURE_DISABLED');
+    expect((res._body as any).code).not.toBe('DAILY_LIMIT_REACHED');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('7) duas requisições "simultâneas": a segunda é rejeitada pelo check atômico do banco mesmo quando o snapshot em memória ainda achava que havia vaga', async () => {
+    // Simulates the actual race this fix closes: both requests read the SAME
+    // in-memory entitlements snapshot (canStart: true, as if only 0 of 1 used),
+    // but the DB-side reserve_writing_review is the authoritative, serialized
+    // check — the second call's reservation attempt loses the race for real.
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 1, consumed: 0 }));
+    let reserveCallCount = 0;
+    const { fn: rpc } = rpcSpy({
+      reserve_writing_review: () => {
+        reserveCallCount += 1;
+        if (reserveCallCount === 1) return Promise.resolve({ data: { status: 'reserved', reservationId: 'r1', fresh: true }, error: null });
+        return Promise.resolve({ data: { error: 'DAILY_LIMIT_REACHED' }, error: null });
+      },
+    });
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res1 = makeRes();
+    const res2 = makeRes();
+    await handler(makeReq({ body: { attemptId: '11111111-2222-3333-4444-555555555501' } }), res1);
+    await handler(makeReq({ body: { attemptId: '11111111-2222-3333-4444-555555555502' } }), res2);
+
+    expect(res1._status).toBe(200);
+    expect(res2._status).toBe(403);
+    expect((res2._body as any).code).toBe('DAILY_LIMIT_REACHED');
+    expect(mockCreate).toHaveBeenCalledTimes(1); // the AI provider was never charged for the rejected second attempt
+  });
+
+  it('8) retry da mesma requisição (mesmo attemptId): não chama a IA de novo e devolve o mesmo resultado, sem contar duas vezes', async () => {
+    let reserveCallCount = 0;
+    const { fn: rpc } = rpcSpy({
+      reserve_writing_review: () => {
+        reserveCallCount += 1;
+        if (reserveCallCount === 1) return Promise.resolve({ data: { status: 'reserved', reservationId: 'r1', fresh: true }, error: null });
+        return Promise.resolve({ data: { status: 'completed', reservationId: 'r1', reviewId: DEFAULT_REVIEW_ID, fresh: false }, error: null });
+      },
+    });
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const attemptId = '22222222-3333-4444-5555-666666666601';
+    const res1 = makeRes();
+    await handler(makeReq({ body: { attemptId } }), res1);
+    const res2 = makeRes();
+    await handler(makeReq({ body: { attemptId } }), res2);
+
+    expect(res1._status).toBe(200);
+    expect(res2._status).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(1); // never called again on retry
+    expect((res1._body as any).reviewId).toBe((res2._body as any).reviewId);
+    expect((res2._body as any).feedback.correctedText).toBe(STORED_REVIEW_ROW.corrected_text);
+  });
+
+  it('9) falha da IA (provider indisponível): libera a reserva, nunca grava english_reviews, nunca completa a reserva', async () => {
+    mockCreate.mockRejectedValue(Object.assign(new Error('down'), { status: 503 }));
+    const { fn: rpc, calls } = rpcSpy();
+    const insertSpy = vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ single: vi.fn().mockResolvedValue({ data: { id: DEFAULT_REVIEW_ID }, error: null }) }) });
+    const supabase = {
+      ...makeDefaultSupabase(),
+      rpc,
+      from: vi.fn((table: string) => {
+        if (table === 'english_reviews') return { insert: insertSpy, select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }) }) };
+        return makeDefaultSupabase().from(table);
+      }),
+    };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBeGreaterThanOrEqual(500);
+    expect(insertSpy).not.toHaveBeenCalled(); // AI never succeeded — nothing to record
+    expect(calls.some((c) => c.name === 'fail_writing_review_reservation')).toBe(true);
+    expect(calls.some((c) => c.name === 'complete_writing_review_reservation')).toBe(false);
+  });
+
+  it('10) tentativa bloqueada (limite esgotado): nunca chama o provedor de IA nem a reserva no banco', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 1, consumed: 1, canStart: false }));
+    const { fn: rpc, calls } = rpcSpy();
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(403);
+    expect(mockCreate).not.toHaveBeenCalled();
+    // The cheap in-memory snapshot check short-circuits before ever reaching
+    // the DB-level reservation — never a wasted round-trip for the common,
+    // obviously-exhausted case.
+    expect(calls.some((c) => c.name === 'reserve_writing_review')).toBe(false);
+  });
+
+  it('bloqueia com DB-level DAILY_LIMIT_REACHED mesmo quando o snapshot em memória (canStart) estava desatualizado', async () => {
+    // Defense in depth: even if the cheap pre-check were somehow bypassed or
+    // stale, the atomic RPC is what actually gates the AI call.
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWithReviews({ unlimited: false, limit: 1, consumed: 0, canStart: true }));
+    const { fn: rpc } = rpcSpy({
+      reserve_writing_review: () => Promise.resolve({ data: { error: 'DAILY_LIMIT_REACHED' }, error: null }),
+    });
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(403);
+    expect((res._body as any).code).toBe('DAILY_LIMIT_REACHED');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejeita attemptId ausente ou inválido antes de qualquer verificação de plano', async () => {
+    const res1 = makeRes();
+    await handler(makeReq({ body: { attemptId: undefined } }), res1);
+    expect(res1._status).toBe(400);
+
+    const res2 = makeRes();
+    await handler(makeReq({ body: { attemptId: 'not-a-uuid' } }), res2);
+    expect(res2._status).toBe(400);
+
+    expect(mockGetCurrentUserPlanEntitlements).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('11) tentativa em processamento (mesmo attemptId ainda "reserved"): nunca inicia uma segunda chamada simultânea à IA', async () => {
+    // Distinct from scenario 8 (retry of an already-COMPLETED attempt): this
+    // is a genuine second request landing while the FIRST one is still
+    // in-flight (reservation status still 'reserved', not yet completed).
+    const { fn: rpc } = rpcSpy({
+      reserve_writing_review: () => Promise.resolve({ data: { status: 'in_progress', reservationId: 'r1', fresh: false }, error: null }),
+    });
+    const supabase = { ...makeDefaultSupabase(), rpc };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status).toBe(409);
+    expect((res._body as any).code).toBe('REVIEW_IN_PROGRESS');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('12) english_reviews recebe exatamente uma linha por revisão concluída, mesmo sob múltiplas chamadas/retries', async () => {
+    const insertSpy = vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ single: vi.fn().mockResolvedValue({ data: { id: DEFAULT_REVIEW_ID }, error: null }) }) });
+    let reserveCallCount = 0;
+    const { fn: rpc } = rpcSpy({
+      reserve_writing_review: () => {
+        reserveCallCount += 1;
+        if (reserveCallCount === 1) return Promise.resolve({ data: { status: 'reserved', reservationId: 'r1', fresh: true }, error: null });
+        return Promise.resolve({ data: { status: 'completed', reservationId: 'r1', reviewId: DEFAULT_REVIEW_ID, fresh: false }, error: null });
+      },
+    });
+    const supabase = {
+      ...makeDefaultSupabase(),
+      rpc,
+      from: vi.fn((table: string) => {
+        if (table === 'english_reviews') {
+          return {
+            insert: insertSpy,
+            select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle: vi.fn().mockResolvedValue({ data: { id: DEFAULT_REVIEW_ID, ...STORED_REVIEW_ROW }, error: null }) }) }),
+          };
+        }
+        return makeDefaultSupabase().from(table);
+      }),
+    };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    const attemptId = '33333333-4444-5555-6666-777777777701';
+    await handler(makeReq({ body: { attemptId } }), makeRes());
+    await handler(makeReq({ body: { attemptId } }), makeRes()); // retry — must not insert again
+
+    expect(insertSpy).toHaveBeenCalledTimes(1);
   });
 });

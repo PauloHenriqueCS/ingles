@@ -212,7 +212,15 @@ export async function getCurrentUserPlanEntitlements(
       .gt('remaining_seconds', 0)
       .or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
     supabase.from('generated_themes').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
-    supabase.from('english_reviews').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('entry_date', todayDate),
+    // writing_review_reservations, not english_reviews.entry_date: entry_date
+    // is which diary day a review is ABOUT (can be any day the user
+    // navigates to), not when the review was actually consumed — the single
+    // source of truth for "reviews used today" is the same atomic
+    // reserve/complete ledger api/review-text.ts writes to, counted by
+    // created_at like every other daily counter here (themeCountResult,
+    // pronunciationCountResult). 'reserved' counts too — a reservation holds
+    // its slot the instant it is taken, before the AI call even starts.
+    supabase.from('writing_review_reservations').select('id', { count: 'exact', head: true }).eq('user_id', userId).in('status', ['reserved', 'completed']).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
     supabase.from('user_listening_assignments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('activity_date', todayDate).not('episode_id', 'is', null),
     supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId).gte('session_date', monthStartDate).lt('session_date', monthEndDate),
