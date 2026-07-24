@@ -28,13 +28,13 @@ if (!process.env.VITE_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
 
 async function main() {
   const deps = getProductionDeps();
-  const outcome = await reconcileEventCost(eventId, {
+  const { outcome, totalCostUsd } = await reconcileEventCost(eventId, {
     usageRepository: deps.usageRepository,
     pricingRepository: deps.pricingRepository,
     logger: deps.logger,
   });
 
-  console.log(`Event ${eventId}: ${outcome}`);
+  console.log(`Event ${eventId}: ${outcome}${totalCostUsd !== null ? ` (totalCostUsd=${totalCostUsd})` : ''}`);
   if (outcome === 'not_found') process.exitCode = 1;
 }
 

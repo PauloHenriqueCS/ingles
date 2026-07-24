@@ -15,7 +15,10 @@
  *                          path (right after metrics are inserted) and by
  *                          manual/backfill reconciliation of pending events.
  *                          Server-only, id-only — never accepts a
- *                          client-supplied price.
+ *                          client-supplied price. Returns the real
+ *                          totalCostUsd alongside the outcome, so the
+ *                          enforce-mode pipeline can commit actual spend to
+ *                          a budget bucket instead of a pre-call estimate.
  *
  * Runs only in observe mode. Legacy mode never reaches this module (the
  * gateway core returns before telemetry runs at all). A cost-calculation
@@ -224,6 +227,14 @@ export async function calculateEventCost(
 
 export type ReconcileOutcome = 'calculated' | 'partial' | 'not_found';
 
+export interface ReconcileResult {
+  outcome: ReconcileOutcome;
+  // The real, persisted total cost — set only when outcome === 'calculated'.
+  // Callers that need to record actual spend (e.g. committing a Gateway
+  // reservation's budget bucket) must use this, never a pre-call estimate.
+  totalCostUsd: string | null;
+}
+
 export interface ReconcileDeps {
   usageRepository: UsageRepositoryInterface;
   pricingRepository: PricingRepositoryInterface;
@@ -238,12 +249,12 @@ export interface ReconcileDeps {
  * re-read from provider_pricing. Server-only — no HTTP route is exposed for
  * this in this stage.
  */
-export async function reconcileEventCost(eventId: string, deps: ReconcileDeps): Promise<ReconcileOutcome> {
+export async function reconcileEventCost(eventId: string, deps: ReconcileDeps): Promise<ReconcileResult> {
   const event = await deps.usageRepository.getEventForCosting(eventId);
-  if (!event) return 'not_found';
+  if (!event) return { outcome: 'not_found', totalCostUsd: null };
 
   const metrics = await deps.usageRepository.getMetricsForEvent(eventId);
-  if (metrics.length === 0) return 'partial';
+  if (metrics.length === 0) return { outcome: 'partial', totalCostUsd: null };
 
   const outcome = await calculateEventCost(event, metrics, deps.pricingRepository, deps.logger);
 
@@ -267,12 +278,12 @@ export async function reconcileEventCost(eventId: string, deps: ReconcileDeps): 
         costStatus: 'calculated',
         calculatedCostUsd: outcome.totalCostUsd,
       });
-      return 'calculated';
+      return { outcome: 'calculated', totalCostUsd: outcome.totalCostUsd };
     } catch (err) {
       deps.logger('gateway.cost.updateEventCost.failed', sanitizeError(err));
-      return 'partial';
+      return { outcome: 'partial', totalCostUsd: null };
     }
   }
 
-  return 'partial';
+  return { outcome: 'partial', totalCostUsd: null };
 }
