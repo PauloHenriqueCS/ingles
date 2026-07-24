@@ -17,6 +17,8 @@ import {
   estimateTtsCharacters,
   estimateProviderRequests,
   estimateRealtimeSessionSeconds,
+  reconcileSessionReservation,
+  releaseSessionReservation,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
@@ -26,6 +28,7 @@ import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-
 import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
 import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
+import { reserveRealtimeSessionBudget } from '../_realtime-budget';
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
 
@@ -294,10 +297,20 @@ function buildCreateSessionMetrics(): GatewayUsageMetric[] {
 // feature that will actually report activation/usage/completion), even
 // though it is authorized here — the same split used by
 // pronunciation.start_assessment authorizing a pronunciation.assess_text
-// session (see api/pronunciation/[...slug].ts). Gated by webrtc_connect's
-// OWN runtime policy, independent of conversation.create_session's policy:
-// while webrtc_connect stays legacy (this stage), this never runs, no
-// session row is created, and gatewaySessionId is never returned.
+// session (see api/pronunciation/[...slug].ts).
+//
+// Correction: this used to be gated on conversation.webrtc_connect's own
+// gatewayMode === 'observe' — but the physical WebRTC call (and the real
+// cost conversation.realtime_usage later attaches to this session) happens
+// unconditionally, in every mode, since it is driven entirely by the
+// browser regardless of what this backend's runtime policy says. Gating
+// authorization on gatewayMode meant the mode controlled whether telemetry
+// existed at all, not just how the Gateway enforces — exactly backwards
+// (mode must never decide whether cost gets recorded, only how the Gateway
+// enforces). This bridge now always authorizes a session and always records
+// usage, in legacy, observe, and enforce alike — the same fix already
+// applied to pronunciation.assess_text's bridge (see the header comment
+// above maybeAuthorizeAssessTextSession in api/pronunciation/[...slug].ts).
 async function maybeAuthorizeWebrtcSession(
   gatewayDeps: GatewayDeps,
   userId: string,
@@ -305,15 +318,6 @@ async function maybeAuthorizeWebrtcSession(
   expiresAt: Date,
 ): Promise<string | undefined> {
   try {
-    const policy = await gatewayDeps.policyResolver.resolvePolicy({
-      featureKey: 'conversation.webrtc_connect',
-      provider: 'openai',
-      userId,
-      actorType: 'user',
-      executionLocation: 'frontend',
-    });
-    if (policy.gatewayMode !== 'observe') return undefined;
-
     const { sessionId } = await authorizeProviderSession(
       gatewayDeps.usageRepository,
       {
@@ -395,6 +399,21 @@ async function handleSession(req: any, res: any) {
     return res.status(403).json({ code: 'MONTHLY_LIMIT_REACHED', message: ENTITLEMENT_MESSAGES.conversationMinutesExhausted });
   }
 
+  // Fase 12 — authorized max recording time for the call about to start:
+  // the smallest positive value among the per-recording commercial cap, the
+  // remaining monthly balance (extra credits included), and the technical
+  // session ceiling. Computed HERE (a cheap, pure calculation, no I/O) so
+  // the upfront Gateway budget reservation below — after the rate limiter,
+  // before ever calling OpenAI — can size itself against the real ceiling
+  // this session would actually be authorized to use. Reused unchanged
+  // later in this function for the response fields — never recomputed
+  // against a slightly different "now".
+  const gatewayDeps = getProductionDeps();
+  const sessionStartNowMs = gatewayDeps.clock();
+  const authorizedAtStart = computeAuthorizedRecording(
+    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
+  );
+
   const safetyIdentifier = createHash('sha256').update(userId).digest('hex');
   const today = getTodayUtc();
 
@@ -470,6 +489,26 @@ async function handleSession(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'conversation-session')) return;
 
+  // Upfront AI Gateway budget reservation for conversation.realtime_usage —
+  // see api/_realtime-budget.ts's header comment for the full rationale.
+  // After the rate limiter (a spamming client must not be able to hold
+  // budget capacity via repeated never-completed reservations faster than
+  // it can be rate-limited), but still strictly before the OpenAI call
+  // below: refuses to ever mint an ephemeral token when the session's own
+  // worst-case cost already cannot be proven to fit in the remaining
+  // configured budget. A no-op (always allowed, no reservation held) when
+  // no budget is configured anywhere for this scope — matches today's
+  // production reality.
+  const realtimeBudget = await reserveRealtimeSessionBudget(
+    gatewayDeps, userId, 'openai', REALTIME_MODEL, authorizedAtStart.authorizedMaxRecordingSeconds,
+  );
+  if (!realtimeBudget.allowed) {
+    return res.status(403).json({
+      code: 'BUDGET_EXCEEDED',
+      message: 'O orçamento configurado para o serviço de conversa foi atingido. Tente novamente mais tarde.',
+    });
+  }
+
   const instructions = buildTutorInstructionsWithContext(prefs, cefrLevel, ctx);
   if (!instructions) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
@@ -499,7 +538,6 @@ async function handleSession(req: any, res: any) {
     },
   };
 
-  const gatewayDeps = getProductionDeps();
   let rawText: string;
   try {
     const fetchResult = await executeAiGatewayCall<{ httpStatus: number; requestId: string | null; rawText: string }>(
@@ -553,6 +591,11 @@ async function handleSession(req: any, res: any) {
     );
     rawText = fetchResult.rawText;
   } catch (err) {
+    // The OpenAI call never succeeded — this session never really started,
+    // so the upfront budget hold (if any) must be released rather than
+    // sitting reserved for up to REALTIME_MAX_SESSION_SECONDS over a call
+    // that never happened.
+    if (realtimeBudget.reservationId) await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'session_never_started');
     if (err instanceof CreateSessionTimeoutError) {
       safeLog('conversation/session', 'timeout', 504);
       return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
@@ -593,10 +636,11 @@ async function handleSession(req: any, res: any) {
     return res.status(502).json({ code: 'OPENAI_SESSION_FAILED', message: SESSION_ERROR_MESSAGE.OPENAI_SESSION_FAILED });
   }
 
-  // Additive, retrocompatible: gatewaySessionId is only present when
-  // conversation.webrtc_connect is in observe mode (this stage: always
-  // absent — legacy). Never blocks token issuance on failure (fail-open,
-  // isolated inside maybeAuthorizeWebrtcSession).
+  // Additive, retrocompatible: gatewaySessionId is now always authorized,
+  // independent of gatewayMode (see the correction comment above
+  // maybeAuthorizeWebrtcSession) — absent only if authorization itself
+  // failed. Never blocks token issuance on failure (fail-open, isolated
+  // inside maybeAuthorizeWebrtcSession).
   const gatewaySessionId = await maybeAuthorizeWebrtcSession(
     gatewayDeps,
     userId,
@@ -604,15 +648,10 @@ async function handleSession(req: any, res: any) {
     new Date(data.expires_at * 1000),
   );
 
-  // Fase 12 — authorized max recording time for the call about to start:
-  // the smallest positive value among the per-recording commercial cap, the
-  // remaining monthly balance (extra credits included), and the technical
-  // session ceiling. The frontend uses this purely for UX (countdown,
-  // auto-stop) — enforcement itself stays server-side via session-control.
-  const sessionStartNowMs = Date.now();
-  const authorizedAtStart = computeAuthorizedRecording(
-    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
-  );
+  // authorizedAtStart was already computed above (before the budget
+  // reservation and the OpenAI call) — reused here unchanged. The frontend
+  // uses these fields purely for UX (countdown, auto-stop) — enforcement
+  // itself stays server-side via session-control.
 
   // Quota-bypass fix (2026-07-21 audit) — a server-only authorization row,
   // independent of conversation.webrtc_connect's (still 'legacy') AI Gateway
@@ -634,6 +673,17 @@ async function handleSession(req: any, res: any) {
           user_id: userId,
           session_date: getTodaySP(),
           authorized_max_seconds: authorizedMaxSecondsFloor,
+          // Reconciled (committed with the session's real cost, or released
+          // if no usage occurred) by /session-complete below, or by the
+          // abandoned-session sweep — see
+          // api/_ai-gateway/reservation-reconciliation.ts. NULL when no
+          // budget was configured for conversation.realtime_usage at
+          // session-start time.
+          gateway_budget_reservation_id: realtimeBudget.reservationId,
+          // conversation.realtime_usage's real ai_usage_events are keyed by
+          // THIS id (ai_provider_sessions.id, not this row's own id) —
+          // required to look them up when reconciling the reservation above.
+          gateway_session_id: gatewaySessionId ?? null,
         })
         .select('id')
         .single();
@@ -641,6 +691,14 @@ async function handleSession(req: any, res: any) {
     } catch (e) {
       gatewayDeps.logger('gateway.conversationSessionAuthorization.failed', { message: String(e) });
     }
+  }
+  if (!recordingAuthorizationId && realtimeBudget.reservationId) {
+    // The authorization row itself failed to insert (best-effort, logged
+    // above) — nothing will ever call /session-complete for a row that
+    // doesn't exist, so this reservation would otherwise sit held until its
+    // REALTIME_MAX_SESSION_SECONDS expiry. Release it now rather than leak
+    // it silently.
+    await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'authorization_row_insert_failed');
   }
 
   res.setHeader('Cache-Control', 'no-store');
@@ -698,7 +756,7 @@ async function handleSessionComplete(req: any, res: any) {
     const client = getSharedServiceClient();
     const { data: authRow, error: fetchErr } = await client
       .from('conversation_session_authorizations')
-      .select('id, session_date, authorized_at, authorized_max_seconds')
+      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id')
       .eq('id', recordingAuthorizationId)
       .eq('user_id', userId)
       .eq('status', 'authorized')
@@ -709,7 +767,10 @@ async function handleSessionComplete(req: any, res: any) {
       return res.status(200).json({ status: 'ignored' });
     }
 
-    const row = authRow as { id: string; session_date: string; authorized_at: string; authorized_max_seconds: number };
+    const row = authRow as {
+      id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
+      gateway_budget_reservation_id: string | null; gateway_session_id: string | null;
+    };
     const elapsedSeconds = (nowMs - new Date(row.authorized_at).getTime()) / 1000;
     const durationSeconds = Math.floor(Math.max(0, Math.min(elapsedSeconds, row.authorized_max_seconds)));
 
@@ -724,6 +785,24 @@ async function handleSessionComplete(req: any, res: any) {
       .maybeSingle();
 
     if (!updated) return res.status(200).json({ status: 'ignored' });
+
+    // Reconcile the upfront conversation.realtime_usage budget reservation
+    // against the session's REAL recorded cost — commits it into
+    // ai_gateway_budget_buckets.committed_cost_usd (or releases it in full
+    // if the session recorded no real usage at all) — now that the session
+    // has genuinely ended. Only on the branch that actually won the atomic
+    // UPDATE above, so a racing duplicate /session-complete call never
+    // double-reconciles (commit_gateway_reservation_v1/
+    // release_gateway_reservation_v1 are independently idempotent too).
+    if (row.gateway_budget_reservation_id && row.gateway_session_id) {
+      await reconcileSessionReservation(gatewayDeps, 'conversation.realtime_usage', row.gateway_budget_reservation_id, row.gateway_session_id);
+    } else if (row.gateway_budget_reservation_id) {
+      // No webrtc_connect bridge session was ever authorized (fail-open
+      // path — see maybeAuthorizeWebrtcSession) so there is structurally no
+      // ai_usage_events row this reservation could ever be reconciled
+      // against — release it rather than hold it forever.
+      await releaseSessionReservation(gatewayDeps, row.gateway_budget_reservation_id, 'no_gateway_session_to_reconcile_against');
+    }
 
     // conversation_sessions.duration_sec has CHECK (duration_sec > 0) — a
     // call that never really got going (mic granted, connection dropped in
@@ -1179,20 +1258,17 @@ async function handleSessionUsage(req: any, res: any) {
 
     const gatewayDeps = getProductionDeps();
 
-    // conversation.realtime_usage is a distinct accounting key with its own
-    // runtime policy (independent of webrtc_connect's) — re-checked here so
-    // a session existing is never sufficient by itself to record billable
-    // metrics.
-    const policy = await gatewayDeps.policyResolver.resolvePolicy({
-      featureKey: REALTIME_USAGE_FEATURE_KEY,
-      provider: 'openai',
-      userId,
-      actorType: 'user',
-      executionLocation: 'mixed',
-    });
-    if (policy.gatewayMode !== 'observe') {
-      return res.status(200).json({ status: 'ignored' });
-    }
+    // Correction: this used to be gated on conversation.realtime_usage's own
+    // gatewayMode === 'observe' — but the physical Realtime response (and
+    // its real cost) already happened, relayed here from an
+    // already-authenticated browser, regardless of what this backend's
+    // runtime policy says. Gating telemetry on gatewayMode meant the mode
+    // controlled billing, not just enforcement — exactly backwards (mode
+    // must never decide whether cost gets recorded, only how the Gateway
+    // enforces). This now always records usage and cost, in legacy,
+    // observe, and enforce alike — the same fix already applied to
+    // conversation.webrtc_connect's bridge above and to
+    // pronunciation.assess_text's bridge (api/pronunciation/[...slug].ts).
 
     // model resolved server-side from the session authorized at
     // conversation.create_session time — never trusted from the client.

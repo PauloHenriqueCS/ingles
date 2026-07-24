@@ -128,6 +128,10 @@ function makeMockRepo(overrides: Partial<UsageRepositoryInterface> = {}): UsageR
     async updateEventCost(eventId, params) {
       if (overrides.updateEventCost) await overrides.updateEventCost(eventId, params);
     },
+    async getSessionUsageEvents(featureKey, providerSessionRecordId) {
+      if (overrides.getSessionUsageEvents) return overrides.getSessionUsageEvents(featureKey, providerSessionRecordId);
+      return [];
+    },
   };
 }
 
@@ -887,6 +891,105 @@ describe('GatewayPolicyResolver', () => {
     await resolver.resolvePolicy(ctx);
 
     expect(callCount).toBe(2); // second call hit DB after invalidation
+  });
+
+  // Budget-enforcement correction: a feature/provider/user row that EXISTS
+  // (every feature already has one, for gateway_mode purposes) but has no
+  // budget of its own must not shadow a budget configured only at a
+  // broader scope — each field falls back independently, unlike
+  // gateway_mode's "one whole row wins" resolution. Without this fix, a
+  // global $10/day budget was silently ignored for every real feature call,
+  // because the feature-scope row (present, budget columns NULL) always won.
+  describe('budget/limit field resolution (per-field fallback, not whole-row)', () => {
+    it('a global daily_budget_usd is used even though the feature-scope row exists with no budget of its own', async () => {
+      const mockSupabase = {
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            or: vi.fn().mockResolvedValue({
+              data: [
+                { scope_type: 'global', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: '10.00', monthly_budget_usd: '100.00' },
+                { scope_type: 'provider', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: null, monthly_budget_usd: null },
+                { scope_type: 'feature', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: null, monthly_budget_usd: null },
+              ],
+              error: null,
+            }),
+          }),
+        }),
+      };
+
+      const resolver = new GatewayPolicyResolver(mockSupabase as any, 0);
+      const policy = await resolver.resolvePolicy(baseContext());
+
+      expect(policy.dailyBudgetUsd).toBe('10.00');
+      expect(policy.monthlyBudgetUsd).toBe('100.00');
+    });
+
+    it('a feature-scope budget overrides the global one when both are actually set', async () => {
+      const mockSupabase = {
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            or: vi.fn().mockResolvedValue({
+              data: [
+                { scope_type: 'global', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: '10.00', monthly_budget_usd: '100.00' },
+                { scope_type: 'feature', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: '2.50', monthly_budget_usd: null },
+              ],
+              error: null,
+            }),
+          }),
+        }),
+      };
+
+      const resolver = new GatewayPolicyResolver(mockSupabase as any, 0);
+      const policy = await resolver.resolvePolicy(baseContext());
+
+      expect(policy.dailyBudgetUsd).toBe('2.50'); // feature's own daily budget wins
+      expect(policy.monthlyBudgetUsd).toBe('100.00'); // feature has none — falls back to global
+    });
+
+    it('no budget configured anywhere resolves to null (unlimited), not blocked', async () => {
+      const mockSupabase = {
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            or: vi.fn().mockResolvedValue({
+              data: [
+                { scope_type: 'global', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: null, monthly_budget_usd: null },
+                { scope_type: 'feature', gateway_mode: 'enforce', runtime_status: 'enabled', daily_budget_usd: null, monthly_budget_usd: null },
+              ],
+              error: null,
+            }),
+          }),
+        }),
+      };
+
+      const resolver = new GatewayPolicyResolver(mockSupabase as any, 0);
+      const policy = await resolver.resolvePolicy(baseContext());
+
+      expect(policy.dailyBudgetUsd).toBeNull();
+      expect(policy.monthlyBudgetUsd).toBeNull();
+    });
+
+    it('rate limit/concurrency fields follow the same per-field fallback as budgets', async () => {
+      const mockSupabase = {
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            or: vi.fn().mockResolvedValue({
+              data: [
+                { scope_type: 'global', gateway_mode: 'enforce', runtime_status: 'enabled', max_concurrent_requests: 50, rate_limit_requests: 1000, rate_limit_window_seconds: 3600 },
+                { scope_type: 'feature', gateway_mode: 'enforce', runtime_status: 'enabled', max_concurrent_requests: null, rate_limit_requests: null, rate_limit_window_seconds: null },
+              ],
+              error: null,
+            }),
+          }),
+        }),
+      };
+
+      const resolver = new GatewayPolicyResolver(mockSupabase as any, 0);
+      const policy = await resolver.resolvePolicy(baseContext());
+
+      expect(policy.maxConcurrentRequests).toBe(50);
+      expect(policy.rateLimitRequests).toBe(1000);
+      expect(policy.rateLimitWindowSeconds).toBe(3600);
+    });
   });
 });
 

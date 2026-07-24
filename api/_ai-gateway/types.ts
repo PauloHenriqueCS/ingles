@@ -40,6 +40,15 @@ export interface GatewayPolicy {
   // (enforcement.ts), unreachable in production this stage.
   dailyBudgetUsd?: string | null;
   monthlyBudgetUsd?: string | null;
+  // Which ai_runtime_controls scope actually produced the winning
+  // dailyBudgetUsd/monthlyBudgetUsd value above (most-specific-wins per
+  // field — see policy-resolver.ts's mostSpecificFieldValue). Needed so a
+  // budget configured only at 'global' (or 'provider') is reserved against
+  // ONE shared bucket, not silently re-labeled per-feature — see
+  // enforcement.ts's buildBudgetScopes. Absent/null defaults to 'feature'
+  // scope, preserving prior behavior for any caller that doesn't set it.
+  dailyBudgetScopeType?: 'user' | 'feature' | 'provider' | 'global' | null;
+  monthlyBudgetScopeType?: 'user' | 'feature' | 'provider' | 'global' | null;
   maxConcurrentRequests?: number | null;
   rateLimitRequests?: number | null;
   rateLimitWindowSeconds?: number | null;

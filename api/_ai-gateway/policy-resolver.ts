@@ -52,6 +52,52 @@ function mostSpecificMode(
   return 'legacy';
 }
 
+// ── Budget/limit field resolution ─────────────────────────────────────────────
+
+type ScopedControlRow = {
+  scope_type: string;
+  gateway_mode: string;
+  runtime_status: string;
+  daily_budget_usd: string | number | null;
+  monthly_budget_usd: string | number | null;
+  max_concurrent_requests: number | null;
+  rate_limit_requests: number | null;
+  rate_limit_window_seconds: number | null;
+};
+
+// Per-field fallback: the most specific row that actually HAS this field
+// set wins, independently for each field — not "the most specific row
+// overall" (mostSpecificMode's approach, correct for gateway_mode because
+// every row always has one, but wrong here). Every scope already has a
+// seeded ai_runtime_controls row for gateway_mode purposes, so a
+// feature/provider row that exists but was never given its own budget/limit
+// must not shadow a value configured only at a broader scope (typically
+// 'global') just because that row happens to exist.
+function mostSpecificFieldValue<K extends keyof ScopedControlRow>(
+  rows: ScopedControlRow[], key: K,
+): ScopedControlRow[K] | null {
+  for (const scope of SCOPE_PRIORITY) {
+    const row = rows.find(r => r.scope_type === scope);
+    if (row && row[key] != null) return row[key];
+  }
+  return null;
+}
+
+// Same precedence as mostSpecificFieldValue, but also reports WHICH scope
+// produced the winning value — a budget field resolved from a 'global' (or
+// 'provider') row must be reserved against that ONE shared bucket, never
+// silently re-labeled as if it were configured per-feature (see
+// enforcement.ts's buildBudgetScopes, which consumes this).
+function mostSpecificFieldValueWithScope<K extends keyof ScopedControlRow>(
+  rows: ScopedControlRow[], key: K,
+): { value: NonNullable<ScopedControlRow[K]>; scopeType: (typeof SCOPE_PRIORITY)[number] } | null {
+  for (const scope of SCOPE_PRIORITY) {
+    const row = rows.find(r => r.scope_type === scope);
+    if (row && row[key] != null) return { value: row[key] as NonNullable<ScopedControlRow[K]>, scopeType: scope };
+  }
+  return null;
+}
+
 // ── In-memory policy cache ────────────────────────────────────────────────────
 
 const DEFAULT_TTL_MS = 5_000;
@@ -148,34 +194,29 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
       throw new Error(`Failed to fetch policy: ${error?.message ?? 'no data'}`);
     }
 
-    const rows = data as Array<{
-      scope_type: string;
-      gateway_mode: string;
-      runtime_status: string;
-      daily_budget_usd: string | number | null;
-      monthly_budget_usd: string | number | null;
-      max_concurrent_requests: number | null;
-      rate_limit_requests: number | null;
-      rate_limit_window_seconds: number | null;
-    }>;
+    const rows = data as ScopedControlRow[];
 
     const gatewayMode = mostSpecificMode(rows);
     const runtimeStatus = mostRestrictiveStatus(
       rows.map(r => r.runtime_status as RuntimeStatus),
     );
-    // Same most-specific-scope-wins precedence as gatewayMode — a feature-
-    // or user-level budget/rate-limit override takes priority over a
-    // broader provider/global one, rather than being combined with it.
-    const specific = SCOPE_PRIORITY.map(scope => rows.find(r => r.scope_type === scope)).find(Boolean);
+    // Etapa 11 budget-enforcement correction: resolved per-field (see
+    // mostSpecificFieldValue above), not by picking one whole "most
+    // specific" row — a feature/provider row with no budget of its own must
+    // not shadow a budget set only at a broader scope (typically 'global').
+    const dailyBudget = mostSpecificFieldValueWithScope(rows, 'daily_budget_usd');
+    const monthlyBudget = mostSpecificFieldValueWithScope(rows, 'monthly_budget_usd');
 
     return {
       gatewayMode,
       runtimeStatus,
-      dailyBudgetUsd:         specific?.daily_budget_usd != null ? String(specific.daily_budget_usd) : null,
-      monthlyBudgetUsd:       specific?.monthly_budget_usd != null ? String(specific.monthly_budget_usd) : null,
-      maxConcurrentRequests:  specific?.max_concurrent_requests ?? null,
-      rateLimitRequests:      specific?.rate_limit_requests ?? null,
-      rateLimitWindowSeconds: specific?.rate_limit_window_seconds ?? null,
+      dailyBudgetUsd:          dailyBudget != null ? String(dailyBudget.value) : null,
+      monthlyBudgetUsd:        monthlyBudget != null ? String(monthlyBudget.value) : null,
+      dailyBudgetScopeType:    dailyBudget?.scopeType ?? null,
+      monthlyBudgetScopeType:  monthlyBudget?.scopeType ?? null,
+      maxConcurrentRequests:  mostSpecificFieldValue(rows, 'max_concurrent_requests'),
+      rateLimitRequests:      mostSpecificFieldValue(rows, 'rate_limit_requests'),
+      rateLimitWindowSeconds: mostSpecificFieldValue(rows, 'rate_limit_window_seconds'),
     };
   }
 }

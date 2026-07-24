@@ -14,16 +14,33 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockCheckCronAuth, mockHangupAndPersist, mockFrom } = vi.hoisted(() => ({
+const {
+  mockCheckCronAuth, mockHangupAndPersist, mockFrom,
+  mockReconcileSessionReservation, mockReleaseSessionReservation, mockGetProductionDeps,
+} = vi.hoisted(() => ({
   mockCheckCronAuth: vi.fn(),
   mockHangupAndPersist: vi.fn().mockResolvedValue({ ok: true, httpStatus: 200 }),
   mockFrom: vi.fn(),
+  mockReconcileSessionReservation: vi.fn().mockResolvedValue(undefined),
+  mockReleaseSessionReservation: vi.fn().mockResolvedValue(undefined),
+  // Never actually used by reconcileSessionReservation/releaseSessionReservation
+  // themselves (both fully mocked below) — just needs to exist so
+  // getProductionDeps() doesn't try to construct real Supabase clients
+  // (which would throw without real service-role credentials) purely to be
+  // passed through as an opaque first argument.
+  mockGetProductionDeps: vi.fn(() => ({}) as any),
 }));
 
 vi.mock('../internal/_auth', () => ({ checkCronAuth: mockCheckCronAuth }));
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_ai-gateway/index')>();
-  return { ...actual, getSharedServiceClient: () => ({ from: mockFrom }) };
+  return {
+    ...actual,
+    getSharedServiceClient: () => ({ from: mockFrom }),
+    getProductionDeps: mockGetProductionDeps,
+    reconcileSessionReservation: mockReconcileSessionReservation,
+    releaseSessionReservation: mockReleaseSessionReservation,
+  };
 });
 vi.mock('../_realtime-hangup', () => ({ hangupAndPersist: mockHangupAndPersist }));
 
@@ -199,6 +216,105 @@ describe('GET /conversation-sweep — conversation_session_authorizations abando
     await handler(makeReq(), res);
     expect((res._body() as any).closedAuthorizations).toBe(0);
     expect(mockFrom).not.toHaveBeenCalledWith('conversation_sessions');
+  });
+
+  // ── Reconciling an abandoned session's upfront budget reservation ────────
+  // Requirement 7 ("safe expiration/finalization strategy"): an incomplete
+  // session must never permanently return budget for cost that already
+  // happened. The sweep now reconciles (commits real cost, or releases in
+  // full if truly nothing was consumed) instead of leaving the reservation
+  // dangling forever.
+
+  it('reconciles the linked gateway_budget_reservation_id (commit/release real cost) using gateway_session_id', async () => {
+    const updateChain = makeChain({ data: { id: 'auth-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-1', user_id: 'user-1', session_date: '2026-07-20', authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            gateway_budget_reservation_id: 'reservation-abandoned-1', gateway_session_id: 'gw-session-abandoned-1',
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    await handler(makeReq(), makeRes());
+    expect(mockReconcileSessionReservation).toHaveBeenCalledWith(
+      expect.anything(), 'conversation.realtime_usage', 'reservation-abandoned-1', 'gw-session-abandoned-1',
+    );
+    expect(mockReleaseSessionReservation).not.toHaveBeenCalled();
+  });
+
+  it('releases (never reconciles) when the row has a reservation id but no gateway_session_id', async () => {
+    const updateChain = makeChain({ data: { id: 'auth-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-1', user_id: 'user-1', session_date: '2026-07-20', authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            gateway_budget_reservation_id: 'reservation-abandoned-2', gateway_session_id: null,
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    await handler(makeReq(), makeRes());
+    expect(mockReleaseSessionReservation).toHaveBeenCalledWith(expect.anything(), 'reservation-abandoned-2', 'no_gateway_session_to_reconcile_against');
+    expect(mockReconcileSessionReservation).not.toHaveBeenCalled();
+  });
+
+  it('never attempts reconciliation when the row has no gateway_budget_reservation_id (no budget was configured at session-start)', async () => {
+    const updateChain = makeChain({ data: { id: 'auth-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-1', user_id: 'user-1', session_date: '2026-07-20', authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            gateway_budget_reservation_id: null, gateway_session_id: null,
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    await handler(makeReq(), makeRes());
+    expect(mockReconcileSessionReservation).not.toHaveBeenCalled();
+    expect(mockReleaseSessionReservation).not.toHaveBeenCalled();
+  });
+
+  it('a reconciliation failure never blocks the sweep response (best-effort, logged)', async () => {
+    mockReconcileSessionReservation.mockRejectedValueOnce(new Error('rpc down'));
+    const updateChain = makeChain({ data: { id: 'auth-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-1', user_id: 'user-1', session_date: '2026-07-20', authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            gateway_budget_reservation_id: 'reservation-abandoned-3', gateway_session_id: 'gw-session-abandoned-3',
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).closedAuthorizations).toBe(1);
   });
 });
 

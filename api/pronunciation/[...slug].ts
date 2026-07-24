@@ -11,8 +11,12 @@ import {
   reconcileEventCost,
   rebuildDailyBucketForEvent,
   estimateAudioSecondsCeiling,
+  buildBudgetScopes,
+  estimateConservativeCostUsd,
+  reconcileSessionReservation,
+  releaseSessionReservation,
 } from '../_ai-gateway/index';
-import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
+import type { GatewayUsageMetric, GatewayDeps, GatewayCallContext } from '../_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
@@ -61,9 +65,15 @@ function extractTokenMetrics(): GatewayUsageMetric[] {
 // later reports technical completion through the already-authenticated
 // /complete and /fail endpoints below — never a direct browser→Supabase write.
 //
-// Session creation/completion is itself gated by pronunciation.assess_text's
-// own runtime policy: while legacy (Fase A of Etapa 9), none of this runs —
-// no session row, no gatewaySessionId in the response, zero new behavior.
+// Correction: session creation/completion here used to be gated on
+// pronunciation.assess_text's own gatewayMode === 'observe' — but the
+// physical Azure call (and its real cost) happens unconditionally, in every
+// mode, since it is driven entirely by the browser's Speech SDK regardless
+// of what this backend's runtime policy says. Gating telemetry on gatewayMode
+// meant the mode controlled billing, not just enforcement — exactly backwards
+// (mode must never decide whether cost gets recorded, only how the Gateway
+// enforces). This bridge now always authorizes a session and always records
+// usage, in legacy, observe, and enforce alike.
 
 const ASSESS_TEXT_FEATURE_KEY = 'pronunciation.assess_text';
 // Reasonable upper bound for a single continuous assessment recording —
@@ -71,6 +81,81 @@ const ASSESS_TEXT_FEATURE_KEY = 'pronunciation.assess_text';
 // duration, capped at 5 minutes in pronunciationFlow.ts), so genuine
 // recordings are never rejected while implausible values still are.
 const MAX_ASSESS_TEXT_DURATION_SECONDS = 900;
+
+/**
+ * Upfront AI Gateway budget reservation for this session's assess_text
+ * cost — mirrors conversation.realtime_usage's reserveRealtimeSessionBudget
+ * (api/_realtime-budget.ts), sized by the same worst-case ceiling already
+ * computed below (estimateAudioSecondsCeiling) × real provider_pricing for
+ * the audio_seconds metric, via the same centralized cost-estimator and the
+ * same atomic reserve_gateway_usage_v1.
+ *
+ * Fail-open by design (documented, pre-existing philosophy for this
+ * bridge): a blocked or failed reservation logs and returns undefined
+ * rather than preventing token issuance — this still lets the reservation
+ * correctly compete for the same budget bucket as every other feature
+ * (Conversation included) and, once real usage completes, still gets
+ * properly reconciled (see completeAssessTextGatewaySession) — it just
+ * does not yet hard-block a new assessment the way
+ * reserveRealtimeSessionBudget hard-blocks a new Realtime session. A future
+ * stage may close that asymmetry; not done here to keep this change to the
+ * committed-cost gap it was asked to close.
+ *
+ * Exported (alongside the default route handler) so tests can prove
+ * conversation.realtime_usage and pronunciation.assess_text share the same
+ * budget bucket without needing to drive the full /start HTTP handler
+ * (Azure token issuance, RPC mocks, etc.) — see
+ * api/__tests__/budget-ledger-scenario.test.ts.
+ */
+export async function reserveAssessTextBudget(
+  gatewayDeps: GatewayDeps,
+  userId: string,
+  audioSecondsCeiling: number,
+): Promise<string | undefined> {
+  if (!gatewayDeps.reservationsRepository) return undefined;
+  try {
+    const context: GatewayCallContext = {
+      featureKey: ASSESS_TEXT_FEATURE_KEY, provider: 'azure', userId, actorType: 'user', executionLocation: 'frontend',
+    };
+    const now = new Date(gatewayDeps.clock());
+    const policy = await gatewayDeps.policyResolver.resolvePolicy(context);
+    const budgetScopes = buildBudgetScopes(policy, context, ASSESS_TEXT_FEATURE_KEY, now);
+    if (budgetScopes.length === 0) return undefined; // no budget configured anywhere for this scope
+
+    const metrics = [{ metricKey: 'audio_seconds', quantity: audioSecondsCeiling }];
+    const costEstimate = await estimateConservativeCostUsd(
+      { provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, metrics },
+      gatewayDeps.pricingRepository,
+      now,
+    );
+    const estimatedCostUsd = costEstimate.resolved ? costEstimate.totalCostUsd : null;
+
+    const reservation = await gatewayDeps.reservationsRepository.reserve({
+      idempotencyKey: gatewayDeps.uuidGen(),
+      userId,
+      initiatedByUserId: userId,
+      featureKey: ASSESS_TEXT_FEATURE_KEY,
+      provider: 'azure',
+      estimatedMetrics: metrics,
+      budgetScopes,
+      estimatedCostUsd,
+      expiresInSeconds: MAX_ASSESS_TEXT_DURATION_SECONDS,
+    });
+    if (reservation.status === 'blocked') {
+      gatewayDeps.logger('gateway.assessTextBudget.blocked', { reason: reservation.blockedReason, detail: reservation.blockedDetail });
+      return undefined;
+    }
+    return reservation.reservationId ?? undefined;
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextBudget.reserveFailed', { message: String(e) });
+    return undefined;
+  }
+}
+
+function extractGatewayBudgetReservationId(metadata: Record<string, unknown> | null | undefined): string | undefined {
+  const v = metadata?.gatewayBudgetReservationId;
+  return typeof v === 'string' ? v : undefined;
+}
 
 async function maybeAuthorizeAssessTextSession(
   gatewayDeps: GatewayDeps,
@@ -80,28 +165,14 @@ async function maybeAuthorizeAssessTextSession(
   authorizationExpiresAt: Date,
 ): Promise<string | undefined> {
   try {
-    const policy = await gatewayDeps.policyResolver.resolvePolicy({
-      featureKey: ASSESS_TEXT_FEATURE_KEY,
-      provider: 'azure',
-      userId,
-      actorType: 'user',
-      executionLocation: 'frontend',
-    });
-    if (policy.gatewayMode !== 'observe') return undefined;
-
     // Etapa 11 correction — the server-authorized ceiling (never a
-    // client-chosen duration) is what a real reservation would be sized
+    // client-chosen duration) is what the reservation below is sized
     // against; recorded here so it is genuinely computed and auditable per
-    // session. Not yet tied to a live blocking reservation: this bridge's
-    // physical call happens entirely client-side (like
-    // conversation.webrtc_connect), so there is no executeAiGatewayCall
-    // invocation here for an enforce-mode reservation to attach to — the
-    // same documented, honest limitation class as Realtime's session
-    // control (see handleSessionControl's doc comment). Real consumption is
-    // still only ever recorded from the completed session
-    // (recordAssessTextUsageEvent, durationSeconds validated server-side),
-    // never a client-reported estimate.
+    // session. Real consumption is still only ever recorded from the
+    // completed session (recordAssessTextUsageEvent, durationSeconds
+    // validated server-side), never a client-reported estimate.
     const estimatedAudioSeconds = estimateAudioSecondsCeiling(MAX_ASSESS_TEXT_DURATION_SECONDS);
+    const gatewayBudgetReservationId = await reserveAssessTextBudget(gatewayDeps, userId, estimatedAudioSeconds.quantity);
 
     const { sessionId } = await authorizeProviderSession(
       gatewayDeps.usageRepository,
@@ -113,7 +184,11 @@ async function maybeAuthorizeAssessTextSession(
         internalSessionType: 'pronunciation_assessment',
         internalSessionId: assessmentId,
         authorizationExpiresAt,
-        metadata: { endpoint: 'pronunciation/start', estimatedAudioSecondsCeiling: estimatedAudioSeconds.quantity },
+        metadata: {
+          endpoint: 'pronunciation/start',
+          estimatedAudioSecondsCeiling: estimatedAudioSeconds.quantity,
+          ...(gatewayBudgetReservationId ? { gatewayBudgetReservationId } : {}),
+        },
       },
       ephemeralToken,
     );
@@ -137,7 +212,7 @@ async function transitionAssessTextSession(
   userId: string,
   gatewaySessionId: string,
   update: { status: 'completed'; durationSeconds: number } | { status: 'failed' },
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; metadata: Record<string, unknown> } | null> {
   const supabase = getSharedServiceClient();
   const payload: Record<string, unknown> = {
     status: update.status,
@@ -153,11 +228,11 @@ async function transitionAssessTextSession(
     .eq('feature_key', ASSESS_TEXT_FEATURE_KEY)
     .eq('provider', 'azure')
     .in('status', ['authorized', 'connecting', 'active'])
-    .select('id')
+    .select('id, metadata')
     .maybeSingle();
 
   if (error || !data) return null;
-  return data as { id: string };
+  return data as { id: string; metadata: Record<string, unknown> };
 }
 
 /**
@@ -180,6 +255,11 @@ async function recordAssessTextUsageEvent(
   const eventId = await gatewayDeps.usageRepository.startEvent({
     requestId,
     correlationId,
+    // Lets reservation-reconciliation.ts's getSessionUsageEvents locate
+    // this session's real events when reconciling the upfront budget
+    // reservation (see reserveAssessTextBudget) — the same field
+    // conversation.realtime_usage's events are keyed by.
+    providerSessionRecordId: gatewaySessionId,
     userId,
     initiatedByUserId: userId,
     actorType: 'user',
@@ -238,13 +318,18 @@ async function completeAssessTextGatewaySession(
     const session = await transitionAssessTextSession(userId, gatewaySessionId, { status: 'completed', durationSeconds });
     if (!session) return; // unknown/foreign/already-terminal — idempotent no-op
 
-    const policy = await gatewayDeps.policyResolver.resolvePolicy({
-      featureKey: ASSESS_TEXT_FEATURE_KEY, provider: 'azure', userId,
-      actorType: 'user', executionLocation: 'frontend',
-    });
-    if (policy.gatewayMode !== 'observe') return;
-
     await recordAssessTextUsageEvent(gatewayDeps, userId, gatewaySessionId, durationSeconds);
+
+    // Reconcile the upfront budget reservation (if any) against the REAL
+    // recorded cost — commits it into ai_gateway_budget_buckets.
+    // committed_cost_usd (or releases it in full if, somehow, no real
+    // event ended up recorded) instead of leaving it release-only, which
+    // used to let the budget look fully available again after a session
+    // ended despite real spend having occurred.
+    const reservationId = extractGatewayBudgetReservationId(session.metadata);
+    if (reservationId) {
+      await reconcileSessionReservation(gatewayDeps, ASSESS_TEXT_FEATURE_KEY, reservationId, gatewaySessionId);
+    }
   } catch (e) {
     gatewayDeps.logger('gateway.assessTextComplete.failed', { message: String(e) });
     // fail-open: never throw — this must not affect the pedagogical response
@@ -257,10 +342,19 @@ async function failAssessTextGatewaySession(
   gatewaySessionId: string,
 ): Promise<void> {
   try {
-    await transitionAssessTextSession(userId, gatewaySessionId, { status: 'failed' });
+    const session = await transitionAssessTextSession(userId, gatewaySessionId, { status: 'failed' });
     // No ai_usage_event is created here: unlike /complete, we cannot prove a
     // physical Azure call was actually attempted (the browser may call /fail
     // before ever reaching the Speech SDK step) — never invent an event.
+    if (!session) return; // unknown/foreign/already-terminal — idempotent no-op
+
+    // No physical call was ever proven to happen — release the full
+    // reservation rather than reconcile (there is structurally nothing to
+    // sum real cost from).
+    const reservationId = extractGatewayBudgetReservationId(session.metadata);
+    if (reservationId) {
+      await releaseSessionReservation(gatewayDeps, reservationId, 'assess_text_failed');
+    }
   } catch (e) {
     gatewayDeps.logger('gateway.assessTextFail.failed', { message: String(e) });
   }
@@ -362,8 +456,9 @@ async function handleStart(req: any, res: any) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a análise.' });
   }
 
-  // Additive, retrocompatible: gatewaySessionId is only present when
-  // pronunciation.assess_text is in observe mode (Fase A: always absent).
+  // Additive, retrocompatible: always authorized now (see header comment
+  // above maybeAuthorizeAssessTextSession) — gatewaySessionId absent only if
+  // authorization itself failed (fail-open).
   const gatewaySessionId = await maybeAuthorizeAssessTextSession(
     gatewayDeps,
     auth.userId,
@@ -463,7 +558,8 @@ async function handleComplete(req: any, res: any) {
 
   // Additive Gateway telemetry — never affects the response above. Only runs
   // when the client (still authenticated) reports a gatewaySessionId, which
-  // is only ever issued when pronunciation.assess_text is in observe mode.
+  // is now issued by every /start call regardless of gatewayMode (see header
+  // comment above maybeAuthorizeAssessTextSession).
   if (typeof gatewaySessionId === 'string' && isValidUuid(gatewaySessionId)) {
     try {
       await completeAssessTextGatewaySession(getProductionDeps(), auth.userId, gatewaySessionId, result.audioDurationSeconds);

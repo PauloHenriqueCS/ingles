@@ -31,7 +31,7 @@ const { mockSessionsFrom, sessionsClient } = vi.hoisted(() => {
   return { mockSessionsFrom, sessionsClient: { from: mockSessionsFrom } };
 });
 
-function makeSessionsChain(result: { data: { id: string } | null; error: unknown }) {
+function makeSessionsChain(result: { data: { id: string; metadata?: Record<string, unknown> } | null; error: unknown }) {
   const chain: any = {};
   for (const m of ['update', 'eq', 'in', 'select']) chain[m] = vi.fn().mockReturnValue(chain);
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
@@ -126,16 +126,22 @@ describe('POST /start — pronunciation.start_assessment', () => {
     process.env.AZURE_SPEECH_REGION = 'eastus';
   });
 
-  it('LEGACY: issues the token, writes no telemetry, no gatewaySessionId in response', async () => {
+  it('LEGACY: issues the token, writes no telemetry for start_assessment, but still authorizes an assess_text session (cost recording must never depend on gatewayMode)', async () => {
     const res = makeRes();
     await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('ephemeral-azure-token');
-    expect((res._body() as any).gatewaySessionId).toBeUndefined();
+    // pronunciation.start_assessment itself stays legacy — no telemetry for that feature.
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    // assess_text's session bridge is unconditional — the physical Azure call
+    // always happens client-side regardless of this backend's runtime mode.
+    expect((res._body() as any).gatewaySessionId).toBeTruthy();
+    expect(gw.mockDeps.usageRepository.createProviderSession).toHaveBeenCalledWith(
+      expect.objectContaining({ featureKey: 'pronunciation.assess_text', provider: 'azure', userId: USER_ID }),
+    );
   });
 
-  describe('OBSERVE for pronunciation.start_assessment only (assess_text stays legacy)', () => {
+  describe('OBSERVE for pronunciation.start_assessment only (assess_text session bridge is unaffected by either mode)', () => {
     beforeEach(() => {
       gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
         ctx.featureKey === 'pronunciation.start_assessment'
@@ -144,7 +150,7 @@ describe('POST /start — pronunciation.start_assessment', () => {
       );
     });
 
-    it('records one event for pronunciation.start_assessment, provider_requests only, not billable', async () => {
+    it('records one event for pronunciation.start_assessment, provider_requests only, not billable — and still authorizes the assess_text session', async () => {
       const res = makeRes();
       await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
       expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
@@ -153,8 +159,9 @@ describe('POST /start — pronunciation.start_assessment', () => {
       );
       const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
       expect(metrics).toEqual([expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false })]);
-      // assess_text itself is still legacy — no session authorized, no gatewaySessionId.
-      expect((res._body() as any).gatewaySessionId).toBeUndefined();
+      // assess_text's own session bridge no longer depends on gatewayMode —
+      // it authorizes regardless of what start_assessment's mode resolved to.
+      expect((res._body() as any).gatewaySessionId).toBeTruthy();
     });
   });
 
@@ -212,6 +219,67 @@ describe('POST /start — pronunciation.start_assessment', () => {
     expect(res._status()).toBe(504);
     expect(rpc.rpc).toHaveBeenCalledWith('compensate_pronunciation_assessment', expect.anything());
   });
+
+  // ── Upfront pronunciation.assess_text budget reservation (reserveAssessTextBudget) ──
+
+  describe('upfront assess_text budget reservation — closes the "never comes back to committed_cost_usd" gap', () => {
+    it('is a no-op (no reserve() call) when no budget is configured — unchanged from before this fix', async () => {
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), makeRes());
+      expect(gw.mockReservationsReserve).not.toHaveBeenCalled();
+    });
+
+    it('reserves conservatively (audio_seconds ceiling x price) and stores the reservation id in the session metadata once a budget is configured', async () => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00', dailyBudgetScopeType: 'feature' });
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '1.00', unitSize: '1000000', currency: 'USD' });
+
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), makeRes());
+
+      expect(gw.mockReservationsReserve).toHaveBeenCalledWith(expect.objectContaining({
+        featureKey: 'pronunciation.assess_text', provider: 'azure',
+        estimatedMetrics: [{ metricKey: 'audio_seconds', quantity: 900 }],
+      }));
+      const call = (gw.mockDeps.usageRepository.createProviderSession as any).mock.calls[0][0];
+      expect(call.metadata.gatewayBudgetReservationId).toBeTruthy();
+    });
+
+    it('a blocked reservation never blocks token issuance (fail-open, matching this bridge\'s existing philosophy) — session is still authorized without a reservation id', async () => {
+      // Only assess_text has a budget configured — start_assessment stays
+      // legacy (its own executeAiGatewayCall never reserves at all), so this
+      // test isolates assess_text's own reservation-blocked path.
+      gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
+        ctx.featureKey === 'pronunciation.assess_text'
+          ? { gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '0.01', dailyBudgetScopeType: 'feature' }
+          : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
+      );
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '50.00', unitSize: '1000000', currency: 'USD' });
+      gw.mockReservationsReserve.mockResolvedValue({
+        reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'feature:pronunciation.assess_text',
+      });
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+
+      expect(res._status()).toBe(200);
+      expect((res._body() as any).token).toBe('ephemeral-azure-token');
+      const call = (gw.mockDeps.usageRepository.createProviderSession as any).mock.calls[0][0];
+      expect(call.metadata.gatewayBudgetReservationId).toBeUndefined();
+    });
+
+    it('a reservation infrastructure failure never blocks token issuance either', async () => {
+      gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
+        ctx.featureKey === 'pronunciation.assess_text'
+          ? { gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00' }
+          : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
+      );
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '1.00', unitSize: '1000000', currency: 'USD' });
+      gw.mockReservationsReserve.mockRejectedValue(new Error('rpc down'));
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+      expect(res._status()).toBe(200);
+      expect((res._body() as any).token).toBe('ephemeral-azure-token');
+    });
+  });
 });
 
 // ── pronunciation.assess_text — /complete bridge ────────────────────────────
@@ -236,7 +304,24 @@ describe('POST /complete — pronunciation.assess_text session bridge', () => {
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
-  describe('with gatewaySessionId, assess_text in observe', () => {
+  it('LEGACY (default mock policy): still completes the session and records the usage event — cost recording must never depend on gatewayMode', async () => {
+    const res = makeRes();
+    await handler(
+      makeReq({
+        url: '/api/pronunciation/complete',
+        body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: VALID_RESULT, gatewaySessionId: GATEWAY_SESSION_ID },
+      }),
+      res,
+    );
+    expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ featureKey: 'pronunciation.assess_text', provider: 'azure', userId: USER_ID, executionLocation: 'frontend' }),
+    );
+    const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
+    expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'audio_seconds', quantity: 12.5, isBillable: true }));
+  });
+
+  describe('with gatewaySessionId (session bridge behavior — mode-independent)', () => {
     beforeEach(() => {
       gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
     });
@@ -364,6 +449,59 @@ describe('POST /complete — pronunciation.assess_text session bridge', () => {
     expect(res._status()).toBe(409);
     expect(mockSessionsFrom).not.toHaveBeenCalled();
   });
+
+  // ── Reconciling the upfront budget reservation with the REAL cost ─────────
+
+  describe('reconciling the upfront assess_text budget reservation with the real cost', () => {
+    beforeEach(() => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    });
+
+    it('commits the real cost (never just releases) when the session row carries a gatewayBudgetReservationId', async () => {
+      mockSessionsFrom.mockReturnValue(makeSessionsChain({
+        data: { id: GATEWAY_SESSION_ID, metadata: { gatewayBudgetReservationId: 'reservation-42' } }, error: null,
+      }));
+      gw.mockGetSessionUsageEvents.mockResolvedValue([{ id: 'evt-assess-1', calculatedCostUsd: '0.03' }]);
+
+      await handler(
+        makeReq({
+          url: '/api/pronunciation/complete',
+          body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: VALID_RESULT, gatewaySessionId: GATEWAY_SESSION_ID },
+        }),
+        makeRes(),
+      );
+
+      expect(gw.mockGetSessionUsageEvents).toHaveBeenCalledWith('pronunciation.assess_text', GATEWAY_SESSION_ID);
+      expect(gw.mockReservationsCommit).toHaveBeenCalledWith('reservation-42', 'evt-assess-1', '0.03');
+      expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+    });
+
+    it('attempts no reconciliation when the session metadata carries no reservation id (no budget was configured at /start)', async () => {
+      mockSessionsFrom.mockReturnValue(makeSessionsChain({ data: { id: GATEWAY_SESSION_ID, metadata: {} }, error: null }));
+      await handler(
+        makeReq({
+          url: '/api/pronunciation/complete',
+          body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: VALID_RESULT, gatewaySessionId: GATEWAY_SESSION_ID },
+        }),
+        makeRes(),
+      );
+      expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
+      expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+    });
+
+    it('a duplicate /complete call for an already-terminal session never double-reconciles', async () => {
+      mockSessionsFrom.mockReturnValue(makeSessionsChain({ data: null, error: null })); // atomic UPDATE matches nothing
+      await handler(
+        makeReq({
+          url: '/api/pronunciation/complete',
+          body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, result: VALID_RESULT, gatewaySessionId: GATEWAY_SESSION_ID },
+        }),
+        makeRes(),
+      );
+      expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
+      expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ── pronunciation.assess_text — /fail bridge ────────────────────────────────
@@ -414,6 +552,33 @@ describe('POST /fail — pronunciation.assess_text session bridge', () => {
       res,
     );
     expect(res._status()).toBe(200);
+  });
+
+  it('releases (never commits) the upfront budget reservation — no physical call is ever proven to have happened', async () => {
+    mockSessionsFrom.mockReturnValue(makeSessionsChain({
+      data: { id: GATEWAY_SESSION_ID, metadata: { gatewayBudgetReservationId: 'reservation-99' } }, error: null,
+    }));
+    await handler(
+      makeReq({
+        url: '/api/pronunciation/fail',
+        body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, code: 'AZURE_CANCELED', gatewaySessionId: GATEWAY_SESSION_ID },
+      }),
+      makeRes(),
+    );
+    expect(gw.mockReservationsRelease).toHaveBeenCalledWith('reservation-99', 'assess_text_failed');
+    expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
+  });
+
+  it('never releases when the session metadata carries no reservation id', async () => {
+    mockSessionsFrom.mockReturnValue(makeSessionsChain({ data: { id: GATEWAY_SESSION_ID, metadata: {} }, error: null }));
+    await handler(
+      makeReq({
+        url: '/api/pronunciation/fail',
+        body: { assessmentId: ASSESSMENT_ID, attemptId: ATTEMPT_ID, code: 'AZURE_CANCELED', gatewaySessionId: GATEWAY_SESSION_ID },
+      }),
+      makeRes(),
+    );
+    expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
   });
 });
 

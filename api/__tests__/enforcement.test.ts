@@ -1,10 +1,13 @@
 /**
  * Unit tests for api/_ai-gateway/enforcement.ts — the enforce-mode pipeline
  * (Etapa 11, Fase 5/11/15, corrected per the "close enforcement readiness
- * gaps" follow-up). Unreachable in production this stage (no feature's
- * gateway_mode is 'enforce'), but must be correct and tested regardless —
- * "não fingir proteção forte" cuts both ways: the code must be real, not
- * just the refusal to activate it.
+ * gaps" follow-up, and again per the P0 budget-enforcement fix). NOTE: the
+ * "unreachable in production" framing below predates
+ * 20260723050000_gateway_global_runtime_control_activation.sql /
+ * 20260723060000_kill_switch_runtime_controls_fix.sql (ingles-dashboad) —
+ * gateway_mode is now 'enforce' for the real provider/feature rows in
+ * production, so this pipeline is live. "não fingir proteção forte" cuts
+ * both ways: the code must be real, not just the refusal to activate it.
  *
  * Mocks every repository/RPC-wrapper interface directly (no real Postgres —
  * see supabase/manual-validation/ai-gateway-enforcement-concurrency.sql for
@@ -20,6 +23,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeEnforcedPipeline } from '../_ai-gateway/enforcement';
 import { GatewayError } from '../_ai-gateway/errors';
+import { calculateLineCostUsd } from '../_ai-gateway/decimal';
 import type { GatewayDeps } from '../_ai-gateway/gateway';
 import type { GatewayCallContext, GatewayPolicy, EffectiveEntitlement, ReserveUsageParams, ReservationResult } from '../_ai-gateway/types';
 
@@ -299,13 +303,96 @@ describe('executeEnforcedPipeline', () => {
     expect(params.estimatedMetrics).toEqual([{ metricKey: 'session_seconds', quantity: 999999 }]);
   });
 
-  it('builds day and month budget scopes at feature scope from policy.dailyBudgetUsd/monthlyBudgetUsd', async () => {
+  it('builds day and month budget scopes at feature scope from policy.dailyBudgetUsd/monthlyBudgetUsd when no scope type is reported (default/back-compat)', async () => {
     const policy = basePolicy({ dailyBudgetUsd: '5.00', monthlyBudgetUsd: '100.00' });
     await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy);
     const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
     expect(params.budgetScopes).toHaveLength(2);
     expect(params.budgetScopes.map((s) => s.periodType).sort()).toEqual(['day', 'month']);
     expect(params.budgetScopes.every((s) => s.scopeType === 'feature' && s.scopeKey === 'writing.correct')).toBe(true);
+  });
+
+  // ── Global/provider budget scope must be ONE shared bucket, not N per-feature buckets ──
+  // Regression coverage: buildBudgetScopes used to hardcode scopeType:
+  // 'feature' regardless of which ai_runtime_controls row actually produced
+  // the winning dailyBudgetUsd/monthlyBudgetUsd value — a budget an
+  // administrator configured only at 'global' would silently become an
+  // independent per-feature bucket for every feature that inherited it,
+  // each individually allowed up to the full configured amount instead of
+  // sharing one real cap.
+
+  it('a budget resolved from the global scope reserves against scopeType=global, scopeKey=global — the SAME bucket for two different feature keys', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '10.00', dailyBudgetScopeType: 'global' });
+    await executeEnforcedPipeline('writing.correct', baseContext({ featureKey: 'writing.correct' }), invoke, deps, policy);
+    const paramsA = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(paramsA.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'global', scopeKey: 'global', limitUsd: '10.00' })]);
+
+    deps.reserve.mockClear();
+    await executeEnforcedPipeline('listening.episode_generate_story', baseContext({ featureKey: 'listening.episode_generate_story' }), invoke, deps, policy);
+    const paramsB = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(paramsB.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'global', scopeKey: 'global', limitUsd: '10.00' })]);
+
+    // Identical scope on both calls — a real reserve_gateway_usage_v1 would
+    // touch/lock the exact same ai_gateway_budget_buckets row for both,
+    // proving they share one cap rather than each getting their own.
+    expect(paramsA.budgetScopes).toEqual(paramsB.budgetScopes);
+  });
+
+  it('a budget resolved from the provider scope reserves against scopeType=provider, scopeKey=<provider>', async () => {
+    const policy = basePolicy({ monthlyBudgetUsd: '50.00', monthlyBudgetScopeType: 'provider' });
+    const ctx = baseContext({ provider: 'openai' });
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'provider', scopeKey: 'openai', limitUsd: '50.00' })]);
+  });
+
+  it('a budget resolved from the user scope reserves against scopeType=user, scopeKey=<userId>', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '2.00', dailyBudgetScopeType: 'user' });
+    const ctx = baseContext({ userId: 'user-456' });
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'user', scopeKey: 'user-456' })]);
+  });
+
+  it('a user-scoped budget for a system actor (no userId) falls back to feature scope rather than inventing a shared bucket', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '2.00', dailyBudgetScopeType: 'user' });
+    const ctx = baseContext({ userId: undefined, actorType: 'system' });
+    deps.entitlementResolve.mockResolvedValue(allowedEntitlement({ userId: null, actorType: 'system', source: 'system_actor' }));
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    expect(params.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'feature', scopeKey: 'writing.correct' })]);
+  });
+
+  it('Conversation (conversation.create_session) and Pronunciation (pronunciation.start_assessment) correctly enter the SAME global budget bucket when a global budget is configured', async () => {
+    const policy = basePolicy({ dailyBudgetUsd: '20.00', dailyBudgetScopeType: 'global' });
+
+    await executeEnforcedPipeline('conversation.create_session', baseContext({ featureKey: 'conversation.create_session' }), invoke, deps, policy);
+    const conversationParams = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+
+    deps.reserve.mockClear();
+    await executeEnforcedPipeline('pronunciation.start_assessment', baseContext({ featureKey: 'pronunciation.start_assessment', provider: 'azure' }), invoke, deps, policy);
+    const pronunciationParams = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+
+    // Both reserve against the identical (scope_type, scope_key, period)
+    // triple — a real reserve_gateway_usage_v1 locks/increments the exact
+    // same ai_gateway_budget_buckets row for either call, so spend from one
+    // feature genuinely counts against the other's remaining budget.
+    expect(conversationParams.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'global', scopeKey: 'global', limitUsd: '20.00' })]);
+    expect(pronunciationParams.budgetScopes).toEqual([expect.objectContaining({ scopeType: 'global', scopeKey: 'global', limitUsd: '20.00' })]);
+    expect(conversationParams.budgetScopes).toEqual(pronunciationParams.budgetScopes);
+  });
+
+  it('day and month budgets resolved from DIFFERENT scopes (e.g. daily=global, monthly=feature) each get their own correct scope independently', async () => {
+    const policy = basePolicy({
+      dailyBudgetUsd: '10.00', dailyBudgetScopeType: 'global',
+      monthlyBudgetUsd: '200.00', monthlyBudgetScopeType: 'feature',
+    });
+    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy);
+    const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+    const daily = params.budgetScopes.find((s) => s.periodType === 'day');
+    const monthly = params.budgetScopes.find((s) => s.periodType === 'month');
+    expect(daily).toEqual(expect.objectContaining({ scopeType: 'global', scopeKey: 'global' }));
+    expect(monthly).toEqual(expect.objectContaining({ scopeType: 'feature', scopeKey: 'writing.correct' }));
   });
 
   it('blocks with QUOTA_EXCEEDED when reserve() reports a blocked quota (atomic check failed server-side)', async () => {
@@ -340,6 +427,73 @@ describe('executeEnforcedPipeline', () => {
   it('proceeds without reserving when no reservationsRepository is configured (legacy-safe, no crash)', async () => {
     delete (deps as any).reservationsRepository;
     await expect(executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy())).resolves.toBe('ok');
+  });
+
+  // ── Centralized conservative cost estimate (budget-enforcement fix) ─────
+  // Proves estimatedCostUsd sent to reserve() is now a real, centrally
+  // computed figure — never the always-null context.estimatedCostUsd no
+  // real caller populates — so a single call whose own worst-case cost
+  // already exceeds the remaining budget can be blocked by THIS call's own
+  // reservation, not just by an unrelated later one.
+
+  describe('centralized conservative cost estimate wired into reserve()', () => {
+    it('skips pricing lookups entirely (estimatedCostUsd stays null) when no budget scope is configured', async () => {
+      const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 1000 }] });
+      await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy()); // no dailyBudgetUsd/monthlyBudgetUsd
+      expect(deps.pricingRepository.findActivePrice).not.toHaveBeenCalled();
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBeNull();
+    });
+
+    it('computes a real conservative estimate from estimatedMetrics × provider_pricing once a budget scope exists', async () => {
+      (deps.pricingRepository.findActivePrice as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000', currency: 'USD',
+      });
+      const policy = basePolicy({ dailyBudgetUsd: '5.00' });
+      const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 1_000_000 }] });
+      await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBe('0.6');
+    });
+
+    it('never trusts context.estimatedCostUsd for the reservation — a per-feature guess cannot bypass the centralized estimate', async () => {
+      (deps.pricingRepository.findActivePrice as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000', currency: 'USD',
+      });
+      const policy = basePolicy({ dailyBudgetUsd: '5.00' });
+      // A caller claiming a suspiciously cheap $0.0001 for a 1M-token call —
+      // the centralized estimate must override it with the real ~$0.60.
+      const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 1_000_000 }], estimatedCostUsd: '0.0001' });
+      await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBe('0.6');
+    });
+
+    it('an unpriced billable metric against a configured budget scope sends a NULL estimate — fails closed at the SQL layer, never treated as $0 in the TS layer', async () => {
+      // findActivePrice keeps makeDeps()'s default (resolves null) — no price registered yet.
+      const policy = basePolicy({ dailyBudgetUsd: '5.00' });
+      const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 1_000_000 }] });
+      await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy);
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBeNull();
+    });
+
+    it('a pricing-lookup failure fails closed to a NULL estimate rather than throwing or defaulting to $0', async () => {
+      (deps.pricingRepository.findActivePrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('pricing db down'));
+      const policy = basePolicy({ dailyBudgetUsd: '5.00' });
+      const ctx = baseContext({ estimatedMetrics: [{ metricKey: 'output_text_tokens', quantity: 1_000_000 }] });
+      await expect(executeEnforcedPipeline('writing.correct', ctx, invoke, deps, policy)).resolves.toBe('ok');
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBeNull();
+    });
+
+    it('provider_requests-only calls (the generic pipeline fallback) estimate a real $0 — no price lookup needed, never unresolved', async () => {
+      const policy = basePolicy({ dailyBudgetUsd: '5.00' });
+      await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, policy); // default estimatedMetrics: provider_requests=1
+      expect(deps.pricingRepository.findActivePrice).not.toHaveBeenCalled();
+      const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
+      expect(params.estimatedCostUsd).toBe('0');
+    });
   });
 
   // ── Acceptance scenario (Etapa 11 correction, §1): 600 session_seconds/month ──
@@ -395,6 +549,97 @@ describe('executeEnforcedPipeline', () => {
     expect(deps.insertMetrics).toHaveBeenCalledWith('event-1', expect.any(Array));
     expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', null, [{ metricKey: 'output_text_tokens', quantity: 10 }]);
     expect(deps.recordOutcome).toHaveBeenCalledWith('openai', null, 'writing.correct', true);
+  });
+
+  // Budget-enforcement correction: no real caller ever populates
+  // context.estimatedCostUsd (confirmed by reading every call site), so
+  // committing it verbatim left every budget bucket's committed_cost_usd
+  // frozen at $0 forever regardless of real spend. The fix commits the REAL
+  // cost reconcileEventCost just calculated instead.
+  it('commits the REAL reconciled cost to the budget bucket, never the (always-absent) pre-call estimate', async () => {
+    const usageRepo = deps.usageRepository as unknown as {
+      getEventForCosting: ReturnType<typeof vi.fn>;
+      getMetricsForEvent: ReturnType<typeof vi.fn>;
+    };
+    usageRepo.getEventForCosting.mockResolvedValue({
+      id: 'event-1', provider: 'openai', service: 'chat.completions', model: 'gpt-4o-mini',
+      startedAt: new Date(0).toISOString(), costStatus: 'pending',
+    });
+    usageRepo.getMetricsForEvent.mockResolvedValue([
+      { id: 'metric-1', metricKey: 'output_text_tokens', quantity: 10, isBillable: true },
+    ]);
+    deps.pricingRepository.findActivePrice = vi.fn().mockResolvedValue({
+      id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000',
+    });
+    const expectedCost = calculateLineCostUsd(10, '0.60', '1000000');
+
+    const extractMetrics = vi.fn().mockReturnValue([
+      { metricKey: 'output_text_tokens', unitType: 'token', quantity: 10, isBillable: true, measurementSource: 'provider_response' },
+    ]);
+    // context.estimatedCostUsd deliberately left unset — matching every real caller today.
+    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy(), extractMetrics);
+
+    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', expectedCost, [{ metricKey: 'output_text_tokens', quantity: 10 }]);
+  });
+
+  it('falls back to the pre-call estimate for commit only while pricing has not resolved yet (cost still pending)', async () => {
+    // getEventForCosting/getMetricsForEvent keep their makeDeps() defaults
+    // (null / []), so reconcileEventCost resolves to 'not_found'/'partial'
+    // (totalCostUsd stays null) — same as production until pricing exists.
+    const ctx = baseContext({ estimatedCostUsd: '0.02' });
+    await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, basePolicy());
+    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', '0.02', []);
+  });
+
+  // ── Real cost vs. reserved estimate: both directions ─────────────────────
+  // The comparison itself (release the excess back to available, or commit
+  // an overage in full without capping) is a SQL-level guarantee inside
+  // commit_gateway_reservation_v1 (reserved_cost_usd -= the ORIGINAL
+  // reserved amount, unconditionally; committed_cost_usd += whatever the
+  // real cost turns out to be) — unchanged by this delivery. These prove
+  // the TS layer always hands that function the REAL calculated cost,
+  // regardless of which direction it differs from the pre-call estimate.
+
+  it('real cost LESS than the reserved estimate is still committed as the exact real amount — commit_gateway_reservation_v1 frees the unused difference back to available budget', async () => {
+    const usageRepo = deps.usageRepository as unknown as { getEventForCosting: ReturnType<typeof vi.fn>; getMetricsForEvent: ReturnType<typeof vi.fn> };
+    usageRepo.getEventForCosting.mockResolvedValue({
+      id: 'event-1', provider: 'openai', service: 'chat.completions', model: 'gpt-4o-mini',
+      startedAt: new Date(0).toISOString(), costStatus: 'pending',
+    });
+    // Real usage (10 tokens) turns out far smaller than what a caller might
+    // have conservatively estimated (e.g. a 1000-token ceiling reserved
+    // upfront) — the reservation sizing itself is irrelevant to commit();
+    // only the real metrics/price matter for what gets committed.
+    usageRepo.getMetricsForEvent.mockResolvedValue([{ id: 'metric-1', metricKey: 'output_text_tokens', quantity: 10, isBillable: true }]);
+    deps.pricingRepository.findActivePrice = vi.fn().mockResolvedValue({ id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000' });
+    const realCost = calculateLineCostUsd(10, '0.60', '1000000'); // tiny — much less than a conservative reservation would have held
+
+    const extractMetrics = vi.fn().mockReturnValue([{ metricKey: 'output_text_tokens', unitType: 'token', quantity: 10, isBillable: true, measurementSource: 'provider_response' }]);
+    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy(), extractMetrics);
+
+    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', realCost, [{ metricKey: 'output_text_tokens', quantity: 10 }]);
+  });
+
+  it('real cost GREATER than the reserved estimate (overage) is still fully committed — never capped/truncated at the original reservation', async () => {
+    const usageRepo = deps.usageRepository as unknown as { getEventForCosting: ReturnType<typeof vi.fn>; getMetricsForEvent: ReturnType<typeof vi.fn> };
+    usageRepo.getEventForCosting.mockResolvedValue({
+      id: 'event-1', provider: 'openai', service: 'chat.completions', model: 'gpt-4o-mini',
+      startedAt: new Date(0).toISOString(), costStatus: 'pending',
+    });
+    // Real usage (5,000,000 tokens) far exceeds any small ceiling a caller
+    // might have reserved upfront — the overage must still be recorded in
+    // full, never silently dropped or clamped.
+    usageRepo.getMetricsForEvent.mockResolvedValue([{ id: 'metric-1', metricKey: 'output_text_tokens', quantity: 5_000_000, isBillable: true }]);
+    deps.pricingRepository.findActivePrice = vi.fn().mockResolvedValue({ id: 'price-1', pricePerUnit: '0.60', unitSize: '1000000' });
+    const realCost = calculateLineCostUsd(5_000_000, '0.60', '1000000');
+
+    const extractMetrics = vi.fn().mockReturnValue([{ metricKey: 'output_text_tokens', unitType: 'token', quantity: 5_000_000, isBillable: true, measurementSource: 'provider_response' }]);
+    await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy(), extractMetrics);
+
+    expect(deps.commit).toHaveBeenCalledWith('res-1', 'event-1', realCost, [{ metricKey: 'output_text_tokens', quantity: 5_000_000 }]);
+    // The real amount is committed verbatim — no min()/cap logic anywhere
+    // in the TS layer that could silently truncate an overage.
+    expect(Number(realCost)).toBeGreaterThan(1); // sanity: this really is a large, non-trivial overage
   });
 
   it('provider failure releases the reservation and records a breaker failure, never a usage event completion', async () => {

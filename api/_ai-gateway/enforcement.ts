@@ -1,11 +1,17 @@
 /**
  * SERVER-ONLY — never import from src/ or any client-side code.
  *
- * The enforce-mode pipeline (Etapa 11, Fase 5/11 — corrected). Unreachable
- * in production this stage: no feature's gateway_mode is 'enforce', and
- * nothing in this delivery flips one. Exercised only by unit tests, so that
- * the day a feature IS switched to enforce, this code path is already
- * correct rather than a first attempt made under pressure.
+ * The enforce-mode pipeline (Etapa 11, Fase 5/11 — corrected). gateway_mode
+ * is now 'enforce' for every real feature/provider/global
+ * ai_runtime_controls row in production (since
+ * 20260723050000_gateway_global_runtime_control_activation.sql /
+ * kill_switch_runtime_controls_fix.sql — applied directly to the live
+ * database, not present as local migration files in this checkout), so
+ * this pipeline is live, not a dormant unit-test-only path. No
+ * daily_budget_usd/monthly_budget_usd is configured at any scope as of this
+ * writing, so buildBudgetScopes() below currently always returns []
+ * (budget checks are inert until an administrator sets one) — but quota
+ * enforcement (entitlement limits) is live today.
  *
  * Pipeline order (fixed by the Etapa 11 correction, §7): entitlement →
  * breaker gate → rate limit → dedupe → estimate → atomic quota+budget+
@@ -22,6 +28,18 @@
  * just a per-call ceiling — a single call whose own estimate already
  * exceeds the limit is still rejected by the very same check, so "limite
  * por chamada" is a special case of this, not a separate step.
+ *
+ * Budget correction (this delivery): estimatedCostUsd below is now a real,
+ * centrally-computed conservative figure (see cost-estimator.ts) instead of
+ * the always-null context.estimatedCostUsd no caller ever populated —
+ * previously a NULL estimate was coalesced to $0 by
+ * reserve_gateway_usage_v1's budget check, so a single call whose own
+ * worst-case cost already exceeded the remaining budget was never blocked
+ * by that check itself, only by unrelated later calls once enough
+ * committed spend had piled up. See
+ * 20260724030000_ai_gateway_conservative_budget_estimate_fix.sql for the
+ * matching SQL-side fix (a NULL estimate against a scope that DOES have a
+ * configured limit now fails closed, never silently passes as free).
  *
  * Known, deliberate simplifications (documented rather than hidden):
  *   - Dedupe: a 'completed' prior lock is reported as DUPLICATE_IN_PROGRESS
@@ -41,11 +59,45 @@ import { recordDecisionSafely } from './decisions';
 import type { GatewayDeps, MetricExtractor } from './gateway';
 import { sanitizeError } from './sanitize';
 import { reconcileEventCost } from './cost-calculator';
+import { estimateConservativeCostUsd } from './cost-estimator';
 import { rebuildDailyBucketForEvent } from './daily-rollup';
 import { getFeatureMeta, type AiFeatureKey } from './feature-catalog';
 import { dayBoundsUtc, monthBoundsUtc } from './periods';
 import type { GatewayCallContext, GatewayPolicy, GatewayUsageMetric, ReservationBudgetScope, ReservationMetricEstimate } from './types';
 import type { StartEventParams } from './usage-repository';
+
+// Derives the {scopeType, scopeKey} pair a resolved budget field must be
+// reserved against, from WHICH ai_runtime_controls scope actually produced
+// the winning value (policy.dailyBudgetScopeType/monthlyBudgetScopeType —
+// see policy-resolver.ts). A budget resolved from a 'global' or 'provider'
+// row must land in ONE shared bucket for that scope — never re-labeled
+// 'feature' just because the caller happens to be a specific feature, or a
+// budget an administrator intended as a shared cap across every feature
+// would silently become N independent per-feature buckets, each
+// individually allowed up to the full configured amount. Absent/undefined
+// scopeType (e.g. a hand-built GatewayPolicy in a test, or a cached policy
+// shape predating this field) defaults to 'feature', preserving the exact
+// prior behavior.
+function resolveBudgetScope(
+  scopeType: 'user' | 'feature' | 'provider' | 'global' | null | undefined,
+  featureKey: AiFeatureKey,
+  context: GatewayCallContext,
+): { scopeType: ReservationBudgetScope['scopeType']; scopeKey: string } {
+  switch (scopeType) {
+    case 'user':
+      // A user-scoped budget with no userId (system actor) has no user to
+      // key on — fall back to feature scope rather than inventing a shared
+      // bucket every anonymous/system caller would collide into.
+      return context.userId ? { scopeType: 'user', scopeKey: context.userId } : { scopeType: 'feature', scopeKey: featureKey };
+    case 'provider':
+      return { scopeType: 'provider', scopeKey: context.provider };
+    case 'global':
+      return { scopeType: 'global', scopeKey: 'global' };
+    case 'feature':
+    default:
+      return { scopeType: 'feature', scopeKey: featureKey };
+  }
+}
 
 /**
  * Builds the budget scopes to validate/reserve against, from the already-
@@ -53,27 +105,27 @@ import type { StartEventParams } from './usage-repository';
  * monthly limits) plus the feature/provider/global scopes. Applies equally
  * to system actors (§ correction item 18: "actor system continua sujeito a
  * budgets globais/provider/feature") — nothing here branches on actorType,
- * only on which scopes have a configured limit.
+ * only on which scopes have a configured limit. Exported so other bridges
+ * that reserve directly against reservationsRepository without going
+ * through executeEnforcedPipeline (conversation.realtime_usage's upfront
+ * session reservation — see api/conversation/[...slug].ts) build the exact
+ * same scope set, so they correctly share a 'global'/'provider' budget
+ * bucket instead of drifting into their own scoping logic.
  */
-function buildBudgetScopes(policy: GatewayPolicy, featureKey: AiFeatureKey, now: Date): ReservationBudgetScope[] {
+export function buildBudgetScopes(policy: GatewayPolicy, context: GatewayCallContext, featureKey: AiFeatureKey, now: Date): ReservationBudgetScope[] {
   const scopes: ReservationBudgetScope[] = [];
   if (policy.dailyBudgetUsd == null && policy.monthlyBudgetUsd == null) return scopes;
 
   const { start: dayStart, end: dayEnd } = dayBoundsUtc(now);
   const { start: monthStart, end: monthEnd } = monthBoundsUtc(now);
 
-  // policy.dailyBudgetUsd/monthlyBudgetUsd already reflect the
-  // most-specific configured ai_runtime_controls row (user > feature >
-  // provider > global precedence) — applied here at 'feature' scope, since
-  // GatewayPolicy carries only the single winning value, not which scope
-  // produced it (documented limitation, unchanged from before this
-  // correction — closing it fully would require carrying the winning
-  // scope_type/scope_key through GatewayPolicy, a larger change).
   if (policy.dailyBudgetUsd != null) {
-    scopes.push({ scopeType: 'feature', scopeKey: featureKey, periodType: 'day', periodStart: dayStart.toISOString(), periodEnd: dayEnd.toISOString(), limitUsd: policy.dailyBudgetUsd });
+    const { scopeType, scopeKey } = resolveBudgetScope(policy.dailyBudgetScopeType, featureKey, context);
+    scopes.push({ scopeType, scopeKey, periodType: 'day', periodStart: dayStart.toISOString(), periodEnd: dayEnd.toISOString(), limitUsd: policy.dailyBudgetUsd });
   }
   if (policy.monthlyBudgetUsd != null) {
-    scopes.push({ scopeType: 'feature', scopeKey: featureKey, periodType: 'month', periodStart: monthStart.toISOString(), periodEnd: monthEnd.toISOString(), limitUsd: policy.monthlyBudgetUsd });
+    const { scopeType, scopeKey } = resolveBudgetScope(policy.monthlyBudgetScopeType, featureKey, context);
+    scopes.push({ scopeType, scopeKey, periodType: 'month', periodStart: monthStart.toISOString(), periodEnd: monthEnd.toISOString(), limitUsd: policy.monthlyBudgetUsd });
   }
   return scopes;
 }
@@ -162,7 +214,36 @@ export async function executeEnforcedPipeline<T>(
       periodStart: lim.periodStart, periodEnd: lim.resetAt,
     };
   });
-  const budgetScopes = buildBudgetScopes(policy, featureKey, now);
+  const budgetScopes = buildBudgetScopes(policy, context, featureKey, now);
+
+  // Centralized conservative cost estimate (closes the estimatedCostUsd-
+  // always-null gap — see cost-estimator.ts's header comment). Computed once
+  // here from the call's own estimatedMetrics ceiling + real
+  // provider_pricing rows, never duplicated per-feature. Only worth the
+  // pricing lookups when a budget scope actually exists to check it
+  // against — with none configured (every scope today), the SQL layer
+  // would discard the value anyway (reserve_gateway_usage_v1 only reads
+  // p_estimated_cost_usd for scopes whose limit_usd is non-null), so this
+  // skip keeps today's no-budget-configured hot path exactly as cheap as
+  // before this fix.
+  let estimatedCostUsd: string | null = null;
+  if (budgetScopes.length > 0) {
+    try {
+      const costEstimate = await estimateConservativeCostUsd(
+        { provider: context.provider, service: context.service, model: context.model, metrics: estimatedMetrics },
+        deps.pricingRepository,
+        now,
+      );
+      // Unresolved (a billable metric has no active price row) must never
+      // collapse to $0 — reserve_gateway_usage_v1 fails closed on a NULL
+      // estimate against any scope that has a configured limit, rather than
+      // treating "we cannot prove this call is affordable" as "it's free".
+      estimatedCostUsd = costEstimate.resolved ? costEstimate.totalCostUsd : null;
+    } catch (estimateErr) {
+      deps.logger('gateway.enforce.costEstimate.failed', sanitizeError(estimateErr));
+      estimatedCostUsd = null;
+    }
+  }
 
   let reservationId: string | null = null;
   if (deps.reservationsRepository) {
@@ -176,7 +257,7 @@ export async function executeEnforcedPipeline<T>(
         model: context.model,
         estimatedMetrics,
         budgetScopes,
-        estimatedCostUsd: context.estimatedCostUsd ?? null,
+        estimatedCostUsd,
         expiresInSeconds: 120,
       });
       if (reservation.status === 'blocked') {
@@ -258,8 +339,10 @@ export async function executeEnforcedPipeline<T>(
       }
       if (realMetrics.length > 0) await deps.usageRepository.insertMetrics(eventId, realMetrics);
 
+      let calculatedCostUsd: string | null = null;
       try {
-        await reconcileEventCost(eventId, { usageRepository: deps.usageRepository, pricingRepository: deps.pricingRepository, logger: deps.logger });
+        const reconciled = await reconcileEventCost(eventId, { usageRepository: deps.usageRepository, pricingRepository: deps.pricingRepository, logger: deps.logger });
+        calculatedCostUsd = reconciled.totalCostUsd;
       } catch (costErr) { deps.logger('gateway.enforce.cost.failed', sanitizeError(costErr)); }
 
       if (reservationId && deps.reservationsRepository) {
@@ -268,8 +351,15 @@ export async function executeEnforcedPipeline<T>(
           // committed_quantity by the ACTUAL amount (never the estimate)
           // and releases the reserved/actual difference; an overage (real >
           // reserved) is still fully committed, never silently dropped.
+          // Budget correction: commits the REAL calculated cost from
+          // reconcileEventCost above, never the pre-call estimate — no
+          // caller populates context.estimatedCostUsd today, so committing
+          // it verbatim would have left every budget bucket's
+          // committed_cost_usd frozen at $0 forever regardless of actual
+          // spend. Falls back to the pre-call estimate only while pricing
+          // hasn't resolved yet (cost still pending/partial).
           const actualMetrics = realMetrics.map((m) => ({ metricKey: m.metricKey, quantity: m.quantity }));
-          await deps.reservationsRepository.commit(reservationId, eventId, context.estimatedCostUsd ?? null, actualMetrics);
+          await deps.reservationsRepository.commit(reservationId, eventId, calculatedCostUsd ?? context.estimatedCostUsd ?? null, actualMetrics);
         } catch (commitErr) {
           deps.logger('gateway.enforce.reservationCommit.failed', sanitizeError(commitErr));
           // Provider responded and was already persisted, but confirming the

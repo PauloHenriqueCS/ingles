@@ -126,6 +126,15 @@ export interface UpdateEventCostParams {
   calculatedCostUsd: string;
 }
 
+// A single event belonging to a client-driven bridge session (Realtime,
+// pronunciation.assess_text), read back for budget-reservation
+// reconciliation (see reservation-reconciliation.ts). calculatedCostUsd is
+// null when that event's cost hasn't been calculated yet.
+export interface SessionUsageEvent {
+  id: string;
+  calculatedCostUsd: string | null;
+}
+
 // ── Interface ─────────────────────────────────────────────────────────────────
 
 export interface UsageRepositoryInterface {
@@ -143,6 +152,11 @@ export interface UsageRepositoryInterface {
   getMetricsForEvent(eventId: string): Promise<UsageMetricForCosting[]>;
   updateMetricCost(metricId: string, params: UpdateMetricCostParams): Promise<void>;
   updateEventCost(eventId: string, params: UpdateEventCostParams): Promise<void>;
+  // Every SUCCEEDED event recorded for one client-driven bridge session
+  // (feature_key + provider_session_record_id), oldest first — used to
+  // reconcile that session's upfront budget reservation against its real
+  // recorded cost. See reservation-reconciliation.ts.
+  getSessionUsageEvents(featureKey: AiFeatureKey, providerSessionRecordId: string): Promise<SessionUsageEvent[]>;
 }
 
 // ── Service role client factory ───────────────────────────────────────────────
@@ -432,5 +446,21 @@ export class SupabaseUsageRepository implements UsageRepositoryInterface {
       .eq('id', eventId);
 
     if (error) throw new Error(`updateEventCost failed: ${error.message}`);
+  }
+
+  async getSessionUsageEvents(featureKey: AiFeatureKey, providerSessionRecordId: string): Promise<SessionUsageEvent[]> {
+    const { data, error } = await this.supabase
+      .from('ai_usage_events')
+      .select('id, calculated_cost_usd')
+      .eq('feature_key', featureKey)
+      .eq('provider_session_record_id', providerSessionRecordId)
+      .eq('status', 'succeeded')
+      .order('created_at', { ascending: true });
+
+    if (error || !data) return [];
+    return (data as Array<{ id: string; calculated_cost_usd: string | number | null }>).map((r) => ({
+      id: r.id,
+      calculatedCostUsd: r.calculated_cost_usd === null ? null : String(r.calculated_cost_usd),
+    }));
   }
 }

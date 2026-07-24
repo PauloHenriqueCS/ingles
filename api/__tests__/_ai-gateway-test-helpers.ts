@@ -31,10 +31,21 @@ export function createMockGatewayDeps() {
   const mockFailSession = vi.fn();
   const mockExpireSession = vi.fn();
   const mockEntitlementResolve = vi.fn();
+  const mockReservationsReserve = vi.fn();
+  const mockReservationsCommit = vi.fn();
+  const mockReservationsRelease = vi.fn();
+  const mockReservationsMarkReconciliationRequired = vi.fn();
+  const mockGetSessionUsageEvents = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
     entitlementResolver: { resolve: mockEntitlementResolve },
+    reservationsRepository: {
+      reserve: mockReservationsReserve,
+      commit: mockReservationsCommit,
+      release: mockReservationsRelease,
+      markReconciliationRequired: mockReservationsMarkReconciliationRequired,
+    },
     usageRepository: {
       startEvent: mockStartEvent,
       completeEvent: mockCompleteEvent,
@@ -50,6 +61,7 @@ export function createMockGatewayDeps() {
       getMetricsForEvent: mockGetMetricsForEvent,
       updateMetricCost: mockUpdateMetricCost,
       updateEventCost: mockUpdateEventCost,
+      getSessionUsageEvents: mockGetSessionUsageEvents,
     },
     pricingRepository: {
       findActivePrice: mockFindActivePrice,
@@ -68,6 +80,7 @@ export function createMockGatewayDeps() {
     let eventCounter = 0;
     let uuidCounter = 0;
     let sessionCounter = 0;
+    let reservationCounter = 0;
     mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'legacy', runtimeStatus: 'enabled' });
     mockStartEvent.mockImplementation(() => Promise.resolve(`event-${++eventCounter}`));
     mockCompleteEvent.mockResolvedValue(undefined);
@@ -93,6 +106,14 @@ export function createMockGatewayDeps() {
       effectivePlanId: null, limits: [], source: 'no_plan_configured', revision: null,
       resolvedAt: new Date(0).toISOString(),
     });
+    mockReservationsReserve.mockImplementation(() => Promise.resolve({
+      reservationId: `reservation-${++reservationCounter}`, status: 'pending',
+      expiresAt: new Date(1000).toISOString(), blockedReason: null, blockedDetail: null,
+    }));
+    mockReservationsCommit.mockResolvedValue(undefined);
+    mockReservationsRelease.mockResolvedValue(undefined);
+    mockReservationsMarkReconciliationRequired.mockResolvedValue(undefined);
+    mockGetSessionUsageEvents.mockResolvedValue([]);
   }
 
   return {
@@ -119,6 +140,11 @@ export function createMockGatewayDeps() {
     mockFailSession,
     mockExpireSession,
     mockEntitlementResolve,
+    mockReservationsReserve,
+    mockReservationsCommit,
+    mockReservationsRelease,
+    mockReservationsMarkReconciliationRequired,
+    mockGetSessionUsageEvents,
     resetDefaults,
   };
 }

@@ -144,16 +144,23 @@ beforeEach(() => {
 describe('POST /session — conversation.create_session', () => {
   const GA_RESPONSE = { value: 'ephemeral-token-xyz', expires_at: 9999999999, session: { id: 'sess-123', model: 'gpt-realtime-2.1-mini' } };
 
-  it('LEGACY: issues the token, writes no telemetry, no gatewaySessionId in response', async () => {
+  it('LEGACY: issues the token, writes no conversation.create_session telemetry, but still authorizes the webrtc_connect bridge session', async () => {
     vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('ephemeral-token-xyz');
-    expect((res._body() as any).gatewaySessionId).toBeUndefined();
+    // Correction: webrtc_connect's bridge session is now authorized
+    // unconditionally (see the doc comment above maybeAuthorizeWebrtcSession)
+    // — the physical WebRTC call always happens regardless of gatewayMode,
+    // so gatewaySessionId must always be present, even in pure legacy.
+    expect((res._body() as any).gatewaySessionId).toBeTruthy();
     // Fase 9 — always present, independent of gatewaySessionId/observe mode,
     // so the client can source its self-termination timer from the server.
     expect((res._body() as any).maxSessionSeconds).toBe(30 * 60);
+    // conversation.create_session itself is still legacy — no ai_usage_event
+    // for THAT feature key (session authorization is a distinct primitive
+    // from usage-event telemetry).
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
@@ -239,7 +246,7 @@ describe('POST /session — conversation.create_session', () => {
     expect(res._status()).toBe(200);
   });
 
-  describe('OBSERVE for create_session only (webrtc_connect stays legacy)', () => {
+  describe('OBSERVE for create_session only (webrtc_connect authorization is unconditional regardless)', () => {
     beforeEach(() => {
       gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
         ctx.featureKey === 'conversation.create_session'
@@ -248,7 +255,7 @@ describe('POST /session — conversation.create_session', () => {
       );
     });
 
-    it('records one event, provider_requests=1, not billable, no session authorized', async () => {
+    it('records one event, provider_requests=1, not billable, AND still authorizes the webrtc_connect bridge session', async () => {
       vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
       const res = makeRes();
       await handler(makeReq(), res);
@@ -264,7 +271,9 @@ describe('POST /session — conversation.create_session', () => {
       );
       const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
       expect(metrics).toEqual([expect.objectContaining({ metricKey: 'provider_requests', quantity: 1, isBillable: false })]);
-      expect((res._body() as any).gatewaySessionId).toBeUndefined();
+      // webrtc_connect's own mode (still 'legacy' here) no longer gates
+      // authorization — the bridge session is always opened.
+      expect((res._body() as any).gatewaySessionId).toBeTruthy();
     });
   });
 
@@ -320,6 +329,76 @@ describe('POST /session — conversation.create_session', () => {
       await handler(makeReq(), res);
       expect(res._status()).toBe(200);
       expect((res._body() as any).token).toBe('ephemeral-token-xyz');
+    });
+  });
+
+  // ── Upfront conversation.realtime_usage budget reservation (api/_realtime-budget.ts) ──
+
+  describe('upfront Realtime budget reservation — never mint an OpenAI token the remaining budget cannot afford', () => {
+    it('a budget-exceeded reservation refuses the session with 403 BUDGET_EXCEEDED and never calls OpenAI', async () => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '0.01', dailyBudgetScopeType: 'feature' });
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '20.00', unitSize: '1000000', currency: 'USD' });
+      gw.mockReservationsReserve.mockResolvedValue({
+        reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'feature:conversation.realtime_usage',
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('BUDGET_EXCEEDED');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a successful reservation lets the session proceed normally — token minted, response unchanged', async () => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00', dailyBudgetScopeType: 'feature' });
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '1.00', unitSize: '1000000', currency: 'USD' });
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect((res._body() as any).token).toBe('ephemeral-token-xyz');
+      expect(gw.mockReservationsReserve).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage' }));
+    });
+
+    it('the reservation happens BEFORE the OpenAI call — a blocked reservation means fetch is never invoked at all', async () => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled', monthlyBudgetUsd: '0.01', monthlyBudgetScopeType: 'global' });
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '50.00', unitSize: '1000000', currency: 'USD' });
+      gw.mockReservationsReserve.mockResolvedValue({
+        reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'global:global',
+      });
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: { get: () => null }, text: async () => '{}' });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler(makeReq(), makeRes());
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('releases the reservation when the OpenAI call itself fails after a successful reservation — never leaks held budget for a session that never started', async () => {
+      gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00', dailyBudgetScopeType: 'feature' });
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '1.00', unitSize: '1000000', currency: 'USD' });
+      vi.stubGlobal('fetch', mockClientSecretsFetch(500, { error: { type: 'server_error' } }));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(502);
+      expect(gw.mockReservationsReserve).toHaveBeenCalled();
+      const reservedId = (await gw.mockReservationsReserve.mock.results[0].value).reservationId;
+      expect(gw.mockReservationsRelease).toHaveBeenCalledWith(reservedId, 'session_never_started');
+    });
+
+    it('is a no-op when no budget is configured — unchanged behavior from before this fix', async () => {
+      // resetDefaults() leaves gatewayMode legacy with no budget fields.
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+      const res = makeRes();
+      await handler(makeReq(), res);
+      expect(res._status()).toBe(200);
+      expect(gw.mockReservationsReserve).not.toHaveBeenCalled();
     });
   });
 });
@@ -590,30 +669,32 @@ describe('POST /session-usage — conversation.realtime_usage', () => {
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 
-  it('conversation.realtime_usage has its own runtime policy — session existing is not sufficient alone', async () => {
+  it('records usage and cost even in LEGACY mode — the physical Realtime response already happened regardless of gatewayMode, so telemetry must never be gated on it (mode controls enforcement, never billing)', async () => {
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'legacy', runtimeStatus: 'enabled' });
     const res = makeRes();
     await handler(usageReq(), res);
     expect(res._status()).toBe(200);
-    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage' }));
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1);
   });
 
-  it('never creates its own reservation — accounting_child: even in enforce mode, this handler only ever records through the parent session\'s already-reserved usageRepository path (startEvent/insertMetrics), never a second executeAiGatewayCall/reservation for the same response.done', async () => {
+  it('records usage and cost in ENFORCE mode too, but never creates its own reservation — accounting_child: this handler only ever records through the parent session\'s already-reserved usageRepository path (startEvent/insertMetrics), never a second executeAiGatewayCall/reservation for the same response.done', async () => {
     // Etapa 11 correction: conversation.realtime_usage is classified
     // accounting_child of conversation.webrtc_connect (see
     // api/_ai-gateway/enforce-readiness.ts's ACCOUNTING_CHILD_PARENT) —
     // requiring it to reserve independently per response.done would
-    // double-reserve the same already-reserved session. handleSessionUsage
-    // structurally guarantees this today by gating on gatewayMode ===
-    // 'observe' exactly: 'enforce' is not yet an independent reservation
-    // path here, so no second reservation can be invented no matter what
-    // policy is resolved.
+    // double-reserve the same already-reserved session. This handler never
+    // calls executeAiGatewayCall/the entitlement resolver at all, in any
+    // mode, so no second reservation can be invented no matter what policy
+    // is resolved — but recording the real usage/cost itself must still
+    // happen, in every mode (see the finding #1 correction above).
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'enforce', runtimeStatus: 'enabled' });
     const res = makeRes();
     await handler(usageReq(), res);
     expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('ignored');
-    expect(gw.mockStartEvent).not.toHaveBeenCalled();
+    expect((res._body() as any).status).toBe('recorded');
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage' }));
+    expect(gw.mockEntitlementResolve).not.toHaveBeenCalled();
   });
 
   it('rejects a malformed providerResponseId (400) before touching the database', async () => {
@@ -648,6 +729,64 @@ describe('POST /session-usage — conversation.realtime_usage', () => {
     await handler(usageReq(), makeRes());
     const startCall = gw.mockStartEvent.mock.calls[0][0] as any;
     expect(JSON.stringify(startCall)).not.toMatch(/transcript|sdp/i);
+  });
+});
+
+// ── Finding: telemetry must never be gated on gatewayMode ─────────────────
+// Gateway mode may control ENFORCEMENT, but must never control whether
+// financial telemetry (usage events + calculated cost) gets recorded — the
+// physical call already happened (browser-driven) regardless of what this
+// backend's runtime policy says. Proves conversation.webrtc_connect and
+// conversation.realtime_usage both record usage/cost identically across
+// legacy, observe, and enforce.
+
+const GATEWAY_MODES = ['legacy', 'observe', 'enforce'] as const;
+
+describe('conversation.webrtc_connect — session-active records its usage event in every gateway mode', () => {
+  it.each(GATEWAY_MODES)('mode=%s', async (mode) => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: mode, runtimeStatus: 'enabled' });
+    mockSessionsFrom.mockReturnValue(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+    const res = makeRes();
+    await handler(makeReq({ url: '/api/conversation/session-active', body: { gatewaySessionId: GATEWAY_SESSION_ID } }), res);
+    expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.webrtc_connect' }));
+    expect(gw.mockInsertMetrics).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('conversation.realtime_usage — session-usage records a real, priced usage event in every gateway mode', () => {
+  it.each(GATEWAY_MODES)('mode=%s', async (mode) => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: mode, runtimeStatus: 'enabled' });
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, metadata: { model: 'gpt-realtime-2.1-mini' } }, error: null }));
+
+    // Wires cost calculation end to end (same pattern as
+    // review-text-gateway.test.ts): getMetricsForEvent reads back exactly
+    // what insertMetrics stored for this eventId, and findActivePrice
+    // resolves every billable metric — proving a real, non-zero cost is
+    // computed and persisted, not skipped because of gatewayMode.
+    gw.mockGetEventForCosting.mockImplementation(async (eventId: string) => ({
+      id: eventId, provider: 'openai', service: 'realtime', model: 'gpt-realtime-2.1-mini',
+      startedAt: new Date(1000).toISOString(), costStatus: 'pending',
+    }));
+    gw.mockGetMetricsForEvent.mockImplementation(async (eventId: string) => {
+      const call = gw.mockInsertMetrics.mock.calls.find((c: any) => c[0] === eventId);
+      if (!call) return [];
+      const metrics = call[1] as Array<{ metricKey: string; quantity: number; isBillable: boolean }>;
+      return metrics.map((m, i) => ({ id: `${eventId}-metric-${i}`, metricKey: m.metricKey, quantity: m.quantity, isBillable: m.isBillable }));
+    });
+    gw.mockFindActivePrice.mockResolvedValue({ id: 'price-1', pricePerUnit: '0.15', unitSize: '1000000', currency: 'USD' });
+
+    const res = makeRes();
+    await handler(usageReq({ gatewaySessionId: GATEWAY_SESSION_ID, providerResponseId: `resp_${mode}`, usage: FULL_USAGE }), res);
+
+    expect(res._status()).toBe(200);
+    expect(gw.mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'conversation.realtime_usage', isBillable: true }));
+    expect(gw.mockUpdateEventCost).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ costStatus: 'calculated', calculatedCostUsd: expect.any(String) }),
+    );
+    const calculatedCost = (gw.mockUpdateEventCost.mock.calls[0][1] as any).calculatedCostUsd as string;
+    expect(Number(calculatedCost)).toBeGreaterThan(0);
   });
 });
 
@@ -1192,6 +1331,93 @@ describe('POST /session-complete — server-authoritative conversation duration'
 
     const insertChain = mockSessionsFrom.mock.results[2].value;
     expect(insertChain.insert).toHaveBeenCalledWith({ user_id: USER_ID, session_date: '2026-07-18', duration_sec: 1200 });
+  });
+
+  it('reconciles (commits the REAL cost of) the upfront Realtime budget reservation once the session genuinely completes', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:20:00Z').getTime());
+    const GATEWAY_SESSION_ID_FOR_TEST = 'ffffffff-0000-0000-0000-000000000001';
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: {
+          id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800,
+          gateway_budget_reservation_id: 'reservation-77', gateway_session_id: GATEWAY_SESSION_ID_FOR_TEST,
+        },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+    gw.mockGetSessionUsageEvents.mockResolvedValue([{ id: 'evt-real-1', calculatedCostUsd: '0.50' }]);
+
+    await handler(completeReq(), makeRes());
+
+    expect(gw.mockGetSessionUsageEvents).toHaveBeenCalledWith('conversation.realtime_usage', GATEWAY_SESSION_ID_FOR_TEST);
+    expect(gw.mockReservationsCommit).toHaveBeenCalledWith('reservation-77', 'evt-real-1', '0.5');
+    expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+  });
+
+  it('releases the reservation in full when the session recorded no real usage at all', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:20:00Z').getTime());
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: {
+          id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800,
+          gateway_budget_reservation_id: 'reservation-77', gateway_session_id: 'ffffffff-0000-0000-0000-000000000002',
+        },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+    gw.mockGetSessionUsageEvents.mockResolvedValue([]); // connected but never generated a response
+
+    await handler(completeReq(), makeRes());
+    expect(gw.mockReservationsRelease).toHaveBeenCalledWith('reservation-77', 'session_completed_no_usage');
+    expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
+  });
+
+  it('releases (never reconciles) when the row has a reservation but no gateway_session_id — nothing to look real usage up against', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:20:00Z').getTime());
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: {
+          id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800,
+          gateway_budget_reservation_id: 'reservation-77', gateway_session_id: null,
+        },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+
+    await handler(completeReq(), makeRes());
+    expect(gw.mockReservationsRelease).toHaveBeenCalledWith('reservation-77', 'no_gateway_session_to_reconcile_against');
+    expect(gw.mockGetSessionUsageEvents).not.toHaveBeenCalled();
+  });
+
+  it('never attempts a reconcile/release when the row has no gateway_budget_reservation_id (no budget was configured at session-start)', async () => {
+    gw.mockClock.mockReturnValue(new Date('2026-07-18T12:20:00Z').getTime());
+    mockSessionsFrom
+      .mockReturnValueOnce(makeSelectChain({
+        data: {
+          id: AUTH_ID, session_date: '2026-07-18', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800,
+          gateway_budget_reservation_id: null, gateway_session_id: null,
+        },
+        error: null,
+      }))
+      .mockReturnValueOnce(makeUpdateChain({ data: { id: AUTH_ID }, error: null }))
+      .mockReturnValueOnce(makeInsertChain({ error: null }));
+
+    await handler(completeReq(), makeRes());
+    expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+    expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
+  });
+
+  it('a duplicate /session-complete call (idempotent no-op branch) never double-reconciles the reservation', async () => {
+    // The atomic UPDATE...WHERE status='authorized' guard means a second
+    // call for an already-completed row never reaches the reconcile step at
+    // all (mirrors the existing idempotency test below).
+    mockSessionsFrom.mockReturnValueOnce(makeSelectChain({ data: null, error: null }));
+    await handler(completeReq(), makeRes());
+    expect(gw.mockReservationsRelease).not.toHaveBeenCalled();
+    expect(gw.mockReservationsCommit).not.toHaveBeenCalled();
   });
 
   it('never reports more than authorized_max_seconds, even if authorized_at is long past (abandoned session)', async () => {

@@ -17,7 +17,7 @@
 
 import { checkCronAuth } from '../_auth';
 import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
-import { getSharedServiceClient } from '../../_ai-gateway/index';
+import { getSharedServiceClient, getProductionDeps, reconcileSessionReservation, releaseSessionReservation } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
 import {
   WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS,
@@ -312,6 +312,13 @@ async function handleSupply(req: any, res: any): Promise<void> {
 //      conversation_sessions only when > 0) — closes the exact quota-bypass
 //      gap this table was created to prevent (2026-07-21 audit) for the one
 //      path session-complete alone can never cover: nobody left to call it.
+//      Also reconciles that row's upfront conversation.realtime_usage
+//      budget reservation (see api/_ai-gateway/reservation-reconciliation.ts)
+//      the same way /session-complete itself would — the "safe expiration"
+//      strategy for an incomplete session: commit whatever real cost
+//      genuinely accrued, never silently return budget for spend that
+//      already happened just because nobody was left to close the session
+//      cooperatively.
 //
 // Every UPDATE below is the same guarded-by-current-status pattern used
 // throughout api/conversation/[...slug].ts (matches no rows if another path
@@ -395,12 +402,13 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
     const csaOuterCutoff = new Date(Date.now() - (REALTIME_MAX_SESSION_SECONDS + AUTHORIZATION_SWEEP_GRACE_SECONDS) * 1000).toISOString();
     const { data: staleAuthRows } = await supabase
       .from('conversation_session_authorizations')
-      .select('id, user_id, session_date, authorized_at, authorized_max_seconds')
+      .select('id, user_id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id')
       .eq('status', 'authorized')
       .lt('authorized_at', csaOuterCutoff);
 
     for (const row of (staleAuthRows ?? []) as Array<{
       id: string; user_id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
+      gateway_budget_reservation_id: string | null; gateway_session_id: string | null;
     }>) {
       const authorizedAtMs = new Date(row.authorized_at).getTime();
       const graceDeadlineMs = authorizedAtMs + row.authorized_max_seconds * 1000 + AUTHORIZATION_SWEEP_GRACE_SECONDS * 1000;
@@ -424,6 +432,26 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
           .insert({ user_id: row.user_id, session_date: row.session_date, duration_sec: durationSeconds });
         if (insertErr) {
           safeLog('internal/listening/conversation-sweep', 'mirror_duration_failed', 200, { error: insertErr.message });
+        }
+      }
+
+      // Reconcile the upfront conversation.realtime_usage budget reservation
+      // (see api/_ai-gateway/reservation-reconciliation.ts) for a session
+      // nobody was left to call /session-complete for — this is the "safe
+      // expiration/finalization strategy" for an incomplete session: it
+      // commits whatever real cost genuinely accrued (never guesses, never
+      // silently returns budget for spend that already happened), the same
+      // reconciliation /session-complete itself would have run.
+      if (row.gateway_budget_reservation_id) {
+        try {
+          const gatewayDeps = getProductionDeps();
+          if (row.gateway_session_id) {
+            await reconcileSessionReservation(gatewayDeps, 'conversation.realtime_usage', row.gateway_budget_reservation_id, row.gateway_session_id);
+          } else {
+            await releaseSessionReservation(gatewayDeps, row.gateway_budget_reservation_id, 'no_gateway_session_to_reconcile_against');
+          }
+        } catch (e) {
+          safeLog('internal/listening/conversation-sweep', 'budget_reconcile_failed', 200, { error: e instanceof Error ? e.message : String(e) });
         }
       }
     }

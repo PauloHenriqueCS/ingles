@@ -53,6 +53,7 @@ export type {
   UsageMetricForCosting,
   UpdateMetricCostParams,
   UpdateEventCostParams,
+  SessionUsageEvent,
 } from './usage-repository';
 
 // Pricing repository
@@ -123,12 +124,13 @@ export {
 export type { GatewayDeps, MetricExtractor } from './gateway';
 
 // ── Etapa 11 — enforcement layer ──────────────────────────────────────────────
-// Unreachable in production this stage (no feature's gateway_mode is
-// 'enforce'), but part of the Gateway's public surface for callers that need
-// to check policy directly (e.g. the Realtime session-control poll route,
-// which reuses evaluateKillSwitch + the entitlement resolver outside the
-// executeAiGatewayCall wrapper — see api/conversation/[...slug].ts's
-// handleSessionControl).
+// gateway_mode is 'enforce' for nearly every real feature/provider/global
+// ai_runtime_controls row in production (see enforcement.ts's header
+// comment) — this pipeline is live. Also part of the Gateway's public
+// surface for callers that need to check policy directly (e.g. the
+// Realtime session-control poll route, which reuses evaluateKillSwitch +
+// the entitlement resolver outside the executeAiGatewayCall wrapper — see
+// api/conversation/[...slug].ts's handleSessionControl).
 
 export { evaluateKillSwitch } from './kill-switch';
 export type { KillSwitchDecision } from './kill-switch';
@@ -165,7 +167,14 @@ export {
 } from './estimators';
 export type { MetricEstimate } from './estimators';
 
-export { executeEnforcedPipeline } from './enforcement';
+export { executeEnforcedPipeline, buildBudgetScopes } from './enforcement';
+
+export { estimateConservativeCostUsd } from './cost-estimator';
+export type { ConservativeCostEstimateInput, ConservativeCostEstimateMetric, ConservativeCostEstimateOutcome } from './cost-estimator';
+
+export { reconcileSessionReservation, releaseSessionReservation } from './reservation-reconciliation';
+export { summarizeSessionCost } from './session-cost-summary';
+export type { SessionCostEvent, SessionCostSummary } from './session-cost-summary';
 
 export type {
   EntitlementSource,
@@ -175,6 +184,7 @@ export type {
   GatewayDecisionRecord,
   ReservationStatus,
   ReservationMetricEstimate,
+  ReservationBudgetScope,
   ReserveUsageParams,
   ReservationResult,
 } from './types';
