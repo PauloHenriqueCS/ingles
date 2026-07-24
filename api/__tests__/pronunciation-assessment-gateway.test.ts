@@ -242,7 +242,7 @@ describe('POST /start — pronunciation.start_assessment', () => {
       expect(call.metadata.gatewayBudgetReservationId).toBeTruthy();
     });
 
-    it('a blocked reservation never blocks token issuance (fail-open, matching this bridge\'s existing philosophy) — session is still authorized without a reservation id', async () => {
+    it('CORRECTED (independent audit finding): a blocked reservation now fails closed — returns BUDGET_EXCEEDED, issues no Azure token, creates no session', async () => {
       // Only assess_text has a budget configured — start_assessment stays
       // legacy (its own executeAiGatewayCall never reserves at all), so this
       // test isolates assess_text's own reservation-blocked path.
@@ -255,17 +255,24 @@ describe('POST /start — pronunciation.start_assessment', () => {
       gw.mockReservationsReserve.mockResolvedValue({
         reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'feature:pronunciation.assess_text',
       });
+      const rpc = makeSupabaseRpc({ reserve_pronunciation_assessment: reserveOk, compensate_pronunciation_assessment: {} });
+      mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: rpc });
 
       const res = makeRes();
       await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
 
-      expect(res._status()).toBe(200);
-      expect((res._body() as any).token).toBe('ephemeral-azure-token');
-      const call = (gw.mockDeps.usageRepository.createProviderSession as any).mock.calls[0][0];
-      expect(call.metadata.gatewayBudgetReservationId).toBeUndefined();
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('BUDGET_EXCEEDED');
+      expect(mockIssueToken).not.toHaveBeenCalled();
+      expect(gw.mockDeps.usageRepository.createProviderSession).not.toHaveBeenCalled();
+      // The domain reservation slot (created just before the budget check)
+      // is compensated so the user isn't left holding a dead "in progress" slot.
+      expect(rpc.rpc).toHaveBeenCalledWith('compensate_pronunciation_assessment', expect.objectContaining({
+        p_assessment_id: ASSESSMENT_ID, p_error_code: 'BUDGET_EXCEEDED',
+      }));
     });
 
-    it('a reservation infrastructure failure never blocks token issuance either', async () => {
+    it('CORRECTED: a reservation infrastructure failure also fails closed (BUDGET_EXCEEDED) — matches reserveRealtimeSessionBudget\'s own philosophy', async () => {
       gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
         ctx.featureKey === 'pronunciation.assess_text'
           ? { gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00' }
@@ -276,8 +283,53 @@ describe('POST /start — pronunciation.start_assessment', () => {
 
       const res = makeRes();
       await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
-      expect(res._status()).toBe(200);
-      expect((res._body() as any).token).toBe('ephemeral-azure-token');
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('BUDGET_EXCEEDED');
+      expect(mockIssueToken).not.toHaveBeenCalled();
+    });
+
+    it('an unpriced metric (estimate unavailable) against a configured budget fails closed — reserve() is called with a null estimate and its block is honored', async () => {
+      gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
+        ctx.featureKey === 'pronunciation.assess_text'
+          ? { gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00' }
+          : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
+      );
+      gw.mockFindActivePrice.mockResolvedValue(null); // no active price row for audio_seconds
+      // Mirrors what the real reserve_gateway_usage_v1 does for a NULL
+      // estimate against a scope that DOES have a configured limit (see
+      // 20260724030000_ai_gateway_conservative_budget_estimate_fix.sql).
+      gw.mockReservationsReserve.mockResolvedValue({
+        reservationId: null, status: 'blocked', expiresAt: null, blockedReason: 'BUDGET_EXCEEDED', blockedDetail: 'feature:pronunciation.assess_text:estimate_unavailable',
+      });
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+
+      expect(gw.mockReservationsReserve).toHaveBeenCalledWith(expect.objectContaining({ estimatedCostUsd: null }));
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('BUDGET_EXCEEDED');
+      expect(mockIssueToken).not.toHaveBeenCalled();
+    });
+
+    it('token issuance failing AFTER a successful reservation releases it rather than leaving it dangling', async () => {
+      gw.mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
+        ctx.featureKey === 'pronunciation.assess_text'
+          ? { gatewayMode: 'enforce', runtimeStatus: 'enabled', dailyBudgetUsd: '5.00' }
+          : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
+      );
+      gw.mockFindActivePrice.mockResolvedValue({ id: 'p', pricePerUnit: '1.00', unitSize: '1000000', currency: 'USD' });
+      gw.mockReservationsReserve.mockResolvedValue({
+        reservationId: 'reservation-token-fail-1', status: 'pending', expiresAt: new Date(2000).toISOString(), blockedReason: null,
+      });
+      const { AzureSpeechError } = await import('../_azure-speech');
+      mockIssueToken.mockRejectedValue(new AzureSpeechError('AZURE_SPEECH_TIMEOUT', 'timed out'));
+
+      const res = makeRes();
+      await handler(makeReq({ url: '/api/pronunciation/start', body: { textVersionId: TEXT_VERSION_ID, attemptId: ATTEMPT_ID } }), res);
+
+      expect(res._status()).toBe(504);
+      expect(gw.mockReservationsRelease).toHaveBeenCalledWith('reservation-token-fail-1', 'assess_text_token_issue_failed');
+      expect(gw.mockDeps.usageRepository.createProviderSession).not.toHaveBeenCalled();
     });
   });
 });

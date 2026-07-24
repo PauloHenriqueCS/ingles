@@ -35,6 +35,7 @@ export function createMockGatewayDeps() {
   const mockReservationsCommit = vi.fn();
   const mockReservationsRelease = vi.fn();
   const mockReservationsMarkReconciliationRequired = vi.fn();
+  const mockReservationsListExpiredPending = vi.fn();
   const mockGetSessionUsageEvents = vi.fn();
 
   const mockDeps = {
@@ -45,6 +46,7 @@ export function createMockGatewayDeps() {
       commit: mockReservationsCommit,
       release: mockReservationsRelease,
       markReconciliationRequired: mockReservationsMarkReconciliationRequired,
+      listExpiredPending: mockReservationsListExpiredPending,
     },
     usageRepository: {
       startEvent: mockStartEvent,
@@ -113,6 +115,7 @@ export function createMockGatewayDeps() {
     mockReservationsCommit.mockResolvedValue(undefined);
     mockReservationsRelease.mockResolvedValue(undefined);
     mockReservationsMarkReconciliationRequired.mockResolvedValue(undefined);
+    mockReservationsListExpiredPending.mockResolvedValue([]);
     mockGetSessionUsageEvents.mockResolvedValue([]);
   }
 
@@ -144,6 +147,7 @@ export function createMockGatewayDeps() {
     mockReservationsCommit,
     mockReservationsRelease,
     mockReservationsMarkReconciliationRequired,
+    mockReservationsListExpiredPending,
     mockGetSessionUsageEvents,
     resetDefaults,
   };

@@ -26,6 +26,13 @@ export interface ReservationsRepositoryInterface {
   commit(reservationId: string, usageEventId: string, actualCostUsd: string | null, actualMetrics?: ReservationActualMetric[]): Promise<void>;
   release(reservationId: string, reason: string): Promise<void>;
   markReconciliationRequired(reservationId: string, reason: string): Promise<void>;
+  // Every reservation still 'pending' past its own expires_at, regardless of
+  // feature — used by the central expired-reservation sweep (see
+  // reservation-reconciliation.ts's releaseExpiredPendingReservations) to
+  // close the "process died mid-request, nothing ever ran to release it"
+  // gap for backend-wrapped features (executeEnforcedPipeline's own
+  // release-on-invoke-error path only runs when invoke() actually throws).
+  listExpiredPending(nowIso: string): Promise<Array<{ id: string; featureKey: AiFeatureKey }>>;
 }
 
 export class SupabaseReservationsRepository implements ReservationsRepositoryInterface {
@@ -97,6 +104,16 @@ export class SupabaseReservationsRepository implements ReservationsRepositoryInt
       p_reason: reason,
     });
     if (error) throw new Error(`mark_gateway_reservation_reconciliation_required_v1 failed: ${error.message}`);
+  }
+
+  async listExpiredPending(nowIso: string): Promise<Array<{ id: string; featureKey: AiFeatureKey }>> {
+    const { data, error } = await this.supabase
+      .from('usage_reservations')
+      .select('id, feature_key')
+      .eq('status', 'pending')
+      .lt('expires_at', nowIso);
+    if (error) throw new Error(`listExpiredPending failed: ${error.message}`);
+    return (data ?? []).map((r: { id: string; feature_key: string }) => ({ id: r.id, featureKey: r.feature_key as AiFeatureKey }));
   }
 }
 

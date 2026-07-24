@@ -17,7 +17,11 @@
 
 import { checkCronAuth } from '../_auth';
 import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
-import { getSharedServiceClient, getProductionDeps, reconcileSessionReservation, releaseSessionReservation } from '../../_ai-gateway/index';
+import { handleProductConfigStatusRoute } from '../_product-config-status-route-handler';
+import {
+  getSharedServiceClient, getProductionDeps, reconcileSessionReservation, releaseSessionReservation,
+  releaseExpiredPendingReservations,
+} from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
 import {
   WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS,
@@ -320,16 +324,47 @@ async function handleSupply(req: any, res: any): Promise<void> {
 //      already happened just because nobody was left to close the session
 //      cooperatively.
 //
+//   3. pronunciation.assess_text ai_provider_sessions rows abandoned past
+//      their authorization_expires_at — the same class of gap as #1, but
+//      for Pronunciation (added following an independent audit finding:
+//      Pronunciation had no sweep equivalent to Conversation's). Reuses the
+//      exact same reconcileSessionReservation used by Conversation and by
+//      assess_text's own /complete — commits real cost if a usage event
+//      exists, releases in full if none does, and never releases when cost
+//      isn't fully known yet. No hangupAndPersist equivalent here: Azure has
+//      no session to actively terminate, this only closes the bookkeeping
+//      row and reconciles its budget reservation.
+//
+//   4. Any OTHER feature's reservation still 'pending' well past its own
+//      expires_at (releaseExpiredPendingReservations, in the shared
+//      reservation-reconciliation.ts module) — the generic "process died
+//      mid-request" case executeEnforcedPipeline's own release-on-error path
+//      can never reach, because there is no error to catch when nothing ever
+//      ran to catch it (function timeout, crash, mid-request redeploy).
+//      Root-caused (read-only investigation) as the reason a small number of
+//      pre-existing writing.evaluate_rewrite reservations were found stuck
+//      'pending' long after their 120s expiry. Excludes
+//      conversation.realtime_usage/pronunciation.assess_text, which are
+//      already covered — more carefully, with real-usage correlation — by
+//      #2 and #3 above.
+//
 // Every UPDATE below is the same guarded-by-current-status pattern used
 // throughout api/conversation/[...slug].ts (matches no rows if another path
 // already closed the same row first — concurrency-safe, idempotent, safe to
 // run every minute even if a previous run is still finishing a slow hangup
 // call for an unrelated row).
 
+const PRONUNCIATION_ASSESS_TEXT_FEATURE_KEY = 'pronunciation.assess_text';
+
 interface StaleProviderSessionRow {
   id: string;
   provider_session_id: string | null;
   started_at: string | null;
+}
+
+interface StaleAssessTextSessionRow {
+  id: string;
+  metadata: Record<string, unknown> | null;
 }
 
 async function closeStaleProviderSession(
@@ -354,6 +389,42 @@ async function closeStaleProviderSession(
     .in('status', ['active', 'authorized', 'connecting']);
 }
 
+/**
+ * Closes one abandoned pronunciation.assess_text ai_provider_sessions row
+ * and reconciles its budget reservation (see reconcileSessionReservation) —
+ * commits real cost if a usage event was recorded, releases in full if
+ * none was, never releases when cost isn't fully known yet. Idempotent: the
+ * closing UPDATE is guarded by current status, so a row another path (or a
+ * concurrent sweep tick) already closed is a safe no-op that never
+ * double-reconciles.
+ */
+async function closeStaleAssessTextSession(
+  supabase: ReturnType<typeof getSharedServiceClient>,
+  row: StaleAssessTextSessionRow,
+): Promise<void> {
+  const { data: updated } = await supabase
+    .from('ai_provider_sessions')
+    .update({ status: 'expired', ended_at: new Date().toISOString() })
+    .eq('id', row.id)
+    .in('status', ['authorized', 'connecting', 'active'])
+    .select('id')
+    .maybeSingle();
+
+  if (!updated) return; // another path (or a concurrent sweep tick) already closed it — no-op
+
+  const reservationId = row.metadata && typeof row.metadata.gatewayBudgetReservationId === 'string'
+    ? row.metadata.gatewayBudgetReservationId
+    : undefined;
+  if (!reservationId) return;
+
+  try {
+    const gatewayDeps = getProductionDeps();
+    await reconcileSessionReservation(gatewayDeps, PRONUNCIATION_ASSESS_TEXT_FEATURE_KEY, reservationId, row.id);
+  } catch (e) {
+    safeLog('internal/listening/conversation-sweep', 'assess_text_budget_reconcile_failed', 200, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 async function handleConversationSweep(req: any, res: any): Promise<void> {
   if (!methodGuard(req, res, ['GET'])) return;
   const supabase = getSharedServiceClient();
@@ -361,6 +432,8 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
 
   let expiredSessions = 0;
   let closedAuthorizations = 0;
+  let expiredAssessTextSessions = 0;
+  let releasedExpiredReservations = 0;
 
   try {
     // ── 1a. 'active' sessions whose heartbeat has gone stale ────────────────
@@ -456,8 +529,41 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
       }
     }
 
-    safeLog('internal/listening/conversation-sweep', 'swept', 200, { expiredSessions, closedAuthorizations });
-    return res.status(200).json({ success: true, expiredSessions, closedAuthorizations });
+    // ── 3. pronunciation.assess_text abandoned ai_provider_sessions ────────
+    // Pronunciation has no active-heartbeat/connecting phase (unlike
+    // Conversation's WebRTC sessions) — a session only ever sits in
+    // 'authorized' until /complete or /fail reports back, or the browser
+    // simply vanishes.
+    const { data: staleAssessText } = await supabase
+      .from('ai_provider_sessions')
+      .select('id, metadata')
+      .eq('feature_key', PRONUNCIATION_ASSESS_TEXT_FEATURE_KEY)
+      .eq('provider', 'azure')
+      .in('status', ['authorized', 'connecting', 'active'])
+      .not('authorization_expires_at', 'is', null)
+      .lt('authorization_expires_at', nowIso);
+
+    for (const row of (staleAssessText ?? []) as StaleAssessTextSessionRow[]) {
+      await closeStaleAssessTextSession(supabase, row);
+      expiredAssessTextSessions++;
+    }
+
+    // ── 4. Any other feature's reservation stuck 'pending' past its own
+    // expiry — the generic "process died mid-request" case (see header
+    // comment above). Best-effort, never affects this sweep's own response.
+    try {
+      const result = await releaseExpiredPendingReservations(getProductionDeps(), nowIso);
+      releasedExpiredReservations = result.releasedCount;
+    } catch (e) {
+      safeLog('internal/listening/conversation-sweep', 'expired_reservation_sweep_failed', 200, { error: e instanceof Error ? e.message : String(e) });
+    }
+
+    safeLog('internal/listening/conversation-sweep', 'swept', 200, {
+      expiredSessions, closedAuthorizations, expiredAssessTextSessions, releasedExpiredReservations,
+    });
+    return res.status(200).json({
+      success: true, expiredSessions, closedAuthorizations, expiredAssessTextSessions, releasedExpiredReservations,
+    });
   } catch (err) {
     safeLog('internal/listening/conversation-sweep', 'sweep_error', 500, { error: err instanceof Error ? err.message : String(err) });
     return res.status(500).json({ success: false, error: 'Sweep failed.', detail: String(err) });
@@ -467,12 +573,20 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any): Promise<void> {
+  const slug = resolveSlug(req, '/api/internal/listening');
+
+  // Reused function slot for /api/internal/product-config/* (see
+  // vercel.json) — independent auth (PRODUCT_CONFIG_STATUS_SECRET, not
+  // CRON_SECRET), handled entirely inside this branch. Nothing below is
+  // reached for this slug, so the listening routes below are unaffected.
+  if (slug.startsWith('product-config/')) {
+    return handleProductConfigStatusRoute(req, res, slug.slice('product-config/'.length));
+  }
+
   if (!checkCronAuth(req)) {
     safeLog('internal/listening', 'unauthorized', 401, {});
     return res.status(401).json({ error: 'Unauthorized' });
   }
-
-  const slug = resolveSlug(req, '/api/internal/listening');
 
   switch (slug) {
     case 'dispatch':

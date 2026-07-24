@@ -82,6 +82,12 @@ const ASSESS_TEXT_FEATURE_KEY = 'pronunciation.assess_text';
 // recordings are never rejected while implausible values still are.
 const MAX_ASSESS_TEXT_DURATION_SECONDS = 900;
 
+export interface AssessTextBudgetReservation {
+  allowed: boolean;
+  reservationId: string | null;
+  blockedReason: 'QUOTA_EXCEEDED' | 'BUDGET_EXCEEDED' | null;
+}
+
 /**
  * Upfront AI Gateway budget reservation for this session's assess_text
  * cost — mirrors conversation.realtime_usage's reserveRealtimeSessionBudget
@@ -90,16 +96,15 @@ const MAX_ASSESS_TEXT_DURATION_SECONDS = 900;
  * the audio_seconds metric, via the same centralized cost-estimator and the
  * same atomic reserve_gateway_usage_v1.
  *
- * Fail-open by design (documented, pre-existing philosophy for this
- * bridge): a blocked or failed reservation logs and returns undefined
- * rather than preventing token issuance — this still lets the reservation
- * correctly compete for the same budget bucket as every other feature
- * (Conversation included) and, once real usage completes, still gets
- * properly reconciled (see completeAssessTextGatewaySession) — it just
- * does not yet hard-block a new assessment the way
- * reserveRealtimeSessionBudget hard-blocks a new Realtime session. A future
- * stage may close that asymmetry; not done here to keep this change to the
- * committed-cost gap it was asked to close.
+ * CORRECTION (independent audit finding): this used to be fail-open — a
+ * blocked or failed reservation logged and let token issuance proceed
+ * anyway, which meant `pronunciation.assess_text` could exceed an active
+ * global budget by design. Now mirrors reserveRealtimeSessionBudget's own
+ * philosophy exactly: `allowed: false` on an explicit block AND on any
+ * reservation-infrastructure failure (cannot prove the call is affordable
+ * -> treat as not affordable, never silently let it through). The caller
+ * (handleStart, below) must call this BEFORE issuing any Azure credential
+ * and refuse to proceed when `allowed` is false.
  *
  * Exported (alongside the default route handler) so tests can prove
  * conversation.realtime_usage and pronunciation.assess_text share the same
@@ -111,25 +116,49 @@ export async function reserveAssessTextBudget(
   gatewayDeps: GatewayDeps,
   userId: string,
   audioSecondsCeiling: number,
-): Promise<string | undefined> {
-  if (!gatewayDeps.reservationsRepository) return undefined;
+): Promise<AssessTextBudgetReservation> {
+  if (!gatewayDeps.reservationsRepository) {
+    return { allowed: true, reservationId: null, blockedReason: null };
+  }
+
+  const context: GatewayCallContext = {
+    featureKey: ASSESS_TEXT_FEATURE_KEY, provider: 'azure', userId, actorType: 'user', executionLocation: 'frontend',
+  };
+
+  let budgetScopes: ReturnType<typeof buildBudgetScopes>;
   try {
-    const context: GatewayCallContext = {
-      featureKey: ASSESS_TEXT_FEATURE_KEY, provider: 'azure', userId, actorType: 'user', executionLocation: 'frontend',
-    };
     const now = new Date(gatewayDeps.clock());
     const policy = await gatewayDeps.policyResolver.resolvePolicy(context);
-    const budgetScopes = buildBudgetScopes(policy, context, ASSESS_TEXT_FEATURE_KEY, now);
-    if (budgetScopes.length === 0) return undefined; // no budget configured anywhere for this scope
+    budgetScopes = buildBudgetScopes(policy, context, ASSESS_TEXT_FEATURE_KEY, now);
+  } catch (e) {
+    gatewayDeps.logger('gateway.assessTextBudgetPolicy.failed', { message: String(e) });
+    // Same fail-safe default as reserveRealtimeSessionBudget / the policy
+    // resolver's own catch: the policy itself is unresolvable, so nothing
+    // is known to be configured — never blocks a session over a transient
+    // policy-fetch hiccup.
+    return { allowed: true, reservationId: null, blockedReason: null };
+  }
+  if (budgetScopes.length === 0) {
+    // No budget configured anywhere for this scope — nothing to reserve
+    // against, same "never restricts when unconfigured" principle used
+    // everywhere else in the Gateway.
+    return { allowed: true, reservationId: null, blockedReason: null };
+  }
 
-    const metrics = [{ metricKey: 'audio_seconds', quantity: audioSecondsCeiling }];
-    const costEstimate = await estimateConservativeCostUsd(
-      { provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, metrics },
-      gatewayDeps.pricingRepository,
-      now,
-    );
-    const estimatedCostUsd = costEstimate.resolved ? costEstimate.totalCostUsd : null;
+  const now = new Date(gatewayDeps.clock());
+  const metrics = [{ metricKey: 'audio_seconds', quantity: audioSecondsCeiling }];
+  const costEstimate = await estimateConservativeCostUsd(
+    { provider: 'azure', service: 'pronunciation_assessment_sdk', model: null, metrics },
+    gatewayDeps.pricingRepository,
+    now,
+  );
+  // Unresolved (no active price for audio_seconds) against a scope that DOES
+  // have a configured budget must never collapse to $0 — reserve() itself
+  // (backed by the corrected reserve_gateway_usage_v1) fails this closed,
+  // exactly like every other feature.
+  const estimatedCostUsd = costEstimate.resolved ? costEstimate.totalCostUsd : null;
 
+  try {
     const reservation = await gatewayDeps.reservationsRepository.reserve({
       idempotencyKey: gatewayDeps.uuidGen(),
       userId,
@@ -143,12 +172,16 @@ export async function reserveAssessTextBudget(
     });
     if (reservation.status === 'blocked') {
       gatewayDeps.logger('gateway.assessTextBudget.blocked', { reason: reservation.blockedReason, detail: reservation.blockedDetail });
-      return undefined;
+      return { allowed: false, reservationId: null, blockedReason: reservation.blockedReason ?? 'BUDGET_EXCEEDED' };
     }
-    return reservation.reservationId ?? undefined;
+    return { allowed: true, reservationId: reservation.reservationId, blockedReason: null };
   } catch (e) {
     gatewayDeps.logger('gateway.assessTextBudget.reserveFailed', { message: String(e) });
-    return undefined;
+    // Fail-closed: a scope DOES have a configured budget but we cannot
+    // currently prove this call is affordable — block rather than silently
+    // let it through (matches reserveRealtimeSessionBudget's own
+    // RESERVATION_FAILED philosophy).
+    return { allowed: false, reservationId: null, blockedReason: 'BUDGET_EXCEEDED' };
   }
 }
 
@@ -157,23 +190,30 @@ function extractGatewayBudgetReservationId(metadata: Record<string, unknown> | n
   return typeof v === 'string' ? v : undefined;
 }
 
-async function maybeAuthorizeAssessTextSession(
+/**
+ * Creates the ai_provider_sessions bridge row for an assess_text session
+ * whose budget reservation (if any) was ALREADY resolved and found
+ * allowed by reserveAssessTextBudget, called strictly before this — the
+ * Azure token has therefore already been minted and returned to the caller
+ * by the time this runs. This step's own failure (a DB write failure for
+ * the bridge/tracking row itself, not a budget decision) stays fail-open —
+ * matching Conversation's own webrtc bridge-row authorization
+ * (maybeAuthorizeWebrtcSession) — since refusing the already-issued token
+ * here would strand a client holding a usable credential with no way to
+ * ever report completion. If this fails AFTER a real reservation was made,
+ * that reservation is released immediately rather than left to dangle
+ * until the abandoned-session sweep's expiry window.
+ */
+async function authorizeAssessTextSession(
   gatewayDeps: GatewayDeps,
   userId: string,
   assessmentId: string,
   ephemeralToken: string,
   authorizationExpiresAt: Date,
+  estimatedAudioSecondsCeiling: number,
+  gatewayBudgetReservationId: string | undefined,
 ): Promise<string | undefined> {
   try {
-    // Etapa 11 correction — the server-authorized ceiling (never a
-    // client-chosen duration) is what the reservation below is sized
-    // against; recorded here so it is genuinely computed and auditable per
-    // session. Real consumption is still only ever recorded from the
-    // completed session (recordAssessTextUsageEvent, durationSeconds
-    // validated server-side), never a client-reported estimate.
-    const estimatedAudioSeconds = estimateAudioSecondsCeiling(MAX_ASSESS_TEXT_DURATION_SECONDS);
-    const gatewayBudgetReservationId = await reserveAssessTextBudget(gatewayDeps, userId, estimatedAudioSeconds.quantity);
-
     const { sessionId } = await authorizeProviderSession(
       gatewayDeps.usageRepository,
       {
@@ -186,7 +226,7 @@ async function maybeAuthorizeAssessTextSession(
         authorizationExpiresAt,
         metadata: {
           endpoint: 'pronunciation/start',
-          estimatedAudioSecondsCeiling: estimatedAudioSeconds.quantity,
+          estimatedAudioSecondsCeiling,
           ...(gatewayBudgetReservationId ? { gatewayBudgetReservationId } : {}),
         },
       },
@@ -195,6 +235,9 @@ async function maybeAuthorizeAssessTextSession(
     return sessionId;
   } catch (e) {
     gatewayDeps.logger('gateway.assessTextAuthorize.failed', { message: String(e) });
+    if (gatewayBudgetReservationId) {
+      await releaseSessionReservation(gatewayDeps, gatewayBudgetReservationId, 'assess_text_authorize_failed');
+    }
     return undefined; // fail-open: token issuance must never be blocked by this
   }
 }
@@ -418,6 +461,34 @@ async function handleStart(req: any, res: any) {
   const referenceText = result.referenceText as string;
   const isOurSlot = result.action === 'created' || result.action === 'reactivated' || result.action === 'existing_processing' || result.action === 'restarted';
   const gatewayDeps = getProductionDeps();
+
+  const compensateSlot = async (errorCode: string, errorMessage: string): Promise<void> => {
+    if (!isOurSlot || !assessmentId) return;
+    try {
+      await supabase.rpc('compensate_pronunciation_assessment', { p_assessment_id: assessmentId, p_error_code: errorCode, p_error_message: errorMessage });
+    } catch (compensateErr) {
+      console.error('[pronunciation/start] Compensation RPC failed:', compensateErr instanceof Error ? compensateErr.message : 'unknown');
+    }
+  };
+
+  // Upfront AI Gateway budget reservation for assess_text's real cost —
+  // strictly BEFORE any Azure credential is minted. Fail-closed (see
+  // reserveAssessTextBudget's header comment): a block or an infrastructure
+  // failure both refuse to proceed, matching Conversation's own
+  // reserveRealtimeSessionBudget. The server-authorized ceiling (never a
+  // client-chosen duration) is what this is sized against — the /start
+  // request body has no duration field to begin with.
+  const estimatedAudioSeconds = estimateAudioSecondsCeiling(MAX_ASSESS_TEXT_DURATION_SECONDS);
+  const budgetReservation = await reserveAssessTextBudget(gatewayDeps, auth.userId, estimatedAudioSeconds.quantity);
+  if (!budgetReservation.allowed) {
+    await compensateSlot('BUDGET_EXCEEDED', 'Orçamento configurado para o serviço de pronúncia foi atingido.');
+    return res.status(403).json({
+      code: 'BUDGET_EXCEEDED',
+      message: 'O orçamento configurado para o serviço de pronúncia foi atingido. Tente novamente mais tarde.',
+    });
+  }
+  const gatewayBudgetReservationId = budgetReservation.reservationId ?? undefined;
+
   let tokenResult: Awaited<ReturnType<typeof issueAzureSpeechToken>>;
   try {
     tokenResult = await executeAiGatewayCall(
@@ -441,14 +512,14 @@ async function handleStart(req: any, res: any) {
       extractTokenMetrics,
     );
   } catch (err) {
-    if (isOurSlot && assessmentId) {
-      const errorCode = err instanceof AzureSpeechError ? err.code : 'TOKEN_ISSUE_FAILED';
-      try {
-        await supabase.rpc('compensate_pronunciation_assessment', { p_assessment_id: assessmentId, p_error_code: errorCode, p_error_message: 'Falha ao emitir credencial temporária de pronúncia.' });
-      } catch (compensateErr) {
-        console.error('[pronunciation/start] Compensation RPC failed:', compensateErr instanceof Error ? compensateErr.message : 'unknown');
-      }
+    // Token issuance failed AFTER the budget reservation succeeded — no
+    // physical call to Azure was ever proven to happen, so release it
+    // rather than leaving it held until it expires on its own.
+    if (gatewayBudgetReservationId) {
+      await releaseSessionReservation(gatewayDeps, gatewayBudgetReservationId, 'assess_text_token_issue_failed');
     }
+    const errorCode = err instanceof AzureSpeechError ? err.code : 'TOKEN_ISSUE_FAILED';
+    await compensateSlot(errorCode, 'Falha ao emitir credencial temporária de pronúncia.');
     if (err instanceof AzureSpeechError) {
       return res.status(AZURE_ERROR_STATUS[err.code] ?? 503).json({ configured: false, code: err.code, message: AZURE_ERROR_MESSAGES[err.code] ?? AZURE_ERROR_MESSAGES.AZURE_SPEECH_UNAVAILABLE });
     }
@@ -457,14 +528,17 @@ async function handleStart(req: any, res: any) {
   }
 
   // Additive, retrocompatible: always authorized now (see header comment
-  // above maybeAuthorizeAssessTextSession) — gatewaySessionId absent only if
-  // authorization itself failed (fail-open).
-  const gatewaySessionId = await maybeAuthorizeAssessTextSession(
+  // above authorizeAssessTextSession) — gatewaySessionId absent only if
+  // authorization itself failed (fail-open for THIS step specifically; the
+  // budget decision itself was already fail-closed above).
+  const gatewaySessionId = await authorizeAssessTextSession(
     gatewayDeps,
     auth.userId,
     assessmentId,
     tokenResult.token,
     new Date(Date.now() + tokenResult.expiresInSeconds * 1000),
+    estimatedAudioSeconds.quantity,
+    gatewayBudgetReservationId,
   );
 
   res.setHeader('Cache-Control', 'no-store');

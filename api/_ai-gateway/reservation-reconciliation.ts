@@ -98,3 +98,56 @@ export async function releaseSessionReservation(gatewayDeps: GatewayDeps, reserv
     gatewayDeps.logger('gateway.sessionReservation.release.failed', { message: String(e) });
   }
 }
+
+// Feature keys with their own dedicated, session-based reconciliation (see
+// reconcileSessionReservation above, and the abandoned-session sweep in
+// api/internal/listening/[...slug].ts's handleConversationSweep). A blind
+// release below would be wrong for these two specifically — real
+// client-driven usage may still be waiting to be correlated against a usage
+// event, and reconcileSessionReservation already knows how to do that
+// safely. Every OTHER feature goes through executeEnforcedPipeline
+// (enforcement.ts), where invoke() is fully contained within the SAME
+// request lifecycle as the reservation itself (expiresInSeconds: 120) — a
+// reservation still 'pending' long past that deadline can only mean the
+// request died before its own success/failure path ever ran (function
+// timeout, crash, mid-request redeploy), never that a physical call is
+// still silently in flight days later.
+const SESSION_RECONCILED_FEATURE_KEYS: ReadonlySet<AiFeatureKey> = new Set([
+  'conversation.realtime_usage',
+  'pronunciation.assess_text',
+]);
+
+/**
+ * Releases every backend-wrapped (non-session) reservation still 'pending'
+ * past its own expires_at — closes the gap executeEnforcedPipeline's own
+ * release-on-invoke-error path can never reach, because there is no error
+ * to catch when the process itself died mid-request (root cause confirmed,
+ * read-only, for the pre-existing stuck writing.evaluate_rewrite
+ * reservations this was added to fix). Best-effort and idempotent per
+ * reservation (release_gateway_reservation_v1's own WHERE status='pending'
+ * guard) — one failure never stops the rest. Intended to be called
+ * periodically from the same cron sweep that already handles Conversation
+ * and Pronunciation's own abandoned-session reconciliation.
+ */
+export async function releaseExpiredPendingReservations(
+  gatewayDeps: GatewayDeps,
+  nowIso: string = new Date(gatewayDeps.clock()).toISOString(),
+): Promise<{ releasedCount: number }> {
+  if (!gatewayDeps.reservationsRepository) return { releasedCount: 0 };
+  let releasedCount = 0;
+  try {
+    const expired = await gatewayDeps.reservationsRepository.listExpiredPending(nowIso);
+    for (const row of expired) {
+      if (SESSION_RECONCILED_FEATURE_KEYS.has(row.featureKey)) continue;
+      try {
+        await gatewayDeps.reservationsRepository.release(row.id, 'expired_reservation_sweep');
+        releasedCount++;
+      } catch (e) {
+        gatewayDeps.logger('gateway.expiredReservationSweep.releaseFailed', { reservationId: row.id, message: String(e) });
+      }
+    }
+  } catch (e) {
+    gatewayDeps.logger('gateway.expiredReservationSweep.listFailed', { message: String(e) });
+  }
+  return { releasedCount };
+}

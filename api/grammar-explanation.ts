@@ -11,6 +11,7 @@ import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlement
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { handleAccountDeactivateRoute } from './_account/deactivate-route-handler';
+import { handleConfigPublicRoute } from './_config/public-route-handler';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -141,6 +142,11 @@ export default async function handler(req: any, res: any) {
   // below. This route's own behavior/URL is otherwise untouched.
   if (req.query?.__lemonRoute === 'account-deactivate') {
     return handleAccountDeactivateRoute(req, res);
+  }
+  // Rewritten here from GET /api/config/public (see vercel.json) — same
+  // function-budget reuse as account-deactivate above, otherwise unrelated.
+  if (req.query?.__lemonRoute === 'config-public') {
+    return handleConfigPublicRoute(req, res);
   }
 
   if (!methodGuard(req, res, ['POST'])) return;

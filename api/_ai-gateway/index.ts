@@ -172,7 +172,7 @@ export { executeEnforcedPipeline, buildBudgetScopes } from './enforcement';
 export { estimateConservativeCostUsd } from './cost-estimator';
 export type { ConservativeCostEstimateInput, ConservativeCostEstimateMetric, ConservativeCostEstimateOutcome } from './cost-estimator';
 
-export { reconcileSessionReservation, releaseSessionReservation } from './reservation-reconciliation';
+export { reconcileSessionReservation, releaseSessionReservation, releaseExpiredPendingReservations } from './reservation-reconciliation';
 export { summarizeSessionCost } from './session-cost-summary';
 export type { SessionCostEvent, SessionCostSummary } from './session-cost-summary';
 

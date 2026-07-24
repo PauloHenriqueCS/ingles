@@ -13,6 +13,7 @@ import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTtsCharacters, estimateProviderRequests } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
+import { getProductConfig, resolveConfigEnvironment } from '../src/server/product-config';
 
 // ── Voice configuration ───────────────────────────────────────────────────────
 
@@ -39,9 +40,9 @@ function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
-function buildSsml(text: string, voice: string): string {
+function buildSsml(text: string, voice: string, locale: string): string {
   return (
-    `<speak version="1.0" xml:lang="en-US">` +
+    `<speak version="1.0" xml:lang="${locale}">` +
     `<voice name="${voice}">` +
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`
@@ -123,8 +124,6 @@ export default async function handler(req: any, res: any) {
   // ── Input validation ───────────────────────────────────────────────────────
 
   const { text, voice } = req.body ?? {};
-  const resolvedVoice =
-    typeof voice === 'string' && ALLOWED_VOICES.has(voice) ? voice : DEFAULT_ENGLISH_VOICE;
 
   if (!text || typeof text !== 'string') {
     return jsonError(res, 400, 'INVALID_REQUEST', 'O campo text é obrigatório.');
@@ -140,6 +139,22 @@ export default async function handler(req: any, res: any) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'O texto é muito longo para síntese de voz.');
   }
 
+  // Config only ever picks the DEFAULT voice/locale/format; the client-input
+  // allowlist above is unchanged and still the only way `voice` is chosen
+  // when the client sends one. defaultVoiceName is a free-form string in the
+  // dashboard's schema (no enum) — re-checked against ALLOWED_VOICES here so
+  // an admin-configured value can never reach the unescaped `<voice name=...>`
+  // SSML attribute unless it's one of the four vetted voices.
+  const productConfig = await getProductConfig(resolveConfigEnvironment());
+  const azureConfig = productConfig.values['audio.azure'];
+  const configuredDefaultVoice = ALLOWED_VOICES.has(azureConfig.defaultVoiceName)
+    ? azureConfig.defaultVoiceName
+    : DEFAULT_ENGLISH_VOICE;
+  const resolvedVoice =
+    typeof voice === 'string' && ALLOWED_VOICES.has(voice) ? voice : configuredDefaultVoice;
+  const resolvedLocale = azureConfig.defaultLocale;
+  const resolvedOutputFormat = azureConfig.outputFormat;
+
   // ── Azure availability check ───────────────────────────────────────────────
 
   let config: { key: string; region: string };
@@ -152,7 +167,7 @@ export default async function handler(req: any, res: any) {
 
   // ── Call Azure TTS REST API ────────────────────────────────────────────────
 
-  const ssml = buildSsml(normalized, resolvedVoice);
+  const ssml = buildSsml(normalized, resolvedVoice, resolvedLocale);
   const ttsUrl = `https://${config.region}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const characterCount = countTtsSsmlCharacters(ssml);
 
@@ -194,7 +209,7 @@ export default async function handler(req: any, res: any) {
             headers: {
               'Ocp-Apim-Subscription-Key': config.key,
               'Content-Type': 'application/ssml+xml',
-              'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+              'X-Microsoft-OutputFormat': resolvedOutputFormat,
               'User-Agent': 'lemon-english-app/1.0',
             },
             body: ssml,

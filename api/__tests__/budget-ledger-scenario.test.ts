@@ -209,7 +209,13 @@ describe('$1 global budget — Conversation and Pronunciation contend for the SA
       metricKey === 'audio_seconds' ? { id: 'p2', pricePerUnit: '0.50', unitSize: '900', currency: 'USD' } : null,
     );
     const pronunciationSession = await reserveAssessTextBudget(gw.mockDeps, 'user-e', 900);
-    expect(pronunciationSession).toBeUndefined(); // reserveAssessTextBudget is fail-open: undefined means no reservation id (blocked or skipped)
+    // reserveAssessTextBudget is now fail-closed (independent audit
+    // correction): a blocked reservation surfaces as allowed=false, never a
+    // reservation id — the caller (handleStart) refuses to issue an Azure
+    // token in this case.
+    expect(pronunciationSession.allowed).toBe(false);
+    expect(pronunciationSession.reservationId).toBeNull();
+    expect(pronunciationSession.blockedReason).toBe('BUDGET_EXCEEDED');
     expect(gw.mockReservationsReserve).toHaveBeenCalledTimes(2); // both attempts genuinely went through reserve()
     const secondCallResult = await gw.mockReservationsReserve.mock.results[1].value;
     expect(secondCallResult.status).toBe('blocked');
@@ -223,7 +229,8 @@ describe('$1 global budget — Conversation and Pronunciation contend for the SA
     expect(bucket.state()).toEqual({ committedCostUsd: 0, reservedCostUsd: 0, availableUsd: 1 });
 
     const pronunciationRetry = await reserveAssessTextBudget(gw.mockDeps, 'user-e', 900);
-    expect(pronunciationRetry).toBeTruthy(); // now succeeds — a real reservation id
+    expect(pronunciationRetry.allowed).toBe(true); // now succeeds — a real reservation id
+    expect(pronunciationRetry.reservationId).toBeTruthy();
     expect(bucket.state().reservedCostUsd).toBe(0.5);
   });
 });

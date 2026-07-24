@@ -17,12 +17,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const {
   mockCheckCronAuth, mockHangupAndPersist, mockFrom,
   mockReconcileSessionReservation, mockReleaseSessionReservation, mockGetProductionDeps,
+  mockReleaseExpiredPendingReservations,
 } = vi.hoisted(() => ({
   mockCheckCronAuth: vi.fn(),
   mockHangupAndPersist: vi.fn().mockResolvedValue({ ok: true, httpStatus: 200 }),
   mockFrom: vi.fn(),
   mockReconcileSessionReservation: vi.fn().mockResolvedValue(undefined),
   mockReleaseSessionReservation: vi.fn().mockResolvedValue(undefined),
+  mockReleaseExpiredPendingReservations: vi.fn().mockResolvedValue({ releasedCount: 0 }),
   // Never actually used by reconcileSessionReservation/releaseSessionReservation
   // themselves (both fully mocked below) — just needs to exist so
   // getProductionDeps() doesn't try to construct real Supabase clients
@@ -40,6 +42,7 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
     getProductionDeps: mockGetProductionDeps,
     reconcileSessionReservation: mockReconcileSessionReservation,
     releaseSessionReservation: mockReleaseSessionReservation,
+    releaseExpiredPendingReservations: mockReleaseExpiredPendingReservations,
   };
 });
 vi.mock('../_realtime-hangup', () => ({ hangupAndPersist: mockHangupAndPersist }));
@@ -87,6 +90,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockCheckCronAuth.mockReturnValue(true);
   mockHangupAndPersist.mockResolvedValue({ ok: true, httpStatus: 200 });
+  mockReleaseExpiredPendingReservations.mockResolvedValue({ releasedCount: 0 });
 });
 
 describe('GET /conversation-sweep — ai_provider_sessions, heartbeat-stale active', () => {
@@ -315,6 +319,120 @@ describe('GET /conversation-sweep — conversation_session_authorizations abando
     await handler(makeReq(), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).closedAuthorizations).toBe(1);
+  });
+});
+
+describe('GET /conversation-sweep — pronunciation.assess_text abandoned ai_provider_sessions', () => {
+  it('a session past its authorization window with no reservation id is closed without any reconciliation attempt', async () => {
+    const updateChain = makeChain({ data: { id: 'assess-sess-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [
+        makeChain({ data: [], error: null }), // staleActive (none)
+        makeChain({ data: [], error: null }), // staleAuthorized (none)
+        makeChain({ data: [{ id: 'assess-sess-1', metadata: {} }], error: null }), // staleAssessText
+        updateChain,
+      ],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'expired' }));
+    expect(updateChain.in).toHaveBeenCalledWith('status', ['authorized', 'connecting', 'active']);
+    expect((res._body() as any).expiredAssessTextSessions).toBe(1);
+    expect(mockReconcileSessionReservation).not.toHaveBeenCalled();
+    expect(mockReleaseSessionReservation).not.toHaveBeenCalled();
+  });
+
+  it('a session without real usage (never reached /complete) has its reservation released via reconcileSessionReservation', async () => {
+    const updateChain = makeChain({ data: { id: 'assess-sess-2' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [{ id: 'assess-sess-2', metadata: { gatewayBudgetReservationId: 'reservation-abandoned-4' } }], error: null }),
+        updateChain,
+      ],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    await handler(makeReq(), makeRes());
+
+    // reconcileSessionReservation itself decides release-vs-commit based on
+    // real usage events (see reservation-reconciliation.test.ts) — the sweep
+    // only has to call it with the right feature key, reservation id, and
+    // session id (used as providerSessionRecordId, matching how
+    // recordAssessTextUsageEvent keyed the session's real events).
+    expect(mockReconcileSessionReservation).toHaveBeenCalledWith(
+      expect.anything(), 'pronunciation.assess_text', 'reservation-abandoned-4', 'assess-sess-2',
+    );
+  });
+
+  it('idempotent — a row another path already closed first (UPDATE matches 0 rows) is not double-counted or reconciled', async () => {
+    const updateChain = makeChain({ data: null, error: null }); // .maybeSingle() → no row matched
+    queueFrom({
+      ai_provider_sessions: [
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [{ id: 'assess-sess-3', metadata: { gatewayBudgetReservationId: 'reservation-abandoned-5' } }], error: null }),
+        updateChain,
+      ],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect((res._body() as any).expiredAssessTextSessions).toBe(1); // the sweep still attempted it...
+    expect(mockReconcileSessionReservation).not.toHaveBeenCalled(); // ...but the guarded UPDATE matched nothing, so no reconciliation ran
+  });
+
+  it('a reconciliation failure never blocks the sweep response (best-effort, logged)', async () => {
+    mockReconcileSessionReservation.mockRejectedValueOnce(new Error('rpc down'));
+    const updateChain = makeChain({ data: { id: 'assess-sess-4' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [], error: null }),
+        makeChain({ data: [{ id: 'assess-sess-4', metadata: { gatewayBudgetReservationId: 'reservation-abandoned-6' } }], error: null }),
+        updateChain,
+      ],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).expiredAssessTextSessions).toBe(1);
+  });
+});
+
+describe('GET /conversation-sweep — generic expired-reservation release (other features)', () => {
+  it('calls releaseExpiredPendingReservations with the sweep\'s own "now" and surfaces its count in the response', async () => {
+    mockReleaseExpiredPendingReservations.mockResolvedValue({ releasedCount: 2 });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(mockReleaseExpiredPendingReservations).toHaveBeenCalledWith(expect.anything(), expect.any(String));
+    expect((res._body() as any).releasedExpiredReservations).toBe(2);
+  });
+
+  it('a failure never blocks the sweep response (best-effort, logged)', async () => {
+    mockReleaseExpiredPendingReservations.mockRejectedValue(new Error('rpc down'));
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [makeChain({ data: [], error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).releasedExpiredReservations).toBe(0);
   });
 });
 
