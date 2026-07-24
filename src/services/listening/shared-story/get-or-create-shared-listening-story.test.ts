@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SharedStoryGeneratingError } from './listening-shared-story-types';
 
+// This file mocks the acquire_or_get_listening_shared_story RPC — it can
+// only prove the orchestrator's REACTION to won/status (see the "reuse"
+// and "expired-lock takeover" describe blocks below), not the RPC's own
+// SQL reacquire condition. That condition (a 'ready' row is never taken
+// over by an expired lock; a 'generating' row is takeable over only when
+// its own lock has expired; a 'failed' row is always takeable over) is
+// proven against a real Postgres instance by the inline validation block
+// in supabase/migrations/20260724070000_fix_listening_shared_story_reacquire_and_grants.sql
+// (run automatically on every migration apply — RAISE EXCEPTION aborts
+// the migration on any mismatch).
+
 vi.mock('../daily/resolve-user-listening-level', () => ({
   resolveUserListeningLevel: vi.fn(),
 }));
@@ -155,6 +166,23 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
     expect(generateListeningStory).not.toHaveBeenCalled();
   });
 
+  it('6. two separate opens of the same ready story (e.g. minutes apart) each reuse it — zero OpenAI/Azure calls across both', async () => {
+    // Simulates two independent requests hitting an already-ready row well
+    // after its original lock would have expired: the RPC (mocked here;
+    // its own reacquire condition is proven against real Postgres in
+    // supabase/migrations/20260724070000_fix_listening_shared_story_reacquire_and_grants.sql)
+    // keeps returning status='ready', won=false for both, so neither
+    // request may call the old flow.
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    const db = makeMockDb(readyRow());
+
+    await getOrCreateSharedListeningStory('user-a', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+    await getOrCreateSharedListeningStory('user-b', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(generateListeningStory).not.toHaveBeenCalled();
+    expect(db.rpcMock).toHaveBeenCalledTimes(2);
+  });
+
   it('16. a reused response keeps the exact ListeningStoryData contract the frontend expects', async () => {
     vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
     const db = makeMockDb(readyRow());
@@ -187,7 +215,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
     expect(result.parts[0].answerToken).not.toBe('original-token-1');
   });
 
-  it('downloads audio from Storage using the exact stored paths, base64-encoding it for the response', async () => {
+  it('7. downloads audio from Storage using the exact stored paths, base64-encoding it for the response — never re-uploads/overwrites existing audio', async () => {
     vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
     const db = makeMockDb(readyRow());
 
@@ -227,6 +255,19 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
         part2_audio_path: expect.stringContaining('story-1'),
         audio_mime_type: 'audio/mpeg',
       }),
+      'story-1',
+    );
+  });
+
+  it('a successful persist clears lock_expires_at (defense in depth — a ready row should never carry a stale lock)', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
+    const db = makeMockDb(wonRow());
+
+    await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(db.updateSharedStoryMock).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'ready', lock_expires_at: null }),
       'story-1',
     );
   });

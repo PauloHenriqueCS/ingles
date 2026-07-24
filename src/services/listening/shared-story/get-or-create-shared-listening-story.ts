@@ -77,6 +77,7 @@ async function persistSharedStory(
       part2_audio_path: part2Path,
       audio_mime_type: story.parts[0].audioMimeType,
       error_message: null,
+      lock_expires_at: null,
     })
     .eq('id', storyId);
   if (error) throw new Error(`SHARED_STORY_PERSIST_FAILED: ${error.message}`);
