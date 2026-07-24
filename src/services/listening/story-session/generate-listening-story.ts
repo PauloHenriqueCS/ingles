@@ -477,7 +477,8 @@ async function synthesizeAudio(
 
 // ── HMAC answer token ─────────────────────────────────────────────────────────
 
-function signToken(correctIndex: number, explanationPt: string, secret: string): string {
+/** Exported so a reused (already-persisted) shared story can be served with a fresh, non-expired token — same signing scheme, no behavior change. */
+export function signToken(correctIndex: number, explanationPt: string, secret: string): string {
   const payload = JSON.stringify({
     c: correctIndex,
     e: explanationPt,

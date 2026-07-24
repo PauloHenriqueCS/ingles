@@ -42,7 +42,9 @@ import {
   generateStorySession,
   decodeAnswerToken,
 } from '../../src/services/listening/story-session/generate-story-session';
-import { generateListeningStory as generateListeningStoryService, StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
+import { StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
+import { getOrCreateSharedListeningStory } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
+import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
 
 const ALLOWED_STORY_THEMES = new Set([
   'travel', 'work_career', 'daily_life', 'movies_series', 'music',
@@ -651,7 +653,7 @@ async function handleListeningGenerate(req: any, res: any) {
 
   try {
     const serviceClient = getListeningServiceClient();
-    const result = await generateListeningStoryService(
+    const result = await getOrCreateSharedListeningStory(
       userId, serviceClient, openaiKey, azureKey, azureRegion, secret,
       storyPackage ?? null, theme,
     );
@@ -659,6 +661,18 @@ async function handleListeningGenerate(req: any, res: any) {
     safeLog('listening/generate', 'generated', 200, { requestId, level: result.level });
     return res.status(200).json(result);
   } catch (err) {
+    if (err instanceof SharedStoryGeneratingError) {
+      // Another request already holds the shared-story lock for this
+      // group/day — never call OpenAI/Azure here. Reuses the frontend's
+      // EXISTING generic ListeningApiError handling (setErrorMsg + phase
+      // 'error', with its own retry button) instead of a new UI state.
+      safeLog('listening/generate', 'shared_story_generating', 409, { requestId, levelGroup: err.levelGroup });
+      return jsonError(
+        res, 409, err.code,
+        'Sua história está sendo preparada por outra pessoa neste momento. Tente novamente em instantes.',
+      );
+    }
+
     // Infer stage from error shape/message
     let stage = 'calling_openai';
     if (err instanceof StoryTtsError) {
