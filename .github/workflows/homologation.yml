@@ -1,0 +1,79 @@
+name: Homologation
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: homologation-deploy
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. Validate ──────────────────────────────────────────────────────────────
+  validate:
+    name: Validate (tests + build)
+    runs-on: ubuntu-latest
+    env:
+      VITE_SUPABASE_URL: https://placeholder.supabase.co
+      VITE_SUPABASE_ANON_KEY: placeholder-anon-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  # ── 2. Apply migrations to Supabase homologation ────────────────────────────
+  apply-migrations:
+    name: Apply migrations (Supabase homologation)
+    needs: [validate]
+    runs-on: ubuntu-latest
+    environment: homologation
+    steps:
+      - name: Verify required secrets are present
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD_HOMOLOG: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
+          SUPABASE_PROJECT_REF_HOMOLOG: ${{ secrets.SUPABASE_PROJECT_REF_HOMOLOG }}
+        run: |
+          missing=0
+          for name in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD_HOMOLOG SUPABASE_PROJECT_REF_HOMOLOG; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+
+      - name: Link Supabase project (homologation)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
+          SUPABASE_PROJECT_REF_HOMOLOG: ${{ secrets.SUPABASE_PROJECT_REF_HOMOLOG }}
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF_HOMOLOG"
+
+      - name: Preview pending migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
+        run: supabase db push --dry-run
+
+      - name: Apply migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
+        run: supabase db push
