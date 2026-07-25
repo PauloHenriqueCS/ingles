@@ -22,7 +22,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const MIGRATIONS_DIR = resolve(__dirname, '..', '..', 'supabase', 'migrations');
+const MIGRATIONS_DIR = resolve(__dirname, '..');
 const sql = readFileSync(
   resolve(MIGRATIONS_DIR, '20260724030000_ai_gateway_conservative_budget_estimate_fix.sql'),
   'utf8',
