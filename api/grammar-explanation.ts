@@ -12,6 +12,7 @@ import { checkFeatureConfigError } from './_entitlements/require-feature-access'
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { handleAccountDeactivateRoute } from './_account/deactivate-route-handler';
 import { handleConfigPublicRoute } from './_config/public-route-handler';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -187,6 +188,10 @@ export default async function handler(req: any, res: any) {
   }
   if (!entitlements.writing.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
+  const writingFlag = (await getProductConfig(resolveConfigEnvironment())).values['features.writing'];
+  if (!writingFlag.enabled && isWithinConfiguredWindow(writingFlag.startsAt, writingFlag.endsAt)) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', writingFlag.unavailableMessage);
   }
 
   // ── Cache read (user-authed client — RLS ge_select allows authenticated reads) ──

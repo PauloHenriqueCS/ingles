@@ -29,6 +29,9 @@ import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
 import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
 import { reserveRealtimeSessionBudget } from '../_realtime-budget';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
+
+const REALTIME_VOICE_IDS = new Set(REALTIME_VOICES.map((v) => v.id));
 
 // ─── isValidUuid — shared by the webrtc_connect bridge handlers below ────────
 
@@ -377,6 +380,15 @@ async function handleSession(req: any, res: any) {
     return res.status(503).json({ code: 'OPENAI_NOT_CONFIGURED', message: 'O serviço de conversa não está configurado.' });
   }
 
+  // ── Central de Configuração: global feature flag ──────────────────────────
+  // Independent of, and checked before, the per-plan entitlement below — this
+  // is an on/off switch for everyone, not a plan capability.
+  const productConfig = await getProductConfig(resolveConfigEnvironment());
+  const conversationFlag = productConfig.values['features.conversation'];
+  if (!conversationFlag.enabled && isWithinConfiguredWindow(conversationFlag.startsAt, conversationFlag.endsAt)) {
+    return res.status(403).json({ code: 'FEATURE_DISABLED', message: conversationFlag.unavailableMessage });
+  }
+
   // ── Plan entitlements ──────────────────────────────────────────────────────
   // Gates creating a NEW realtime session (the costly operation). Distinct
   // from prefs.dailyConversationGoalMinutes below, which is the user's own
@@ -485,6 +497,16 @@ async function handleSession(req: any, res: any) {
     ctx.remainingConversationMinutes = Math.max(0, prefs.dailyConversationGoalMinutes - totalConvMin);
   } catch {
     // context is optional
+  }
+
+  // prefs.voice may have come straight from ai_conversation_preferences,
+  // written directly by the browser via the Supabase client with no server
+  // route in between and no CHECK constraint on the column — never trusted
+  // unvalidated before reaching OpenAI. Falls back to the configured
+  // audio.openai_voice default (itself always one of REALTIME_VOICES, see
+  // validators.ts) instead of the static BASE_DEFAULTS.voice.
+  if (!REALTIME_VOICE_IDS.has(prefs.voice)) {
+    prefs.voice = productConfig.values['audio.openai_voice'].defaultVoiceId;
   }
 
   if (!await applyRateLimit(res, userId, 'conversation-session')) return;

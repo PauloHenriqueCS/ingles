@@ -32,6 +32,7 @@ import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
 import LoginPage from './components/LoginPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
+import MaintenanceBanner from './components/MaintenanceBanner';
 
 // Installed once at module load — reacts to ACCOUNT_DEACTIVATED from any
 // authenticated API call, from anywhere in the app, by ending the session.
@@ -179,6 +180,8 @@ export default function App() {
           onLogout={handleLogout}
         />
       )}
+
+      <MaintenanceBanner />
 
       {syncError && (
         <div className="bg-amber-900/60 border-b border-amber-700 px-4 py-2 text-xs text-amber-200 text-center mt-14">

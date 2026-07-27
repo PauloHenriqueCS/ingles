@@ -109,6 +109,7 @@ export async function runAnalysisFlow(
     token: string;
     region: string;
     referenceText: string;
+    language?: string;
     gatewaySessionId?: string;
   };
   try {
@@ -146,6 +147,7 @@ export async function runAnalysisFlow(
       token:           startBody.token,
       region:          startBody.region,
       referenceText:   startBody.referenceText, // always from /start, never from caller
+      language:        startBody.language,
       wavFile,
       audioDurationMs: input.audioDurationMs,
     });

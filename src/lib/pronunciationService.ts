@@ -16,6 +16,9 @@ export interface PronunciationServiceOptions {
   referenceText: string;
   wavFile: File;
   audioDurationMs: number;
+  // Server-resolved from audio.azure.defaultLocale (see /start endpoints);
+  // optional so existing callers that don't yet forward it keep working.
+  language?: string;
 }
 
 export interface RecognitionSession {
@@ -188,7 +191,7 @@ export function createRecognitionSession(options: PronunciationServiceOptions): 
     } = sdk;
 
     const speechConfig = SpeechConfig.fromAuthorizationToken(options.token, options.region);
-    speechConfig.speechRecognitionLanguage = 'en-US';
+    speechConfig.speechRecognitionLanguage = options.language ?? 'en-US';
 
     const paCfg = new PronunciationAssessmentConfig(
       options.referenceText,

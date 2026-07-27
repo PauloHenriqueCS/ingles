@@ -40,7 +40,11 @@ export interface ProductConfigServiceOptions {
 }
 
 export class ProductConfigService {
-  private readonly client: SupabaseClient;
+  // Not eagerly resolved: getProductConfigServiceClient() throws
+  // synchronously when service-role credentials are missing, and that must
+  // surface as a fallback like any other read failure, never as an
+  // unguarded throw out of the constructor.
+  private client: SupabaseClient | undefined;
   private readonly cache: ProductConfigCache;
   private readonly clock: () => number;
   private readonly instanceId: string;
@@ -48,10 +52,15 @@ export class ProductConfigService {
 
   constructor(options: ProductConfigServiceOptions = {}) {
     this.clock = options.clock ?? Date.now;
-    this.client = options.client ?? getProductConfigServiceClient();
+    this.client = options.client;
     this.cache = options.cache ?? new ProductConfigCache(this.clock);
     this.instanceId = options.instanceId ?? process.env.VERCEL_DEPLOYMENT_ID ?? 'local';
     this.appVersion = options.appVersion ?? process.env.VERCEL_GIT_COMMIT_SHA ?? 'unknown';
+  }
+
+  private resolveClient(): SupabaseClient {
+    if (!this.client) this.client = getProductConfigServiceClient();
+    return this.client;
   }
 
   async getConfig(environment: ConfigEnvironment): Promise<ResolvedProductConfig> {
@@ -71,7 +80,8 @@ export class ProductConfigService {
     const loadedAt = this.clock();
     let snapshot: RawConfigSnapshot;
     try {
-      snapshot = await fetchServerConfigSnapshot(this.client, environment);
+      const client = this.resolveClient();
+      snapshot = await fetchServerConfigSnapshot(client, environment);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'unknown error';
       safeLog('product-config/service', 'config_read_error', 500, { environment, error: message });
@@ -124,8 +134,9 @@ export class ProductConfigService {
   // Fire-and-forget: never lets an ack failure affect the resolved config.
   private async ack(environment: ConfigEnvironment, resolved: ResolvedProductConfig, snapshot: RawConfigSnapshot | null): Promise<void> {
     try {
+      const client = this.resolveClient();
       const result = !resolved.usingFallback ? 'applied' : resolved.source === 'fallback_invalid_schema' ? 'failed' : 'skipped';
-      await ackConfigSnapshot(this.client, {
+      await ackConfigSnapshot(client, {
         environment,
         application: 'backend',
         instanceId: this.instanceId,

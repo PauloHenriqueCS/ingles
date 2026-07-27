@@ -7,6 +7,7 @@ import type {
 import { buildListeningAzureSpeechConfig } from './listening-audio-config';
 import { synthesizeListeningBlock } from './synthesize-listening-block';
 import { SSML_GENERATOR_VERSION } from '../listening-ssml-config';
+import { getProductConfig, resolveConfigEnvironment } from '../../../server/product-config';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -174,11 +175,17 @@ export async function synthesizeListeningEpisode(
   // Load sentences for expected bookmark calculation
   const allSentences = await loadSentences(supabase, sortedBlocks.map(b => b.id));
 
+  // Per-episode voice_name/locale (set at story generation time) always wins;
+  // this is only the fallback for episodes that don't specify one — mirrors
+  // api/tts.ts's DEFAULT_ENGLISH_VOICE, now sourced from the same audio.azure
+  // config instead of a second, independently-hardcoded literal.
+  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
+
   if (validateOnly) {
     // Dry-run: validate config and bookmarks without calling Azure
     const key = azureKey ?? process.env.AZURE_SPEECH_KEY ?? '';
     const region = azureRegion ?? process.env.AZURE_SPEECH_REGION ?? '';
-    buildListeningAzureSpeechConfig(key, region, episode.voice_name ?? 'en-US-AvaMultilingualNeural', episode.locale ?? 'en-US');
+    buildListeningAzureSpeechConfig(key, region, episode.voice_name ?? audioDefaults.defaultVoiceName, episode.locale ?? audioDefaults.defaultLocale);
 
     for (const block of targetBlocks) {
       const sentenceKeys = allSentences
@@ -201,8 +208,8 @@ export async function synthesizeListeningEpisode(
   // Build Azure config
   const key = azureKey ?? process.env.AZURE_SPEECH_KEY ?? '';
   const region = azureRegion ?? process.env.AZURE_SPEECH_REGION ?? '';
-  const voiceName = episode.voice_name ?? 'en-US-AvaMultilingualNeural';
-  const locale = episode.locale ?? 'en-US';
+  const voiceName = episode.voice_name ?? audioDefaults.defaultVoiceName;
+  const locale = episode.locale ?? audioDefaults.defaultLocale;
   const azureConfig = buildListeningAzureSpeechConfig(key, region, voiceName, locale);
 
   // Mark episode as processing

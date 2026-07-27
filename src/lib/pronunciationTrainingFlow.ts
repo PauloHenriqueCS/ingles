@@ -102,6 +102,7 @@ export async function runTrainingAnalysisFlow(
     token: string;
     region: string;
     referenceText: string;
+    language?: string;
   };
   try {
     const headers = await getAuthHeader();
@@ -137,6 +138,7 @@ export async function runTrainingAnalysisFlow(
       token:           startBody.token,
       region:          startBody.region,
       referenceText:   startBody.referenceText, // always from /start, never from caller
+      language:        startBody.language,
       wavFile,
       audioDurationMs: input.audioDurationMs,
     });

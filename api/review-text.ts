@@ -8,6 +8,7 @@ import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkTextLength, checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { isValidUuid } from '../src/lib/pronunciationAssessment';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -376,6 +377,10 @@ export default async function handler(req: any, res: any) {
   }
   if (!entitlements.writing.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
+  }
+  const writingFlag = (await getProductConfig(resolveConfigEnvironment())).values['features.writing'];
+  if (!writingFlag.enabled && isWithinConfiguredWindow(writingFlag.startsAt, writingFlag.endsAt)) {
+    return jsonError(res, 403, 'FEATURE_DISABLED', writingFlag.unavailableMessage);
   }
   const lengthCheck = checkTextLength(originalText, entitlements.writing.maxCharactersPerText, entitlements.writing.maxCharactersUnlimited);
   if (!lengthCheck.allowed) {

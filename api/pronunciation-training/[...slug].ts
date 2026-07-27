@@ -15,6 +15,7 @@ import type { PlanEntitlementsSnapshot } from '../../src/domain/entitlements/ent
 import type { PronunciationNormalizedResult, PronunciationFailCode } from '../../src/types';
 import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import { getTodaySP } from '../../src/lib/timezone';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
 type AccessDenial = { status: number; code: string; message: string };
 
@@ -41,6 +42,10 @@ async function requirePronunciationEnabled(userId: string): Promise<AccessDenial
   if (configErrorCheck) return { status: 500, code: configErrorCheck.code!, message: configErrorCheck.message! };
   if (!entitlements.pronunciation.enabled) {
     return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
+  }
+  const pronunciationFlag = (await getProductConfig(resolveConfigEnvironment())).values['features.pronunciation'];
+  if (!pronunciationFlag.enabled && isWithinConfiguredWindow(pronunciationFlag.startsAt, pronunciationFlag.endsAt)) {
+    return { status: 403, code: 'FEATURE_DISABLED', message: pronunciationFlag.unavailableMessage };
   }
   return { entitlements };
 }
@@ -481,10 +486,11 @@ async function handleTrainingStart(req: any, res: any) {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao preparar a análise.');
   }
 
+  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     sessionId, attemptId, token: tokenResult.token, region: tokenResult.region,
-    language: 'en-US', referenceText,
+    language: audioDefaults.defaultLocale, referenceText,
   });
 }
 

@@ -20,6 +20,7 @@ import type { GatewayUsageMetric, GatewayDeps, GatewayCallContext } from '../_ai
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -434,6 +435,10 @@ async function handleStart(req: any, res: any) {
   if (!entitlements.pronunciation.enabled) {
     return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable });
   }
+  const pronunciationFlag = (await getProductConfig(resolveConfigEnvironment())).values['features.pronunciation'];
+  if (!pronunciationFlag.enabled && isWithinConfiguredWindow(pronunciationFlag.startsAt, pronunciationFlag.endsAt)) {
+    return res.status(403).json({ code: 'FEATURE_DISABLED', message: pronunciationFlag.unavailableMessage });
+  }
   if (!entitlements.pronunciation.evaluations.canStart) {
     const code = entitlements.pronunciation.evaluations.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
     return res.status(403).json({ code, message: ENTITLEMENT_MESSAGES.pronunciationEvaluationsExhausted });
@@ -541,10 +546,11 @@ async function handleStart(req: any, res: any) {
     gatewayBudgetReservationId,
   );
 
+  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     assessmentId, attemptId, token: tokenResult.token, region: tokenResult.region,
-    language: 'en-US', referenceText,
+    language: audioDefaults.defaultLocale, referenceText,
     ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
 }

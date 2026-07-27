@@ -3,46 +3,58 @@ import type { View } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { usePublicConfig, type PublicConfigValues } from '../hooks/usePublicConfig';
 
 interface Props {
   onNavigate: (v: View) => void;
   onStartPractice: () => void;
 }
 
-type CardVisualState = 'loading' | 'available' | 'disabled_by_plan' | 'limit_reached';
+type CardVisualState = 'loading' | 'available' | 'disabled_by_plan' | 'disabled_globally' | 'limit_reached';
 
 function isExhausted(state: string): boolean {
   return state === 'daily_limit_reached' || state === 'monthly_limit_reached';
 }
 
-function writingCardState(entitlements: PlanEntitlementsSnapshot | null): CardVisualState {
+// Central de Configuração's global on/off (checked first, distinct from the
+// per-plan gate below) — an admin-wide switch, not a plan capability.
+function globallyDisabled(flag: { enabled: boolean } | undefined): boolean {
+  return flag !== undefined && flag.enabled === false;
+}
+
+function writingCardState(entitlements: PlanEntitlementsSnapshot | null, config: PublicConfigValues | null): CardVisualState {
   if (!entitlements) return 'loading';
+  if (globallyDisabled(config?.['features.writing'])) return 'disabled_globally';
   if (!entitlements.writing.enabled) return 'disabled_by_plan';
   const genExhausted = isExhausted(entitlements.writing.themeGenerations.state);
   const reviewsExhausted = isExhausted(entitlements.writing.reviews.state);
   return genExhausted && reviewsExhausted ? 'limit_reached' : 'available';
 }
 
-function listeningCardState(entitlements: PlanEntitlementsSnapshot | null): CardVisualState {
+function listeningCardState(entitlements: PlanEntitlementsSnapshot | null, config: PublicConfigValues | null): CardVisualState {
   if (!entitlements) return 'loading';
+  if (globallyDisabled(config?.['features.listening'])) return 'disabled_globally';
   if (!entitlements.listening.enabled) return 'disabled_by_plan';
   return isExhausted(entitlements.listening.stories.state) ? 'limit_reached' : 'available';
 }
 
-function pronunciationCardState(entitlements: PlanEntitlementsSnapshot | null): CardVisualState {
+function pronunciationCardState(entitlements: PlanEntitlementsSnapshot | null, config: PublicConfigValues | null): CardVisualState {
   if (!entitlements) return 'loading';
+  if (globallyDisabled(config?.['features.pronunciation'])) return 'disabled_globally';
   if (!entitlements.pronunciation.enabled) return 'disabled_by_plan';
   return isExhausted(entitlements.pronunciation.evaluations.state) ? 'limit_reached' : 'available';
 }
 
-function conversationCardState(entitlements: PlanEntitlementsSnapshot | null): CardVisualState {
+function conversationCardState(entitlements: PlanEntitlementsSnapshot | null, config: PublicConfigValues | null): CardVisualState {
   if (!entitlements) return 'loading';
+  if (globallyDisabled(config?.['features.conversation'])) return 'disabled_globally';
   if (!entitlements.conversation.enabled) return 'disabled_by_plan';
   return isExhausted(entitlements.conversation.monthlyTime.state) ? 'limit_reached' : 'available';
 }
 
 export default function HomePage({ onNavigate, onStartPractice }: Props) {
   const { data: entitlements, isLoading } = usePlanEntitlements();
+  const { config } = usePublicConfig();
   // Loading and "not yet resolved" both render the neutral loading state —
   // never a flash of a card looking available before the plan is known.
   const resolved = isLoading ? null : entitlements;
@@ -62,7 +74,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
         <ActivityCard
-          state={writingCardState(resolved)}
+          state={writingCardState(resolved, config)}
+          disabledMessage={config?.['features.writing'].unavailableMessage}
           onClick={onStartPractice}
           accent="blue"
           icon={<PenSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
@@ -73,7 +86,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
         />
 
         <ActivityCard
-          state={conversationCardState(resolved)}
+          state={conversationCardState(resolved, config)}
+          disabledMessage={config?.['features.conversation'].unavailableMessage}
           onClick={() => onNavigate('conversation')}
           accent="teal"
           icon={<MessagesSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
@@ -84,7 +98,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
         />
 
         <ActivityCard
-          state={listeningCardState(resolved)}
+          state={listeningCardState(resolved, config)}
+          disabledMessage={config?.['features.listening'].unavailableMessage}
           onClick={() => onNavigate('listening')}
           accent="purple"
           icon={<Headphones className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
@@ -95,7 +110,8 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
         />
 
         <ActivityCard
-          state={pronunciationCardState(resolved)}
+          state={pronunciationCardState(resolved, config)}
+          disabledMessage={config?.['features.pronunciation'].unavailableMessage}
           onClick={() => onNavigate('pronunciation-training')}
           accent="orange"
           icon={<AudioLines className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
@@ -128,16 +144,23 @@ interface ActivityCardProps {
   description: string;
   cta: string;
   exhaustedBadge: string;
+  /** Shown when state === 'disabled_globally' — configured unavailableMessage. */
+  disabledMessage?: string;
 }
 
-function ActivityCard({ state, onClick, accent, icon, title, description, cta, exhaustedBadge }: ActivityCardProps) {
+function ActivityCard({ state, onClick, accent, icon, title, description, cta, exhaustedBadge, disabledMessage }: ActivityCardProps) {
   const a = ACCENTS[accent];
   const isDisabledByPlan = state === 'disabled_by_plan';
+  const isDisabledGlobally = state === 'disabled_globally';
   const isLimitReached = state === 'limit_reached';
-  const isDimmed = state === 'loading' || isDisabledByPlan || isLimitReached;
+  const isDimmed = state === 'loading' || isDisabledByPlan || isDisabledGlobally || isLimitReached;
 
   function handleClick() {
     if (state === 'loading') return; // avoid starting an action before the plan is known
+    if (isDisabledGlobally) {
+      window.alert(disabledMessage || ENTITLEMENT_MESSAGES.featureUnavailable);
+      return;
+    }
     if (isDisabledByPlan) {
       window.alert(ENTITLEMENT_MESSAGES.featureUnavailable);
       return;
@@ -152,18 +175,23 @@ function ActivityCard({ state, onClick, accent, icon, title, description, cta, e
     <button
       type="button"
       onClick={handleClick}
-      aria-disabled={isDisabledByPlan || state === 'loading'}
+      aria-disabled={isDisabledByPlan || isDisabledGlobally || state === 'loading'}
       className={`group text-left bg-slate-800 border border-slate-700 rounded-2xl p-6 transition-all duration-200 focus:outline-none focus:ring-2 ${a.ring} focus:ring-offset-2 focus:ring-offset-slate-900 ${
         isDimmed ? 'opacity-60' : `${a.border} hover:bg-slate-700/60`
       }`}
     >
       <div className="flex items-center justify-between mb-5">
         <div className={`flex items-center justify-center w-14 h-14 rounded-xl bg-gradient-to-br ${a.grad} shadow-lg ${a.shadow} ${isDimmed ? 'grayscale' : ''}`}>
-          {isDisabledByPlan ? <Lock className="w-6 h-6 text-white shrink-0" strokeWidth={2} aria-hidden="true" /> : icon}
+          {isDisabledByPlan || isDisabledGlobally ? <Lock className="w-6 h-6 text-white shrink-0" strokeWidth={2} aria-hidden="true" /> : icon}
         </div>
         {isDisabledByPlan && (
           <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-400 text-xs font-medium">
             {ENTITLEMENT_MESSAGES.notIncludedInPlanBadge}
+          </span>
+        )}
+        {isDisabledGlobally && (
+          <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-400 text-xs font-medium">
+            Indisponível
           </span>
         )}
         {isLimitReached && (

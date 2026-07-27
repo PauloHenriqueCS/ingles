@@ -45,6 +45,7 @@ import {
 import { StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
 import { getOrCreateSharedListeningStory } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
 import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
+import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
 const ALLOWED_STORY_THEMES = new Set([
   'travel', 'work_career', 'daily_life', 'movies_series', 'music',
@@ -61,6 +62,16 @@ const ALLOWED_STORY_THEMES = new Set([
 
 interface ListeningAccessDenial { status: number; code: string; message: string }
 
+/** Central de Configuração global on/off — checked alongside every
+ *  per-plan `entitlements.listening.enabled` gate below, never in its place. */
+async function checkGlobalListeningFlag(): Promise<ListeningAccessDenial | null> {
+  const flag = (await getProductConfig(resolveConfigEnvironment())).values['features.listening'];
+  if (!flag.enabled && isWithinConfiguredWindow(flag.startsAt, flag.endsAt)) {
+    return { status: 403, code: 'FEATURE_DISABLED', message: flag.unavailableMessage };
+  }
+  return null;
+}
+
 /** Gates STARTING a new generation — same enabled+canStart check as handleToday. */
 async function checkListeningCanStart(userId: string): Promise<ListeningAccessDenial | null> {
   let entitlements;
@@ -74,6 +85,8 @@ async function checkListeningCanStart(userId: string): Promise<ListeningAccessDe
   if (!entitlements.listening.enabled) {
     return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
   }
+  const globalFlagDenial = await checkGlobalListeningFlag();
+  if (globalFlagDenial) return globalFlagDenial;
   if (!entitlements.listening.stories.canStart) {
     const code = entitlements.listening.stories.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
     return { status: 403, code, message: ENTITLEMENT_MESSAGES.listeningStoriesExhausted };
@@ -98,7 +111,7 @@ async function checkListeningEnabled(userId: string): Promise<ListeningAccessDen
   if (!entitlements.listening.enabled) {
     return { status: 403, code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.featureUnavailable };
   }
-  return null;
+  return checkGlobalListeningFlag();
 }
 
 // ─── GET /api/listening/episode?episodeId=UUID ────────────────────────────────
@@ -332,6 +345,8 @@ async function handleToday(req: any, res: any) {
   if (!entitlements.listening.enabled) {
     return jsonError(res, 403, 'FEATURE_DISABLED', ENTITLEMENT_MESSAGES.featureUnavailable);
   }
+  const globalFlagDenial = await checkGlobalListeningFlag();
+  if (globalFlagDenial) return jsonError(res, globalFlagDenial.status, globalFlagDenial.code, globalFlagDenial.message);
   // The daily limit only gates STARTING a new story — continuing or
   // reopening today's already-active story must never be blocked by it.
   // Once every story assigned today is completed, getting another one IS a
