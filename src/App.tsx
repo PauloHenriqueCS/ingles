@@ -27,6 +27,7 @@ import ListeningView from './components/ListeningView';
 import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
 import SettingsView from './components/SettingsView';
+import SubscriptionView from './components/SubscriptionView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
@@ -271,6 +272,9 @@ export default function App() {
         )}
         {view === 'settings' && (
           <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
+        )}
+        {view === 'subscription' && (
+          <SubscriptionView onBack={() => setView('home')} />
         )}
       </main>
     </div>

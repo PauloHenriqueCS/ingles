@@ -1,6 +1,6 @@
 import {
   House, CalendarDays,
-  History, TrendingUp, BookOpen, Volume2, Settings, LogOut, X,
+  History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -19,6 +19,7 @@ const MENU_ITEMS: MenuItem[] = [
   { view: 'evolution',      label: 'Evolução',                 icon: TrendingUp },
   { view: 'memory',         label: 'Revisão',                  icon: BookOpen },
   { view: 'audio-settings', label: 'Configurações de áudio',   icon: Volume2 },
+  { view: 'subscription',   label: 'Assinatura',               icon: CreditCard },
   { view: 'settings',       label: 'Configurações',            icon: Settings },
 ];
 
