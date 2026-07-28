@@ -23,6 +23,7 @@ import {
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { listPublishedMinutePackages } from '../_entitlements/minute-packages-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getTodaySP } from '../../src/lib/timezone';
@@ -1700,6 +1701,49 @@ async function handleSessionControl(req: any, res: any) {
   }
 }
 
+// ── GET /minute-packages ──────────────────────────────────────────────────
+// Real backend integration for extra conversation-minute packages (replaces
+// any frontend mock — this is the only source of purchasable packages now).
+// Never trusts plan/eligibility from the client: plan and
+// conversation.extra_purchase_enabled come from getCurrentUserPlanEntitlements
+// (the same resolver /session uses), and the catalog itself comes only from
+// conversation_minute_packages rows with active=true AND status='published',
+// filtered further by per-package plan compatibility — see
+// minute-packages-service.ts. The trial plan is always excluded from
+// purchaseAvailable, redundantly to whatever conversation.extra_purchase_enabled
+// resolves to for it — an explicit guard here, never a change to trial's own
+// entitlements/capability data. Out of scope by design: checkout,
+// Apple/Google IAP, and redemption into user_conversation_credits.
+async function handleMinutePackages(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu plano. Tente novamente.' });
+  }
+
+  const isTrial = entitlements.planCode === 'trial';
+  const purchaseAvailable = !isTrial && entitlements.conversation.extraPurchaseEnabled === true;
+
+  let packages: Awaited<ReturnType<typeof listPublishedMinutePackages>> = [];
+  if (purchaseAvailable) {
+    try {
+      packages = await listPublishedMinutePackages(getSharedServiceClient(), entitlements.planCode);
+    } catch (e) {
+      console.error('[conversation/minute-packages] catalog read failed', e instanceof Error ? e.message : 'unknown');
+      return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível carregar os pacotes disponíveis.' });
+    }
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).json({ purchaseAvailable, packages });
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -1707,6 +1751,7 @@ export default async function handler(req: any, res: any) {
   switch (slug) {
     case 'preview':        return handlePreview(req, res);
     case 'session':        return handleSession(req, res);
+    case 'minute-packages': return handleMinutePackages(req, res);
     case 'webrtc-connect': return handleWebrtcConnect(req, res);
     // Flat, single-segment routes — NOT nested (session/active etc.). A
     // nested sub-path under this catch-all 404'd in production: Vercel
