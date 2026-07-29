@@ -83,3 +83,79 @@ export async function assertBillingAllowed(userId: string): Promise<void> {
     throw new BillingBlockedError(ACCOUNT_DELETION_BILLING_REASON);
   }
 }
+
+// ── Subscription billing-issue signal ──────────────────────────────────────
+//
+// Reserved for a future payment-provider webhook (Apple/Google/Stripe — none
+// integrated today, audited before this was written) to flag that a
+// commercial plan's last renewal charge failed. Nothing in this codebase
+// calls flagSubscriptionBillingIssue yet — it exists so the 'billing_issue'
+// subscription state (api/_entitlements/subscription-status-service.ts) has
+// a real, non-fake signal to read the moment billing is actually
+// integrated, never a status invented client-side. Same table as the
+// account-deletion block above, distinguished only by `reason` (free text,
+// no CHECK constraint restricts it) — a billing issue and an
+// account-deletion block are both, correctly, "cobrança bloqueada", so
+// reusing the table is not a semantic stretch.
+
+export const SUBSCRIPTION_BILLING_ISSUE_REASON = 'subscription_payment_failed';
+export const SUBSCRIPTION_BILLING_ISSUE_SOURCE = 'subscription_billing';
+
+/** Idempotent — never creates a second active billing-issue block for the same user. */
+export async function flagSubscriptionBillingIssue(userId: string): Promise<void> {
+  const supabase = getSharedServiceClient();
+
+  const { data: existing, error: selectError } = await supabase
+    .from('user_billing_blocks')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('reason', SUBSCRIPTION_BILLING_ISSUE_REASON)
+    .eq('is_active', true)
+    .limit(1)
+    .maybeSingle();
+  if (selectError) throw new Error('Falha ao consultar bloqueio de cobrança.');
+  if (existing) return;
+
+  const { error } = await supabase.from('user_billing_blocks').insert({
+    user_id: userId,
+    reason: SUBSCRIPTION_BILLING_ISSUE_REASON,
+    source: SUBSCRIPTION_BILLING_ISSUE_SOURCE,
+    is_active: true,
+  });
+  if (error && (error as { code?: string }).code !== '23505') {
+    throw new Error('Falha ao registrar bloqueio de cobrança.');
+  }
+}
+
+/** Lifts a previously flagged billing issue (e.g. a retried charge succeeded). */
+export async function clearSubscriptionBillingIssue(userId: string, liftedBy: string): Promise<void> {
+  const supabase = getSharedServiceClient();
+  const { error } = await supabase
+    .from('user_billing_blocks')
+    .update({ is_active: false, lifted_at: new Date().toISOString(), lifted_by: liftedBy, lift_reason: 'resolved' })
+    .eq('user_id', userId)
+    .eq('reason', SUBSCRIPTION_BILLING_ISSUE_REASON)
+    .eq('is_active', true);
+  if (error) throw new Error('Falha ao liberar bloqueio de cobrança.');
+}
+
+/**
+ * Read-only check used by the subscription status resolver to display
+ * 'billing_issue' — never used to block a charge attempt (that remains
+ * isBillingBlocked/assertBillingAllowed's job). Fails OPEN (false) on a
+ * lookup error: unlike a billing gate, a transient read error here must
+ * never falsely tell an otherwise-fine subscriber their payment failed.
+ */
+export async function hasActiveSubscriptionBillingIssue(userId: string): Promise<boolean> {
+  const supabase = getSharedServiceClient();
+  const { data, error } = await supabase
+    .from('user_billing_blocks')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('reason', SUBSCRIPTION_BILLING_ISSUE_REASON)
+    .eq('is_active', true)
+    .limit(1)
+    .maybeSingle();
+  if (error) return false;
+  return data != null;
+}

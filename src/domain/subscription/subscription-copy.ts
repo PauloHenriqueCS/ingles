@@ -26,11 +26,20 @@ export const SUBSCRIPTION_MESSAGES = {
   canceledAccessEndedNote: 'Seu acesso a este plano já foi encerrado.',
   canceledChooseAgainNote: 'Escolha novamente um plano para continuar praticando.',
 
+  // billing_issue
+  billingIssueTitle: 'Houve um problema com seu pagamento',
+  billingIssueSubtitle: 'Atualize sua forma de pagamento para continuar com o acesso ao plano.',
+  billingIssueAccessUntilNote: 'Seu acesso continua disponível até:',
+
   // plans
   recommendedBadge: 'Recomendado',
   extraMinutePackagesNote: 'Possibilidade futura de comprar pacotes adicionais de minutos.',
   /** Shown only when import.meta.env.DEV — never in a production build. */
   conversationMinutesTbdDev: 'Franquia de conversação a definir (texto de desenvolvimento — não exibido em produção)',
+
+  // loading/error (real fetch)
+  statusLoading: 'Carregando status da assinatura...',
+  statusLoadError: 'Não foi possível carregar o status da sua assinatura agora. Tente novamente.',
 
   // buttons
   subscribeEssential: 'Assinar Essencial',

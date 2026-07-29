@@ -3,8 +3,8 @@ import { getMockSubscriptionState, MOCK_STATUS_OPTIONS, MOCK_SUBSCRIPTION_STATES
 import { COMMERCIAL_PLANS } from './subscription-plans';
 
 describe('MOCK_STATUS_OPTIONS', () => {
-  it('exposes exactly the four supported statuses, for the dev state switcher', () => {
-    expect(MOCK_STATUS_OPTIONS).toEqual(['trialing', 'active', 'expired', 'canceled']);
+  it('exposes exactly the five supported statuses, for the dev state switcher', () => {
+    expect(MOCK_STATUS_OPTIONS).toEqual(['trialing', 'active', 'expired', 'canceled', 'billing_issue']);
   });
 });
 

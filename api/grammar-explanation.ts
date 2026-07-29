@@ -12,6 +12,7 @@ import { checkFeatureConfigError } from './_entitlements/require-feature-access'
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { handleAccountDeactivateRoute } from './_account/deactivate-route-handler';
 import { handleConfigPublicRoute } from './_config/public-route-handler';
+import { handleSubscriptionStatusRoute } from './_entitlements/subscription-status-route-handler';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -148,6 +149,12 @@ export default async function handler(req: any, res: any) {
   // function-budget reuse as account-deactivate above, otherwise unrelated.
   if (req.query?.__lemonRoute === 'config-public') {
     return handleConfigPublicRoute(req, res);
+  }
+  // Rewritten here from GET /api/subscription/status (see vercel.json) —
+  // same function-budget reuse as the two branches above, otherwise
+  // unrelated to grammar explanations.
+  if (req.query?.__lemonRoute === 'subscription-status') {
+    return handleSubscriptionStatusRoute(req, res);
   }
 
   if (!methodGuard(req, res, ['POST'])) return;

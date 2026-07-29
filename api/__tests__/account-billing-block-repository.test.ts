@@ -25,6 +25,10 @@ import {
   isBillingBlocked,
   assertBillingAllowed,
   BillingBlockedError,
+  flagSubscriptionBillingIssue,
+  clearSubscriptionBillingIssue,
+  hasActiveSubscriptionBillingIssue,
+  SUBSCRIPTION_BILLING_ISSUE_REASON,
 } from '../_account/billing-block-repository';
 
 function chain(result: { data: any; error: any }) {
@@ -33,6 +37,7 @@ function chain(result: { data: any; error: any }) {
     eq: () => builder,
     limit: () => builder,
     insert: () => builder,
+    update: () => builder,
     maybeSingle: async () => result,
     then: (resolve: any) => resolve(result),
   };
@@ -90,5 +95,51 @@ describe('isBillingBlocked / assertBillingAllowed', () => {
   it('fails CLOSED (treated as blocked) when the lookup itself errors', async () => {
     mockFrom.mockReturnValueOnce(chain({ data: null, error: { message: 'relation does not exist' } }));
     expect(await isBillingBlocked('user-1')).toBe(true);
+  });
+});
+
+describe('flagSubscriptionBillingIssue / clearSubscriptionBillingIssue / hasActiveSubscriptionBillingIssue', () => {
+  it('flagSubscriptionBillingIssue is idempotent — skips the insert when an active flag already exists', async () => {
+    mockFrom.mockReturnValueOnce(chain({ data: { id: 'block-1' }, error: null }));
+    await flagSubscriptionBillingIssue('user-1');
+    expect(mockFrom).toHaveBeenCalledTimes(1);
+  });
+
+  it('flagSubscriptionBillingIssue inserts a new active block with the reserved reason when none exists', async () => {
+    mockFrom
+      .mockReturnValueOnce(chain({ data: null, error: null }))
+      .mockReturnValueOnce(chain({ data: null, error: null }));
+    await flagSubscriptionBillingIssue('user-1');
+    expect(mockFrom).toHaveBeenCalledTimes(2);
+  });
+
+  it('flagSubscriptionBillingIssue tolerates a concurrent unique-violation without throwing', async () => {
+    mockFrom
+      .mockReturnValueOnce(chain({ data: null, error: null }))
+      .mockReturnValueOnce(chain({ data: null, error: { code: '23505' } }));
+    await expect(flagSubscriptionBillingIssue('user-1')).resolves.not.toThrow();
+  });
+
+  it('hasActiveSubscriptionBillingIssue returns true only when an active row with the reserved reason exists', async () => {
+    mockFrom.mockReturnValueOnce(chain({ data: { id: 'block-1' }, error: null }));
+    expect(await hasActiveSubscriptionBillingIssue('user-1')).toBe(true);
+
+    mockFrom.mockReturnValueOnce(chain({ data: null, error: null }));
+    expect(await hasActiveSubscriptionBillingIssue('user-1')).toBe(false);
+  });
+
+  it('hasActiveSubscriptionBillingIssue fails OPEN (false) on a lookup error — a display-only signal must never falsely accuse a fine subscriber', async () => {
+    mockFrom.mockReturnValueOnce(chain({ data: null, error: { message: 'transient' } }));
+    expect(await hasActiveSubscriptionBillingIssue('user-1')).toBe(false);
+  });
+
+  it('clearSubscriptionBillingIssue deactivates the flag and records who lifted it', async () => {
+    mockFrom.mockReturnValueOnce(chain({ data: null, error: null }));
+    await expect(clearSubscriptionBillingIssue('user-1', 'admin-1')).resolves.not.toThrow();
+    expect(mockFrom).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a reason distinct from the account-deletion reason — never conflated with account deactivation', () => {
+    expect(SUBSCRIPTION_BILLING_ISSUE_REASON).not.toBe('user_requested_account_deletion');
   });
 });

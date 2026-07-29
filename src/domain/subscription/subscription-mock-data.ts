@@ -52,9 +52,20 @@ export const MOCK_SUBSCRIPTION_STATES: Record<SubscriptionAccessStatus, Subscrip
     // after cancellation — still populated here so the screen can show it.
     subscriptionExpiresAt: daysFromNowIso(9),
   },
+  billing_issue: {
+    status: 'billing_issue',
+    trialEndsAt: null,
+    trialDaysRemaining: null,
+    currentPlanCode: 'essential',
+    currentPlanName: 'Essencial',
+    subscriptionProvider: 'apple',
+    // Access typically survives until the period end even with a failed
+    // charge — a grace window, same as 'canceled'.
+    subscriptionExpiresAt: daysFromNowIso(3),
+  },
 };
 
-export const MOCK_STATUS_OPTIONS: SubscriptionAccessStatus[] = ['trialing', 'active', 'expired', 'canceled'];
+export const MOCK_STATUS_OPTIONS: SubscriptionAccessStatus[] = ['trialing', 'active', 'expired', 'canceled', 'billing_issue'];
 
 /** Returns a fresh copy — callers (including placeholder button handlers)
  *  can never mutate the shared mock fixture through the returned object. */

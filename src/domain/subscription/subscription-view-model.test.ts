@@ -91,6 +91,35 @@ describe('buildSubscriptionViewModel — canceled', () => {
   });
 });
 
+describe('buildSubscriptionViewModel — billing_issue', () => {
+  it('shows the payment-problem headline, current plan, and access-until date; manage button, no plan cards', () => {
+    const vm = buildSubscriptionViewModel(
+      state({
+        status: 'billing_issue',
+        currentPlanCode: 'essential',
+        currentPlanName: 'Essencial',
+        subscriptionExpiresAt: '2026-08-01T00:00:00Z',
+      }),
+      NOW,
+    );
+    expect(vm.headline).toBe(SUBSCRIPTION_MESSAGES.billingIssueTitle);
+    expect(vm.subheadline).toBe(SUBSCRIPTION_MESSAGES.billingIssueSubtitle);
+    expect(vm.currentPlanName).toBe('Essencial');
+    expect(vm.accessEndsAtLabel).toMatch(/\d{1,2} de \w+ de 2026/);
+    expect(vm.showManageButton).toBe(true);
+    expect(vm.showPlanCards).toBe(false);
+    expect(vm.showTrialLimits).toBe(false);
+  });
+
+  it('never fabricates an access-until date when none is known', () => {
+    const vm = buildSubscriptionViewModel(
+      state({ status: 'billing_issue', currentPlanName: 'Plus', subscriptionExpiresAt: null }),
+      NOW,
+    );
+    expect(vm.accessEndsAtLabel).toBeNull();
+  });
+});
+
 describe('buildSubscriptionViewModel — button visibility matrix', () => {
   it('trialing: no manage button, no plan cards (so no subscribe buttons), restore always offered', () => {
     const vm = buildSubscriptionViewModel(state({ status: 'trialing', trialEndsAt: '2026-07-31T12:00:00Z' }), NOW);

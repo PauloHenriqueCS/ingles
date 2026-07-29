@@ -110,5 +110,24 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         showRestoreButton: true,
       };
     }
+
+    case 'billing_issue': {
+      return {
+        status: 'billing_issue',
+        headline: SUBSCRIPTION_MESSAGES.billingIssueTitle,
+        subheadline: SUBSCRIPTION_MESSAGES.billingIssueSubtitle,
+        trialDaysRemainingLabel: null,
+        trialEndsAtLabel: null,
+        currentPlanName: state.currentPlanName,
+        activeStatusLabel: null,
+        renewalLabel: null,
+        canceledPlanName: null,
+        accessEndsAtLabel: state.subscriptionExpiresAt ? formatDatePtBr(state.subscriptionExpiresAt) : null,
+        showTrialLimits: false,
+        showPlanCards: false,
+        showManageButton: true,
+        showRestoreButton: true,
+      };
+    }
   }
 }

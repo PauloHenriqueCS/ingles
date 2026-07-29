@@ -1,10 +1,13 @@
 /**
- * UI-only contracts for the subscription/paywall screen. Deliberately
- * isolated from `../entitlements/*` — this screen does not read real plan
- * data yet, it only renders against a local mock (see subscription-mock-data.ts).
- * Do not import these types into enforcement code.
+ * UI contracts for the subscription/paywall screen. src/hooks/useSubscriptionStatus.ts
+ * adapts the real GET /api/subscription/status response (see
+ * api/_entitlements/subscription-status-service.ts's SubscriptionStatusSnapshot)
+ * into this shape. subscriptionProvider stays null until Apple/Google are
+ * integrated — never populated client-side. subscription-mock-data.ts still
+ * provides the DEV-only status switcher fixtures. Do not import these types
+ * into enforcement code.
  */
-export type SubscriptionAccessStatus = 'trialing' | 'active' | 'expired' | 'canceled';
+export type SubscriptionAccessStatus = 'trialing' | 'active' | 'expired' | 'canceled' | 'billing_issue';
 
 export interface SubscriptionScreenState {
   status: SubscriptionAccessStatus;

@@ -37,8 +37,8 @@ describe('COMMERCIAL_PLANS.plus', () => {
     expect(plus.conversationMinutesMonthly).toBeNull();
   });
 
-  it('does not (yet) advertise extra minute packages', () => {
-    expect(plus.allowsExtraMinutePackages).toBe(false);
+  it('allows extra minute packages, same as Essencial', () => {
+    expect(plus.allowsExtraMinutePackages).toBe(true);
   });
 });
 

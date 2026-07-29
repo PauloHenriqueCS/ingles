@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, RotateCcw, Settings2 } from 'lucide-react';
+import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2 } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
@@ -7,10 +7,13 @@ import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE, TRIAL_D
 import { SUBSCRIPTION_MESSAGES, TRIAL_LIMIT_LABELS } from '../domain/subscription/subscription-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
+import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 
 interface Props {
   onBack: () => void;
-  /** Testing/dev only — which mock state to render initially. Defaults to 'trialing'. */
+  /** Testing/dev only — which mock state to render initially. When set, this
+   *  overrides the real fetched status for the whole session (see the DEV
+   *  switcher below); leave unset in production. */
   initialStatus?: SubscriptionAccessStatus;
 }
 
@@ -19,6 +22,7 @@ const STATUS_ICON = {
   active: CheckCircle2,
   expired: AlertTriangle,
   canceled: Ban,
+  billing_issue: CreditCard,
 } as const;
 
 const STATUS_SWITCHER_LABEL: Record<SubscriptionAccessStatus, string> = {
@@ -26,13 +30,15 @@ const STATUS_SWITCHER_LABEL: Record<SubscriptionAccessStatus, string> = {
   active: 'Ativa',
   expired: 'Expirado',
   canceled: 'Cancelada',
+  billing_issue: 'Problema no pagamento',
 };
 
-export default function SubscriptionView({ onBack, initialStatus = 'trialing' }: Props) {
-  const [mockStatus, setMockStatus] = useState<SubscriptionAccessStatus>(initialStatus);
-  const state = getMockSubscriptionState(mockStatus);
-  const vm = buildSubscriptionViewModel(state);
-  const StatusIcon = STATUS_ICON[vm.status];
+export default function SubscriptionView({ onBack, initialStatus }: Props) {
+  const [mockOverride, setMockOverride] = useState<SubscriptionAccessStatus | null>(initialStatus ?? null);
+  const { state: fetchedState, error } = useSubscriptionStatus();
+  const state = mockOverride ? getMockSubscriptionState(mockOverride) : fetchedState;
+  const vm = state ? buildSubscriptionViewModel(state) : null;
+  const StatusIcon = vm ? STATUS_ICON[vm.status] : Clock;
 
   function handleSubscribe(plan: CommercialPlanDisplay) {
     window.alert(SUBSCRIPTION_MESSAGES.devPurchasePlaceholder(plan.name));
@@ -46,18 +52,35 @@ export default function SubscriptionView({ onBack, initialStatus = 'trialing' }:
     window.alert(SUBSCRIPTION_MESSAGES.devManageSubscriptionPlaceholder);
   }
 
+  const header = (
+    <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 z-10 flex items-center gap-3">
+      <button
+        onClick={onBack}
+        className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+        aria-label="Voltar"
+      >
+        <AppIcon icon={ArrowLeft} className="w-4 h-4 shrink-0" />
+      </button>
+      <h1 className="text-base font-semibold text-slate-100">Assinatura</h1>
+    </header>
+  );
+
+  if (!vm) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col">
+        {header}
+        <div className="flex-1 flex items-center justify-center p-4">
+          <p className={`text-sm ${error ? 'text-red-400' : 'text-slate-400'}`}>
+            {error ? SUBSCRIPTION_MESSAGES.statusLoadError : SUBSCRIPTION_MESSAGES.statusLoading}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 z-10 flex items-center gap-3">
-        <button
-          onClick={onBack}
-          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
-          aria-label="Voltar"
-        >
-          <AppIcon icon={ArrowLeft} className="w-4 h-4 shrink-0" />
-        </button>
-        <h1 className="text-base font-semibold text-slate-100">Assinatura</h1>
-      </header>
+      {header}
 
       <div className="flex-1 overflow-auto p-4 max-w-2xl mx-auto w-full space-y-5 pb-10">
 
@@ -69,9 +92,9 @@ export default function SubscriptionView({ onBack, initialStatus = 'trialing' }:
                 <button
                   key={status}
                   type="button"
-                  onClick={() => setMockStatus(status)}
+                  onClick={() => setMockOverride(status)}
                   className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    status === mockStatus
+                    status === mockOverride
                       ? 'bg-amber-600 text-white'
                       : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200'
                   }`}
@@ -115,6 +138,17 @@ export default function SubscriptionView({ onBack, initialStatus = 'trialing' }:
                 <p className="text-sm text-slate-300">Plano anterior: <span className="font-medium text-slate-100">{vm.canceledPlanName}</span></p>
               )}
               <p className="text-xs text-slate-500">Acesso até: {vm.accessEndsAtLabel}</p>
+            </div>
+          )}
+
+          {vm.status === 'billing_issue' && (
+            <div className="space-y-1">
+              {vm.currentPlanName && (
+                <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
+              )}
+              {vm.accessEndsAtLabel && (
+                <p className="text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.billingIssueAccessUntilNote} {vm.accessEndsAtLabel}</p>
+              )}
             </div>
           )}
         </section>

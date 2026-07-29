@@ -34,7 +34,7 @@ export const COMMERCIAL_PLANS: Record<CommercialPlanCode, CommercialPlanDisplay>
     pronunciationPerDay: 3,
     listeningPerDay: 3,
     conversationMinutesMonthly: null,
-    allowsExtraMinutePackages: false,
+    allowsExtraMinutePackages: true,
   },
 };
 
