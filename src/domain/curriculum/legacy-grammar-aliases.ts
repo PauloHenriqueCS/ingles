@@ -72,6 +72,18 @@ const LEGACY_ALIAS_MAP: Record<string, string | null> = {
   'articles': 'grammar.articles',
   'comparatives': 'grammar.adjectives.comparative',
   'superlatives': 'grammar.adjectives.superlative',
+
+  // Revisão → Gramática chip labels (from extractGrammarFocus) that were not yet
+  // mapped, so every chip resolves to catalog content without any AI call.
+  'prepositions': 'grammar.prepositions.time_place_basic',
+  'plural': 'grammar.nouns.plural_regular',
+  'plurals': 'grammar.nouns.plural_regular',
+  'future': 'grammar.future.will',
+  // No single beginner-appropriate catalog topic exists for these; explicitly
+  // null so the UI shows the learner's own error context + a general message
+  // instead of a mismatched advanced topic.
+  'word order': null,
+  'sentence structure': null,
   'used to': 'grammar.used_to',
   'wish': 'grammar.wish_if_only',
   'if only': 'grammar.wish_if_only',

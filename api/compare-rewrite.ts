@@ -9,8 +9,34 @@ import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlement
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { validateRewriteText } from '../src/domain/writing-rewrite/rewrite-text-validation';
+import { normalizeForComparison } from '../src/domain/text/text-normalization';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+/**
+ * Item 9: the "Revisado" state means the final corrected version has been
+ * generated and persisted. Promote the writing_entries row for the review's
+ * day to 'revisado' (idempotent, RLS-scoped, best-effort — never blocks the
+ * response). No-op when the entry date is unknown or already 'revisado'.
+ */
+async function promoteEntryToRevisado(
+  supabase: SupabaseClient,
+  userId: string,
+  entryDate: string | null,
+): Promise<void> {
+  if (!entryDate) return;
+  try {
+    await supabase
+      .from('writing_entries')
+      .update({ status: 'revisado' })
+      .eq('user_id', userId)
+      .eq('entry_date', entryDate)
+      .neq('status', 'revisado');
+  } catch {
+    /* non-fatal: status promotion never blocks returning the final text */
+  }
+}
 
 const SYSTEM_PROMPT_COMPARE = `Você é um professor de inglês para brasileiros adultos iniciantes.
 
@@ -200,7 +226,7 @@ export default async function handler(req: any, res: any) {
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
-  const { userId } = auth;
+  const { userId, supabase } = auth;
 
   // Rewrite V2 (compare + final correction) is a continuation of a review
   // the user already started under writing.reviews' quota — only the
@@ -225,9 +251,9 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de comparação não está configurado.');
 
-  const { originalText, correctedText, rewriteText, mainMistakes, generateFinalTextOnly } = req.body ?? {};
+  const { originalText, correctedText, rewriteText, mainMistakes, generateFinalTextOnly, reviewId } = req.body ?? {};
 
-  // ── Mode: generate final corrected text only (for old records with V2 but no final text)
+  // ── Mode: generate the final corrected text (idempotent), attaching it to a review
   if (generateFinalTextOnly === true) {
     if (!correctedText?.trim() || !rewriteText?.trim()) {
       return jsonError(res, 400, 'INVALID_REQUEST', 'correctedText e rewriteText são obrigatórios.');
@@ -240,6 +266,38 @@ export default async function handler(req: any, res: any) {
     if (!contentCheck.valid) {
       safeLog('compare-rewrite', 'invalid_content_rejected', 400, { reasonCode: contentCheck.reasonCode!, mode: 'final_text_only' });
       return jsonError(res, 400, 'INVALID_REWRITE_TEXT', contentCheck.message!);
+    }
+
+    const reviewIdRaw = typeof reviewId === 'string' ? reviewId.trim() : '';
+    let entryDate: string | null = null;
+
+    // ── Idempotency: if a final version is already persisted for this review AND
+    // the student's V2 text hasn't meaningfully changed (comparison ignores case/
+    // spacing/quotes), return the stored text WITHOUT calling the AI. This covers
+    // reopening the screen, page refresh, a timeout retry after the AI already
+    // answered, and concurrent/duplicate clicks — all resolve to the same result.
+    if (reviewIdRaw) {
+      const { data: existing } = await supabase
+        .from('english_reviews')
+        .select('version_2_text, version_2_final_text, entry_date')
+        .eq('id', reviewIdRaw)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (existing) {
+        entryDate = (existing.entry_date as string | null) ?? null;
+        const storedFinal = typeof existing.version_2_final_text === 'string' ? existing.version_2_final_text.trim() : '';
+        const storedV2 = typeof existing.version_2_text === 'string' ? existing.version_2_text : '';
+        // "Changed meaningfully" ignores trivial edits (case, spacing, curly
+        // apostrophes, trailing sentence punctuation) so those don't force an
+        // unnecessary AI regeneration; a real content change still invalidates.
+        const unchanged =
+          normalizeForComparison(storedV2) === normalizeForComparison(rewriteText);
+        if (storedFinal && unchanged) {
+          safeLog('compare-rewrite', 'final_only_reused', 200, { reused: true });
+          await promoteEntryToRevisado(supabase, userId, entryDate);
+          return res.json({ finalCorrectedText: storedFinal, persisted: true, reused: true });
+        }
+      }
     }
 
     if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
@@ -292,8 +350,27 @@ export default async function handler(req: any, res: any) {
       );
       const finalCorrectedText = (completion.choices[0]?.message?.content ?? '').trim();
       if (!finalCorrectedText) throw new Error('Resposta vazia');
-      safeLog('compare-rewrite', 'final_only_success', 200);
-      return res.json({ finalCorrectedText });
+
+      // Persist server-side so a later retry/refresh finds the result without a
+      // new AI call, and promote the day to 'revisado'. Bound to the review row
+      // (RLS-scoped); the client is told whether persistence happened so it can
+      // fall back to its own save only when no reviewId was provided.
+      let persisted = false;
+      if (reviewIdRaw) {
+        const { error: updateErr } = await supabase
+          .from('english_reviews')
+          .update({ version_2_final_text: finalCorrectedText })
+          .eq('id', reviewIdRaw)
+          .eq('user_id', userId);
+        if (updateErr) {
+          safeLog('compare-rewrite', 'final_only_persist_error', 200, { nonFatal: true });
+        } else {
+          persisted = true;
+          await promoteEntryToRevisado(supabase, userId, entryDate);
+        }
+      }
+      safeLog('compare-rewrite', 'final_only_success', 200, { persisted });
+      return res.json({ finalCorrectedText, persisted });
     } catch (err) {
       const { code, status } = sanitizeProviderError(err);
       safeLog('compare-rewrite', 'final_only_error', status, { code });

@@ -274,7 +274,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
           <div className="bg-slate-800 rounded-xl p-4 space-y-3">
             <p className="text-xs text-slate-400 leading-relaxed">
               Leia em voz alta o texto abaixo. Você pode gravar quantas vezes quiser antes de enviar
-              para análise. A gravação será processada pelo serviço Azure Speech.
+              para análise. A gravação será processada para avaliar sua pronúncia.
             </p>
             <div className="border-t border-slate-700 pt-3">
               <p className="text-xs text-slate-500 mb-2 font-medium uppercase tracking-wider">Texto para praticar</p>

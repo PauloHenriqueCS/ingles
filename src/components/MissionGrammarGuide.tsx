@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { BookOpen, ArrowDown, CheckCircle2, XCircle } from 'lucide-react';
 import { EnglishDailyTheme, GrammarGuide, OptionalExercise } from '../types';
 import CollapsibleBlock from './CollapsibleBlock';
+import { normalizeAnswerForComparison } from '../domain/text/text-normalization';
+import { isFillBlankAnswerCorrect } from '../domain/writing/fill-blank-answer';
 
 interface Props {
   theme: EnglishDailyTheme;
@@ -142,14 +144,6 @@ const TYPE_LABELS: Record<string, string> = {
   translate: 'Traduza',
 };
 
-function normalizeAnswer(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .replace(/[.,!?;:'"]/g, '')
-    .replace(/\s+/g, ' ');
-}
-
 function ExerciseCard({ exercise, index }: { exercise: OptionalExercise; index: number }) {
   const [textAnswer, setTextAnswer] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -157,7 +151,14 @@ function ExerciseCard({ exercise, index }: { exercise: OptionalExercise; index: 
 
   const isMultipleChoice = exercise.type === 'multiple_choice' && !!exercise.options?.length;
   const userAnswer = isMultipleChoice ? selected : textAnswer;
-  const isCorrect = checked && normalizeAnswer(userAnswer ?? '') === normalizeAnswer(exercise.correctAnswer);
+  // Fill-in-the-blank accepts the bare verb OR the full resolved sentence; every
+  // other type compares against the stored answer. Both go through the shared
+  // normalizer (punctuation/case/spaces/curly apostrophes/contraction equivalence).
+  const isCorrect =
+    checked &&
+    (exercise.type === 'fill_blank'
+      ? isFillBlankAnswerCorrect(exercise.question, exercise.correctAnswer, userAnswer ?? '')
+      : normalizeAnswerForComparison(userAnswer ?? '') === normalizeAnswerForComparison(exercise.correctAnswer));
 
   function verify() {
     if (!userAnswer?.trim()) return;
@@ -184,7 +185,7 @@ function ExerciseCard({ exercise, index }: { exercise: OptionalExercise; index: 
         <div className="flex flex-col gap-1.5">
           {exercise.options!.map((opt, i) => {
             const isSelected = selected === opt;
-            const isRightAnswer = normalizeAnswer(opt) === normalizeAnswer(exercise.correctAnswer);
+            const isRightAnswer = normalizeAnswerForComparison(opt) === normalizeAnswerForComparison(exercise.correctAnswer);
             const cls = checked
               ? isRightAnswer
                 ? 'border-green-600 bg-green-900/20 text-green-300'

@@ -709,3 +709,124 @@ describe('content-quality validation (invalid rewrite text)', () => {
     expect(mockApplyRateLimit).not.toHaveBeenCalled();
   });
 });
+
+// ── Item 7: idempotent final-text generation + persistence ────────────────────
+//
+// A chainable Supabase mock records writes so each scenario can assert exactly
+// how many AI calls happened and what was persisted. Confirms: reuse of a stored
+// result skips the AI; a fresh generation calls the AI once and persists it +
+// promotes the day to 'revisado'; a meaningfully changed V2 regenerates.
+
+function makeSupabaseMock(reviewRow: Record<string, unknown> | null) {
+  const updatedReviews: Record<string, unknown>[] = [];
+  const updatedEntries: Record<string, unknown>[] = [];
+  function from(table: string) {
+    const builder: any = {
+      _table: table,
+      select() { return builder; },
+      update(vals: Record<string, unknown>) {
+        if (table === 'english_reviews') updatedReviews.push(vals);
+        if (table === 'writing_entries') updatedEntries.push(vals);
+        return builder;
+      },
+      eq() { return builder; },
+      neq() { return builder; },
+      maybeSingle() { return Promise.resolve({ data: reviewRow, error: null }); },
+      then(resolve: (v: { error: null }) => unknown) { return Promise.resolve({ error: null }).then(resolve); },
+    };
+    return builder;
+  }
+  return { from, _updatedReviews: updatedReviews, _updatedEntries: updatedEntries } as any;
+}
+
+const REVIEW_ID = 'bbbbbbbb-0000-0000-0000-000000000009';
+const V2_TEXT = 'Yesterday I went to the store and buyed bread.';
+
+describe('generateFinalTextOnly — idempotency & persistence (item 7)', () => {
+  it('reuses the stored final text WITHOUT calling the AI when V2 is unchanged', async () => {
+    const supabase = makeSupabaseMock({
+      version_2_text: V2_TEXT,
+      version_2_final_text: 'STORED FINAL VERSION',
+      entry_date: '2026-07-30',
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, reviewId: REVIEW_ID, correctedText: 'Yesterday I went to the store.', rewriteText: V2_TEXT } }), res);
+
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe('STORED FINAL VERSION');
+    expect((res._body() as any).reused).toBe(true);
+    expect((res._body() as any).persisted).toBe(true);
+    expect(mockCreate).not.toHaveBeenCalled();          // NO AI call
+    expect(mockApplyRateLimit).not.toHaveBeenCalled();  // reuse short-circuits before rate limit
+    expect(supabase._updatedEntries).toHaveLength(1);   // promoted to 'revisado'
+    expect(supabase._updatedEntries[0]).toEqual({ status: 'revisado' });
+  });
+
+  it('normalizes trivial differences (curly apostrophe/case/spacing) as unchanged → still no AI call', async () => {
+    const supabase = makeSupabaseMock({
+      version_2_text: "I'm not certain about it.",
+      version_2_final_text: 'STORED FINAL VERSION',
+      entry_date: '2026-07-30',
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, reviewId: REVIEW_ID, correctedText: 'x', rewriteText: '  I’m   NOT certain about it  ' } }), res);
+
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).reused).toBe(true);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('generates once and persists (+ promotes to revisado) when no final text exists yet', async () => {
+    mockCreate.mockImplementation(() => aiOk('FRESHLY GENERATED FINAL TEXT'));
+    const supabase = makeSupabaseMock({
+      version_2_text: V2_TEXT,
+      version_2_final_text: null,
+      entry_date: '2026-07-30',
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, reviewId: REVIEW_ID, correctedText: 'Yesterday I went to the store.', rewriteText: V2_TEXT } }), res);
+
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe('FRESHLY GENERATED FINAL TEXT');
+    expect((res._body() as any).persisted).toBe(true);
+    expect(mockCreate).toHaveBeenCalledTimes(1);        // exactly ONE AI call
+    expect(supabase._updatedReviews).toHaveLength(1);
+    expect(supabase._updatedReviews[0]).toEqual({ version_2_final_text: 'FRESHLY GENERATED FINAL TEXT' });
+    expect(supabase._updatedEntries[0]).toEqual({ status: 'revisado' });
+  });
+
+  it('regenerates (AI call) when the stored V2 changed meaningfully, not reusing the old final', async () => {
+    mockCreate.mockImplementation(() => aiOk('REGENERATED FINAL TEXT'));
+    const supabase = makeSupabaseMock({
+      version_2_text: 'A completely different earlier version.',
+      version_2_final_text: 'OLD STORED FINAL',
+      entry_date: '2026-07-30',
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeFinalOnlyReq({ body: { generateFinalTextOnly: true, reviewId: REVIEW_ID, correctedText: 'x', rewriteText: V2_TEXT } }), res);
+
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe('REGENERATED FINAL TEXT');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(supabase._updatedReviews[0]).toEqual({ version_2_final_text: 'REGENERATED FINAL TEXT' });
+  });
+
+  it('without a reviewId falls back to AI-only, reports persisted:false (client persists)', async () => {
+    mockCreate.mockImplementation(() => aiOk('FINAL TEXT NO REVIEW'));
+    const res = makeRes();
+    await handler(makeFinalOnlyReq(), res); // no reviewId
+
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe('FINAL TEXT NO REVIEW');
+    expect((res._body() as any).persisted).toBe(false);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+});

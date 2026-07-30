@@ -95,7 +95,7 @@ export const WORD_BANDS: Record<WordBand, WordBandInfo> = {
     colorClass: 'text-blue-400',
     bgClass: 'bg-blue-900/20',
     borderClass: 'border-blue-700',
-    makeAriaLabel: (w) => `Palavra adicional ${w}, identificada pelo Azure, não faz parte do texto.`,
+    makeAriaLabel: (w) => `Palavra adicional ${w}, identificada na gravação, não faz parte do texto.`,
   },
   no_data: {
     band: 'no_data',
@@ -121,7 +121,7 @@ export function getWordGuidance(word: PronunciationWordDetail): string {
     return 'Esta palavra não foi identificada na gravação.';
   }
   if (word.errorType === 'insertion') {
-    return 'O Azure identificou uma palavra adicional que não fazia parte do texto.';
+    return 'A análise identificou uma palavra adicional que não fazia parte do texto.';
   }
   if (word.accuracyScore === null) {
     return 'O serviço não retornou detalhes suficientes para esta palavra.';

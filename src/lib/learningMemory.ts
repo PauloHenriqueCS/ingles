@@ -4,6 +4,7 @@ import { fetchEnglishReviews } from './reviewsHistory';
 import { getUniquePracticeDays } from './evolutionStats';
 import { deduplicateReviews } from './metricsCore';
 import { fetchCurrentStreak } from './activeDates';
+import { extractGrammarFocusLabels } from '../domain/writing/grammar-focus-topics';
 
 // ── Row mapper ────────────────────────────────────────────────────────────────
 
@@ -34,22 +35,10 @@ function rowToMemory(row: Record<string, unknown>): EnglishLearningMemory {
 // ── Grammar topic extraction ──────────────────────────────────────────────────
 
 function extractGrammarFocus(reviews: EnglishReviewSaved[]): string[] {
-  const topics = new Set<string>();
-  for (const r of reviews) {
-    for (const m of r.mainMistakes ?? []) {
-      const text = `${m.explanation} ${m.original} ${m.correct}`.toLowerCase();
-      if (/passado|past tense|simple past|went|yesterday|was |were /.test(text)) topics.add('Simple Past');
-      if (/preposição|preposition|in\/on|on the|in the|at the/.test(text)) topics.add('Prepositions');
-      if (/artigo|article|\ba\/an\b|use the|use a\b/.test(text)) topics.add('Articles');
-      if (/word order|ordem das palavras/.test(text)) topics.add('Word Order');
-      if (/plural|plurais/.test(text)) topics.add('Plural');
-      if (/sentence structure|estrutura da frase/.test(text)) topics.add('Sentence Structure');
-      if (/continuous|is doing|is going|estar fazendo/.test(text)) topics.add('Present Continuous');
-      if (/\bwill\b|future|futuro/.test(text)) topics.add('Future');
-      if (/comparativ|more.*than|er than/.test(text)) topics.add('Comparatives');
-    }
-  }
-  return Array.from(topics).slice(0, 5);
+  // Shared rules (src/domain/writing/grammar-focus-topics) so the chip labels
+  // and the click-to-explain contextual matcher use ONE definition.
+  const mistakes = reviews.flatMap((r) => r.mainMistakes ?? []);
+  return extractGrammarFocusLabels(mistakes).slice(0, 5);
 }
 
 // ── Local text generators ─────────────────────────────────────────────────────

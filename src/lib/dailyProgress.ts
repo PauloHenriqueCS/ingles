@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { DailyActivityStatus, DailyProgress, DayEntry } from '../types';
 import { toSpDate } from './timezone';
 import { isConversationGoalMet } from './conversationSessions';
+import { deriveWritingActivityState } from '../domain/writing/entry-status';
 
 export async function getPronunciationDatesForMonth(
   year: number,
@@ -30,9 +31,16 @@ export async function getPronunciationDatesForMonth(
 }
 
 function writingStatus(entry: DayEntry | undefined): DailyActivityStatus {
-  if (!entry?.originalText?.trim()) return 'not_started';
-  if (entry.status === 'corrigido' || entry.status === 'revisado') return 'completed';
-  return 'in_progress';
+  // Shared derivation (src/domain/writing/entry-status) so the calendar and the
+  // History screen classify the same entry identically. The calendar only has
+  // the entry itself (no review rows), so review/final-version evidence comes
+  // from the stored status column, which the derivation honors.
+  return deriveWritingActivityState({
+    storedStatus: entry?.status ?? null,
+    hasText: !!entry?.originalText?.trim(),
+    hasReview: entry?.status === 'corrigido' || entry?.status === 'revisado',
+    hasFinalVersion: entry?.status === 'revisado',
+  });
 }
 
 function conversationStatus(totalSec: number, goalSec: number): DailyActivityStatus {
