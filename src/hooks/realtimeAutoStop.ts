@@ -15,20 +15,22 @@ export function shouldAutoStopForCommercialLimit(
   recordingLimitReason: RecordingLimitReason | null,
 ): boolean {
   if (authorizedMaxSeconds === null) return false;
-  if (recordingLimitReason !== 'per_turn' && recordingLimitReason !== 'monthly_balance') return false;
+  if (recordingLimitReason !== 'per_turn' && recordingLimitReason !== 'monthly_balance' && recordingLimitReason !== 'trial_balance') return false;
   return elapsedMs / 1000 >= authorizedMaxSeconds;
 }
 
-/** The friendly message shown when triggerLimitStop fires — differentiates per-turn vs balance-exhausted, per the product spec. */
-export function pickStopMessage(limitReason: 'per_turn' | 'monthly_balance', elapsedSeconds: number): string {
-  return limitReason === 'monthly_balance'
-    ? ENTITLEMENT_MESSAGES.conversationRecordingStoppedByBalance
-    : ENTITLEMENT_MESSAGES.recordingLimitReached(Math.round(elapsedSeconds));
+/** The friendly message shown when triggerLimitStop fires — differentiates per-turn vs balance-exhausted (monthly or trial), per the product spec. */
+export function pickStopMessage(limitReason: 'per_turn' | 'monthly_balance' | 'trial_balance', elapsedSeconds: number): string {
+  if (limitReason === 'monthly_balance') return ENTITLEMENT_MESSAGES.conversationRecordingStoppedByBalance;
+  if (limitReason === 'trial_balance') return ENTITLEMENT_MESSAGES.conversationRecordingStoppedByBalance;
+  return ENTITLEMENT_MESSAGES.recordingLimitReached(Math.round(elapsedSeconds));
 }
 
 /** The session-end reason reported to the backend for each commercial stop trigger. */
-export function pickStopEndReason(limitReason: 'per_turn' | 'monthly_balance'): string {
-  return limitReason === 'monthly_balance' ? 'plan_monthly_balance_exhausted' : 'plan_recording_limit_reached';
+export function pickStopEndReason(limitReason: 'per_turn' | 'monthly_balance' | 'trial_balance'): string {
+  if (limitReason === 'monthly_balance') return 'plan_monthly_balance_exhausted';
+  if (limitReason === 'trial_balance') return 'plan_trial_balance_exhausted';
+  return 'plan_recording_limit_reached';
 }
 
 /**

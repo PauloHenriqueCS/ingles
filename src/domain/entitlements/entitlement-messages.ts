@@ -22,6 +22,8 @@ export const ENTITLEMENT_MESSAGES = {
     'Avaliação concluída! Seu plano permite treinar sem limite — gere um novo texto para continuar.',
   conversationMinutesExhausted:
     'Seus minutos de conversação deste mês acabaram. Sua conversa foi preservada.',
+  conversationTrialMinutesExhausted:
+    'Seus minutos de conversação do período de teste acabaram. Sua conversa foi preservada.',
   conversationExtraPurchaseAvailable:
     'Seus minutos deste mês acabaram. Você pode adicionar mais minutos para continuar praticando.',
   conversationRecordingStoppedByBalance:

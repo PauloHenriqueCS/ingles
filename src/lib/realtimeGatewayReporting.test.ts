@@ -320,6 +320,16 @@ describe('checkSessionControl', () => {
     expect(result.recordingLimitReason).toBe('monthly_balance');
   });
 
+  it("Etapa 2A: accepts recordingLimitReason='trial_balance' as a recognized value", async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ terminate: false, deadlineAt: '2026-01-01T00:00:00.000Z', authorizedMaxRecordingSeconds: 8, recordingLimitReason: 'trial_balance' }),
+    }));
+    const result = await checkSessionControl('session-26b');
+    expect(result.authorizedMaxRecordingSeconds).toBe(8);
+    expect(result.recordingLimitReason).toBe('trial_balance');
+  });
+
   it('drops an unrecognized recordingLimitReason value rather than trusting it blindly', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,

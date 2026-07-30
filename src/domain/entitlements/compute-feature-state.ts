@@ -71,7 +71,10 @@ export function computeFeatureState(input: ComputeFeatureLimitInput): FeatureLim
     };
   }
 
-  const exhaustedState: FeatureAccessState = input.period === 'month' ? 'monthly_limit_reached' : 'daily_limit_reached';
+  const exhaustedState: FeatureAccessState =
+    input.period === 'month' ? 'monthly_limit_reached'
+    : input.period === 'lifetime' ? 'trial_balance_exhausted'
+    : 'daily_limit_reached';
   return {
     enabled: true,
     unlimited: false,

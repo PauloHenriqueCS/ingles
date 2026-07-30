@@ -25,6 +25,11 @@ import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count'
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { listPublishedMinutePackages } from '../_entitlements/minute-packages-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
+import {
+  authorizeTrialConversationSession,
+  attachTrialConversationSessionGatewayIds,
+  releaseTrialConversationSessionAuthorization,
+} from '../_entitlements/authorize-trial-conversation-session';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
@@ -409,6 +414,12 @@ async function handleSession(req: any, res: any) {
     return res.status(403).json({ code: 'FEATURE_DISABLED', message: ENTITLEMENT_MESSAGES.conversationUnavailable });
   }
   if (!entitlements.conversation.monthlyTime.canStart) {
+    // Etapa 2A — the trial's lifetime total (period='lifetime') is a
+    // distinct, non-monthly balance; its exhaustion must never be reported
+    // as "monthly", per plan_trial_balance_exhausted's contract below.
+    if (entitlements.conversation.monthlyTime.period === 'lifetime') {
+      return res.status(403).json({ code: 'TRIAL_BALANCE_EXHAUSTED', message: ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted });
+    }
     return res.status(403).json({ code: 'MONTHLY_LIMIT_REACHED', message: ENTITLEMENT_MESSAGES.conversationMinutesExhausted });
   }
 
@@ -423,7 +434,7 @@ async function handleSession(req: any, res: any) {
   // against a slightly different "now".
   const gatewayDeps = getProductionDeps();
   const sessionStartNowMs = gatewayDeps.clock();
-  const authorizedAtStart = computeAuthorizedRecording(
+  let authorizedAtStart = computeAuthorizedRecording(
     entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
   );
 
@@ -511,6 +522,72 @@ async function handleSession(req: any, res: any) {
   }
 
   if (!await applyRateLimit(res, userId, 'conversation-session')) return;
+
+  // Etapa 2A — concurrency-safe authorization against the trial's lifetime
+  // (never-renewed) balance. After the rate limiter (same reasoning as the
+  // $ budget reservation just below: a spamming client must not be able to
+  // burn through the trial's small, non-renewing 900s via repeated
+  // never-completed requests faster than it can be rate-limited), but
+  // strictly BEFORE the $ budget reservation and the OpenAI call: unlike
+  // commercial plans (plain INSERT after the OpenAI call succeeds, unchanged
+  // below), a trial's authorization row is created HERE, atomically, so two
+  // sessions requested at nearly the same instant can never together
+  // authorize more than the real remaining balance — see
+  // authorize-trial-conversation-session.ts's header comment. Gated purely
+  // on period==='lifetime' (never entitlements.trialAssignment): the RPC
+  // itself now re-resolves the plan/assignment/window/total server-side
+  // (security revision, Etapa 2A) — nothing about the caller's own
+  // snapshot needs to be threaded through beyond "is this balance finite".
+  let recordingAuthorizationId: string | null = null;
+  const isTrialBalance = entitlements.conversation.monthlyTime.period === 'lifetime';
+  if (isTrialBalance && !entitlements.conversation.monthlyTime.unlimited) {
+    const requestedMaxSeconds = Math.floor(authorizedAtStart.authorizedMaxRecordingSeconds);
+    if (requestedMaxSeconds <= 0) {
+      return res.status(403).json({ code: 'TRIAL_BALANCE_EXHAUSTED', message: ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted });
+    }
+    // Client-generated, same pattern as PronunciationRecorder.tsx/
+    // ListeningView.tsx's attemptId/submissionId (crypto.randomUUID()) —
+    // stable across a network-level retry of this exact /session attempt,
+    // so a duplicate call never reserves the trial balance twice. Falls
+    // back to a server-generated id for an older cached client bundle that
+    // doesn't send one yet — never blocks on its absence.
+    const rawSessionAttemptId = (req.body ?? {}).sessionAttemptId;
+    const sessionAttemptId = isValidUuid(rawSessionAttemptId) ? rawSessionAttemptId : gatewayDeps.uuidGen();
+    let atomicResult;
+    try {
+      atomicResult = await authorizeTrialConversationSession(getSharedServiceClient(), {
+        userId,
+        requestedMaxSeconds,
+        sessionDate: getTodaySP(),
+        gatewayBudgetReservationId: null,
+        gatewaySessionId: null,
+        idempotencyKey: sessionAttemptId,
+      });
+    } catch (e) {
+      // Fail-SAFE here, deliberately not fail-open like the rest of this
+      // file: a lifetime, non-renewing budget's whole guarantee depends on
+      // this atomic check actually running. Letting the session start
+      // anyway on a transient failure would defeat the reason this function
+      // exists (see the migration's header comment).
+      gatewayDeps.logger('gateway.trialConversationAuthorize.failed', { message: String(e) });
+      return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu saldo de teste. Tente novamente.' });
+    }
+    if (atomicResult.blocked) {
+      return res.status(403).json({ code: 'TRIAL_BALANCE_EXHAUSTED', message: ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted });
+    }
+    recordingAuthorizationId = atomicResult.authorizationId;
+    if (atomicResult.authorizedMaxSeconds < requestedMaxSeconds) {
+      // The balance shrank between the entitlements snapshot above and this
+      // atomic recheck (a concurrent session consumed some of it in
+      // between) — the response must reflect the TRUE, race-safe ceiling,
+      // never the stale snapshot-based one.
+      authorizedAtStart = {
+        authorizedMaxRecordingSeconds: atomicResult.authorizedMaxSeconds,
+        recordingLimitReason: 'trial_balance',
+        effectiveDeadlineMs: sessionStartNowMs + atomicResult.authorizedMaxSeconds * 1000,
+      };
+    }
+  }
 
   // Upfront AI Gateway budget reservation for conversation.realtime_usage —
   // see api/_realtime-budget.ts's header comment for the full rationale.
@@ -619,6 +696,16 @@ async function handleSession(req: any, res: any) {
     // sitting reserved for up to REALTIME_MAX_SESSION_SECONDS over a call
     // that never happened.
     if (realtimeBudget.reservationId) await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'session_never_started');
+    // Etapa 2A — the trial's authorization row (if any) was created EARLY,
+    // atomically, before this OpenAI call — it never represented real usage
+    // since the call itself never succeeded, so it must be released rather
+    // than permanently holding part of the trial's lifetime balance.
+    if (recordingAuthorizationId && isTrialBalance) {
+      await releaseTrialConversationSessionAuthorization(getSharedServiceClient(), recordingAuthorizationId).catch((e) => {
+        gatewayDeps.logger('gateway.trialConversationAuthorization.releaseFailed', { message: String(e) });
+      });
+      recordingAuthorizationId = null;
+    }
     if (err instanceof CreateSessionTimeoutError) {
       safeLog('conversation/session', 'timeout', 504);
       return res.status(504).json({ code: 'AI_TIMEOUT', message: 'O serviço demorou para responder. Tente novamente.' });
@@ -686,9 +773,21 @@ async function handleSession(req: any, res: any) {
   // student is waiting for; it just means this call's duration silently
   // won't count toward their quota (same direction of failure as before this
   // fix existed, never worse).
-  let recordingAuthorizationId: string | null = null;
   const authorizedMaxSecondsFloor = Math.floor(authorizedAtStart.authorizedMaxRecordingSeconds);
-  if (authorizedMaxSecondsFloor > 0) {
+  if (recordingAuthorizationId) {
+    // Etapa 2A — trial path: the row already exists (created atomically,
+    // before the OpenAI call, by the guard above) — only attach the ids that
+    // were unknown at that point. Best-effort, same failure posture as the
+    // commercial INSERT below: a failure here never blocks the token, it
+    // just means this call's reservation/session ids won't be reconciled.
+    try {
+      await attachTrialConversationSessionGatewayIds(
+        getSharedServiceClient(), recordingAuthorizationId, realtimeBudget.reservationId, gatewaySessionId ?? null,
+      );
+    } catch (e) {
+      gatewayDeps.logger('gateway.trialConversationAuthorization.attachIdsFailed', { message: String(e) });
+    }
+  } else if (authorizedMaxSecondsFloor > 0) {
     try {
       const { data: authRow, error: authErr } = await getSharedServiceClient()
         .from('conversation_session_authorizations')
@@ -1524,7 +1623,7 @@ async function handleSessionEnd(req: any, res: any) {
 // ceiling still remaining in this session. When both commercial values are
 // unlimited, the result is governed purely by the technical ceiling — which
 // the frontend must never present as if it were a commercial benefit.
-export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'technical';
+export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'trial_balance' | 'technical';
 
 export interface AuthorizedRecording {
   /**
@@ -1566,7 +1665,10 @@ function computeAuthorizedRecording(
   if (effectiveDeadlineMs === perTurnDeadlineMs && Number.isFinite(perTurnDeadlineMs)) {
     recordingLimitReason = 'per_turn';
   } else if (effectiveDeadlineMs === monthlyDeadlineMs && Number.isFinite(monthlyDeadlineMs)) {
-    recordingLimitReason = 'monthly_balance';
+    // Etapa 2A — the trial's lifetime total shares this same FeatureLimit
+    // slot (period='lifetime' instead of 'month'); the reason reported must
+    // distinguish it so it's never described as "monthly" downstream.
+    recordingLimitReason = entitlements.conversation.monthlyTime.period === 'lifetime' ? 'trial_balance' : 'monthly_balance';
   } else {
     recordingLimitReason = 'technical';
   }
@@ -1683,7 +1785,9 @@ async function handleSessionControl(req: any, res: any) {
     }
 
     if (Date.now() >= authorized.effectiveDeadlineMs) {
-      const reason = authorized.recordingLimitReason === 'monthly_balance' ? 'plan_monthly_balance_exhausted' : 'plan_recording_limit_reached';
+      const reason = authorized.recordingLimitReason === 'monthly_balance' ? 'plan_monthly_balance_exhausted'
+        : authorized.recordingLimitReason === 'trial_balance' ? 'plan_trial_balance_exhausted'
+        : 'plan_recording_limit_reached';
       return terminate(reason);
     }
 

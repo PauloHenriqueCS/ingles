@@ -66,4 +66,44 @@ describe('computeFeatureState', () => {
     expect(result.state).toBe('disabled_by_plan');
     expect(result.canStart).toBe(false);
   });
+
+  // Etapa 2A — the internal 'trial' plan's lifetime total (period='lifetime').
+  it('returns trial_balance_exhausted (never monthly_limit_reached) when period is lifetime and the total is exhausted', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: false, limit: 900, consumed: 900, period: 'lifetime' });
+    expect(result.state).toBe('trial_balance_exhausted');
+    expect(result.canStart).toBe(false);
+    expect(result.remaining).toBe(0);
+  });
+
+  it('900 available and 0 used -> 900 remaining, available, canStart true', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: false, limit: 900, consumed: 0, period: 'lifetime' });
+    expect(result.state).toBe('available');
+    expect(result.remaining).toBe(900);
+    expect(result.canStart).toBe(true);
+  });
+
+  it('900 available and 300 used -> 600 remaining', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: false, limit: 900, consumed: 300, period: 'lifetime' });
+    expect(result.remaining).toBe(600);
+    expect(result.canStart).toBe(true);
+  });
+
+  it('lifetime consumption never produces a negative remaining even when it overshoots the total', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: false, limit: 900, consumed: 950, period: 'lifetime' });
+    expect(result.remaining).toBe(0);
+    expect(result.state).toBe('trial_balance_exhausted');
+  });
+
+  it('a trial-coded 0-with-unlimited-false total means zero balance, never unlimited', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: false, limit: 0, consumed: 0, period: 'lifetime' });
+    expect(result.unlimited).toBe(false);
+    expect(result.state).toBe('trial_balance_exhausted');
+    expect(result.canStart).toBe(false);
+  });
+
+  it('an explicit unlimited=true trial total is still reported as unlimited, same as any other period', () => {
+    const result = computeFeatureState({ enabled: true, unlimited: true, limit: 0, consumed: 900, period: 'lifetime' });
+    expect(result.state).toBe('unlimited');
+    expect(result.canStart).toBe(true);
+  });
 });

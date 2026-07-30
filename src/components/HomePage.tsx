@@ -13,7 +13,7 @@ interface Props {
 type CardVisualState = 'loading' | 'available' | 'disabled_by_plan' | 'disabled_globally' | 'limit_reached';
 
 function isExhausted(state: string): boolean {
-  return state === 'daily_limit_reached' || state === 'monthly_limit_reached';
+  return state === 'daily_limit_reached' || state === 'monthly_limit_reached' || state === 'trial_balance_exhausted';
 }
 
 // Central de Configuração's global on/off (checked first, distinct from the

@@ -97,6 +97,53 @@ Use UTC, e sempre um timestamp posterior a `20260725120002`.
 - A migration deve ser idempotente sempre que possível (`ON CONFLICT`,
   `IF NOT EXISTS`).
 
+## Coordenação com `ingles-dashboad` (banco compartilhado)
+
+`lemon-homolog` (`ahszqexfzpbirdlkmdci`) é compartilhado por dois
+repositórios — `ingles` (este) e `ingles-dashboad` — cada um com seu próprio
+diretório `supabase/migrations/` local. Isso já causou uma colisão real
+(Etapa 2A, 2026-07-27): os dois repositórios criaram, de forma
+independente, um arquivo com o **mesmo prefixo de timestamp**
+(`20260727000000_...`), cada um com conteúdo completamente diferente.
+
+**Achado ao investigar (leitura de `supabase_migrations.schema_migrations`
+via MCP, `list_migrations`)**: a migration do `ingles-dashboad` está
+registrada no remoto sob a versão `20260727223126` — **diferente** do
+prefixo do nome do arquivo local (`20260727000000`). Isso confirma que ela
+não foi aplicada via `supabase db push` a partir do arquivo local commitado
+(que teria registrado a versão exatamente como `20260727000000`) — foi
+aplicada por outro caminho (o mais provável: a tool MCP `apply_migration`,
+que gera sua própria versão no momento da chamada, ou uma reconciliação
+manual via `supabase migration repair`). O mesmo padrão já era conhecido
+antes desta etapa — ver `supabase/baseline_docs/migration_history_plan.md`,
+que documenta `version` (horário real de aplicação) divergindo de `name`
+(timestamp de autoria) no histórico de produção.
+
+**Recomendação concreta para evitar reaplicação/drift futuros:**
+
+1. **Nunca aplicar uma migration que deveria ficar rastreada em
+   `supabase/migrations/` usando a tool `apply_migration` do MCP do
+   Supabase, ou SQL manual (SQL Editor, `psql` avulso).** Esses caminhos geram uma
+   versão própria no `schema_migrations`, que nunca bate com o timestamp do
+   arquivo local — é exatamente essa divergência que torna
+   `supabase migration list`/`db push` não confiáveis para detectar "já
+   aplicada". Reserve `apply_migration` (MCP) só para exploração/scratch que
+   nunca vira arquivo commitado.
+2. **Antes de todo `db push` (manual ou via o workflow de CI
+   `apply-migrations`), rode `supabase migration list --project-ref
+   ahszqexfzpbirdlkmdci`** (ou a mesma consulta via MCP `list_migrations`) e
+   confira que todo arquivo local novo tem uma versão que ainda NÃO aparece
+   no remoto, E que nenhum arquivo novo colide, por prefixo, com nada
+   listado — nem deste repositório, nem (verificando manualmente o
+   diretório vizinho) do `ingles-dashboad`.
+3. **Toda migration nova neste repositório usa um timestamp estritamente
+   posterior à MAIOR versão conhecida em `schema_migrations`** (não apenas
+   à maior versão entre os arquivos locais) — a Etapa 2A passou a numerar a
+   partir de `20260727223126` por esse motivo exato.
+4. Isso não corrige a divergência já existente da migration do
+   `ingles-dashboad` (fora de escopo alterar o histórico remoto ou o outro
+   repositório) — só evita que o problema se repita daqui para frente.
+
 ## Onde encontrar mais contexto
 
 - `supabase/baseline_docs/inventory.md` — inventário completo do que existe

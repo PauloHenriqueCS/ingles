@@ -148,7 +148,7 @@ export function reportSessionEnd(gatewaySessionId: string): void {
 // is actively connected.
 
 /** Which constraint is currently authoritative for the recording ceiling — see api/conversation/[...slug].ts's computeAuthorizedRecording. */
-export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'technical';
+export type RecordingLimitReason = 'per_turn' | 'monthly_balance' | 'trial_balance' | 'technical';
 
 export interface SessionControlResult {
   terminate: boolean;
@@ -158,7 +158,7 @@ export interface SessionControlResult {
   recordingLimitReason?: RecordingLimitReason;
 }
 
-const RECORDING_LIMIT_REASONS = new Set<RecordingLimitReason>(['per_turn', 'monthly_balance', 'technical']);
+const RECORDING_LIMIT_REASONS = new Set<RecordingLimitReason>(['per_turn', 'monthly_balance', 'trial_balance', 'technical']);
 
 export async function checkSessionControl(gatewaySessionId: string): Promise<SessionControlResult> {
   try {

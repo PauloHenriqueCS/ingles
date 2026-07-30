@@ -34,6 +34,11 @@ describe('shouldAutoStopForCommercialLimit', () => {
   it('scenario 23: per-turn unlimited + finite monthly — governed by monthly_balance as reported by the backend', () => {
     expect(shouldAutoStopForCommercialLimit(20_000, 20, 'monthly_balance')).toBe(true);
   });
+
+  it("Etapa 2A: stops once elapsed reaches the remaining trial balance, reason='trial_balance'", () => {
+    expect(shouldAutoStopForCommercialLimit(10_000, 10, 'trial_balance')).toBe(true);
+    expect(shouldAutoStopForCommercialLimit(9_000, 10, 'trial_balance')).toBe(false);
+  });
 });
 
 describe('pickStopMessage', () => {
@@ -50,6 +55,12 @@ describe('pickStopMessage', () => {
   it('rounds fractional elapsed seconds rather than truncating or floating them raw into the message', () => {
     expect(pickStopMessage('per_turn', 29.6)).toContain('30 segundos');
   });
+
+  it("Etapa 2A: uses the same balance-exhausted friendly message for reason='trial_balance'", () => {
+    expect(pickStopMessage('trial_balance', 42)).toBe(
+      'A gravação foi encerrada porque seus minutos disponíveis chegaram ao fim.',
+    );
+  });
 });
 
 describe('pickStopEndReason', () => {
@@ -59,6 +70,10 @@ describe('pickStopEndReason', () => {
 
   it('maps per_turn to plan_recording_limit_reached', () => {
     expect(pickStopEndReason('per_turn')).toBe('plan_recording_limit_reached');
+  });
+
+  it('Etapa 2A: maps trial_balance to plan_trial_balance_exhausted — never "monthly"', () => {
+    expect(pickStopEndReason('trial_balance')).toBe('plan_trial_balance_exhausted');
   });
 });
 

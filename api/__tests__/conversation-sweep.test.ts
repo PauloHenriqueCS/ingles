@@ -186,6 +186,38 @@ describe('GET /conversation-sweep — conversation_session_authorizations abando
     expect((res._body() as any).closedAuthorizations).toBe(1);
   });
 
+  // Etapa 2A — the trial's atomic authorization (authorize_trial_conversation_session_v1)
+  // inserts into this SAME table; the row it creates is structurally a
+  // normal conversation_session_authorizations row (now also carrying an
+  // idempotency_key, ignored here) — this sweep is plan-agnostic by
+  // construction (its SELECT/WHERE never reference plan/capability), so a
+  // trial-created row abandoned before the client ever completed it is
+  // closed identically to a commercial one, with no code change required.
+  it('closes an abandoned TRIAL authorization (row also carries an idempotency_key) exactly like a commercial one — the sweep never special-cases it', async () => {
+    const updateChain = makeChain({ data: { id: 'trial-auth-1' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'trial-auth-1', user_id: 'trial-user-1', session_date: '2026-07-20',
+            authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            idempotency_key: 'client-attempt-uuid-1',
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', duration_seconds: MAX_SECONDS }));
+    expect((res._body() as any).closedAuthorizations).toBe(1);
+  });
+
   it('a row still within its grace window (DB filter was a safe superset) is left untouched — no UPDATE issued', async () => {
     const recentAuthorizedAt = new Date(Date.now() - 10_000).toISOString(); // 10s ago — well within any grace
     queueFrom({

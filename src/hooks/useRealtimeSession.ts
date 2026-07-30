@@ -240,7 +240,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   // conversation actually closes — the student never hears a reply get cut
   // off mid-sentence. 'technical' never produces a message: the gateway
   // ceiling is a pure backstop, never presented as a commercial feature.
-  const triggerLimitStop = useCallback((limitReason: 'per_turn' | 'monthly_balance', elapsedSeconds: number) => {
+  const triggerLimitStop = useCallback((limitReason: 'per_turn' | 'monthly_balance' | 'trial_balance', elapsedSeconds: number) => {
     if (limitStopTriggeredRef.current || endCalledRef.current) return;
     limitStopTriggeredRef.current = true;
 
@@ -305,9 +305,15 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     let model: string;
     try {
       const headers = await getAuthHeader();
+      // Etapa 2A — stable per-attempt id (same pattern as
+      // PronunciationRecorder.tsx/ListeningView.tsx's attemptId/submissionId):
+      // lets the backend deduplicate a network-level retry of this exact
+      // attempt so a trial user's lifetime balance is never reserved twice
+      // for one logical session start. Ignored entirely for commercial plans.
       const resp = await fetch(apiUrl('/api/conversation/session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ sessionAttemptId: crypto.randomUUID() }),
       });
 
       if (!resp.ok) {
@@ -351,7 +357,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         authorizedMaxSecondsRef.current = body.authorizedMaxRecordingSeconds;
         setAuthorizedMaxSeconds(body.authorizedMaxRecordingSeconds);
       }
-      if (body.recordingLimitReason === 'per_turn' || body.recordingLimitReason === 'monthly_balance' || body.recordingLimitReason === 'technical') {
+      if (body.recordingLimitReason === 'per_turn' || body.recordingLimitReason === 'monthly_balance' || body.recordingLimitReason === 'trial_balance' || body.recordingLimitReason === 'technical') {
         recordingLimitReasonRef.current = body.recordingLimitReason;
         setRecordingLimitReason(body.recordingLimitReason);
       }
@@ -409,7 +415,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         // ceiling, instead of waiting for the next (up to 5s later) poll.
         const reason = recordingLimitReasonRef.current;
         if (shouldAutoStopForCommercialLimit(elapsed, authorizedMaxSecondsRef.current, reason)) {
-          triggerLimitStop(reason as 'per_turn' | 'monthly_balance', elapsed / 1000);
+          triggerLimitStop(reason as 'per_turn' | 'monthly_balance' | 'trial_balance', elapsed / 1000);
           return;
         }
 

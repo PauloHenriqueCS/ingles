@@ -43,14 +43,19 @@ const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted((
 // used only by the session-transition bridge code (session-active, -failed,
 // -usage, -end), distinct from the per-request `supabase` (requireAuth) used
 // by the existing /session pedagogical-context queries.
-const { mockSessionsFrom, sessionsClient } = vi.hoisted(() => {
+const { mockSessionsFrom, mockSessionsRpc, sessionsClient } = vi.hoisted(() => {
   const mockSessionsFrom = vi.fn();
-  return { mockSessionsFrom, sessionsClient: { from: mockSessionsFrom } };
+  // Etapa 2A — authorize_trial_conversation_session_v1 (and no other RPC)
+  // is called through this same shared service-role client; existing
+  // (non-trial) tests never trigger it (entitlements.trialAssignment stays
+  // unset), so a permissive default here changes nothing for them.
+  const mockSessionsRpc = vi.fn();
+  return { mockSessionsFrom, mockSessionsRpc, sessionsClient: { from: mockSessionsFrom, rpc: mockSessionsRpc } };
 });
 
 function makeUpdateChain(result: { data: { id: string; started_at?: string | null } | null; error: unknown }) {
   const chain: any = {};
-  for (const m of ['update', 'eq', 'in', 'or', 'select']) chain[m] = vi.fn().mockReturnValue(chain);
+  for (const m of ['update', 'delete', 'eq', 'in', 'or', 'select']) chain[m] = vi.fn().mockReturnValue(chain);
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
   return chain;
 }
@@ -134,6 +139,7 @@ beforeEach(() => {
   gw.resetDefaults();
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
   mockSessionsFrom.mockReturnValue(makeUpdateChain({ data: { id: GATEWAY_SESSION_ID }, error: null }));
+  mockSessionsRpc.mockResolvedValue({ data: [{ authorization_id: 'trial-auth-id', authorized_max_seconds: 999999, blocked: false }], error: null });
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   process.env.OPENAI_API_KEY = 'sk-test-key';
   process.env.OPENAI_REALTIME_MODEL = 'gpt-realtime-2.1-mini';
@@ -399,6 +405,153 @@ describe('POST /session — conversation.create_session', () => {
       await handler(makeReq(), res);
       expect(res._status()).toBe(200);
       expect(gw.mockReservationsReserve).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Etapa 2A — trial's lifetime balance, concurrency-safe authorization ──
+  describe('trial plan — atomic, concurrency-safe authorization against the lifetime balance', () => {
+    function trialEntitlements(overrides: Partial<FeatureLimit> = {}) {
+      const entitlements = permissiveEntitlements();
+      entitlements.planCode = 'trial';
+      entitlements.conversation.maxRecordingUnlimited = true; // isolate the trial-balance constraint
+      entitlements.conversation.monthlyTime = {
+        enabled: true, unlimited: false, limit: 900, consumed: 0, remaining: 900,
+        period: 'lifetime', state: 'available', canStart: true, ...overrides,
+      };
+      return entitlements;
+    }
+
+    it('calls authorize_trial_conversation_session_v1 BEFORE the OpenAI call — never with an assignmentId/window/total, only userId/requestedMaxSeconds/idempotencyKey (the RPC re-resolves everything else itself)', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      const fetchMock = mockClientSecretsFetch(200, GA_RESPONSE);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect(mockSessionsRpc).toHaveBeenCalledWith('authorize_trial_conversation_session_v1', {
+        p_user_id: USER_ID,
+        p_requested_max_seconds: 900,
+        p_session_date: expect.any(String),
+        p_gateway_budget_reservation_id: null,
+        p_gateway_session_id: null,
+        p_idempotency_key: expect.any(String),
+      });
+      expect(mockSessionsRpc.mock.invocationCallOrder[0]).toBeLessThan((fetchMock as any).mock.invocationCallOrder[0]);
+    });
+
+    it('uses the client-supplied sessionAttemptId as the idempotency key when present', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq({ body: { sessionAttemptId: 'cccccccc-1111-2222-3333-444444444444' } }), res);
+
+      expect(res._status()).toBe(200);
+      expect(mockSessionsRpc).toHaveBeenCalledWith('authorize_trial_conversation_session_v1', expect.objectContaining({
+        p_idempotency_key: 'cccccccc-1111-2222-3333-444444444444',
+      }));
+    });
+
+    it('falls back to a server-generated idempotency key when the client sends none or an invalid one — never blocks the request', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq({ body: { sessionAttemptId: 'not-a-uuid' } }), res);
+
+      expect(res._status()).toBe(200);
+      const call = mockSessionsRpc.mock.calls.find((c) => c[0] === 'authorize_trial_conversation_session_v1');
+      expect(typeof (call?.[1] as any).p_idempotency_key).toBe('string');
+      expect((call?.[1] as any).p_idempotency_key).not.toBe('not-a-uuid');
+    });
+
+    it('blocked atomic result -> 403 TRIAL_BALANCE_EXHAUSTED, never calls OpenAI, never reserves the $ budget', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      mockSessionsRpc.mockResolvedValue({ data: [{ authorization_id: null, authorized_max_seconds: 0, blocked: true, blocked_reason: 'balance_exhausted' }], error: null });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('TRIAL_BALANCE_EXHAUSTED');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(gw.mockReservationsReserve).not.toHaveBeenCalled();
+    });
+
+    it('blocked with reason no_active_trial (e.g. the trial expired between the snapshot and the atomic recheck) also returns 403 TRIAL_BALANCE_EXHAUSTED', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      mockSessionsRpc.mockResolvedValue({ data: [{ authorization_id: null, authorized_max_seconds: 0, blocked: true, blocked_reason: 'no_active_trial' }], error: null });
+      vi.stubGlobal('fetch', vi.fn());
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('TRIAL_BALANCE_EXHAUSTED');
+    });
+
+    it('a snapshot that already reports canStart=false returns 403 TRIAL_BALANCE_EXHAUSTED without ever calling the atomic RPC', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements({ remaining: 0, state: 'trial_balance_exhausted', canStart: false }));
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(403);
+      expect((res._body() as any).code).toBe('TRIAL_BALANCE_EXHAUSTED');
+      expect(mockSessionsRpc).not.toHaveBeenCalled();
+    });
+
+    it('when the atomic recheck further tightens the ceiling (a concurrent session consumed balance in between), the response reflects the TRUE ceiling with reason trial_balance', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements({ remaining: 900 }));
+      mockSessionsRpc.mockResolvedValue({ data: [{ authorization_id: 'trial-auth-id', authorized_max_seconds: 30, blocked: false, blocked_reason: null }], error: null });
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(200);
+      const body = res._body() as { authorizedMaxRecordingSeconds: number; recordingLimitReason: string };
+      expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(30, 0);
+      expect(body.recordingLimitReason).toBe('trial_balance');
+    });
+
+    it('an unlimited trial balance skips the atomic RPC entirely — nothing to protect', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements({ unlimited: true, remaining: Number.POSITIVE_INFINITY, state: 'unlimited' }));
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect(mockSessionsRpc).not.toHaveBeenCalled();
+    });
+
+    it('releases (deletes) the trial authorization row when the OpenAI call fails after the atomic authorization succeeded', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      vi.stubGlobal('fetch', mockClientSecretsFetch(500, { error: { type: 'server_error' } }));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(502);
+      // The same shared service-role client's .from('conversation_session_authorizations').delete() path.
+      expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
+    });
+
+    it('attaches the gateway session/budget-reservation ids to the pre-created row after success — never a second INSERT', async () => {
+      mockGetCurrentUserPlanEntitlements.mockResolvedValue(trialEntitlements());
+      vi.stubGlobal('fetch', mockClientSecretsFetch(200, GA_RESPONSE));
+
+      const res = makeRes();
+      await handler(makeReq(), res);
+
+      expect(res._status()).toBe(200);
+      expect((res._body() as any).recordingAuthorizationId).toBe('trial-auth-id');
+      // Exactly one atomic authorize call — the commercial-plan plain INSERT path is never also taken.
+      expect(mockSessionsRpc).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -1240,6 +1393,23 @@ describe('POST /session-control — mid-session control poll', () => {
     // Monthly balance (10s left) is the binding constraint here, not the
     // generous 600s per-turn cap — the reason must say so distinctly.
     expect(res._body()).toEqual({ terminate: true, reason: 'plan_monthly_balance_exhausted' });
+  });
+
+  it('Etapa 2A: reports plan_trial_balance_exhausted (never "monthly") when the binding constraint is the trial lifetime balance', async () => {
+    const startedAt = new Date(Date.now() - 20 * 1000).toISOString(); // 20s ago
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 600;
+    entitlements.conversation.maxRecordingUnlimited = false;
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 900, consumed: 890, remaining: 10, period: 'lifetime', state: 'available', canStart: true,
+    }; // only 10s of the trial's lifetime total left — smaller than elapsed 20s
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'plan_trial_balance_exhausted' });
   });
 
   it('does not terminate early when comfortably within both the per-turn cap and the monthly balance', async () => {

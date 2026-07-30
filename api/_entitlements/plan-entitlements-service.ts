@@ -72,6 +72,14 @@ interface EffectivePlanRow {
   plan_version_id: string | null;
   version_number: number | null;
   is_suspended: boolean;
+  // Etapa 2A — already returned by admin_resolve_effective_plan_v1 (used
+  // elsewhere by api/_ai-gateway/entitlements.ts), now also read here so the
+  // trial's lifetime window can be resolved without a second RPC round-trip.
+  // assignment_id/starts_at/ends_at are null when this plan came from the
+  // default-plan fallback (origin='default'), never from a real assignment.
+  assignment_id: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
 }
 
 function utcDateString(d: Date): string {
@@ -103,6 +111,7 @@ function lockedSnapshot(now: Date): PlanEntitlementsSnapshot {
     listening: { enabled: false, stories: zeroLimit },
     pronunciation: { enabled: false, evaluations: zeroLimit, maxRecordingSeconds: 0, maxRecordingUnlimited: false },
     conversation: { enabled: false, monthlyTime: zeroLimit, maxRecordingSeconds: 0, maxRecordingUnlimited: false, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    trialAssignment: null,
     monthlyRenewsAt: null,
     resolvedAt: now.toISOString(),
   };
@@ -183,6 +192,46 @@ export async function getCurrentUserPlanEntitlements(
   const todayDate = utcDateString(now);
   const { startDate: monthStartDate, endDate: monthEndDate, resetAtIso } = utcMonthRange(now);
 
+  // Etapa 2A — the internal 'trial' plan's Conversation completeness is
+  // satisfied by conversation.realtime.seconds.trial_total instead of the
+  // monthly pair (see publish_plan_version's trial-code branch). Its
+  // consumption is bounded by the trial's OWN assignment window
+  // (starts_at..ends_at), never the calendar month, and never resets on a
+  // month change. Only a GENUINE assignment counts — the default-plan
+  // fallback (assignment_id/starts_at both null) never does, matching "só
+  // considere trial uma atribuição efetiva coerente com o plano trial".
+  //
+  // DECISÃO EXPLÍCITA sobre user_plan_assignments.origin (Etapa 2A —
+  // revisão de segurança): origin NUNCA é consultado aqui, por design, e
+  // isso é deliberado, não um esquecimento. Auditoria do RPC que cria
+  // atribuições no ingles-dashboad (admin_assign_plan_v1) confirma que
+  // origin é um rótulo em texto livre, escolhido pelo administrador que faz
+  // a chamada, e INDEPENDENTE do plan_id assignado — um admin pode atribuir
+  // o plano 'trial' com origin='manual' (ex.: suporte concedendo o trial
+  // manualmente), ou teoricamente qualquer outro plano com origin='trial'.
+  // origin portanto não é um sinal confiável de "isto é realmente um
+  // trial" — só o CÓDIGO do plano efetivamente resolvido (plan.plan_code)
+  // determina quais capabilities/limites se aplicam, nunca a origem
+  // administrativa de como o usuário chegou a esse plano. Consequência
+  // intencional: uma atribuição MANUAL do plano trial (origin='manual')
+  // recebe exatamente a mesma semântica lifetime que uma atribuição
+  // origin='trial' — ambas resolvem para o MESMO plan_version publicado,
+  // com as MESMAS capabilities, então tratá-las diferente só por causa do
+  // rótulo origin seria uma inconsistência, não uma proteção. A regra
+  // mínima que É de fato aplicada (ver trialWindow abaixo): o plano
+  // padrão/fallback com code='trial' mas SEM uma atribuição real
+  // (assignment_id/starts_at ausentes) nunca recebe saldo lifetime,
+  // independente de origin.
+  const isTrial = plan.plan_code === 'trial';
+  const trialWindow = isTrial && plan.assignment_id && plan.starts_at
+    ? { startIso: plan.starts_at, endIso: plan.ends_at }
+    : null;
+  // A trial-coded plan resolved WITHOUT a real assignment window is a
+  // dashboard misconfiguration this service cannot safely bound — never
+  // silently treated as unlimited or as "no trial" (see unwrapLimit's
+  // config_error path below, forced on for the conversation feature).
+  const trialWindowMissing = isTrial && !trialWindow;
+
   const [
     planValuesResult,
     overridesResult,
@@ -223,7 +272,25 @@ export async function getCurrentUserPlanEntitlements(
     supabase.from('writing_review_reservations').select('id', { count: 'exact', head: true }).eq('user_id', userId).in('status', ['reserved', 'completed']).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
     supabase.from('user_listening_assignments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('activity_date', todayDate).not('episode_id', 'is', null),
-    supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId).gte('session_date', monthStartDate).lt('session_date', monthEndDate),
+    (() => {
+      let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId);
+      if (trialWindow) {
+        // Filtered on authorized_at (a precise timestamp), not session_date
+        // (a calendar date) — required so a session started just before the
+        // trial began, or the instant it ends, is bounded exactly, not by a
+        // day-level approximation. Matches "uso anterior ao início do trial
+        // não é contado" / "uso posterior ao encerramento não é contado".
+        q = q.gte('authorized_at', trialWindow.startIso);
+        if (trialWindow.endIso) q = q.lt('authorized_at', trialWindow.endIso);
+        return q;
+      }
+      if (isTrial) {
+        // trialWindowMissing — no safe window to bound consumption by.
+        // Never falls back to the calendar month for a trial-coded plan.
+        return Promise.resolve({ data: [], error: null });
+      }
+      return q.gte('session_date', monthStartDate).lt('session_date', monthEndDate);
+    })(),
   ]);
 
   const planRows = (planValuesResult.data ?? []) as CapabilityValueRow[];
@@ -258,7 +325,11 @@ export async function getCurrentUserPlanEntitlements(
     authorized_max_seconds: number;
     duration_seconds: number | null;
   }
-  const conversationSecondsThisMonth = ((conversationSecondsResult.data ?? []) as ConversationAuthorizationRow[]).reduce(
+  // Named generically: this window is the calendar month for a commercial
+  // plan, but the trial's own [assignment.starts_at, assignment.ends_at)
+  // window when isTrial (see conversationSecondsResult's query above) — the
+  // reduction itself (live-elapsed-clamped vs completed) is identical either way.
+  const conversationSecondsConsumed = ((conversationSecondsResult.data ?? []) as ConversationAuthorizationRow[]).reduce(
     (sum, r) => {
       if (r.status === 'completed') return sum + (r.duration_seconds ?? 0);
       const elapsedSeconds = (now.getTime() - new Date(r.authorized_at).getTime()) / 1000;
@@ -325,17 +396,32 @@ export async function getCurrentUserPlanEntitlements(
 
   // ── Conversation ──────────────────────────────────────────────────────────
   const conversationEnabledR = enabledR(CAPABILITY_KEYS.conversationEnabled);
-  const monthlySecondsR = limitR(CAPABILITY_KEYS.conversationIncludedSecondsPerMonth, CAPABILITY_KEYS.conversationIncludedSecondsPerMonthUnlimited);
+  // Etapa 2A — trial reads trial_total/trial_total.unlimited INSTEAD OF the
+  // monthly pair; every other plan (including invisible/zero-price/internal
+  // ones that aren't 'trial') keeps reading monthly exactly as before. This
+  // key choice is the only thing isTrial changes about resolveNumericLimit —
+  // never a fallback from one pair to the other for the same plan.
+  const conversationTimeR = isTrial
+    ? limitR(CAPABILITY_KEYS.conversationTrialTotalSeconds, CAPABILITY_KEYS.conversationTrialTotalSecondsUnlimited)
+    : limitR(CAPABILITY_KEYS.conversationIncludedSecondsPerMonth, CAPABILITY_KEYS.conversationIncludedSecondsPerMonthUnlimited);
   const conversationMaxRecordingR = limitR(CAPABILITY_KEYS.conversationMaxRecordingSeconds, CAPABILITY_KEYS.conversationMaxRecordingSecondsUnlimited);
   const extraPurchaseR = enabledR(CAPABILITY_KEYS.conversationExtraPurchaseEnabled);
-  const conversationConfigError = conversationEnabledR.configError || monthlySecondsR.configError || conversationMaxRecordingR.configError || extraPurchaseR.configError;
+  // trialWindowMissing forces config_error even if trial_total itself is
+  // configured: without a real assignment window there is no safe way to
+  // bound "consumed", and this must never silently degrade to unlimited or
+  // to the monthly window (see the comment above trialWindowMissing).
+  const conversationConfigError = conversationEnabledR.configError || conversationTimeR.configError
+    || conversationMaxRecordingR.configError || extraPurchaseR.configError || trialWindowMissing;
   const conversationEnabled = conversationConfigError ? false : conversationEnabledR.enabled;
+  // 'lifetime' — never resets on a period boundary; computeFeatureState maps
+  // its exhaustion to 'trial_balance_exhausted', never 'monthly_limit_reached'.
+  const conversationTimePeriod: LimitPeriod = isTrial ? 'lifetime' : 'month';
 
   const conversation: ConversationEntitlements = {
     enabled: conversationEnabled,
-    monthlyTime: conversationConfigError ? configErrorLimit('month') : computeFeatureState({
-      enabled: conversationEnabled, unlimited: monthlySecondsR.unlimited, limit: monthlySecondsR.limit,
-      consumed: conversationSecondsThisMonth, period: 'month', extraAvailable: extraSecondsAvailable,
+    monthlyTime: conversationConfigError ? configErrorLimit(conversationTimePeriod) : computeFeatureState({
+      enabled: conversationEnabled, unlimited: conversationTimeR.unlimited, limit: conversationTimeR.limit,
+      consumed: conversationSecondsConsumed, period: conversationTimePeriod, extraAvailable: extraSecondsAvailable,
     }),
     maxRecordingSeconds: conversationConfigError ? 0 : conversationMaxRecordingR.limit,
     maxRecordingUnlimited: conversationConfigError ? false : conversationMaxRecordingR.unlimited,
@@ -353,7 +439,12 @@ export async function getCurrentUserPlanEntitlements(
     listening,
     pronunciation,
     conversation,
-    monthlyRenewsAt: (conversationConfigError || monthlySecondsR.unlimited) ? null : resetAtIso,
+    trialAssignment: trialWindow
+      ? { id: plan.assignment_id as string, startsAt: trialWindow.startIso, endsAt: trialWindow.endIso }
+      : null,
+    // The trial's lifetime total never renews — always null, regardless of
+    // conversationConfigError/unlimited, unlike the monthly reset date below.
+    monthlyRenewsAt: (isTrial || conversationConfigError || conversationTimeR.unlimited) ? null : resetAtIso,
     resolvedAt: now.toISOString(),
   };
 }

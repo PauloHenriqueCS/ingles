@@ -4,6 +4,7 @@ import {
   formatSecondsAsMinSec,
   formatMonthlyRemaining,
   formatExtraMinutesRemaining,
+  formatTrialRemaining,
   formatClock,
 } from './entitlement-formatting';
 
@@ -40,6 +41,9 @@ describe('formatMonthlyRemaining / formatExtraMinutesRemaining', () => {
   });
   it('appends the extra-minutes suffix', () => {
     expect(formatExtraMinutesRemaining(200)).toBe('3 min 20 s restantes em minutos extras');
+  });
+  it('appends the trial suffix, never "neste mês"', () => {
+    expect(formatTrialRemaining(512)).toBe('8 min 32 s restantes no período de teste');
   });
 });
 

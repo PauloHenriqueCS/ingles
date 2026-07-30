@@ -460,3 +460,264 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(supabase.rpc).toHaveBeenCalledWith('admin_resolve_effective_plan_v1', expect.objectContaining({ p_user_id: 'the-real-user-id' }));
   });
 });
+
+// ── Etapa 2A — the internal 'trial' plan's lifetime Conversation total ──────
+describe('getCurrentUserPlanEntitlements — trial plan (conversation.realtime.seconds.trial_total)', () => {
+  const RESOLVED_TRIAL_PLAN = {
+    user_id: 'u1',
+    access_allowed: true,
+    plan_id: 'plan-trial',
+    plan_code: 'trial',
+    plan_name: 'Trial',
+    plan_version_id: 'version-trial-1',
+    version_number: 1,
+    is_suspended: false,
+    assignment_id: 'assignment-1',
+    starts_at: '2026-07-10T00:00:00Z',
+    ends_at: '2026-07-17T00:00:00Z',
+  };
+
+  const TRIAL_CAPS = [
+    { capability_key: 'conversation.enabled', value: true },
+    { capability_key: 'conversation.realtime.seconds.trial_total', value: 900 },
+    { capability_key: 'conversation.realtime.seconds.trial_total.unlimited', value: false },
+    { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+    { capability_key: 'conversation.extra_purchase_enabled', value: false },
+  ];
+
+  it('resolves conversation from trial_total/trial_total.unlimited, with period lifetime, never monthly', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null } },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.planCode).toBe('trial');
+    expect(snapshot.conversation.monthlyTime.limit).toBe(900);
+    expect(snapshot.conversation.monthlyTime.unlimited).toBe(false);
+    expect(snapshot.conversation.monthlyTime.period).toBe('lifetime');
+    expect(snapshot.conversation.monthlyTime.state).toBe('available');
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(900);
+    expect(snapshot.monthlyRenewsAt).toBeNull();
+  });
+
+  it('exposes the active trial assignment window (id/startsAt/endsAt)', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null } },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.trialAssignment).toEqual({
+      id: 'assignment-1', startsAt: '2026-07-10T00:00:00Z', endsAt: '2026-07-17T00:00:00Z',
+    });
+  });
+
+  it('900 available and 0 used -> 900 remaining', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: { data: TRIAL_CAPS, error: null },
+        conversation_session_authorizations: { data: [], error: null },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(900);
+  });
+
+  it('900 available and 300 used -> 600 remaining', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: { data: TRIAL_CAPS, error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'completed', authorized_at: '2026-07-11T10:00:00Z', authorized_max_seconds: 900, duration_seconds: 300 }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(300);
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(600);
+    expect(snapshot.conversation.monthlyTime.canStart).toBe(true);
+  });
+
+  it('900 available and 900 used -> 0 remaining, trial_balance_exhausted, canStart false', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: { data: TRIAL_CAPS, error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'completed', authorized_at: '2026-07-11T10:00:00Z', authorized_max_seconds: 900, duration_seconds: 900 }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(0);
+    expect(snapshot.conversation.monthlyTime.state).toBe('trial_balance_exhausted');
+    expect(snapshot.conversation.monthlyTime.canStart).toBe(false);
+  });
+
+  it('consumption never goes negative even if a stray row over-reports duration', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: { data: TRIAL_CAPS, error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'completed', authorized_at: '2026-07-11T10:00:00Z', authorized_max_seconds: 900, duration_seconds: 5000 }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(0);
+  });
+
+  it('a still-authorized (in-progress) row counts its live elapsed time, same rule as the monthly path', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: { data: TRIAL_CAPS, error: null },
+        conversation_session_authorizations: {
+          data: [{ status: 'authorized', authorized_at: '2026-07-12T11:45:00Z', authorized_max_seconds: 1800, duration_seconds: null }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(900); // 15 min elapsed
+    expect(snapshot.conversation.monthlyTime.remaining).toBe(0);
+  });
+
+  it('a month boundary crossing does not reset the trial balance (same data, different calendar month, same result)', async () => {
+    const rows = [{ status: 'completed', authorized_at: '2026-07-11T10:00:00Z', authorized_max_seconds: 900, duration_seconds: 300 }];
+    const julySupabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null }, conversation_session_authorizations: { data: rows, error: null } },
+    });
+    const augustSupabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null }, conversation_session_authorizations: { data: rows, error: null } },
+    });
+    const julySnapshot = await getCurrentUserPlanEntitlements('u1', { supabase: julySupabase, now: new Date('2026-07-12T12:00:00Z') });
+    const augustSnapshot = await getCurrentUserPlanEntitlements('u1', { supabase: augustSupabase, now: new Date('2026-08-05T12:00:00Z') });
+    expect(julySnapshot.conversation.monthlyTime.remaining).toBe(600);
+    expect(augustSnapshot.conversation.monthlyTime.remaining).toBe(600);
+  });
+
+  it('bounds the consumption query by the assignment window (authorized_at), never the calendar month', async () => {
+    const gteCalls: unknown[] = [];
+    const ltCalls: unknown[] = [];
+    const chain: Record<string, unknown> = {
+      select: () => chain,
+      eq: () => chain,
+      gte: (...args: unknown[]) => { gteCalls.push(args); return chain; },
+      lt: (...args: unknown[]) => { ltCalls.push(args); return chain; },
+      in: () => chain,
+      not: () => chain,
+      or: () => chain,
+      order: () => chain,
+      gt: () => chain,
+      lte: () => chain,
+      maybeSingle: () => Promise.resolve({ data: null }),
+      then: (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null }),
+    };
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [RESOLVED_TRIAL_PLAN], error: null }),
+      from: vi.fn((table: string) => {
+        if (table === 'conversation_session_authorizations') return chain;
+        return makeChain(table === 'plan_capability_values' ? { data: TRIAL_CAPS, error: null } : { data: [], error: null, count: 0 });
+      }),
+    } as any;
+
+    await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(gteCalls).toContainEqual(['authorized_at', RESOLVED_TRIAL_PLAN.starts_at]);
+    expect(ltCalls).toContainEqual(['authorized_at', RESOLVED_TRIAL_PLAN.ends_at]);
+    // Never queried by the calendar-month session_date bounds.
+    expect(gteCalls).not.toContainEqual(['session_date', expect.anything()]);
+  });
+
+  it('a commercial plan continues reading monthly and completely ignores a stray trial_total value', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN, // plan_code: 'free'
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.realtime.seconds.monthly.unlimited', value: false },
+            { capability_key: 'conversation.realtime.seconds.trial_total', value: 900 },
+            { capability_key: 'conversation.realtime.seconds.trial_total.unlimited', value: false },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: false },
+          ],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.limit).toBe(600);
+    expect(snapshot.conversation.monthlyTime.period).toBe('month');
+  });
+
+  it('a trial plan with only monthly configured (no trial_total) becomes config_error — never silently falls back to the monthly value', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.realtime.seconds.monthly.unlimited', value: false },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: false },
+          ],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.state).toBe('config_error');
+    expect(snapshot.conversation.enabled).toBe(false);
+  });
+
+  it('a trial-coded plan resolved WITHOUT a real assignment (no assignment_id/starts_at) is a safe config_error, never unlimited', async () => {
+    const supabase = makeMockSupabase({
+      planRow: { ...RESOLVED_TRIAL_PLAN, assignment_id: null, starts_at: null, ends_at: null },
+      tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null } },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.state).toBe('config_error');
+    expect(snapshot.conversation.monthlyTime.unlimited).toBe(false);
+    expect(snapshot.trialAssignment).toBeNull();
+  });
+
+  it('trial_total = 0 with unlimited=false means zero balance, not unlimited', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_TRIAL_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.trial_total', value: 0 },
+            { capability_key: 'conversation.realtime.seconds.trial_total.unlimited', value: false },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: false },
+          ],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.conversation.monthlyTime.unlimited).toBe(false);
+    expect(snapshot.conversation.monthlyTime.limit).toBe(0);
+    expect(snapshot.conversation.monthlyTime.state).toBe('trial_balance_exhausted');
+    expect(snapshot.conversation.monthlyTime.canStart).toBe(false);
+  });
+});

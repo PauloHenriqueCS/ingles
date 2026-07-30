@@ -16,7 +16,7 @@ import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 import type { ConversationEntitlements } from '../domain/entitlements/entitlement-types';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
-import { formatMonthlyRemaining, formatExtraMinutesRemaining } from '../domain/entitlements/entitlement-formatting';
+import { formatMonthlyRemaining, formatExtraMinutesRemaining, formatTrialRemaining } from '../domain/entitlements/entitlement-formatting';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -80,8 +80,14 @@ function ConversationBalanceIndicator({ conversation }: { conversation: Conversa
   if (conversation.monthlyTime.state === 'monthly_limit_reached') {
     return <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>;
   }
+  if (conversation.monthlyTime.state === 'trial_balance_exhausted') {
+    return <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted}</p>;
+  }
   if (conversation.monthlyTime.state === 'available_with_extra_credits') {
     return <p className="text-xs text-amber-300 text-center">{formatExtraMinutesRemaining(conversation.monthlyTime.remaining)}</p>;
+  }
+  if (conversation.monthlyTime.period === 'lifetime') {
+    return <p className="text-xs text-slate-400 text-center">{formatTrialRemaining(conversation.monthlyTime.remaining)}</p>;
   }
   return <p className="text-xs text-slate-400 text-center">{formatMonthlyRemaining(conversation.monthlyTime.remaining)}</p>;
 }

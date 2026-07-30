@@ -26,6 +26,11 @@ export function formatExtraMinutesRemaining(totalSeconds: number): string {
   return `${formatSecondsAsMinSec(totalSeconds)} restantes em minutos extras`;
 }
 
+/** "8 min 32 s restantes no período de teste" — trial's lifetime total (period='lifetime'), never "neste mês". */
+export function formatTrialRemaining(totalSeconds: number): string {
+  return `${formatSecondsAsMinSec(totalSeconds)} restantes no período de teste`;
+}
+
 /** "00:12" — mm:ss clock for recording timers. */
 export function formatClock(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
