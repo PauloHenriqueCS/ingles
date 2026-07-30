@@ -9,3 +9,4 @@ UserspauloAppDataLocalTempgh_deployments.json
 .vercel
 .env*
 !.env.mobile
+supabase/.temp/
