@@ -6,8 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,6 +26,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
+      - name: Gateway typecheck (api/_ai-gateway and dependents)
+        run: npx tsc -p tsconfig.gateway.json --noEmit
 
   # ── 2. Unit tests ────────────────────────────────────────────────────────────
   unit-tests:
