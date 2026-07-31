@@ -11,7 +11,10 @@ import { execSync } from 'child_process';
 import path from 'path';
 
 const ROOT = path.resolve(__dirname, '../..');
-const EXEC = (cmd: string) => execSync(cmd, { cwd: ROOT, encoding: 'utf8', timeout: 120_000 });
+// maxBuffer default is 1 MB — the growing suite's --reporter=verbose output
+// now exceeds that on its own (ENOBUFS), independent of whether the tests
+// themselves pass or fail. 64 MB is a generous ceiling for stdout+stderr.
+const EXEC = (cmd: string) => execSync(cmd, { cwd: ROOT, encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
 
 test.describe('Baseline — unit tests, TypeScript, build', () => {
   test('vitest: all unit tests pass', () => {
