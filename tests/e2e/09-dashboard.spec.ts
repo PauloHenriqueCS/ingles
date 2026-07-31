@@ -70,18 +70,24 @@ test.describe('Dashboard — novo usuário (sem dados)', () => {
   });
 });
 
-// ── Section 9.2 — Dashboard content ───────────────────────────────────────────
+// ── Section 9.2 — Home screen (HomePage) content ────────────────────────────
+// view: 'dashboard' (Dashboard.tsx, heading "Início") has had no navigation
+// path since 765ce6b ("remove item duplicado Início do menu", 2026-07-16) —
+// neither HamburgerMenu.tsx nor BottomNav.tsx list it. HomePage.tsx (view:
+// 'home', the default view, menu label "Página inicial") is the real current
+// home screen; the two tests below validate its actual content instead.
+// Dashboard.tsx itself is left as-is — this only updates the tests.
 
-test.describe('Dashboard — conteúdo e estrutura', () => {
-  test('dashboard mostra título "Início"', async ({ page }) => {
+test.describe('Tela inicial (HomePage) — conteúdo e estrutura', () => {
+  test('tela inicial mostra o título e subtítulo atuais', async ({ page }) => {
     await setupA1User(page);
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    await openDashboard(page);
-
-    await expect(page.getByRole('heading', { name: 'Início' }).or(page.getByText('Início')).first())
+    await expect(page.getByRole('heading', { name: 'O que você quer praticar hoje?' }))
       .toBeVisible({ timeout: 8_000 });
+    await expect(page.getByText('Escolha uma atividade e continue sua evolução no inglês'))
+      .toBeVisible();
   });
 
   test('dashboard não exibe zeros ou A1 inventado durante loading', async ({ page }) => {
@@ -106,16 +112,15 @@ test.describe('Dashboard — conteúdo e estrutura', () => {
     await expect(page.locator('body')).toBeVisible();
   });
 
-  test('dashboard exibe seção "Próximo treino"', async ({ page }) => {
+  test('tela inicial exibe os quatro cards de atividade', async ({ page }) => {
     await setupA1User(page);
     await page.goto('/');
     await page.waitForLoadState('networkidle');
-    await openDashboard(page);
 
-    // Either recommendation card or the placeholder text should be visible
-    const trainingSection = page.getByText('Próximo treino')
-      .or(page.getByText('Conclua pelo menos uma avaliação'));
-    await expect(trainingSection.first()).toBeVisible({ timeout: 8_000 });
+    await expect(page.getByRole('heading', { name: 'Praticar escrita e voz' })).toBeVisible({ timeout: 8_000 });
+    await expect(page.getByRole('heading', { name: 'Conversar com IA' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Praticar listening' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Treinar pronúncia' })).toBeVisible();
   });
 
   test('dashboard exibe estado vazio único quando não há atividades', async ({ page }) => {
