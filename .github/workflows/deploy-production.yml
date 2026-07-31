@@ -1,0 +1,192 @@
+name: Deploy Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+  SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROD_PROJECT_REF }}
+  SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_PROD_DB_PASSWORD }}
+
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROD_PROJECT_ID }}
+
+  PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+
+jobs:
+  # Single job, single linear sequence of steps — GitHub Actions' default
+  # behavior already guarantees no later step runs once an earlier one fails
+  # (no `continue-on-error`, no `if: always()` anywhere below), so migrations
+  # failing stops the job before the Vercel steps ever run, with no extra
+  # conditionals needed to enforce that.
+  deploy:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      # ── 1. Checkout the exact commit that landed on main ──────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      # ── 2. Node + dependencies ─────────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+
+      # ── 3. Validations (re-run here even though CI already ran them on the PR —
+      # this validates the exact commit that landed on main, e.g. after a squash
+      # merge, before it can reach production) ───────────────────────────────────
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Gateway typecheck
+        run: npx tsc -p tsconfig.gateway.json --noEmit
+      - name: Unit tests
+        # src/lib/supabase.ts calls createClient() at module load time — same
+        # cause already fixed in ci.yml's unit-tests job. Step-scoped (not in
+        # the job-level env: above) so these placeholders can never reach
+        # vercel pull/build/deploy below, which must only ever see the real
+        # values Vercel pulls from the production project itself.
+        env:
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+          VITE_SUPABASE_ANON_KEY: test-anon-key
+        run: npm test
+      - name: Build
+        # Local validation build only (mirrors ci.yml's "Vite Build" job) —
+        # not what gets deployed. The real production bundle is produced by
+        # "Vercel build" below, using vercel pull's real env vars. Same
+        # step-scoping rationale as the Unit tests step above.
+        env:
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: placeholder-anon-key
+        run: npm run build
+
+      # ── 4. Supabase CLI — official, maintained action ──────────────────────────
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          # Pinned, not `latest`: this repo has no supabase/config.toml to
+          # auto-detect a version from. 2.110.0 was the latest stable
+          # (non-prerelease) release at the time this workflow was authored
+          # (2026-07-31, confirmed via the GitHub Releases API). Bump this
+          # value deliberately when upgrading — never switch to `latest`.
+          version: 2.110.0
+
+      # ── 5. Verify every required secret is present before touching any
+      # external service. Values are never printed — only which name (if any)
+      # is missing.
+      - name: Verify required secrets
+        run: |
+          missing=0
+          check() {
+            local internal_name="$1" secret_name="$2"
+            local value="${!internal_name}"
+            if [ -z "$value" ]; then
+              echo "Missing required secret: $secret_name"
+              missing=1
+            fi
+          }
+          check SUPABASE_ACCESS_TOKEN SUPABASE_ACCESS_TOKEN
+          check SUPABASE_PROJECT_REF SUPABASE_PROD_PROJECT_REF
+          check SUPABASE_DB_PASSWORD SUPABASE_PROD_DB_PASSWORD
+          check VERCEL_TOKEN VERCEL_TOKEN
+          check VERCEL_ORG_ID VERCEL_ORG_ID
+          check VERCEL_PROJECT_ID VERCEL_PROD_PROJECT_ID
+          check PRODUCTION_BASE_URL PRODUCTION_BASE_URL
+          if [ "$missing" -eq 1 ]; then
+            echo "One or more required secrets are missing from the 'production' GitHub Environment. Aborting before any external service is touched."
+            exit 1
+          fi
+
+      # ── 6. Link explicitly to the production Supabase project named by the
+      # SUPABASE_PROD_PROJECT_REF secret — never supabase/.temp/ (local dev
+      # machine cache, not committed) and never whatever project a previous
+      # local `supabase link` happened to use.
+      - name: Link Supabase production project
+        run: |
+          supabase link \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --password "$SUPABASE_DB_PASSWORD"
+
+      # ── 7. Migration history + dry-run, against the linked production project ──
+      - name: Migration history (before)
+        run: supabase migration list
+      - name: Migration dry-run
+        run: supabase db push --dry-run
+
+      # ── 8. Apply migrations. Any failure here stops the job outright: no
+      # repair/ignore/manual-SQL fallback, no Vercel deploy after this point. ────
+      - name: Apply migrations
+        run: supabase db push
+      - name: Migration history (after)
+        run: supabase migration list
+
+      # ── 9. Vercel CLI — pinned version, installed via npm (official package) ──
+      - name: Install Vercel CLI
+        run: npm install --global vercel@58.4.4
+
+      # ── 10. Pull the production Vercel project config ──────────────────────────
+      - name: Pull Vercel project (production)
+        run: |
+          vercel pull \
+            --yes \
+            --environment=production \
+            --token="$VERCEL_TOKEN"
+
+      # ── 11. Build ────────────────────────────────────────────────────────────────
+      - name: Vercel build
+        run: |
+          vercel build \
+            --prod \
+            --token="$VERCEL_TOKEN"
+
+      # ── 12. Deploy the prebuilt output ──────────────────────────────────────────
+      - name: Vercel deploy
+        id: vercel_deploy
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "deployment_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
+
+      # ── 13. Smoke test the public production domain (not the ephemeral deploy
+      # URL above) — confirms the alias actually moved and the app responds. ─────
+      - name: Smoke test — /
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "$PRODUCTION_BASE_URL/"
+
+      - name: Smoke test — /api/config/public
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "$PRODUCTION_BASE_URL/api/config/public"

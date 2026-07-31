@@ -21,7 +21,7 @@ interface Props {
   initialV2FinalText?: string;
   studentLevel?: string;
   onSaveV2?: (v2Text: string, v2Comparison: RewriteComparisonResult) => void;
-  onV2FinalText?: (finalText: string) => void;
+  onV2FinalText?: (finalText: string, alreadyPersisted: boolean) => void | Promise<void>;
 }
 
 export default function RewriteSection({
@@ -58,6 +58,7 @@ export default function RewriteSection({
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           generateFinalTextOnly: true,
+          reviewId,
           correctedText: aiReview.correctedText,
           rewriteText: v2Text,
         }),
@@ -83,9 +84,20 @@ export default function RewriteSection({
       }
       const final = String(data?.finalCorrectedText ?? '').trim();
       if (!final) throw new Error('Resposta vazia');
+      // The generation is only "done" once the result is safely persisted.
+      // When the backend already persisted it (reviewId present), the callback
+      // just syncs local state; otherwise it persists and we await confirmation
+      // before marking done, so a failed save never masquerades as success.
+      try {
+        await onV2FinalText?.(final, data?.persisted === true);
+      } catch (persistErr) {
+        console.error('[generate-final-text][persist]', persistErr);
+        setFinalCorrectErrorMessage('A versão final foi gerada, mas não foi possível salvá-la. Tente novamente.');
+        setFinalCorrectState('error');
+        return;
+      }
       setFinalCorrectedText(final);
       setFinalCorrectState('done');
-      onV2FinalText?.(final);
     } catch (err) {
       console.error('[generate-final-text]', err);
       setFinalCorrectErrorMessage('Não foi possível gerar a versão final corrigida agora. Verifique sua conexão e tente novamente.');

@@ -2,10 +2,27 @@
 
 ## Regra fundamental
 
-**Nunca executar `supabase db push` contra o banco de produção.**
+Migrations versionadas em `supabase/migrations/` são aplicadas **automaticamente**
+contra o banco de produção pelo workflow `.github/workflows/deploy-production.yml`,
+depois de um merge na branch `main` — nunca manualmente no SQL Editor e nunca
+antes dos testes/build/dry-run passarem.
 
-Toda migration é aplicada **manualmente** no Supabase SQL Editor:
-Dashboard → SQL Editor → Nova query → cole o arquivo → Execute.
+Esta regra substitui a política anterior ("nunca executar `supabase db push`
+contra produção, sempre manual"), que valia antes da automação de release existir.
+
+## Deploy de produção
+
+A ordem da release é:
+
+1. testes;
+2. build;
+3. dry-run das migrations;
+4. aplicação das migrations;
+5. confirmação do histórico;
+6. build e deploy da Vercel;
+7. smoke test.
+
+Se uma migration falhar, o código não é publicado na Vercel.
 
 ---
 
@@ -110,7 +127,9 @@ Use UTC. Exemplo: `20260801090000_add_user_preferences_theme.sql`
 -- MIGRATION: YYYYMMDDHHMMSS_nome
 -- Projeto: Lemon
 --
--- APLICAR UMA ÚNICA VEZ no Supabase SQL Editor.
+-- Aplicada automaticamente por .github/workflows/deploy-production.yml
+-- (supabase db push) após o merge na main. Não aplicar manualmente no SQL
+-- Editor — isso desalinha o histórico de `supabase migration list`.
 -- Esta migration NÃO modifica nem remove dados existentes.
 -- =============================================================================
 

@@ -89,7 +89,7 @@ export default function PronunciationWordDetailPanel({ word, returnFocusId, onCl
             </p>
             {recognizedDiffers && word.recognizedWord && (
               <p className="text-xs text-slate-500">
-                O Azure identificou:{' '}
+                A análise identificou:{' '}
                 <span className="text-slate-300 font-medium">{word.recognizedWord}</span>
               </p>
             )}
@@ -218,7 +218,7 @@ function PhonemeSection({ phonemes }: { phonemes: PronunciationWordDetail['phone
           );
         })}
       </div>
-      <p className="text-[10px] text-slate-600">Símbolos fornecidos pelo Azure Speech.</p>
+      <p className="text-[10px] text-slate-600">Símbolos fonéticos de referência.</p>
     </div>
   );
 }

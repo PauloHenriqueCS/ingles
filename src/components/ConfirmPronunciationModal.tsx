@@ -52,7 +52,7 @@ export default function ConfirmPronunciationModal({ onConfirm, onCancel }: Props
         </p>
 
         <ul className="text-xs text-slate-400 space-y-1 list-disc list-inside leading-relaxed">
-          <li>A gravação será enviada ao serviço Azure Speech para avaliação.</li>
+          <li>A gravação será enviada para avaliação da sua pronúncia.</li>
           <li>O processo pode levar alguns segundos.</li>
           <li>Se houver uma falha técnica recuperável, a avaliação não será consumida definitivamente.</li>
         </ul>

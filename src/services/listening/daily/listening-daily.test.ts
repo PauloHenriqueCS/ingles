@@ -69,8 +69,14 @@ describe('resolveListeningCalendarStatus', () => {
     expect(resolveListeningCalendarStatus('completed')).toBe('completed');
   });
 
-  it('undefined → coming_soon', () => {
-    expect(resolveListeningCalendarStatus(undefined)).toBe('coming_soon');
+  // 'coming_soon' is a UI-level concept derived from comparing a calendar
+  // date to today (see DailyProgressModal.tsx) — this function only ever
+  // sees an assignment status, never a date, so it cannot distinguish
+  // "no assignment yet because it's future" from "no assignment yet because
+  // it's today". 'not_started' is the correct, intentional fallback here,
+  // matching the same `?? 'not_started'` fallback in dailyProgress.ts.
+  it('undefined → not_started', () => {
+    expect(resolveListeningCalendarStatus(undefined)).toBe('not_started');
   });
 
   it("'in_progress' → 'in_progress'", () => {

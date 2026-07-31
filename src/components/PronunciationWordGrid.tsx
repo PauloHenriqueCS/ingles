@@ -111,7 +111,7 @@ export default function PronunciationWordGrid({ aligned, insertions }: Props) {
               Palavras adicionais identificadas
             </p>
             <p className="text-[10px] text-slate-600">
-              O Azure identificou estas palavras, mas elas não fazem parte do texto de referência.
+              A análise identificou estas palavras, mas elas não fazem parte do texto de referência.
             </p>
             <div className="flex flex-wrap gap-1.5">
               {insertions.map((word) => (

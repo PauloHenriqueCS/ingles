@@ -330,7 +330,17 @@ describe('compare-rewrite handler', () => {
     authOk();
     const res = makeRes();
     rateLimitBlock(res);
-    const req = makeReq({ method: 'POST', body: { originalText: 'hello', correctedText: 'hello', rewriteText: 'hello' } });
+    // rewriteText must clear the content-quality gate (validateRewriteText,
+    // MIN_WORD_COUNT = 3) so the request actually reaches the rate limiter
+    // this test exercises, instead of being rejected earlier as too-few-words.
+    const req = makeReq({
+      method: 'POST',
+      body: {
+        originalText: 'Yesterday I goed to the store.',
+        correctedText: 'Yesterday I went to the store.',
+        rewriteText: 'Yesterday I went to the store and buyed bread.',
+      },
+    });
     await handler(req, res);
     expect(res._status()).toBe(429);
     expect(res._headers()['Retry-After']).toBeDefined();

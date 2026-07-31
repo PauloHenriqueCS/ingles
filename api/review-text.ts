@@ -12,6 +12,17 @@ import { isValidUuid } from '../src/lib/pronunciationAssessment';
 
 const AI_MODEL = 'gpt-4o-mini';
 
+/**
+ * Shared guidance so each `mainMistakes` item explains the learner's REAL,
+ * primary error precisely — not a secondary detail and not a generic rule.
+ * Injected into both the normal and review system prompts.
+ */
+const MAIN_MISTAKES_PRECISION_RULES = `- Cada item de mainMistakes deve identificar o ERRO PRINCIPAL e REAL daquela frase, não um detalhe secundário. Se houver mais de um problema, priorize o mais importante e não omita o erro central.
+- O campo "correct" deve ser a forma realmente correta e equivalente à ideia do aluno; a "explanation" deve descrever com precisão o que estava errado e a regra aplicável, no nível do aluno. Não substitua a explicação específica por uma regra genérica.
+- Contrações corretas (doesn't, don't, isn't, aren't, wasn't, weren't, can't, won't, etc.) são equivalentes à forma expandida (does not, do not, is not...). NUNCA trate uma contração correta como erro.
+- Concordância com auxiliares: depois de "do/does/did" — inclusive nas negativas "don't/doesn't/didn't" — o verbo principal volta à FORMA BASE (o -s da terceira pessoa já está no auxiliar). Ex.: "He doesn't likes" está errado; o correto é "He doesn't like". Ao apontar esse tipo de erro, explique exatamente isso, e não apenas que a negativa foi formada.
+- Garanta que a forma mostrada em "correct" seja de fato aceita como correta e coerente com o correctedText.`;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type RequiredWordEvaluationStatus =
@@ -125,6 +136,7 @@ Regras:
 - level deve ser A1, A2, B1, B2, C1 ou C2.
 - correctedText deve corrigir o texto mantendo a ideia original do aluno, em inglês.
 - mainMistakes deve conter no máximo 5 erros principais.
+${MAIN_MISTAKES_PRECISION_RULES}
 - newVocabulary deve conter de 3 a 5 itens.
 - objectiveFeedback deve explicar se o objetivo gramatical do dia foi cumprido.
 - nextPractice deve ser uma tarefa curta e prática para o próximo treino.
@@ -189,6 +201,7 @@ Regras para os campos principais:
 - level: A1, A2, B1, B2, C1 ou C2.
 - correctedText: corrigir mantendo a ideia original, em inglês.
 - mainMistakes: no máximo 5 erros.
+${MAIN_MISTAKES_PRECISION_RULES}
 - newVocabulary: 3 a 5 itens.
 - objectiveFeedback: se o objetivo gramatical foi cumprido.
 - nextPractice: tarefa curta para o próximo treino.

@@ -167,13 +167,16 @@ describe('7. locked topic never becomes primary', () => {
 
 describe('8. locked topic is never required', () => {
   it('locked topic appears in forbiddenRequiredTopicIds', () => {
+    // grammar.present_perfect was split into grammar.present_perfect.{intro,
+    // markers,vs_past_simple} in the catalog — the bare id was never a real
+    // topic, so it silently matched nothing. Use the real sub-topic id.
     const plan = planMission({
       writingProfile: { level: 'A1', status: 'confirmed', confidence: 0.9 },
       grammarMastery: [
-        makeMastery('grammar.present_perfect', 'locked'),
+        makeMastery('grammar.present_perfect.intro', 'locked'),
       ],
     });
-    expect(plan.generationConstraints.forbiddenRequiredTopicIds).toContain('grammar.present_perfect');
+    expect(plan.generationConstraints.forbiddenRequiredTopicIds).toContain('grammar.present_perfect.intro');
   });
 });
 
@@ -203,10 +206,15 @@ describe('9. introduced topic can appear with support', () => {
 
 describe('10. practicing topic can be primary', () => {
   it('practicing topic is eligible for primary role', () => {
+    // grammar.past_simple's prerequisites in the catalog are
+    // grammar.present_simple AND grammar.verb_to_be.past — without the
+    // latter mastered, the topic is prerequisite-blocked and never gets a
+    // production role at all (see evaluateTopicPrerequisites).
     const mastery: LearnerGrammarSnapshot[] = [
       makeMastery('grammar.past_simple', 'practicing', { confidence: 0.6 }),
       makeMastery('grammar.present_simple', 'mastered'),
       makeMastery('grammar.pronouns.subject', 'mastered'),
+      makeMastery('grammar.verb_to_be.past', 'mastered'),
     ];
     const plan = planMission({
       writingProfile: { level: 'A2', status: 'confirmed', confidence: 0.85 },
@@ -269,9 +277,14 @@ describe('12. mastered topic is not repeated artificially', () => {
 
 describe('13. maintenance due topic is eligible', () => {
   it('maintenance topic with past-due date is selected for review', () => {
+    // grammar.present_simple's prerequisites (grammar.pronouns.subject,
+    // grammar.verb_to_be.present) must be satisfied or the topic is
+    // prerequisite-blocked before the maintenance-due check is even reached.
     const pastDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const mastery: LearnerGrammarSnapshot[] = [
       makeMastery('grammar.present_simple', 'maintenance', { maintenanceDueAt: pastDate }),
+      makeMastery('grammar.pronouns.subject', 'mastered'),
+      makeMastery('grammar.verb_to_be.present', 'mastered'),
     ];
     const { topics } = selectGrammarTopicsForMission({
       effectiveLevel: 'A1',

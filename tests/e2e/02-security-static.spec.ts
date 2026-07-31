@@ -14,6 +14,17 @@ import { execSync } from 'child_process';
 const ROOT   = path.resolve(__dirname, '../..');
 const DIST   = path.join(ROOT, 'dist');
 
+/**
+ * Blanks out the contents of string literals (keeping the quotes) so the
+ * logging-safety checks below match real code — a bare `token`/`authorization`
+ * identifier being passed as a log argument — instead of the words appearing
+ * incidentally inside a log message's own text, e.g. "Unexpected token error"
+ * or "Authorization check failed" are not a credential being logged.
+ */
+function stripStringLiterals(src: string): string {
+  return src.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, (m) => `${m[0]}${m[0]}`);
+}
+
 function readAllJsInDist(): string {
   if (!fs.existsSync(DIST)) return '';
   const files = fs.readdirSync(path.join(DIST, 'assets')).filter(f => f.endsWith('.js'));
@@ -105,18 +116,40 @@ test.describe('Security — bundle inspection', () => {
 });
 
 test.describe('Security — API handler source inspection', () => {
-  test('api/pronunciation/start.ts uses Cache-Control: no-store for token response', () => {
-    const src = fs.readFileSync(
-      path.join(ROOT, 'api/pronunciation/start.ts'), 'utf8'
-    );
-    expect(src).toContain('no-store');
+  // api/pronunciation/{start,complete,fail,status}.ts were consolidated into
+  // a single [...slug].ts catch-all dispatcher (Vercel Hobby plan's
+  // 12-function cap — see api/conversation/ and api/listening/ for the same
+  // pattern repo-wide). Resolve whichever shape actually exists on disk
+  // instead of hardcoding paths that silently go stale on the next
+  // reorganization; fail with a clear message (not a bare ENOENT) if
+  // neither shape is found.
+  function resolvePronunciationHandlerFiles(): string[] {
+    const dir = path.join(ROOT, 'api/pronunciation');
+    const consolidated = path.join(dir, '[...slug].ts');
+    if (fs.existsSync(consolidated)) return [consolidated];
+
+    const individual = ['start.ts', 'complete.ts', 'fail.ts', 'status.ts'].map(f => path.join(dir, f));
+    const missing = individual.filter(f => !fs.existsSync(f));
+    if (missing.length > 0) {
+      throw new Error(
+        `Could not find the pronunciation API handler(s) to inspect. Expected either ` +
+        `${consolidated} or all of: ${individual.join(', ')}. Missing: ${missing.join(', ')}. ` +
+        `Update this resolver in tests/e2e/02-security-static.spec.ts to match the current api/pronunciation/ structure.`
+      );
+    }
+    return individual;
+  }
+
+  test('pronunciation start handler uses Cache-Control: no-store for the token response', () => {
+    for (const file of resolvePronunciationHandlerFiles()) {
+      expect(fs.readFileSync(file, 'utf8')).toContain('no-store');
+    }
   });
 
-  test('api/pronunciation/complete.ts uses Cache-Control: no-store', () => {
-    const src = fs.readFileSync(
-      path.join(ROOT, 'api/pronunciation/complete.ts'), 'utf8'
-    );
-    expect(src).toContain('no-store');
+  test('pronunciation complete handler uses Cache-Control: no-store', () => {
+    for (const file of resolvePronunciationHandlerFiles()) {
+      expect(fs.readFileSync(file, 'utf8')).toContain('no-store');
+    }
   });
 
   test('api/_azure-speech.ts has no VITE_ prefix on secret vars', () => {
@@ -131,15 +164,9 @@ test.describe('Security — API handler source inspection', () => {
     expect(src).toContain('process.env.AZURE_SPEECH_KEY');
   });
 
-  test('api/ handlers do not log Authorization header or full token', () => {
-    const handlers = [
-      'api/pronunciation/start.ts',
-      'api/pronunciation/complete.ts',
-      'api/pronunciation/fail.ts',
-      'api/pronunciation/status.ts',
-    ].map(f => fs.readFileSync(path.join(ROOT, f), 'utf8'));
-
-    for (const src of handlers) {
+  test('pronunciation handlers do not log Authorization header or full token', () => {
+    for (const file of resolvePronunciationHandlerFiles()) {
+      const src = stripStringLiterals(fs.readFileSync(file, 'utf8'));
       // Must not log the Authorization header
       expect(src).not.toMatch(/console\.\w+\(.*[Aa]uthorization/);
       // Must not log raw tokens
