@@ -94,13 +94,21 @@ jobs:
           retention-days: 7
 
   # ── 5. Browser E2E — smoke + dashboard + calendar ────────────────────────────
+  # Points at the existing lemon-homolog Supabase project (never production,
+  # never a new project created for this). Safe to do so: every test in
+  # 09-dashboard/10-calendar/11-smoke.spec.ts mocks 100% of Supabase
+  # auth/REST traffic via page.route() catch-alls (see tests/e2e/helpers/
+  # auth.ts, fixtures.ts) — no real request ever leaves the browser, no
+  # write/delete call exists in any of the three files, and every test user
+  # is a synthetic, disposable fake id/email. The real project is only
+  # needed so createClient()'s URL is well-formed; its data is never touched.
   e2e-browser:
     name: E2E Browser (smoke + dashboard + calendar)
     runs-on: ubuntu-latest
     needs: [build]
     env:
-      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || 'https://placeholder.supabase.co' }}
-      VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key' }}
+      VITE_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.E2E_SUPABASE_ANON_KEY }}
       CI: true
     steps:
       - uses: actions/checkout@v4
