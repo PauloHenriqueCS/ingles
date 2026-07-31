@@ -152,8 +152,22 @@ function makeSupabase(opts: MockOpts = {}) {
         ...chain,
         eq: vi.fn().mockImplementation(() => ({
           ...chain,
-          order: vi.fn().mockResolvedValue(getTableData(table, col, val, opts, {
-            sentences, bookmarks, wordTimings, enCues, ptCues, blocks,
+          // Chainable AND directly awaitable, same dual-purpose shape as the
+          // single-eq `order` below: the real query here is
+          // .eq().eq().order().limit().maybeSingle() (listening_audio_assets
+          // lookup) — .order() must return something with .limit() rather
+          // than resolving straight to {data, error}.
+          order: vi.fn().mockImplementation(() => ({
+            ...chain,
+            limit: vi.fn().mockReturnValue({
+              ...chain,
+              maybeSingle: vi.fn().mockResolvedValue({
+                data: table === 'listening_audio_assets' ? audioAsset : null, error: null,
+              }),
+            }),
+            ...getTableData(table, col, val, opts, {
+              sentences, bookmarks, wordTimings, enCues, ptCues, blocks,
+            }),
           })),
           limit: vi.fn().mockReturnValue({
             ...chain,
@@ -433,8 +447,12 @@ describe('buildListeningCueTimings', () => {
     const timings = buildListeningCueTimings(
       EN_CUES, SENTENCES, makeSentenceTimings(), makeAlignedWordsMap(), AUDIO_DURATION_MS, DEFAULT_TIMING_CONFIG,
     );
-    // b1-c001: first word (Hello) starts at 520. With 100ms pre-roll: 420, but clamped to >=0
-    expect(timings[0].startMs).toBe(Math.max(0, 520 - DEFAULT_TIMING_CONFIG.preRollMs));
+    // b1-c001: first word (Hello) starts at 520. With 100ms pre-roll that's
+    // 420, but buildListeningCueTimings also clamps to the sentence's own
+    // hardStart (b1-s001.startMs = 500 in makeSentenceTimings() above) so the
+    // cue never bleeds before its sentence's bookmark-derived boundary —
+    // 500 wins over both 420 and the >=0 floor.
+    expect(timings[0].startMs).toBe(Math.max(0, 500, 520 - DEFAULT_TIMING_CONFIG.preRollMs));
   });
 
   it('case 19: uses last word endMs as cue end (with post-roll)', () => {

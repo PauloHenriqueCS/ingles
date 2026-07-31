@@ -139,6 +139,39 @@ function postProcess(ops: AlignOp[], canonical: string[], azure: string[]): Alig
     }
   }
 
+  // Backward pass: detect split contractions the forward pass above misses.
+  // Wagner-Fischer sometimes prefers `ins("do") + sub("don't"~"n't")` over
+  // `del("don't") + ins("do") + ins("n't")` — same words consumed, but a
+  // cheaper total cost under these weights (COST_INS + COST_SUB = 1.5 vs
+  // COST_DEL + COST_INS*2 = 2.0) — so the split never reaches the forward
+  // pass's del-then-ins-ins pattern. Same idea, mirrored: consecutive `ins`
+  // ops immediately BEFORE a `sub`, whose combined azure text equals the
+  // sub's own canonical word, are the same split contraction.
+  for (let i = 0; i < result.length; i++) {
+    const op = result[i];
+    if (op.op !== 'sub' || op.ci === null || op.ai === null) continue;
+
+    const cWord = normalizeListeningWord(canonical[op.ci]);
+    const insIdxs: number[] = [];
+    for (let j = i - 1; j >= 0 && insIdxs.length < 3; j--) {
+      if (result[j].op !== 'ins' || result[j].ai === null) break;
+      insIdxs.unshift(j);
+    }
+    if (insIdxs.length === 0) continue;
+
+    const combined = [...insIdxs, i]
+      .map(idx => normalizeListeningWord(azure[result[idx].ai!]))
+      .join('');
+    if (combined === cWord || combined.replace(/'/g, '') === cWord.replace(/'/g, '')) {
+      const firstAi = result[insIdxs[0]].ai!;
+      result[i] = { op: 'match', ci: op.ci, ai: firstAi };
+      (result[i] as AlignOp & { isSplit?: true; splitEndAi?: number }).isSplit = true;
+      (result[i] as AlignOp & { isSplit?: true; splitEndAi?: number }).splitEndAi = op.ai;
+      result.splice(insIdxs[0], insIdxs.length);
+      i -= insIdxs.length;
+    }
+  }
+
   return result;
 }
 

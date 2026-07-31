@@ -36,6 +36,30 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 
+// api/tts.ts now resolves the default voice/locale/output-format from the
+// product-config service (Central de Configuração — see
+// src/server/product-config), which needs real Supabase service-role
+// credentials outside this mock. SAFE_DEFAULTS mirrors the same hardcoded
+// values the endpoint used before that service existed, so this keeps every
+// existing assertion (DEFAULT_ENGLISH_VOICE, etc.) valid unchanged.
+vi.mock('../../src/server/product-config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/server/product-config')>();
+  const { SAFE_DEFAULTS } = await import('../../src/server/product-config/defaults');
+  return {
+    ...actual,
+    getProductConfig: vi.fn(async () => ({
+      environment: 'development' as const,
+      values: SAFE_DEFAULTS,
+      versionNumber: 0,
+      configHash: 'test-fixture',
+      usingFallback: true,
+      schemaValid: true,
+      source: 'fallback_no_version' as const,
+      loadedAt: Date.now(),
+    })),
+  };
+});
+
 import handler from '../tts';
 
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000010';

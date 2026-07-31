@@ -1,11 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
+
+const { mockGetCurrentUserPlanEntitlements } = vi.hoisted(() => ({
+  mockGetCurrentUserPlanEntitlements: vi.fn(),
+}));
 
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
 }));
 
+// handleComplete re-checks the plan's recording-duration cap server-side
+// (Item added after this test was first written) — unmocked, the real
+// service tried to reach Supabase and every request past validation 500'd.
+vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
+
 import { requireAuth } from '../../api/_auth';
-import handler from '../../api/pronunciation/complete';
+// Consolidated into the [...slug].ts catch-all dispatcher (Vercel Hobby
+// plan's 12-function cap) — the standalone complete.ts no longer exists.
+import handler from '../../api/pronunciation/[...slug]';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -28,9 +42,25 @@ const VALID_RESULT = {
 const mockRpc = vi.fn();
 const mockSupabase = { rpc: mockRpc };
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 function makeReq(overrides: Record<string, unknown> = {}) {
   return {
     method: 'POST',
+    url: '/api/pronunciation/complete',
     headers: { 'content-length': '500' },
     body: { assessmentId: VALID_ASSESSMENT_ID, attemptId: VALID_ATTEMPT_ID, result: VALID_RESULT },
     ...overrides,
@@ -56,6 +86,7 @@ beforeEach(() => {
     supabase: mockSupabase as any,
   });
   mockRpc.mockResolvedValue({ data: { action: 'completed' }, error: null });
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 
 afterEach(() => {

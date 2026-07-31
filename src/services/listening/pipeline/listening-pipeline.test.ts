@@ -92,7 +92,11 @@ describe('enqueueListeningEpisodePipeline', () => {
   });
 
   it('returns existing job when idempotency key already exists', async () => {
-    const existingJob = { id: JOB_ID, status: 'pending', idempotency_key: 'x' };
+    // Must match what enqueueListeningEpisodePipeline actually computes for
+    // the input below (GENERATE_LISTENING_STORY:<level>:<seed>:<version>,
+    // no theme segment) — enqueueListeningJob looks up the existing row by
+    // this exact idempotency_key.
+    const existingJob = { id: JOB_ID, status: 'pending', idempotency_key: 'GENERATE_LISTENING_STORY:A2:2026-07-15:v1' };
     const client = buildMockClient({ listening_jobs: [existingJob] });
 
     const result = await enqueueListeningEpisodePipeline(client as any, {
@@ -207,8 +211,8 @@ describe('advanceListeningPipeline', () => {
   it('creates two SYNTHESIZE_LISTENING_BLOCK_AUDIO jobs after SSML complete', async () => {
     const insertedRows: unknown[][] = [];
     const blocks = [
-      { id: B1_ID, block_order: 1 },
-      { id: B2_ID, block_order: 2 },
+      { id: B1_ID, block_order: 1, episode_id: EP_ID },
+      { id: B2_ID, block_order: 2, episode_id: EP_ID },
     ];
     const client = buildMockClient({ listening_blocks: blocks }, insertedRows);
 
@@ -236,8 +240,8 @@ describe('advanceListeningPipeline', () => {
       { block_id: B2_ID, status: 'validated' },
     ];
     const blocks = [
-      { id: B1_ID, block_order: 1 },
-      { id: B2_ID, block_order: 2 },
+      { id: B1_ID, block_order: 1, episode_id: EP_ID },
+      { id: B2_ID, block_order: 2, episode_id: EP_ID },
     ];
 
     const client = buildMockClient(
