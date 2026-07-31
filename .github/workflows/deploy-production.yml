@@ -59,8 +59,23 @@ jobs:
       - name: Gateway typecheck
         run: npx tsc -p tsconfig.gateway.json --noEmit
       - name: Unit tests
+        # src/lib/supabase.ts calls createClient() at module load time — same
+        # cause already fixed in ci.yml's unit-tests job. Step-scoped (not in
+        # the job-level env: above) so these placeholders can never reach
+        # vercel pull/build/deploy below, which must only ever see the real
+        # values Vercel pulls from the production project itself.
+        env:
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+          VITE_SUPABASE_ANON_KEY: test-anon-key
         run: npm test
       - name: Build
+        # Local validation build only (mirrors ci.yml's "Vite Build" job) —
+        # not what gets deployed. The real production bundle is produced by
+        # "Vercel build" below, using vercel pull's real env vars. Same
+        # step-scoping rationale as the Unit tests step above.
+        env:
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: placeholder-anon-key
         run: npm run build
 
       # ── 4. Supabase CLI — official, maintained action ──────────────────────────
