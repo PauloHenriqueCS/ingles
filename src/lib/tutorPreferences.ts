@@ -3,13 +3,14 @@ import { DEFAULT_CONVERSATION_GOAL_MINUTES } from './conversationGoal';
 
 // ── Assistant identity ────────────────────────────────────────────────────────
 //
-// The assistant's name is fixed and non-configurable: it is always "Lemon".
+// The assistant's name is fixed and non-configurable: it is always "Orodim".
 // This is the single source of truth — every place that needs the assistant's
 // name (system prompt, UI labels, DB defaults) must read it from here instead
 // of trusting `teacher_name` values coming from the database, since older rows
-// may still contain legacy names ("Alex", "Lemon AI") from before the app was
-// renamed. See promptBuilder.ts for how this is enforced in the system prompt.
-export const ASSISTANT_NAME = 'Lemon';
+// may still contain legacy names ("Alex", "Lemon", "Lemon AI") from before the
+// app was renamed. See promptBuilder.ts for how this is enforced in the
+// system prompt.
+export const ASSISTANT_NAME = 'Orodim';
 
 // ── Voice catalog (OpenAI Realtime API) ──────────────────────────────────────
 
@@ -34,7 +35,7 @@ export const REALTIME_VOICES: VoiceEntry[] = [
 ];
 
 export const VOICE_PREVIEW_PHRASE =
-  "Hi! I'm Lemon, your English tutor. Let's practice together. How was your day?";
+  "Hi! I'm Orodim, your English tutor. Let's practice together. How was your day?";
 
 // ── Personality presets ───────────────────────────────────────────────────────
 

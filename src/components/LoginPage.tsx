@@ -168,7 +168,7 @@ export default function LoginPage() {
                 draggable={false}
               />
             </div>
-            <h1 className="text-2xl font-bold text-slate-100">Lemon</h1>
+            <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
             <p className="text-slate-400 text-sm">Recuperar senha</p>
           </div>
 
@@ -217,7 +217,7 @@ export default function LoginPage() {
           <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
             <p className="text-sm text-slate-200 font-medium">Sua conta foi excluída.</p>
             <p className="text-xs text-slate-400 mt-1">
-              Seu acesso foi encerrado e você não receberá novas comunicações pelo Lemon.
+              Seu acesso foi encerrado e você não receberá novas comunicações pelo Orodim.
             </p>
           </div>
         )}
@@ -242,7 +242,7 @@ export default function LoginPage() {
               draggable={false}
             />
           </div>
-          <h1 className="text-2xl font-bold text-slate-100">Lemon</h1>
+          <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
           <p className="text-slate-400 text-sm">
             {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}
           </p>

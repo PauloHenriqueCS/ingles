@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { getMicPermissionDeniedMessage } from './micPermissionGuidance';
 
 describe('getMicPermissionDeniedMessage', () => {
-  it('tells Android app users to go to Settings > Apps > Lemon > Permissions, not iPhone/Chrome instructions', () => {
+  it('tells Android app users to go to Settings > Apps > Orodim > Permissions, not iPhone/Chrome instructions', () => {
     const message = getMicPermissionDeniedMessage('android-app');
-    expect(message).toMatch(/Configurações > Apps > Lemon > Permissões/);
+    expect(message).toMatch(/Configurações > Apps > Orodim > Permissões/);
     expect(message).not.toMatch(/iPhone/);
     expect(message).not.toMatch(/Chrome/);
   });

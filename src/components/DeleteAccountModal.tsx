@@ -75,13 +75,13 @@ export default function DeleteAccountModal({ onCancel, onDeleted }: Props) {
 
         <div className="px-5 pt-4 pb-5 space-y-4">
           <p className="text-sm text-slate-300 leading-relaxed">
-            Sua conta deixará de ter acesso ao Lemon. Assinaturas e cobranças futuras serão bloqueadas, e você não
+            Sua conta deixará de ter acesso ao Orodim. Assinaturas e cobranças futuras serão bloqueadas, e você não
             receberá novas comunicações. Para confirmar, digite{' '}
             <span className="font-semibold text-slate-100">{DELETE_ACCOUNT_CONFIRMATION_PHRASE}</span>.
           </p>
 
           <ul className="text-xs text-slate-400 space-y-1.5 list-disc list-inside">
-            <li>Seu acesso ao Lemon será encerrado imediatamente.</li>
+            <li>Seu acesso ao Orodim será encerrado imediatamente.</li>
             <li>Novas cobranças e renovações serão bloqueadas.</li>
             <li>Você deixará de receber e-mails, SMS, push e outras comunicações.</li>
           </ul>
