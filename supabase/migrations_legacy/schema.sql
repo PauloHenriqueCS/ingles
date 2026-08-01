@@ -825,11 +825,11 @@ BEGIN
          error_message = CASE p_error_code
            WHEN 'AUDIO_DECODE_FAILED' THEN 'Não foi possível preparar o áudio para análise.'
            WHEN 'AUDIO_EMPTY'         THEN 'A gravação está vazia ou corrompida.'
-           WHEN 'AZURE_NO_MATCH'      THEN 'Não foi possível reconhecer fala no áudio.'
-           WHEN 'AZURE_CANCELED'      THEN 'A análise de pronúncia foi cancelada.'
-           WHEN 'AZURE_TIMEOUT'       THEN 'A análise de pronúncia demorou para responder.'
+           WHEN 'AZURE_NO_MATCH'      THEN 'O Azure não reconheceu fala no áudio.'
+           WHEN 'AZURE_CANCELED'      THEN 'A análise foi cancelada pelo serviço.'
+           WHEN 'AZURE_TIMEOUT'       THEN 'O serviço de pronúncia demorou para responder.'
            WHEN 'AZURE_NETWORK_ERROR' THEN 'Erro de rede durante a análise de pronúncia.'
-           WHEN 'RESULT_INVALID'      THEN 'O resultado da análise de pronúncia é inválido.'
+           WHEN 'RESULT_INVALID'      THEN 'O resultado retornado pelo serviço é inválido.'
            WHEN 'CLIENT_INTERRUPTED'  THEN 'A análise foi interrompida antes de ser concluída.'
            ELSE                            'Falha técnica durante a análise de pronúncia.'
          END

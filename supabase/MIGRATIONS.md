@@ -1,14 +1,70 @@
 # Migrations — Lemon (english learning app)
 
-## Regra fundamental
+## O corte de baseline (2026-07-25)
 
-Migrations versionadas em `supabase/migrations/` são aplicadas **automaticamente**
-contra o banco de produção pelo workflow `.github/workflows/deploy-production.yml`,
-depois de um merge na branch `main` — nunca manualmente no SQL Editor e nunca
-antes dos testes/build/dry-run passarem.
+O histórico de migrations anterior a `20260725120000` não conseguia reconstruir o
+banco do zero de forma confiável (timestamps de `name` e `version` divergentes,
+migrations `fix_*` sem uma migration original correspondente, dependências
+implícitas de ordem de aplicação). Um baseline completo foi gerado por
+introspecção read-only direta de produção — ver `supabase/baseline_docs/` para
+o inventário completo, o plano de corte e a prova de igualdade estrutural
+usados nessa validação.
 
-Esta regra substitui a política anterior ("nunca executar `supabase db push`
-contra produção, sempre manual"), que valia antes da automação de release existir.
+**A partir deste corte:**
+
+- **`20260725120000_baseline_full_database.sql` é o novo baseline oficial.**
+  Contém o schema inteiro (extensions, enums, 107 tabelas, constraints,
+  índices, views, functions, triggers, RLS, policies, grants) capturado de
+  produção.
+- **`20260725120001_seed_reference_data.sql`** é o seed estrutural idempotente
+  que acompanha o baseline (dados de referência — planos, capabilities, RBAC
+  de admin, catálogo de IA, preços de provedores, definições de
+  app_config). Nenhum dado pessoal, operacional ou secret é copiado.
+- **Um banco novo nasce exclusivamente de baseline + seed**, nessa ordem.
+  Nenhuma migration anterior a `20260725120000` deve ser aplicada a um banco
+  novo.
+- **Toda migration anterior ao corte foi preservada, sem alteração de SQL ou
+  conteúdo, em `supabase/migrations_legacy/`** — histórico e auditoria, nunca
+  para reaplicação (arquivos datados, `loose_scripts/` com os antigos
+  `migration_*.sql` da raiz, `schema.sql` legado e `__tests__/`).
+- **`20260725120002_seed_ai_runtime_controls.sql` existe apenas em
+  `develop`/homologação — não faz parte deste corte de produção.** É um
+  ajuste específico de `lemon-homolog` (preenche `ai_runtime_controls`, que
+  nasceu vazio nesse projeto) e nunca deve ser aplicado em produção, onde
+  essa tabela já tem as 28 linhas reais desde o histórico antigo.
+
+## Estrutura de arquivos
+
+```
+supabase/
+  MIGRATIONS.md                 ← Este arquivo
+  migrations/
+    20260725120000_baseline_full_database.sql       ← baseline oficial
+    20260725120001_seed_reference_data.sql          ← seed estrutural
+    (futuras migrations, sempre com timestamp > 20260725120001)
+  migrations_legacy/             ← histórico pré-corte, preservado, nunca reaplicar
+  baseline_docs/                 ← inventário, plano de corte, prova de igualdade
+```
+
+## Regras fundamentais a partir de agora
+
+1. **Migrations versionadas em `supabase/migrations/` são aplicadas
+   automaticamente contra produção** pelo workflow
+   `.github/workflows/deploy-production.yml` (`supabase db push`), depois de
+   um merge na branch `main` — nunca manualmente no SQL Editor e nunca antes
+   dos testes/build/dry-run passarem.
+2. **Toda migration futura deve ter timestamp estritamente posterior a
+   `20260725120001`.** `supabase/migrations/` deve conter, a qualquer
+   momento, apenas o baseline/seed oficiais e migrations com timestamp
+   posterior a esse corte — nunca arquivos do histórico legado.
+3. **Alterações manuais diretas no banco de produção (SQL Editor, `psql`
+   avulso, tool `apply_migration` do MCP para qualquer coisa que deva ficar
+   rastreada) ficam proibidas.** Qualquer mudança de schema ou dado
+   estrutural é, obrigatoriamente, uma nova migration versionada em
+   `supabase/migrations/`, aplicada via `db push` pelo workflow. Isso é o
+   que mantém `supabase migration list` e `db push` sincronizados.
+4. **Nunca reaplicar** nada de `supabase/migrations_legacy/` — está ali só
+   para consulta/auditoria histórica.
 
 ## Deploy de produção
 
@@ -24,91 +80,30 @@ A ordem da release é:
 
 Se uma migration falhar, o código não é publicado na Vercel.
 
----
+## Coordenação com `ingles-dashboad` (banco compartilhado)
 
-## Estrutura de arquivos
+`jiuurvheeuwmayrfnqgm` (produção) e `ahszqexfzpbirdlkmdci` (`lemon-homolog`)
+são compartilhados por dois repositórios — `ingles` (este) e
+`ingles-dashboad` — cada um com seu próprio diretório `supabase/migrations/`
+local. Isso já causou uma colisão real em homologação (2026-07-27): os dois
+repositórios criaram, de forma independente, um arquivo com o **mesmo
+prefixo de timestamp**, cada um com conteúdo completamente diferente.
 
-```
-supabase/
-  schema.sql                    ← Schema canônico completo (estado final)
-  MIGRATIONS.md                 ← Este arquivo
-  verify_schema.sql             ← Script somente-leitura para verificação
-  migrations/
-    20260714120000_schema_integrity_baseline.sql   ← Primeira migration oficial
-  migration_*.sql               ← Scripts históricos (NÃO reaplicar em produção)
-```
+**Para evitar reaplicação/drift:**
 
----
-
-## Criando um banco novo (do zero)
-
-Execute **somente** `schema.sql`. Ele contém todas as tabelas, índices, políticas
-RLS, triggers e funções no estado final esperado.
-
-```
-Dashboard → SQL Editor → Abrir schema.sql → Execute
-```
-
-Não execute os arquivos `migration_*.sql` em um banco criado pelo `schema.sql` —
-eles representam o histórico de evolução incremental e causariam erros de
-"policy already exists" ou "table already exists" sem o IF NOT EXISTS adequado.
-
----
-
-## Banco existente em produção
-
-Aplique **apenas** as migrations da pasta `supabase/migrations/` que ainda não
-foram aplicadas, em ordem crescente pelo timestamp no nome do arquivo.
-
-### Migrations já em produção (NÃO aplicar novamente)
-
-Os arquivos `migration_*.sql` na raiz do diretório `supabase/` representam a
-evolução histórica do banco. Assumimos que todos já foram aplicados ao banco de
-produção. **Não reaplicar.**
-
-| Arquivo | O que fez |
-|---|---|
-| `schema.sql` (original) | Criou `writing_entries` com RLS anon |
-| `migration_generated_themes.sql` | Criou `generated_themes` |
-| `migration_multiuser.sql` | Adicionou `user_id` às tabelas; criou `english_reviews`, `english_learning_memory`, `grammar_explanations` |
-| `migration_add_ai_review.sql` | Adicionou `ai_review JSONB` em `writing_entries` |
-| `migration_grammar_explanations.sql` | Recriou `grammar_explanations` (pode ter introduzido `anon_all`) |
-| `migration_ai_conversation.sql` | Criou `ai_conversation_preferences` |
-| `migration_history_persistence.sql` | Adicionou colunas de v2 em `english_reviews` |
-| `migration_v2_ai_columns.sql` | Adicionou colunas de IA v2 em `writing_entries` |
-| `migration_review_groups.sql` | Criou `review_groups`, `review_group_items` |
-| `migration_review_attempts.sql` | Criou `review_attempts`, `review_attempt_items` |
-| `migration_review_schedule.sql` | Criou `review_schedule_history`; primeira versão de `apply_review_schedule` |
-| `migration_rls_authenticated.sql` | Adicionou `authenticated_all` (política incorreta — removida em 20260714120000) |
-| `migration_pronunciation_assessment.sql` | Criou `pronunciation_assessments` |
-| `migration_pronunciation_start.sql` | Criou `reserve_pronunciation_assessment` (2 params) e `compensate_pronunciation_assessment` |
-| `migration_pronunciation_step5.sql` | Adicionou colunas de attempt; substituiu reserve por 3 params; criou complete/fail |
-| `migration_pronunciation_unlimited_attempts.sql` | Versão final de reserve e fail (permite tentativas ilimitadas) |
-| `migration_learning_settings.sql` | Criou `user_learning_settings`, `learning_day_overrides`; versão final de `apply_review_schedule` com weekdays |
-| `migration_tutor_preferences.sql` | Expandiu `ai_conversation_preferences` com colunas de personalização |
-| `migration_conversation_goal.sql` | Adicionou `daily_conversation_goal_minutes`; criou `conversation_sessions` |
-
-### Migration a aplicar agora
-
-```
-supabase/migrations/20260714120000_schema_integrity_baseline.sql
-```
-
-**O que ela corrige:**
-1. Remove `"authenticated_all"` de `writing_entries` (permitia qualquer usuário
-   autenticado ler entradas de outros usuários — política incorreta).
-2. Remove `"anon_all"` de `grammar_explanations` (pode ter sobrevivido por ordem
-   de aplicação das migrations históricas).
-3. Garante que `generated_themes` tenha políticas user-specific corretas,
-   independentemente da ordem de aplicação anterior.
-4. Adiciona `CHECK` constraints `NOT VALID` em `review_groups` e
-   `pronunciation_assessments` (não bloqueiam dados existentes).
-5. Adiciona índice `(user_id, session_date)` em `conversation_sessions`
-   para acelerar `getDayTotalSeconds()`.
-6. Recria `update_updated_at()` e `set_updated_at()` com `SET search_path = ''`
-   (hardening contra search_path injection).
-
----
+1. **Nunca aplicar uma migration que deveria ficar rastreada em
+   `supabase/migrations/` usando a tool `apply_migration` do MCP do
+   Supabase, ou SQL manual.** Esses caminhos geram sua própria versão em
+   `schema_migrations`, que nunca bate com o timestamp do arquivo local.
+2. **Antes de todo `db push` (manual ou via CI), rode `supabase migration
+   list --project-ref <ref>`** (ou a mesma consulta via MCP
+   `list_migrations`) e confira que todo arquivo local novo tem uma versão
+   que ainda NÃO aparece no remoto, e que nenhum arquivo novo colide, por
+   prefixo, com nada listado — nem deste repositório, nem do
+   `ingles-dashboad`.
+3. **Toda migration nova usa um timestamp estritamente posterior à MAIOR
+   versão conhecida em `schema_migrations`** (não apenas à maior versão
+   entre os arquivos locais).
 
 ## Padrão para novas migrations
 
@@ -118,7 +113,8 @@ supabase/migrations/20260714120000_schema_integrity_baseline.sql
 supabase/migrations/YYYYMMDDHHMMSS_descricao_curta.sql
 ```
 
-Use UTC. Exemplo: `20260801090000_add_user_preferences_theme.sql`
+Use UTC, e sempre um timestamp posterior a `20260725120001`. Exemplo:
+`20260801090000_add_user_preferences_theme.sql`.
 
 ### Estrutura obrigatória do arquivo
 
@@ -145,9 +141,8 @@ Use UTC. Exemplo: `20260801090000_add_user_preferences_theme.sql`
 - Use `DO $$ BEGIN ... IF NOT EXISTS ... END; $$;` para adicionar constraints.
 - Use `NOT VALID` ao adicionar `CHECK` constraints em tabelas com dados.
 - Nunca `DROP TABLE`, `DROP COLUMN` ou `DELETE FROM` em migrations de produção.
-- Toda alteração de schema deve ser refletida em `schema.sql` após a migration.
-
----
+- A migration deve ser idempotente sempre que possível (`ON CONFLICT`,
+  `IF NOT EXISTS`).
 
 ## Validação pós-migration
 
@@ -159,20 +154,15 @@ Execute `supabase/verify_schema.sql` após cada migration para confirmar:
 
 O script é somente-leitura (apenas `SELECT` e `\d`) — sem efeitos colaterais.
 
----
+## Onde encontrar mais contexto
 
-## Validar constraints NOT VALID (opcional)
-
-Após confirmar que os dados existentes são válidos (via `verify_schema.sql`),
-execute separadamente para cada constraint:
-
-```sql
--- Verifica dados existentes contra a constraint (pode demorar em tabelas grandes)
-ALTER TABLE public.review_groups
-  VALIDATE CONSTRAINT review_groups_level_non_negative;
-
-ALTER TABLE public.pronunciation_assessments
-  VALIDATE CONSTRAINT pa_pronunciation_score_range;
--- (repetir para pa_accuracy_score_range, pa_fluency_score_range,
---  pa_completeness_score_range, pa_prosody_score_range)
-```
+- `supabase/baseline_docs/inventory.md` — inventário completo do que existe
+  em produção (extensions, schemas, tabelas, functions, policies, grants,
+  cron, Storage, ownership Lemon/ingles-dashboad).
+- `supabase/baseline_docs/out_of_schema_config.md` — o que não é reproduzido
+  pelo dump SQL (Auth, SMTP, redirects, secrets, Storage, Edge Functions) e o
+  que fazer a respeito em cada ambiente.
+- `supabase/baseline_docs/equality_validation.md` — script de fingerprint
+  para comparar estrutura entre produção e homologação.
+- `supabase/baseline_docs/migration_history_plan.md` — o plano original de
+  corte, incluindo o estado do histórico de produção antes desta mudança.
