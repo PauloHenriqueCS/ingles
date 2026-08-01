@@ -20,7 +20,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const MIGRATION_PATH = resolve(__dirname, '..', '..', 'supabase', 'migrations', '20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql');
+const MIGRATION_PATH = resolve(__dirname, '..', '20260718020000_ai_gateway_enforcement_function_ambiguity_fix.sql');
 const sql = readFileSync(MIGRATION_PATH, 'utf8');
 
 function functionBody(name: string): string {

@@ -21,7 +21,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const MIGRATIONS_DIR = resolve(__dirname, '..', '..', 'supabase', 'migrations');
+const MIGRATIONS_DIR = resolve(__dirname, '..');
 const securitySql = readFileSync(resolve(MIGRATIONS_DIR, '20260723000000_revoke_new_tables_default_grants_and_extend_privilege_audit.sql'), 'utf8');
 const evidenceSql = readFileSync(resolve(MIGRATIONS_DIR, '20260723010000_realtime_hard_control_evidence_schema.sql'), 'utf8');
 const heartbeatSql = readFileSync(resolve(MIGRATIONS_DIR, '20260723020000_conversation_session_heartbeat_and_hangup_evidence.sql'), 'utf8');

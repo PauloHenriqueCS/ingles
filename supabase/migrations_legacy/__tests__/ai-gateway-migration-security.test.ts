@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const MIGRATION_PATH = resolve(__dirname, '..', '..', 'supabase', 'migrations', '20260718000000_ai_gateway_enforcement.sql');
+const MIGRATION_PATH = resolve(__dirname, '..', '20260718000000_ai_gateway_enforcement.sql');
 const sql = readFileSync(MIGRATION_PATH, 'utf8');
 
 describe('ai_gateway_concurrency_validations — no frontend/ordinary-user write path', () => {
