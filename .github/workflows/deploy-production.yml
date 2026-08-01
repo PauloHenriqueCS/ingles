@@ -190,3 +190,12 @@ jobs:
             --retry-delay 5 \
             --retry-all-errors \
             "$PRODUCTION_BASE_URL/api/config/public"
+
+      # ── 14. Real-browser smoke test — the curl checks above only prove the
+      # HTML shell returns 200; they can't catch the app crashing during
+      # client-side init (e.g. a bad env var reaching the Supabase client,
+      # which renders a blank page while still returning HTTP 200). ──────────
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test — app renders without JS error
+        run: npx tsx scripts/smoke-check-browser.ts "$PRODUCTION_BASE_URL/"
