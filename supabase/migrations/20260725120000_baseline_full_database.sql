@@ -17,7 +17,12 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS "pg_net";
 CREATE EXTENSION IF NOT EXISTS "pg_cron";
-CREATE EXTENSION IF NOT EXISTS "pg_graphql";
+-- pg_graphql: revalidado em 2026-08-01 contra producao (SELECT extname FROM
+-- pg_extension) - NAO esta instalada em producao hoje, apesar dos schemas
+-- graphql/graphql_public existirem (bootstrap padrao do Supabase,
+-- independente da extension). Omitido de propósito para bater exatamente
+-- com o estado real de producao; reinstalar aqui criaria uma tabela/schema
+-- extra que produção não tem, quebrando o fingerprint de equality_validation.md.
 CREATE EXTENSION IF NOT EXISTS "supabase_vault" WITH SCHEMA vault;
 
 -- ---------------------------------------------------------------------
