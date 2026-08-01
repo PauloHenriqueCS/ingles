@@ -2,6 +2,9 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "git": {
+    "deploymentEnabled": false
+  },
   "functions": {
     "api/**/*.ts": {
       "maxDuration": 300

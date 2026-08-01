@@ -6,6 +6,7 @@
 
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import type { FeatureLimit } from '../../src/domain/entitlements/entitlement-types';
+import { countCharacters } from '../../src/domain/text/text-normalization';
 
 export type FeatureAccessDenialCode =
   | 'FEATURE_DISABLED'
@@ -60,10 +61,14 @@ export function requireFeatureAccess(
   return ALLOWED;
 }
 
-/** writing_max_characters_per_text — never applied when unlimited. */
+/**
+ * writing_max_characters_per_text — never applied when unlimited.
+ * Counts Unicode code points (countCharacters), the SAME rule the frontend
+ * counter uses, so the client and server never disagree on the boundary.
+ */
 export function checkTextLength(text: string, maxCharacters: number, unlimited: boolean): FeatureAccessCheck {
   if (unlimited) return ALLOWED;
-  if (text.length <= maxCharacters) return ALLOWED;
+  if (countCharacters(text) <= maxCharacters) return ALLOWED;
   return {
     allowed: false,
     code: 'CHARACTER_LIMIT_EXCEEDED',

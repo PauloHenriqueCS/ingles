@@ -15,7 +15,7 @@ import org.junit.Test;
  */
 public class LemonOriginValidatorTest {
 
-    private static final String ALLOWED_HOST = "my.lemonenglish.app";
+    private static final String ALLOWED_HOST = "app.orodim.com.br";
 
     private boolean isTrusted(String allowedHost, String currentUrl) throws Exception {
         Method method = LemonOriginValidator.class.getDeclaredMethod("isTrusted", String.class, String.class);
@@ -25,48 +25,48 @@ public class LemonOriginValidatorTest {
 
     @Test
     public void acceptsTheExactTrustedOrigin() throws Exception {
-        assertTrue(isTrusted(ALLOWED_HOST, "https://my.lemonenglish.app/"));
+        assertTrue(isTrusted(ALLOWED_HOST, "https://app.orodim.com.br/"));
     }
 
     @Test
     public void acceptsTheExactTrustedOriginWithAPathAndQuery() throws Exception {
-        assertTrue(isTrusted(ALLOWED_HOST, "https://my.lemonenglish.app/day?date=2026-07-22"));
+        assertTrue(isTrusted(ALLOWED_HOST, "https://app.orodim.com.br/day?date=2026-07-22"));
     }
 
     @Test
     public void rejectsHttp() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "http://my.lemonenglish.app/"));
+        assertFalse(isTrusted(ALLOWED_HOST, "http://app.orodim.com.br/"));
     }
 
     @Test
     public void rejectsADeceptiveSubdomain() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "https://my.lemonenglish.app.evil.com/"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://app.orodim.com.br.evil.com/"));
     }
 
     @Test
     public void rejectsALookalikeParentDomain() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.my.lemonenglish.app/"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.app.orodim.com.br/"));
     }
 
     @Test
     public void rejectsTheTrustedHostnameAppearingOnlyInThePath() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.com/my.lemonenglish.app"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.com/app.orodim.com.br"));
     }
 
     @Test
     public void rejectsTheTrustedHostnameAppearingOnlyInTheQuery() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.com/?redirect=my.lemonenglish.app"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://evil.com/?redirect=app.orodim.com.br"));
     }
 
     @Test
     public void rejectsAUserinfoTrick() throws Exception {
         // Everything before '@' is userinfo, not the host — the real host here is evil.com.
-        assertFalse(isTrusted(ALLOWED_HOST, "https://my.lemonenglish.app@evil.com/"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://app.orodim.com.br@evil.com/"));
     }
 
     @Test
     public void rejectsANonDefaultPort() throws Exception {
-        assertFalse(isTrusted(ALLOWED_HOST, "https://my.lemonenglish.app:8443/"));
+        assertFalse(isTrusted(ALLOWED_HOST, "https://app.orodim.com.br:8443/"));
     }
 
     @Test
@@ -86,6 +86,6 @@ public class LemonOriginValidatorTest {
 
     @Test
     public void rejectsWhenNoAllowedHostIsConfigured() throws Exception {
-        assertFalse(isTrusted(null, "https://my.lemonenglish.app/"));
+        assertFalse(isTrusted(null, "https://app.orodim.com.br/"));
     }
 }

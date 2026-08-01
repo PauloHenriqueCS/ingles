@@ -5,7 +5,9 @@ vi.mock('../../api/_auth', () => ({
 }));
 
 import { requireAuth } from '../../api/_auth';
-import handler from '../../api/pronunciation/fail';
+// Consolidated into the [...slug].ts catch-all dispatcher (Vercel Hobby
+// plan's 12-function cap) — the standalone fail.ts no longer exists.
+import handler from '../../api/pronunciation/[...slug]';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -19,6 +21,7 @@ const mockSupabase = { rpc: mockRpc };
 function makeReq(overrides: Record<string, unknown> = {}) {
   return {
     method: 'POST',
+    url: '/api/pronunciation/fail',
     headers: {},
     body: { assessmentId: VALID_ASSESSMENT_ID, attemptId: VALID_ATTEMPT_ID, code: 'AZURE_CANCELED' },
     ...overrides,

@@ -19,10 +19,10 @@ export function getMicPermissionDeniedMessage(
   attribute: ReturnType<typeof runtimeAttribute> = runtimeAttribute(),
 ): string {
   if (attribute === 'android-app') {
-    return 'O acesso ao microfone foi negado. O Android não mostra esse aviso de novo automaticamente — abra Configurações > Apps > Lemon > Permissões > Microfone e permita o acesso.';
+    return 'O acesso ao microfone foi negado. O Android não mostra esse aviso de novo automaticamente — abra Configurações > Apps > Orodim > Permissões > Microfone e permita o acesso.';
   }
   if (attribute === 'ios-app') {
-    return 'O acesso ao microfone foi negado. Abra Ajustes do iPhone > Lemon > Microfone e permita o acesso.';
+    return 'O acesso ao microfone foi negado. Abra Ajustes do iPhone > Orodim > Microfone e permita o acesso.';
   }
   return 'O navegador negou o acesso ao microfone. Toque no ícone de cadeado/informações ao lado do endereço do site, permita o microfone nas permissões e recarregue a página.';
 }

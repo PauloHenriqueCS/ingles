@@ -3,6 +3,7 @@ import { BookOpen, RefreshCw, Loader2, Search } from 'lucide-react';
 import { EnglishLearningMemory, RecurringMistake, VocabularyItem, View } from '../types';
 import { fetchLearningMemory, updateLearningMemory } from '../lib/learningMemory';
 import type { LearningSettings } from '../lib/learningSettings';
+import GrammarTopicSheet from './GrammarTopicSheet';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -152,7 +153,7 @@ export default function MemoryView({ onNavigate: _nav, onSettingsChange: _onChan
             )}
 
             {activeTab === 'grammar' && (
-              <GrammarTab topics={memory.grammarFocus} />
+              <GrammarTab topics={memory.grammarFocus} mistakes={memory.recurringMistakes} />
             )}
 
             {activeTab === 'vocabulary' && (
@@ -259,7 +260,9 @@ function MistakeCard({ mistake }: { mistake: RecurringMistake }) {
 
 // ── Grammar tab ───────────────────────────────────────────────────────────────
 
-function GrammarTab({ topics }: { topics: string[] }) {
+function GrammarTab({ topics, mistakes }: { topics: string[]; mistakes: RecurringMistake[] }) {
+  const [openTopic, setOpenTopic] = useState<string | null>(null);
+
   if (topics.length === 0) {
     return (
       <div className="bg-slate-800 rounded-xl p-6 text-center">
@@ -273,17 +276,28 @@ function GrammarTab({ topics }: { topics: string[] }) {
 
   return (
     <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-      <p className="text-xs text-slate-500">Tópicos identificados para revisão:</p>
+      <p className="text-xs text-slate-500">Toque em um tópico para ver a explicação:</p>
       <div className="flex flex-wrap gap-2">
         {topics.map((topic, i) => (
-          <span
+          <button
             key={i}
-            className="px-3 py-1.5 bg-purple-900/30 border border-purple-800/40 rounded-lg text-sm text-purple-300 font-medium"
+            type="button"
+            onClick={() => setOpenTopic(topic)}
+            aria-haspopup="dialog"
+            className="px-3 py-1.5 bg-purple-900/30 border border-purple-800/40 rounded-lg text-sm text-purple-200 font-medium hover:bg-purple-900/50 hover:border-purple-700/60 focus:outline-none focus:ring-2 focus:ring-purple-500/60 transition-colors"
           >
             {topic}
-          </span>
+          </button>
         ))}
       </div>
+
+      {openTopic && (
+        <GrammarTopicSheet
+          topicLabel={openTopic}
+          mistakes={mistakes}
+          onClose={() => setOpenTopic(null)}
+        />
+      )}
     </div>
   );
 }

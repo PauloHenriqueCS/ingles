@@ -1,10 +1,18 @@
 apply plugin: 'com.android.application'
 
+// Release signing reads exclusively from environment variables set by the
+// developer in their own shell for the duration of the build invocation.
+// Never hardcode or persist these values (not in this file, not in
+// gradle.properties, not in any tracked file).
+def orodimKeystorePath = System.getenv("ORODIM_UPLOAD_KEYSTORE_PATH")
+def orodimStorePassword = System.getenv("ORODIM_UPLOAD_STORE_PASSWORD")
+def orodimKeyPassword = System.getenv("ORODIM_UPLOAD_KEY_PASSWORD")
+
 android {
     namespace = "com.lemon.app"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.lemon.app"
+        applicationId "com.orodim.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
@@ -16,10 +24,23 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (orodimKeystorePath) {
+                storeFile file(orodimKeystorePath)
+                storePassword orodimStorePassword
+                keyAlias "orodim-upload"
+                keyPassword orodimKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (orodimKeystorePath) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

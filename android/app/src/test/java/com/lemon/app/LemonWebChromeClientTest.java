@@ -14,7 +14,7 @@ import org.junit.Test;
  */
 public class LemonWebChromeClientTest {
 
-    private static final String ALLOWED_ORIGIN = "https://my.lemonenglish.app";
+    private static final String ALLOWED_ORIGIN = "https://app.orodim.com.br";
     private static final String[] AUDIO_ONLY = { PermissionRequest.RESOURCE_AUDIO_CAPTURE };
     private static final String[] VIDEO_ONLY = { PermissionRequest.RESOURCE_VIDEO_CAPTURE };
     private static final String[] AUDIO_AND_VIDEO = {
@@ -24,44 +24,44 @@ public class LemonWebChromeClientTest {
 
     @Test
     public void allowsTheExactOriginRequestingAudio() {
-        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app", AUDIO_ONLY));
+        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br", AUDIO_ONLY));
     }
 
     @Test
     public void allowsAudioPlusVideoRequestFromTheExactOrigin() {
         // The caller only ever grants RESOURCE_AUDIO_CAPTURE regardless — this
         // just confirms the gate itself doesn't reject the combined request.
-        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app", AUDIO_AND_VIDEO));
+        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br", AUDIO_AND_VIDEO));
     }
 
     @Test
     public void toleratesATrailingSlashOnTheRequestOrigin() {
-        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app/", AUDIO_ONLY));
+        assertTrue(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br/", AUDIO_ONLY));
     }
 
     @Test
     public void rejectsAVideoOnlyRequestFromTheExactOrigin() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app", VIDEO_ONLY));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br", VIDEO_ONLY));
     }
 
     @Test
     public void rejectsHttpForTheSameHost() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "http://my.lemonenglish.app", AUDIO_ONLY));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "http://app.orodim.com.br", AUDIO_ONLY));
     }
 
     @Test
     public void rejectsADeceptiveSubdomain() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app.evil.com", AUDIO_ONLY));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br.evil.com", AUDIO_ONLY));
     }
 
     @Test
     public void rejectsALookalikeParentDomain() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://evil.my.lemonenglish.app", AUDIO_ONLY));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://evil.app.orodim.com.br", AUDIO_ONLY));
     }
 
     @Test
     public void rejectsANonDefaultPort() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app:8443", AUDIO_ONLY));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br:8443", AUDIO_ONLY));
     }
 
     @Test
@@ -81,11 +81,11 @@ public class LemonWebChromeClientTest {
 
     @Test
     public void rejectsAnEmptyResourceList() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app", new String[0]));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br", new String[0]));
     }
 
     @Test
     public void rejectsANullResourceList() {
-        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://my.lemonenglish.app", null));
+        assertFalse(LemonWebChromeClient.isAllowedMediaRequest(ALLOWED_ORIGIN, "https://app.orodim.com.br", null));
     }
 }

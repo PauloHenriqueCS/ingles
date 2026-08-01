@@ -9,6 +9,22 @@ import {
 } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { getScheduleForDate, ALL_VERB_TENSES } from '../data/calendar2026';
+import { deriveWritingEntryStatus } from '../domain/writing/entry-status';
+import { foldSmartQuotes } from '../domain/text/text-normalization';
+
+/**
+ * Search normalization for the History box: case- AND accent-insensitive
+ * (NFD + strip diacritics, matching the project's diagnostic-validator strategy)
+ * plus smart-quote folding and whitespace collapse. Search-only — never mutates
+ * stored/displayed text.
+ */
+function foldForSearch(text: string): string {
+  return foldSmartQuotes(text.normalize('NFD'))
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -23,9 +39,10 @@ interface UnifiedEntry {
   latestReview: EnglishReviewSaved | null;
   allReviews: EnglishReviewSaved[];
   hasVersion2: boolean;
+  hasFinalVersion: boolean;
 }
 
-type StatusFilter = 'todos' | 'nao-iniciado' | 'escrito' | 'corrigido' | 'pendente-revisao' | 'revisado';
+type StatusFilter = 'todos' | 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 type DiffFilter = 'todos' | 'facil' | 'medio' | 'dificil';
 
 interface Props {
@@ -33,12 +50,16 @@ interface Props {
   onOpenDay: (date: string) => void;
 }
 
+// Buckets map 1:1 to the four canonical states derived by
+// deriveWritingEntryStatus, so every entry lands in exactly one bucket and the
+// card badge always matches the filter. (The former "Pendente de revisão"
+// bucket had no distinct persisted state — it double-counted every 'corrigido'
+// entry — so it was removed rather than left inconsistent.)
 const STATUS_BUTTONS: { value: StatusFilter; label: string }[] = [
-  { value: 'todos',           label: 'Todos' },
+  { value: 'todos',          label: 'Todos' },
   { value: 'nao-iniciado',   label: 'Não iniciado' },
   { value: 'escrito',        label: 'Escrito' },
   { value: 'corrigido',      label: 'Corrigido' },
-  { value: 'pendente-revisao', label: 'Pendente de revisão' },
   { value: 'revisado',       label: 'Revisado' },
 ];
 
@@ -82,56 +103,57 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
         const entry = entries[date];
         const schedule = getScheduleForDate(date);
         const dateReviews = reviewsByDate[date] ?? [];
+        const hasFinalVersion = dateReviews.some((r) => !!r.version2FinalText);
+        // Card status uses the SHARED derivation, reconciled against the actual
+        // review/final-version evidence — so the badge and the filter buckets
+        // (below) can never disagree, and legacy rows are classified correctly.
+        const status = deriveWritingEntryStatus({
+          storedStatus: entry.status,
+          hasText: entry.originalText.trim().length > 0,
+          hasReview: dateReviews.length > 0,
+          hasFinalVersion,
+        });
         return {
           date,
           title: entry.title || schedule?.theme || '',
           originalText: entry.originalText,
-          status: entry.status,
+          status,
           wordCount: entry.wordCount,
           difficulty: entry.difficulty,
           verbTense: schedule?.verbTense ?? '',
           latestReview: dateReviews[0] ?? null,
           allReviews: dateReviews,
           hasVersion2: dateReviews.some((r) => !!r.version2Text),
+          hasFinalVersion,
         };
       });
   }, [entries, reviewsByDate]);
 
-  const filtered = useMemo(() => {
-    return unifiedList.filter((item) => {
-      const hasText = item.originalText.trim().length > 0;
+  // Debounced search: avoids re-filtering on every keystroke while typing.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
 
-      switch (statusFilter) {
-        case 'nao-iniciado':
-          if (item.status !== 'nao-iniciado') return false;
-          break;
-        case 'escrito':
-          if (!hasText || item.status !== 'escrito') return false;
-          break;
-        case 'corrigido':
-          if (!hasText || item.status !== 'corrigido') return false;
-          break;
-        case 'pendente-revisao':
-          if (!hasText || item.latestReview === null || item.status === 'revisado') return false;
-          break;
-        case 'revisado':
-          if (!hasText || item.status !== 'revisado') return false;
-          break;
-        default:
-          if (!hasText) return false;
-      }
+  const filtered = useMemo(() => {
+    const q = foldForSearch(debouncedSearch);
+    return unifiedList.filter((item) => {
+      // Buckets map 1:1 to the derived status; 'todos' shows everything. No
+      // extra ad-hoc predicates, so each entry appears in exactly one bucket
+      // and nothing silently disappears from 'Todos'.
+      if (statusFilter !== 'todos' && item.status !== statusFilter) return false;
 
       if (verbTenseFilter !== 'todos' && item.verbTense !== verbTenseFilter) return false;
       if (diffFilter !== 'todos' && item.difficulty !== diffFilter) return false;
 
-      const q = search.trim().toLowerCase();
-      if (q && !item.title.toLowerCase().includes(q) && !item.originalText.toLowerCase().includes(q)) {
+      if (q && !foldForSearch(item.title).includes(q) && !foldForSearch(item.originalText).includes(q)) {
         return false;
       }
 
       return true;
     });
-  }, [unifiedList, statusFilter, verbTenseFilter, diffFilter, search]);
+  }, [unifiedList, statusFilter, verbTenseFilter, diffFilter, debouncedSearch]);
 
   if (selected) {
     return (
@@ -173,7 +195,8 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
             <button
               key={value}
               onClick={() => setStatusFilter(value)}
-              className={`px-3 py-1 rounded-full text-xs whitespace-nowrap shrink-0 transition-colors ${
+              aria-pressed={statusFilter === value}
+              className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap shrink-0 transition-colors ${
                 statusFilter === value
                   ? 'bg-blue-600 text-white'
                   : 'bg-slate-700 text-slate-300 hover:bg-slate-600'

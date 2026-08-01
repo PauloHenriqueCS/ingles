@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createMockGatewayDeps } from '../../api/__tests__/_ai-gateway-test-helpers';
+import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 
 // vi.mock is hoisted — these run before any imports below
 vi.mock('../../api/_auth', () => ({
@@ -11,9 +13,39 @@ vi.mock('../../api/_azure-speech', async (importOriginal) => {
   return { ...mod, issueAzureSpeechToken: vi.fn() };
 });
 
+// handleStart now goes through the AI Gateway (budget reservation + token
+// issuance via executeAiGatewayCall) and bridges an ai_provider_sessions row
+// via getSharedServiceClient — neither existed when this test was first
+// written. Mirrors api/__tests__/pronunciation-assessment-gateway.test.ts's
+// setup exactly, so behavior stays additive/unaffected for every assertion
+// below that isn't specifically about the Gateway.
+const { mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => ({
+  mockGetCurrentUserPlanEntitlements: vi.fn(),
+  gw: {} as ReturnType<typeof import('../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps>,
+}));
+const { mockSessionsFrom, sessionsClient } = vi.hoisted(() => {
+  const mockSessionsFrom = vi.fn();
+  return { mockSessionsFrom, sessionsClient: { from: mockSessionsFrom } };
+});
+function makeSessionsChain(result: { data: { id: string; metadata?: Record<string, unknown> } | null; error: unknown }) {
+  const chain: any = {};
+  for (const m of ['update', 'eq', 'in', 'select']) chain[m] = vi.fn().mockReturnValue(chain);
+  chain.maybeSingle = vi.fn().mockResolvedValue(result);
+  return chain;
+}
+vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
+  return { ...actual, getProductionDeps: () => gw.mockDeps, getSharedServiceClient: () => sessionsClient };
+});
+vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
+  getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
+}));
+
 import { requireAuth } from '../../api/_auth';
 import { issueAzureSpeechToken, AzureSpeechError } from '../../api/_azure-speech';
-import handler from '../../api/pronunciation/start';
+// Consolidated into the [...slug].ts catch-all dispatcher (Vercel Hobby
+// plan's 12-function cap) — the standalone start.ts no longer exists.
+import handler from '../../api/pronunciation/[...slug]';
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -32,6 +64,7 @@ const mockSupabase = { rpc: mockRpc };
 function makeReq(overrides: Record<string, unknown> = {}) {
   return {
     method: 'POST',
+    url: '/api/pronunciation/start',
     body: { textVersionId: VALID_UUID, attemptId: VALID_ATTEMPT },
     headers: { authorization: 'Bearer test-jwt' },
     ...overrides,
@@ -63,9 +96,29 @@ function reserveCreated() {
   rpcOk({ action: 'created', assessmentId: MOCK_ASSESS, referenceText: MOCK_REF });
 }
 
+function permissiveLimit(period: 'day' | 'month' | 'request' | 'none' = 'day'): FeatureLimit {
+  return { enabled: true, unlimited: true, limit: 0, consumed: 0, remaining: Number.POSITIVE_INFINITY, period, state: 'unlimited', canStart: true };
+}
+function permissiveEntitlements(): PlanEntitlementsSnapshot {
+  return {
+    planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
+    writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
+    listening: { enabled: true, stories: permissiveLimit('day') },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
+    monthlyRenewsAt: null,
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
 beforeEach(() => {
   vi.stubEnv('AZURE_SPEECH_REGION', MOCK_REGION);
   vi.stubEnv('AZURE_SPEECH_KEY', 'mock-key');
+
+  Object.assign(gw, createMockGatewayDeps());
+  gw.resetDefaults();
+  mockSessionsFrom.mockReturnValue(makeSessionsChain({ data: { id: 'session-id' }, error: null }));
+  mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 
   vi.mocked(requireAuth).mockResolvedValue({
     userId: 'user-123',

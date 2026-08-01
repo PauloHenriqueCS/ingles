@@ -20,11 +20,18 @@ usados nessa validação.
 - **`20260725120001_seed_reference_data.sql`** e
   **`20260725120002_seed_ai_runtime_controls.sql`** são os dois seeds
   estruturais que acompanham o baseline (dados de referência — planos,
-  capabilities, RBAC de admin, catálogo de IA — e os controles de runtime do
-  AI Gateway). Nenhum dado pessoal, operacional ou secret é copiado.
-- **Um banco novo nasce exclusivamente de baseline + os dois seeds**, nessa
-  ordem. Nenhuma migration anterior a `20260725120000` deve ser aplicada a um
-  banco novo.
+  capabilities, RBAC de admin, catálogo de IA, preços de provedores,
+  definições de app_config — e os controles de runtime do AI Gateway).
+  Nenhum dado pessoal, operacional ou secret é copiado.
+- **`20260725120002_seed_ai_runtime_controls.sql` existe apenas em
+  `develop`/homologação — não faz parte do corte de produção.** É um ajuste
+  específico de `lemon-homolog` (preenche `ai_runtime_controls`, que nasceu
+  vazio nesse projeto) e nunca deve ser aplicado em produção, onde essa
+  tabela já tem as 28 linhas reais desde o histórico antigo.
+- **Um banco de homologação novo nasce de baseline + os dois seeds, nessa
+  ordem. Um banco de produção novo nasce de baseline + `seed_reference_data`
+  apenas** (sem `seed_ai_runtime_controls`). Nenhuma migration anterior a
+  `20260725120000` deve ser aplicada a um banco novo.
 - **Toda migration anterior ao corte foi preservada, sem alteração de SQL ou
   conteúdo, em `supabase/migrations_legacy/`** — histórico e auditoria, nunca
   para reaplicação:
@@ -46,7 +53,7 @@ supabase/
   migrations/
     20260725120000_baseline_full_database.sql       ← baseline oficial
     20260725120001_seed_reference_data.sql          ← seed estrutural
-    20260725120002_seed_ai_runtime_controls.sql     ← seed de runtime do AI Gateway
+    20260725120002_seed_ai_runtime_controls.sql     ← seed de runtime do AI Gateway (só develop/homolog)
     (futuras migrations, sempre com timestamp > 20260725120002)
   migrations_legacy/             ← histórico pré-corte, preservado, nunca reaplicar
   baseline_docs/                 ← inventário, plano de corte, prova de igualdade
@@ -54,27 +61,42 @@ supabase/
 
 ## Regras fundamentais a partir de agora
 
-1. **`develop` aplica migrations automaticamente, somente em homologação**
+1. **`develop` aplica migrations automaticamente em homologação**
    (`ahszqexfzpbirdlkmdci`), via o workflow
    `.github/workflows/homologation.yml` (`supabase db push` no job
    `apply-migrations`, gatilhado por push em `develop`).
-2. **Produção (`jiuurvheeuwmayrfnqgm`) continua sem `db push` automático.** O
-   alinhamento do histórico de migrations de produção com este novo baseline
-   é uma tarefa separada, deliberadamente **não realizada agora** — produção
-   segue no seu próprio histórico até que essa tarefa seja executada
-   explicitamente.
+2. **`main` aplica migrations automaticamente em produção**
+   (`jiuurvheeuwmayrfnqgm`), via o workflow
+   `.github/workflows/deploy-production.yml` (`supabase db push`), depois de
+   um merge na branch `main` — nunca manualmente no SQL Editor e nunca antes
+   dos testes/build/dry-run passarem.
 3. **Toda migration futura deve ter timestamp estritamente posterior a
    `20260725120002`.** `supabase/migrations/` deve conter, a qualquer
    momento, apenas os três arquivos do baseline/seeds e migrations com
    timestamp posterior a esse corte — nunca arquivos do histórico legado.
-4. **Alterações manuais diretas no banco de homologação (SQL Editor, `psql`
-   avulso, etc.) ficam proibidas depois deste corte.** Qualquer mudança de
-   schema ou dado estrutural passa a ser, obrigatoriamente, uma nova migration
-   versionada em `supabase/migrations/`, aplicada via `db push` pelo
-   workflow. Isso é o que mantém `supabase migration list` e `db push`
-   sincronizados entre ambientes.
+4. **Alterações manuais diretas nos bancos de homologação ou produção (SQL
+   Editor, `psql` avulso, tool `apply_migration` do MCP para qualquer coisa
+   que deva ficar rastreada) ficam proibidas depois deste corte.** Qualquer
+   mudança de schema ou dado estrutural passa a ser, obrigatoriamente, uma
+   nova migration versionada em `supabase/migrations/`, aplicada via
+   `db push` pelo workflow correspondente. Isso é o que mantém
+   `supabase migration list` e `db push` sincronizados entre ambientes.
 5. **Nunca reaplicar** nada de `supabase/migrations_legacy/` — está ali só
    para consulta/auditoria histórica.
+
+## Deploy de produção
+
+A ordem da release é:
+
+1. testes;
+2. build;
+3. dry-run das migrations;
+4. aplicação das migrations;
+5. confirmação do histórico;
+6. build e deploy da Vercel;
+7. smoke test.
+
+Se uma migration falhar, o código não é publicado na Vercel.
 
 ## Padrão para novas migrations
 
@@ -86,25 +108,55 @@ supabase/migrations/YYYYMMDDHHMMSS_descricao_curta.sql
 
 Use UTC, e sempre um timestamp posterior a `20260725120002`.
 
+### Estrutura obrigatória do arquivo
+
+```sql
+-- =============================================================================
+-- MIGRATION: YYYYMMDDHHMMSS_nome
+-- Projeto: Lemon
+--
+-- Aplicada automaticamente por .github/workflows/deploy-production.yml
+-- (supabase db push) após o merge na main. Não aplicar manualmente no SQL
+-- Editor — isso desalinha o histórico de `supabase migration list`.
+-- Esta migration NÃO modifica nem remove dados existentes.
+-- =============================================================================
+
+-- ... SQL aqui ...
+
+-- Após aplicar: execute supabase/verify_schema.sql para verificar o estado.
+```
+
 ### Regras
 
-- Use `IF NOT EXISTS` para `CREATE TABLE`/`CREATE INDEX`/`CREATE EXTENSION`.
+- Use `IF NOT EXISTS` para `CREATE TABLE`, `CREATE INDEX`, `CREATE UNIQUE INDEX`, `CREATE EXTENSION`.
 - Use `DROP POLICY IF EXISTS` antes de `CREATE POLICY` quando a migration
   puder rodar mais de uma vez.
+- Use `DO $$ BEGIN ... IF NOT EXISTS ... END; $$;` para adicionar constraints.
 - Use `NOT VALID` ao adicionar `CHECK` constraints em tabelas com dados.
 - Nunca `DROP TABLE`, `DROP COLUMN` ou `DELETE FROM` sem revisão explícita do
   impacto em produção.
 - A migration deve ser idempotente sempre que possível (`ON CONFLICT`,
   `IF NOT EXISTS`).
 
+## Validação pós-migration
+
+Execute `supabase/verify_schema.sql` após cada migration para confirmar:
+- Que todas as tabelas esperadas existem.
+- Que não há políticas `anon_all` em tabelas de usuário.
+- Que os índices críticos existem.
+- Que as constraints foram criadas.
+
+O script é somente-leitura (apenas `SELECT` e `\d`) — sem efeitos colaterais.
+
 ## Coordenação com `ingles-dashboad` (banco compartilhado)
 
-`lemon-homolog` (`ahszqexfzpbirdlkmdci`) é compartilhado por dois
-repositórios — `ingles` (este) e `ingles-dashboad` — cada um com seu próprio
-diretório `supabase/migrations/` local. Isso já causou uma colisão real
-(Etapa 2A, 2026-07-27): os dois repositórios criaram, de forma
-independente, um arquivo com o **mesmo prefixo de timestamp**
-(`20260727000000_...`), cada um com conteúdo completamente diferente.
+`jiuurvheeuwmayrfnqgm` (produção) e `ahszqexfzpbirdlkmdci` (`lemon-homolog`)
+são compartilhados por dois repositórios — `ingles` (este) e
+`ingles-dashboad` — cada um com seu próprio diretório `supabase/migrations/`
+local. Isso já causou uma colisão real (Etapa 2A, 2026-07-27): os dois
+repositórios criaram, de forma independente, um arquivo com o **mesmo
+prefixo de timestamp** (`20260727000000_...`), cada um com conteúdo
+completamente diferente.
 
 **Achado ao investigar (leitura de `supabase_migrations.schema_migrations`
 via MCP, `list_migrations`)**: a migration do `ingles-dashboad` está
@@ -129,13 +181,13 @@ que documenta `version` (horário real de aplicação) divergindo de `name`
    `supabase migration list`/`db push` não confiáveis para detectar "já
    aplicada". Reserve `apply_migration` (MCP) só para exploração/scratch que
    nunca vira arquivo commitado.
-2. **Antes de todo `db push` (manual ou via o workflow de CI
-   `apply-migrations`), rode `supabase migration list --project-ref
-   ahszqexfzpbirdlkmdci`** (ou a mesma consulta via MCP `list_migrations`) e
-   confira que todo arquivo local novo tem uma versão que ainda NÃO aparece
-   no remoto, E que nenhum arquivo novo colide, por prefixo, com nada
-   listado — nem deste repositório, nem (verificando manualmente o
-   diretório vizinho) do `ingles-dashboad`.
+2. **Antes de todo `db push` (manual ou via workflow de CI, `apply-migrations`
+   ou `deploy-production.yml`), rode `supabase migration list --project-ref
+   <ref>`** (ou a mesma consulta via MCP `list_migrations`) e confira que
+   todo arquivo local novo tem uma versão que ainda NÃO aparece no remoto, E
+   que nenhum arquivo novo colide, por prefixo, com nada listado — nem deste
+   repositório, nem (verificando manualmente o diretório vizinho) do
+   `ingles-dashboad`.
 3. **Toda migration nova neste repositório usa um timestamp estritamente
    posterior à MAIOR versão conhecida em `schema_migrations`** (não apenas
    à maior versão entre os arquivos locais) — a Etapa 2A passou a numerar a

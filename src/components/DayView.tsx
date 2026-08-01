@@ -7,6 +7,7 @@ import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-message
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
+import { countCharacters } from '../domain/text/text-normalization';
 import { updateReviewV2, updateV2FinalText } from '../lib/reviews';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { buildMissionSnapshot } from '../lib/missionSnapshot';
@@ -123,12 +124,21 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
     setExistingV2Comparison(v2Comparison);
   }
 
-  function handleV2FinalText(finalText: string) {
-    if (!reviewId) return;
-    updateV2FinalText(reviewId, finalText).catch((err) => {
-      console.error('Failed to save v2 final text:', err);
-    });
+  // Persistence of the final corrected version is normally done server-side by
+  // /api/compare-rewrite (idempotent, bound to the review). We only persist here
+  // as a fallback when the backend reported it did not (no reviewId). Local UI
+  // state is set ONLY after persistence is confirmed, and any failure is thrown
+  // so the caller can surface it instead of showing a false "done".
+  async function handleV2FinalText(finalText: string, alreadyPersisted: boolean) {
+    if (!alreadyPersisted) {
+      if (!reviewId) throw new Error('missing reviewId — cannot persist final text');
+      await updateV2FinalText(reviewId, finalText);
+    }
     setExistingV2FinalText(finalText);
+    // Item 9: the final corrected version marks the entry as "revisado".
+    // Reflect it locally right away; the backend already persisted the same
+    // status transition on writing_entries.
+    setStatus('revisado');
   }
 
   async function handleActivateDay() {
@@ -265,8 +275,21 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
   const writingLoading = entitlements.data === null;
   const writingDisabledByPlan = writingEntitlements ? !writingEntitlements.enabled : false;
   const reviewsBlocked = writingEntitlements ? !writingEntitlements.reviews.canStart : false;
-  const maxChars = writingEntitlements && !writingEntitlements.maxCharactersUnlimited ? writingEntitlements.maxCharactersPerText : null;
-  const overLimitBy = maxChars !== null ? Math.max(originalText.length - maxChars, 0) : 0;
+  // Character counts use the SHARED code-point counter (countCharacters), the
+  // exact rule the backend enforces (api/_entitlements/require-feature-access),
+  // so the client never accepts a text the server would reject on length.
+  const charCount = countCharacters(originalText);
+  const titleCharCount = countCharacters(title);
+  // The limit comes from the active plan entitlement (writing.max_characters_per_text)
+  // — never hardcoded. A configured limit is only enforced when it is a positive,
+  // finite number; unlimited plans, or a not-yet-loaded/absent config, mean "no
+  // enforceable limit" here — we never silently assume an arbitrary cap.
+  const rawMaxChars = writingEntitlements && !writingEntitlements.maxCharactersUnlimited
+    ? writingEntitlements.maxCharactersPerText
+    : null;
+  const maxChars = rawMaxChars !== null && rawMaxChars > 0 ? rawMaxChars : null;
+  const overLimitBy = maxChars !== null ? Math.max(charCount - maxChars, 0) : 0;
+  const nearLimit = maxChars !== null && overLimitBy === 0 && charCount >= Math.floor(maxChars * 0.9);
 
   const canSubmit = (!isReviewMode || validation.allFound)
     && !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
@@ -311,7 +334,12 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         )}
 
         <div>
-          <label className="text-xs text-slate-400 mb-2 block">Título</label>
+          <div className="flex justify-between mb-2">
+            <label className="text-xs text-slate-400">Título</label>
+            <span className="text-xs text-slate-500">
+              {`${titleCharCount.toLocaleString('pt-BR')} caracteres`}
+            </span>
+          </div>
           <input
             type="text"
             value={title}
@@ -348,10 +376,10 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
         <div>
           <div className="flex justify-between mb-2">
             <label className="text-xs text-slate-400">Seu texto</label>
-            <span className={`text-xs ${overLimitBy > 0 ? 'text-red-400' : 'text-slate-500'}`}>
+            <span className={`text-xs ${overLimitBy > 0 ? 'text-red-400' : nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
               {maxChars !== null
-                ? `${originalText.length.toLocaleString('pt-BR')} / ${maxChars.toLocaleString('pt-BR')} caracteres`
-                : `${words} palavras`}
+                ? `${charCount.toLocaleString('pt-BR')} / ${maxChars.toLocaleString('pt-BR')} caracteres`
+                : `${words.toLocaleString('pt-BR')} palavras · ${charCount.toLocaleString('pt-BR')} caracteres`}
             </span>
           </div>
           <textarea
@@ -359,8 +387,8 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
             value={originalText}
             onChange={(e) => setOriginalText(e.target.value)}
             placeholder="Escreva seu texto em inglês aqui..."
-            maxLength={maxChars ?? undefined}
-            className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500 min-h-[200px] resize-none"
+            aria-invalid={overLimitBy > 0}
+            className={`w-full bg-slate-800 border rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none min-h-[200px] resize-none ${overLimitBy > 0 ? 'border-red-500 focus:border-red-500' : 'border-slate-700 focus:border-blue-500'}`}
           />
           {overLimitBy > 0 && (
             <p className="text-xs text-red-400 mt-1.5">{ENTITLEMENT_MESSAGES.characterOverLimitAfterPlanChange(overLimitBy)}</p>

@@ -22,12 +22,12 @@ export default function AppHeader({ onMenuOpen, onLogoClick }: Props) {
       <button
         onClick={onLogoClick}
         className="ml-auto flex items-center bg-transparent border-0 p-0 cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
-        aria-label="Lemon — ir para o início"
+        aria-label="Orodim — ir para o início"
         style={{ background: 'none' }}
       >
         <img
           src="/brand/lemon-icon.png"
-          alt="Lemon"
+          alt="Orodim"
           className="h-8 sm:h-10 w-auto object-contain"
           width={40}
           height={40}

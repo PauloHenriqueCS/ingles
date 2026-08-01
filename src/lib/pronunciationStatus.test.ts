@@ -5,7 +5,9 @@ vi.mock('../../api/_auth', () => ({
 }));
 
 import { requireAuth } from '../../api/_auth';
-import handler from '../../api/pronunciation/status';
+// Consolidated into the [...slug].ts catch-all dispatcher (Vercel Hobby
+// plan's 12-function cap) — the standalone status.ts no longer exists.
+import handler from '../../api/pronunciation/[...slug]';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +81,7 @@ const COMPLETED_ROW = {
 function makeReq(overrides: Record<string, unknown> = {}) {
   return {
     method: 'GET',
+    url: '/api/pronunciation/status',
     query: { textVersionId: VALID_UUID },
     headers: { authorization: 'Bearer test-token' },
     ...overrides,
@@ -89,9 +92,11 @@ function makeRes() {
   const res = {
     _status: 200,
     _body: null as unknown,
+    _headers: {} as Record<string, string>,
     status(code: number) { res._status = code; return res; },
     json(body: unknown) { res._body = body; return res; },
     end() { return res; },
+    setHeader(k: string, v: string) { res._headers[k] = v; },
   };
   return res;
 }

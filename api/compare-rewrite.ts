@@ -1,17 +1,118 @@
+import { createHash } from 'crypto';
 import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
-import type { GatewayUsageMetric } from './_ai-gateway/index';
+import type { GatewayUsageMetric, DedupeBeginResult } from './_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { validateRewriteText } from '../src/domain/writing-rewrite/rewrite-text-validation';
+import { normalizeForComparison } from '../src/domain/text/text-normalization';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+/**
+ * Item 9: the "Revisado" state means the final corrected version has been
+ * generated and persisted. Promote the writing_entries row for the review's
+ * day to 'revisado' (idempotent, RLS-scoped, best-effort — never blocks the
+ * response). No-op when the entry date is unknown or already 'revisado'.
+ */
+async function promoteEntryToRevisado(
+  supabase: SupabaseClient,
+  userId: string,
+  entryDate: string | null,
+): Promise<void> {
+  if (!entryDate) return;
+  try {
+    await supabase
+      .from('writing_entries')
+      .update({ status: 'revisado' })
+      .eq('user_id', userId)
+      .eq('entry_date', entryDate)
+      .neq('status', 'revisado');
+  } catch {
+    /* non-fatal: status promotion never blocks returning the final text */
+  }
+}
+
+/**
+ * AI Gateway idempotency (reuses SupabaseDedupeStore / begin-complete-fail
+ * _gateway_idempotent_op_v1 — the same generic locks used by the enforce-mode
+ * pipeline, see api/_ai-gateway/enforcement.ts). This endpoint calls the
+ * dedupe store directly instead of going through executeAiGatewayCall's
+ * context.idempotencyKey, because it needs the full begin() outcome
+ * (started/reclaimed/in_progress/completed) to decide whether to serve a
+ * persisted result, ask the client to wait, or proceed — the enforce
+ * pipeline collapses 'in_progress' and 'completed' into the same
+ * DUPLICATE_IN_PROGRESS GatewayError, which isn't enough to implement that.
+ * One fixed scope for the whole endpoint; the operation name is embedded in
+ * the idempotency key itself so the two flows below can never collide.
+ */
+const DEDUPE_SCOPE = 'compare-rewrite';
+const DEDUPE_LEASE_SECONDS = 120;
+
+/** Deterministic content fingerprint — never the raw text itself, only its hash. */
+function hashNormalizedContent(parts: string[]): string {
+  const normalized = parts.map((p) => normalizeForComparison(p)).join(' ');
+  return createHash('sha256').update(normalized, 'utf8').digest('hex');
+}
+
+/**
+ * `{reviewId or userId}:{hash}` — reviewId (when present) already scopes the
+ * key to one user's one review; userId is the fallback for the no-reviewId
+ * path so two different users' identical text never collides.
+ */
+function buildFinalTextIdempotencyKey(scopeId: string, rewriteText: string): string {
+  return `writing.correct_v2_text:${scopeId}:${hashNormalizedContent([rewriteText])}`;
+}
+
+function buildCompareIdempotencyKey(scopeId: string, originalText: string, rewriteText: string): string {
+  return `writing.compare_rewrite:${scopeId}:${hashNormalizedContent([originalText, rewriteText])}`;
+}
+
+const DUPLICATE_IN_PROGRESS_MESSAGE = 'Esta solicitação já está sendo processada. Aguarde alguns instantes e tente novamente.';
+
+interface StoredFinalTextLookup {
+  entryDate: string | null;
+  /** Non-null only when a final text is already persisted AND the V2 hasn't changed meaningfully. */
+  reusableFinalText: string | null;
+}
+
+/**
+ * Re-checks english_reviews for an already-persisted, still-matching final
+ * text. Used both by the up-front idempotent-retry check and by the dedupe
+ * 'completed' branch (a concurrent request may have finished and persisted
+ * between this request's begin() call and now).
+ */
+async function lookupStoredFinalText(
+  supabase: SupabaseClient,
+  userId: string,
+  reviewIdRaw: string,
+  rewriteText: string,
+): Promise<StoredFinalTextLookup | null> {
+  if (!reviewIdRaw) return null;
+  const { data: existing } = await supabase
+    .from('english_reviews')
+    .select('version_2_text, version_2_final_text, entry_date')
+    .eq('id', reviewIdRaw)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (!existing) return null;
+  const entryDate = (existing.entry_date as string | null) ?? null;
+  const storedFinal = typeof existing.version_2_final_text === 'string' ? existing.version_2_final_text.trim() : '';
+  const storedV2 = typeof existing.version_2_text === 'string' ? existing.version_2_text : '';
+  // "Changed meaningfully" ignores trivial edits (case, spacing, curly
+  // apostrophes, trailing sentence punctuation) — same normalization used to
+  // derive the idempotency key itself, so a trivial edit never mints a new
+  // key AND never fails this reuse check either.
+  const unchanged = normalizeForComparison(storedV2) === normalizeForComparison(rewriteText);
+  return { entryDate, reusableFinalText: storedFinal && unchanged ? storedFinal : null };
+}
 
 const SYSTEM_PROMPT_COMPARE = `Você é um professor de inglês para brasileiros adultos iniciantes.
 
@@ -201,7 +302,7 @@ export default async function handler(req: any, res: any) {
 
   const auth = await requireAuth(req, res);
   if (!auth) return;
-  const { userId } = auth;
+  const { userId, supabase } = auth;
 
   // Rewrite V2 (compare + final correction) is a continuation of a review
   // the user already started under writing.reviews' quota — only the
@@ -230,9 +331,9 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de comparação não está configurado.');
 
-  const { originalText, correctedText, rewriteText, mainMistakes, generateFinalTextOnly } = req.body ?? {};
+  const { originalText, correctedText, rewriteText, mainMistakes, generateFinalTextOnly, reviewId } = req.body ?? {};
 
-  // ── Mode: generate final corrected text only (for old records with V2 but no final text)
+  // ── Mode: generate the final corrected text (idempotent), attaching it to a review
   if (generateFinalTextOnly === true) {
     if (!correctedText?.trim() || !rewriteText?.trim()) {
       return jsonError(res, 400, 'INVALID_REQUEST', 'correctedText e rewriteText são obrigatórios.');
@@ -247,6 +348,24 @@ export default async function handler(req: any, res: any) {
       return jsonError(res, 400, 'INVALID_REWRITE_TEXT', contentCheck.message!);
     }
 
+    const reviewIdRaw = typeof reviewId === 'string' ? reviewId.trim() : '';
+    let entryDate: string | null = null;
+
+    // ── Idempotency: if a final version is already persisted for this review AND
+    // the student's V2 text hasn't meaningfully changed (comparison ignores case/
+    // spacing/quotes), return the stored text WITHOUT calling the AI. This covers
+    // reopening the screen, page refresh, a timeout retry after the AI already
+    // answered — the common case, resolved with zero Gateway/lock overhead.
+    const upfrontLookup = await lookupStoredFinalText(supabase, userId, reviewIdRaw, rewriteText);
+    if (upfrontLookup) {
+      entryDate = upfrontLookup.entryDate;
+      if (upfrontLookup.reusableFinalText) {
+        safeLog('compare-rewrite', 'final_only_reused', 200, { reused: true });
+        await promoteEntryToRevisado(supabase, userId, entryDate);
+        return res.json({ finalCorrectedText: upfrontLookup.reusableFinalText, persisted: true, reused: true });
+      }
+    }
+
     if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
 
     // ── Gateway context — created only once auth/validation/rate-limit have
@@ -256,6 +375,38 @@ export default async function handler(req: any, res: any) {
     const gatewayDeps = getProductionDeps();
     const correlationId = gatewayDeps.uuidGen();
     let physicalAttempt = 0;
+
+    // ── Concurrency dedup — closes the gap the up-front check above can't:
+    // two requests racing with the same (reviewId-or-userId, normalized V2)
+    // arrive before either has persisted anything. begin() lets exactly one
+    // through; the other gets 'in_progress' (still running) or 'completed'
+    // (finished between this request's upfront lookup and its begin() call)
+    // and never calls the AI.
+    const dedupeStore = gatewayDeps.dedupeStore;
+    const finalTextIdemKey = buildFinalTextIdempotencyKey(reviewIdRaw || userId, rewriteText);
+    let dedupeLockId: string | null = null;
+    if (dedupeStore) {
+      let begin: DedupeBeginResult;
+      try {
+        begin = await dedupeStore.begin(DEDUPE_SCOPE, finalTextIdemKey, DEDUPE_LEASE_SECONDS);
+      } catch {
+        safeLog('compare-rewrite', 'dedupe_unavailable', 503, { mode: 'final_text_only' });
+        return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço está temporariamente indisponível. Tente novamente.');
+      }
+      if (begin.outcome === 'in_progress' || begin.outcome === 'completed') {
+        if (begin.outcome === 'completed') {
+          const raceLookup = await lookupStoredFinalText(supabase, userId, reviewIdRaw, rewriteText);
+          if (raceLookup?.reusableFinalText) {
+            safeLog('compare-rewrite', 'final_only_reused', 200, { reused: true, viaDedupe: true });
+            await promoteEntryToRevisado(supabase, userId, raceLookup.entryDate);
+            return res.json({ finalCorrectedText: raceLookup.reusableFinalText, persisted: true, reused: true });
+          }
+        }
+        safeLog('compare-rewrite', 'dedupe_in_progress', 409, { mode: 'final_text_only', outcome: begin.outcome });
+        return jsonError(res, 409, 'DUPLICATE_REQUEST_IN_PROGRESS', DUPLICATE_IN_PROGRESS_MESSAGE);
+      }
+      dedupeLockId = begin.lockId;
+    }
 
     try {
       const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
@@ -297,9 +448,30 @@ export default async function handler(req: any, res: any) {
       );
       const finalCorrectedText = (completion.choices[0]?.message?.content ?? '').trim();
       if (!finalCorrectedText) throw new Error('Resposta vazia');
-      safeLog('compare-rewrite', 'final_only_success', 200);
-      return res.json({ finalCorrectedText });
+
+      // Persist server-side so a later retry/refresh finds the result without a
+      // new AI call, and promote the day to 'revisado'. Bound to the review row
+      // (RLS-scoped); the client is told whether persistence happened so it can
+      // fall back to its own save only when no reviewId was provided.
+      let persisted = false;
+      if (reviewIdRaw) {
+        const { error: updateErr } = await supabase
+          .from('english_reviews')
+          .update({ version_2_final_text: finalCorrectedText })
+          .eq('id', reviewIdRaw)
+          .eq('user_id', userId);
+        if (updateErr) {
+          safeLog('compare-rewrite', 'final_only_persist_error', 200, { nonFatal: true });
+        } else {
+          persisted = true;
+          await promoteEntryToRevisado(supabase, userId, entryDate);
+        }
+      }
+      if (dedupeLockId) await dedupeStore!.complete(dedupeLockId, reviewIdRaw || null).catch(() => undefined);
+      safeLog('compare-rewrite', 'final_only_success', 200, { persisted });
+      return res.json({ finalCorrectedText, persisted });
     } catch (err) {
+      if (dedupeLockId) await dedupeStore!.fail(dedupeLockId).catch(() => undefined);
       const { code, status } = sanitizeProviderError(err);
       safeLog('compare-rewrite', 'final_only_error', status, { code });
       if (code === 'AI_TIMEOUT') return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
@@ -334,6 +506,61 @@ export default async function handler(req: any, res: any) {
   const gatewayDeps = getProductionDeps();
   const correlationId = gatewayDeps.uuidGen();
   let physicalAttempt = 0;
+
+  // ── Concurrency dedup — one lock covers the whole flow (comparison +
+  // best-effort final correction), keyed by the review/user + normalized
+  // (original, rewrite) content.
+  //
+  // 'in_progress' means a physically concurrent call is genuinely still
+  // running — the "wait and try again" response is honest there.
+  //
+  // 'completed' means a prior call with this exact content already finished
+  // (complete() only ever runs after invoke() has returned). This mode has
+  // no persisted result to replay from (unlike generateFinalTextOnly's
+  // english_reviews.version_2_final_text) — result/finalCorrectedText only
+  // ever live in the HTTP response, never written to the DB. Treating
+  // 'completed' as "still in progress" would be false, and blocking until
+  // the lock's own TTL elapses (begin_gateway_idempotent_op_v1 never resets
+  // expires_at on complete()/fail() — it's fixed at the original begin()
+  // call, DEDUPE_LEASE_SECONDS out — and reclaim there needs a fresh
+  // begin() call, not something complete()/fail() can force early) would
+  // strand a client whose retry only exists because the original response
+  // was lost in transit. The one safe option left is to generate fresh for
+  // THIS retry. That does not reopen the concurrent-duplicate hole dedupe
+  // closes above: 'completed' is only ever observed once the original
+  // attempt's own complete() call has already run, i.e. never while a
+  // request for this content is still in flight — genuinely-concurrent
+  // duplicates always land on 'in_progress' instead, still fully blocked.
+  const dedupeStore = gatewayDeps.dedupeStore;
+  const compareIdemKey = buildCompareIdempotencyKey(
+    (typeof reviewId === 'string' && reviewId.trim()) || userId,
+    originalText,
+    rewriteText,
+  );
+  let dedupeLockId: string | null = null;
+  if (dedupeStore) {
+    let begin: DedupeBeginResult;
+    try {
+      begin = await dedupeStore.begin(DEDUPE_SCOPE, compareIdemKey, DEDUPE_LEASE_SECONDS);
+    } catch {
+      safeLog('compare-rewrite', 'dedupe_unavailable', 503, { mode: 'compare_and_correct' });
+      return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço está temporariamente indisponível. Tente novamente.');
+    }
+    if (begin.outcome === 'in_progress') {
+      safeLog('compare-rewrite', 'dedupe_in_progress', 409, { mode: 'compare_and_correct' });
+      return jsonError(res, 409, 'DUPLICATE_REQUEST_IN_PROGRESS', DUPLICATE_IN_PROGRESS_MESSAGE);
+    }
+    if (begin.outcome === 'completed') {
+      // No lock held for this attempt: the stale lock isn't ours to mutate
+      // (complete()/fail() below both no-op without a truthy dedupeLockId),
+      // and it isn't reclaimable early — only its own TTL expiry allows a
+      // fresh begin() to reclaim it. Proceed straight to generation instead
+      // of leaving the caller stuck on a false "in progress".
+      safeLog('compare-rewrite', 'dedupe_completed_no_replay', 200, { mode: 'compare_and_correct' });
+    } else {
+      dedupeLockId = begin.lockId;
+    }
+  }
 
   try {
     const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
@@ -391,9 +618,15 @@ export default async function handler(req: any, res: any) {
       parsed = JSON.parse(raw);
     } catch {
       const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) return res.status(500).json({ error: 'Resposta inválida da IA. Tente novamente.' });
+      if (!match) {
+        if (dedupeLockId) await dedupeStore!.fail(dedupeLockId).catch(() => undefined);
+        return res.status(500).json({ error: 'Resposta inválida da IA. Tente novamente.' });
+      }
       try { parsed = JSON.parse(match[0]); }
-      catch { return res.status(500).json({ error: 'Resposta inválida da IA. Tente novamente.' }); }
+      catch {
+        if (dedupeLockId) await dedupeStore!.fail(dedupeLockId).catch(() => undefined);
+        return res.status(500).json({ error: 'Resposta inválida da IA. Tente novamente.' });
+      }
     }
 
     const result = {
@@ -453,9 +686,11 @@ export default async function handler(req: any, res: any) {
       safeLog('compare-rewrite', 'final_text_error', status, { code, nonFatal: true });
     }
 
+    if (dedupeLockId) await dedupeStore!.complete(dedupeLockId, null).catch(() => undefined);
     safeLog('compare-rewrite', 'success', 200, { hasFinalText: finalCorrectedText !== undefined });
     return res.json({ result, ...(finalCorrectedText ? { finalCorrectedText } : {}) });
   } catch (err) {
+    if (dedupeLockId) await dedupeStore!.fail(dedupeLockId).catch(() => undefined);
     const { code, status } = sanitizeProviderError(err);
     if (code === 'AI_TIMEOUT') {
       safeLog('compare-rewrite', 'timeout', status);

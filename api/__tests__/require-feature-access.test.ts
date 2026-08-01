@@ -57,6 +57,13 @@ describe('checkTextLength', () => {
   it('never blocks when unlimited, no matter the length', () => {
     expect(checkTextLength('a'.repeat(50000), 2000, true).allowed).toBe(true);
   });
+  it('counts by Unicode code points, not UTF-16 units — an emoji is one character', () => {
+    // 3 emojis = 6 UTF-16 units but 3 code points; must fit a limit of 3.
+    const three = '\u{1F600}\u{1F601}\u{1F602}';
+    expect(three.length).toBe(6);
+    expect(checkTextLength(three, 3, false).allowed).toBe(true);
+    expect(checkTextLength(three + '\u{1F603}', 3, false).allowed).toBe(false);
+  });
 });
 
 describe('checkRecordingDuration', () => {

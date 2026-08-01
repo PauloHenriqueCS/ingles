@@ -36,7 +36,7 @@ export default function SettingsView({ onBack, onAccountDeleted }: Props) {
               <p className="text-sm font-medium text-slate-200">Excluir conta</p>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Ao excluir sua conta, você perderá permanentemente o acesso ao Lemon. Sua assinatura será interrompida
+              Ao excluir sua conta, você perderá permanentemente o acesso ao Orodim. Sua assinatura será interrompida
               e você deixará de receber cobranças e comunicações.
             </p>
             <button
