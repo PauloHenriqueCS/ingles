@@ -142,13 +142,24 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@58.4.4
 
-      # ── 10. Pull the production Vercel project config ──────────────────────────
+      # ── 10. Pull the production Vercel project config. Retried: a freshly
+      # rotated VERCEL_TOKEN can transiently fail Vercel's own token→user
+      # lookup ("Could not retrieve Project Settings") for a short window
+      # right after creation/rotation, then succeed on the very next call
+      # with the exact same token — observed directly (same token, same
+      # secrets, back-to-back runs) while diagnosing this token's rotation.
+      # Not a config problem, so a short retry is the correct, minimal fix. ──
       - name: Pull Vercel project (production)
         run: |
-          vercel pull \
-            --yes \
-            --environment=production \
-            --token="$VERCEL_TOKEN"
+          for attempt in 1 2 3; do
+            if vercel pull --yes --environment=production --token="$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            echo "vercel pull attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "vercel pull failed after 3 attempts"
+          exit 1
 
       # ── 11. Build ────────────────────────────────────────────────────────────────
       - name: Vercel build
