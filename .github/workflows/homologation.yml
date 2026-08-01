@@ -170,3 +170,154 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
         run: supabase db push --dry-run
+
+  # ── 3. Build and deploy the application to the homologation Vercel project ──
+  #
+  # Vercel's own Git integration deploy is disabled repo-wide
+  # (vercel.json → git.deploymentEnabled: false), which is why production
+  # also deploys via an explicit Vercel CLI job (deploy-production.yml)
+  # instead of relying on it. This job mirrors that exact pattern — same
+  # CLI version, same pull/build/deploy/smoke-test shape — pointed at a
+  # separate, homologation-only Vercel project via its own secrets, never
+  # VERCEL_PROD_PROJECT_ID and never the production project.
+  #
+  # `needs: [apply-migrations]` (which itself needs `validate`) means this
+  # job only runs after both succeed — no `if: always()` anywhere here, so
+  # a failure in either earlier job blocks this one automatically.
+  deploy-homologation:
+    name: Deploy homologation (Vercel)
+    needs: [apply-migrations]
+    runs-on: ubuntu-latest
+    environment: homologation
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_HOMOLOG_PROJECT_ID }}
+      HOMOLOG_BASE_URL: ${{ secrets.HOMOLOG_BASE_URL }}
+    steps:
+      # ── Verify every required secret is present before touching Vercel.
+      # HOMOLOG_BASE_URL is intentionally NOT required here: until an
+      # official homologation alias/domain exists, smoke tests fall back to
+      # the ephemeral deployment URL Vercel returns in the deploy step below.
+      - name: Verify required secrets are present
+        run: |
+          missing=0
+          check() {
+            local internal_name="$1" secret_name="$2"
+            local value="${!internal_name}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing required secret: $secret_name (GitHub Environment: homologation)"
+              missing=1
+            fi
+          }
+          check VERCEL_TOKEN VERCEL_TOKEN
+          check VERCEL_ORG_ID VERCEL_ORG_ID
+          check VERCEL_PROJECT_ID VERCEL_HOMOLOG_PROJECT_ID
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::One or more required secrets are missing from the 'homologation' GitHub Environment. Aborting before any external service is touched. See .github/workflows/homologation.yml for what to configure."
+            exit 1
+          fi
+
+      # ── Guard — project ID must not be the production project. This is a
+      # hard second line of defense on top of using a distinct secret name:
+      # even if VERCEL_HOMOLOG_PROJECT_ID were ever misconfigured to the
+      # same value as production's, this stops the deploy outright. ────────
+      - name: Guard — project must not be production
+        env:
+          VERCEL_PROD_PROJECT_ID: ${{ secrets.VERCEL_PROD_PROJECT_ID }}
+        run: |
+          if [ -n "$VERCEL_PROD_PROJECT_ID" ] && [ "$VERCEL_PROJECT_ID" = "$VERCEL_PROD_PROJECT_ID" ]; then
+            echo "::error::VERCEL_HOMOLOG_PROJECT_ID matches VERCEL_PROD_PROJECT_ID. Refusing to deploy homologation into the production Vercel project."
+            exit 1
+          fi
+
+      # ── Checkout the exact commit that landed on develop ─────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      # ── Vercel CLI — same pinned version as deploy-production.yml ────────
+      - name: Install Vercel CLI
+        run: npm install --global vercel@58.4.4
+
+      # ── Pull the homologation Vercel project config (creates/fills
+      # .vercel/project.json from VERCEL_ORG_ID/VERCEL_PROJECT_ID above —
+      # same non-interactive linking mechanism production uses, no manual
+      # file writing needed). Same retry rationale as production: a
+      # freshly rotated VERCEL_TOKEN can transiently fail right after
+      # creation/rotation. ──────────────────────────────────────────────────
+      - name: Pull Vercel project (homologation)
+        run: |
+          for attempt in 1 2 3; do
+            if vercel pull --yes --environment=production --token="$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            echo "vercel pull attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "vercel pull failed after 3 attempts"
+          exit 1
+
+      # ── Build. --prod here selects the homologation project's own
+      # "Production" environment slot (its only real environment) — safe
+      # only because this project is dedicated exclusively to homologation,
+      # never the shared production app. ───────────────────────────────────
+      - name: Vercel build
+        run: |
+          vercel build \
+            --prod \
+            --token="$VERCEL_TOKEN"
+
+      # ── Deploy the prebuilt output and capture the resulting URL ─────────
+      - name: Vercel deploy
+        id: vercel_deploy
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "deployment_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
+
+      # ── Alias to the official homologation domain, only if one is already
+      # configured (HOMOLOG_BASE_URL). Skipped, not failed, otherwise — an
+      # alias is an operational nicety, not a correctness requirement. ─────
+      - name: Alias to homologation domain (if configured)
+        if: env.HOMOLOG_BASE_URL != ''
+        run: |
+          host="${HOMOLOG_BASE_URL#https://}"
+          host="${host#http://}"
+          vercel alias set "${{ steps.vercel_deploy.outputs.deployment_url }}" "$host" --token="$VERCEL_TOKEN"
+
+      # ── Smoke tests. Target the official alias if configured, otherwise
+      # the ephemeral deployment URL from this same run. ───────────────────
+      - name: Resolve smoke test target
+        id: smoke_target
+        run: |
+          if [ -n "$HOMOLOG_BASE_URL" ]; then
+            echo "url=$HOMOLOG_BASE_URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=${{ steps.vercel_deploy.outputs.deployment_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test — /
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "${{ steps.smoke_target.outputs.url }}/"
+
+      - name: Smoke test — /api/config/public
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "${{ steps.smoke_target.outputs.url }}/api/config/public"
