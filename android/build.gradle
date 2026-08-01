@@ -24,6 +24,18 @@ allprojects {
     }
 }
 
+// Build outputs are redirected outside the OneDrive-synced project folder.
+// OneDrive's real-time sync locks files under */build while Gradle is
+// writing/deleting them, which surfaces as java.nio.file.AccessDeniedException
+// on Windows (reproduced on `:clean` deleting android/build/reports). This
+// does not change any source, package, or app configuration — only where
+// intermediate/output files are written.
+def orodimLocalBuildDir = new File(System.getenv('LOCALAPPDATA') ?: System.getProperty('java.io.tmpdir'), 'orodim-android-build')
+rootProject.buildDir = new File(orodimLocalBuildDir, 'root')
+subprojects {
+    buildDir = new File(orodimLocalBuildDir, project.name)
+}
+
 task clean(type: Delete) {
     delete rootProject.buildDir
 }

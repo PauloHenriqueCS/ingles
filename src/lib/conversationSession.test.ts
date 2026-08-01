@@ -335,7 +335,7 @@ describe('conversationSession handler — GA format', () => {
 // the fixed "Lemon" identity regardless of that stored value.
 
 describe('conversationSession handler — assistant identity is fixed', () => {
-  it('sends "Lemon" identity instructions even when the DB row has a stale teacher_name', async () => {
+  it('sends "Orodim" identity instructions even when the DB row has a stale teacher_name', async () => {
     vi.mocked(requireAuth).mockResolvedValue({
       userId: MOCK_USER_ID,
       supabase: makeChainableSupabase({ prefs: { teacher_name: 'Alex' } }) as any,
@@ -351,12 +351,12 @@ describe('conversationSession handler — assistant identity is fixed', () => {
     const sentBody = JSON.parse(opts.body as unknown as string);
     const instructions = sentBody.session.instructions as string;
 
-    expect(instructions).toContain('Your name is Lemon');
+    expect(instructions).toContain('Your name is Orodim');
     expect(instructions).not.toMatch(/Você é Alex\b/);
     expect(instructions).not.toContain('Alex, um');
   });
 
-  it('sends "Lemon" identity instructions when there is no preferences row yet', async () => {
+  it('sends "Orodim" identity instructions when there is no preferences row yet', async () => {
     vi.mocked(requireAuth).mockResolvedValue({
       userId: MOCK_USER_ID,
       supabase: makeChainableSupabase({ prefs: null }) as any,
@@ -369,7 +369,7 @@ describe('conversationSession handler — assistant identity is fixed', () => {
 
     const [, opts] = globalFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string>; body: string }];
     const sentBody = JSON.parse(opts.body as unknown as string);
-    expect((sentBody.session.instructions as string)).toContain('Your name is Lemon');
+    expect((sentBody.session.instructions as string)).toContain('Your name is Orodim');
   });
 });
 
