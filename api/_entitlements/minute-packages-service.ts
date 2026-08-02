@@ -24,6 +24,8 @@ export interface MinutePackage {
   minutes: number;
   priceCents: number;
   currency: string;
+  appleProductId: string | null;
+  googleProductId: string | null;
 }
 
 interface MinutePackageRow {
@@ -35,6 +37,8 @@ interface MinutePackageRow {
   price_cents: number;
   currency: string;
   compatible_plan_codes: string[] | null;
+  apple_product_id: string | null;
+  google_product_id: string | null;
 }
 
 // NULL/empty compatible_plan_codes means "compatible with any plan that has
@@ -61,7 +65,9 @@ export async function listPublishedMinutePackages(
 ): Promise<MinutePackage[]> {
   const { data, error } = await supabase
     .from('conversation_minute_packages')
-    .select('id, code, name, description, minutes, price_cents, currency, compatible_plan_codes')
+    .select(
+      'id, code, name, description, minutes, price_cents, currency, compatible_plan_codes, apple_product_id, google_product_id',
+    )
     .eq('active', true)
     .eq('status', 'published')
     .order('display_order', { ascending: true });
@@ -79,5 +85,10 @@ export async function listPublishedMinutePackages(
       minutes: row.minutes,
       priceCents: row.price_cents,
       currency: row.currency,
+      // Null until the dashboard configures the package for sale in that
+      // store (see 20260802215100_conversation_minute_packages_store_ids.sql)
+      // — never invented or defaulted to an empty string here.
+      appleProductId: row.apple_product_id,
+      googleProductId: row.google_product_id,
     }));
 }

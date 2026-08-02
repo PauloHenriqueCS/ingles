@@ -46,6 +46,8 @@ interface FixtureRow {
   display_order: number;
   active: boolean;
   status: string;
+  apple_product_id: string | null;
+  google_product_id: string | null;
 }
 
 function packageRow(overrides: Partial<FixtureRow> & { id: string; code: string }): FixtureRow {
@@ -59,6 +61,8 @@ function packageRow(overrides: Partial<FixtureRow> & { id: string; code: string 
     display_order: 0,
     active: true,
     status: 'published',
+    apple_product_id: null,
+    google_product_id: null,
     ...overrides,
   };
 }
@@ -150,9 +154,31 @@ describe('GET /api/conversation/minute-packages', () => {
     const body = res._body() as { purchaseAvailable: boolean; packages: unknown[] };
     expect(body.purchaseAvailable).toBe(true);
     expect(body.packages).toEqual([
-      { id: '1', code: 'extra-60', name: 'Pacote extra-60', description: null, minutes: 60, priceCents: 1990, currency: 'BRL' },
-      { id: '2', code: 'essential-only', name: 'Pacote essential-only', description: null, minutes: 30, priceCents: 990, currency: 'BRL' },
+      { id: '1', code: 'extra-60', name: 'Pacote extra-60', description: null, minutes: 60, priceCents: 1990, currency: 'BRL', appleProductId: null, googleProductId: null },
+      { id: '2', code: 'essential-only', name: 'Pacote essential-only', description: null, minutes: 30, priceCents: 990, currency: 'BRL', appleProductId: null, googleProductId: null },
     ]);
+  });
+
+  it('inclui appleProductId e googleProductId quando configurados no catálogo, sem vazar as colunas snake_case', async () => {
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsFor('essential', true));
+    setCatalog([
+      packageRow({ id: '1', code: 'with-ids', apple_product_id: 'com.orodim.minutes.300', google_product_id: 'minutes_300' }),
+      packageRow({ id: '2', code: 'without-ids', apple_product_id: null, google_product_id: null }),
+    ]);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    const body = res._body() as { packages: Record<string, unknown>[] };
+    expect(body.packages[0]).toMatchObject({ appleProductId: 'com.orodim.minutes.300', googleProductId: 'minutes_300' });
+    expect(body.packages[1]).toMatchObject({ appleProductId: null, googleProductId: null });
+    for (const pkg of body.packages) {
+      expect(pkg).not.toHaveProperty('apple_product_id');
+      expect(pkg).not.toHaveProperty('google_product_id');
+      expect(pkg).not.toHaveProperty('price_cents');
+      expect(pkg).not.toHaveProperty('compatible_plan_codes');
+      expect(pkg).not.toHaveProperty('display_order');
+    }
   });
 
   it('usuário Plus (extra_purchase_enabled=false no plano): purchaseAvailable=false and never queries the catalog', async () => {

@@ -20,6 +20,8 @@ interface FixtureRow {
   display_order: number;
   active: boolean;
   status: string;
+  apple_product_id: string | null;
+  google_product_id: string | null;
 }
 
 function row(overrides: Partial<FixtureRow> & { id: string; code: string }): FixtureRow {
@@ -33,6 +35,8 @@ function row(overrides: Partial<FixtureRow> & { id: string; code: string }): Fix
     display_order: 0,
     active: true,
     status: 'published',
+    apple_product_id: null,
+    google_product_id: null,
     ...overrides,
   };
 }
@@ -140,7 +144,37 @@ describe('listPublishedMinutePackages', () => {
       minutes: 60,
       priceCents: 1990,
       currency: 'BRL',
+      appleProductId: null,
+      googleProductId: null,
     });
+  });
+
+  it('maps apple_product_id and google_product_id to appleProductId/googleProductId when both are set', async () => {
+    const client = makeTableClient([
+      row({ id: '1', code: 'both-ids', apple_product_id: 'com.orodim.minutes.300', google_product_id: 'minutes_300' }),
+    ]);
+    const [pkg] = await listPublishedMinutePackages(client as any, 'essential');
+    expect(pkg.appleProductId).toBe('com.orodim.minutes.300');
+    expect(pkg.googleProductId).toBe('minutes_300');
+  });
+
+  it('keeps appleProductId/googleProductId as null (never an empty string) when neither store id is configured yet', async () => {
+    const client = makeTableClient([
+      row({ id: '1', code: 'no-ids', apple_product_id: null, google_product_id: null }),
+    ]);
+    const [pkg] = await listPublishedMinutePackages(client as any, 'essential');
+    expect(pkg.appleProductId).toBeNull();
+    expect(pkg.googleProductId).toBeNull();
+  });
+
+  it('never leaks internal snake_case column names in the returned contract', async () => {
+    const client = makeTableClient([
+      row({ id: '1', code: 'shape-check', apple_product_id: 'com.orodim.minutes.300', google_product_id: 'minutes_300' }),
+    ]);
+    const [pkg] = await listPublishedMinutePackages(client as any, 'essential');
+    expect(Object.keys(pkg).sort()).toEqual(
+      ['appleProductId', 'code', 'currency', 'description', 'googleProductId', 'id', 'minutes', 'name', 'priceCents'].sort(),
+    );
   });
 
   it('throws when the read fails', async () => {
