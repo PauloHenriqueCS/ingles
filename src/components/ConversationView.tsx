@@ -6,6 +6,7 @@ import { openAndroidAppSettings } from '../lib/lemonNative';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import { useConversationCaptions } from '../hooks/useConversationCaptions';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import ActivityAccessBlocked from './ActivityAccessBlocked';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
@@ -149,7 +150,12 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 
 // ── Main view ─────────────────────────────────────────────────────────────────
 
-export default function ConversationView({ onComplete }: { onComplete?: () => void } = {}) {
+interface Props {
+  onComplete?: () => void;
+  onNavigateToSubscription: () => void;
+}
+
+export default function ConversationView({ onComplete, onNavigateToSubscription }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
   const session      = useRealtimeSession(playbackRate);
@@ -297,6 +303,12 @@ export default function ConversationView({ onComplete }: { onComplete?: () => vo
           </div>
         ) : (
           <div className="flex flex-col gap-4">
+
+            {/* ── No valid trial/subscription access — blocks starting a call,
+                 independent of the Home screen's own visual block ────────── */}
+            {!conversationLoading && conversationDisabledByPlan && (
+              <ActivityAccessBlocked compact onSubscribe={onNavigateToSubscription} />
+            )}
 
             {/* ── Monthly conversation balance (commercial plan) ──────────── */}
             {!conversationLoading && conversation && (

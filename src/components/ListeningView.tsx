@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
+import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import ActivityAccessBlocked from './ActivityAccessBlocked';
 import {
   getEpisodeSession,
   getPublishedEpisodes,
@@ -148,11 +150,17 @@ interface Props {
   onBack: () => void;
   episodeId?: string;
   onComplete?: () => void;
+  onNavigateToSubscription: () => void;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function ListeningView({ onBack, episodeId: propEpisodeId, onComplete }: Props) {
+export default function ListeningView({ onBack, episodeId: propEpisodeId, onComplete, onNavigateToSubscription }: Props) {
+  const entitlementsState = usePlanEntitlements();
+  const listening = entitlementsState.data?.listening ?? null;
+  const listeningLoading = entitlementsState.data === null;
+  const listeningDisabledByPlan = listening ? !listening.enabled : false;
+
   const [phase, setPhase] = useState<Phase>('loading');
   const [episodeId, setEpisodeId] = useState<string | null>(propEpisodeId ?? null);
   const [, setAssignmentId] = useState<string | null>(null);
@@ -300,12 +308,17 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   }, [session?.sessionId, playerSetOnEnded]);
 
   useEffect(() => {
+    // Wait for the plan/subscription check before ever attempting to load
+    // or generate a session — a blocked user must never see a doomed
+    // network call fail generically; the backend enforces this too
+    // (listening/[...slug].ts), this is only about not racing it client-side.
+    if (listeningLoading || listeningDisabledByPlan) return;
     if (propEpisodeId) {
       loadSession(propEpisodeId);
     } else {
       loadTodaySession();
     }
-  }, []); // only on mount
+  }, [listeningLoading, listeningDisabledByPlan, propEpisodeId]);
 
   async function loadTodaySession() {
     setPhase('loading');
@@ -2017,19 +2030,29 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       {renderHeader()}
 
       <div>
-        {phase === 'loading' && renderLoading()}
-        {phase === 'prompt' && renderPrompt()}
-        {phase === 'generating' && renderGenerating()}
-        {phase === 'group_generating' && renderGroupGenerating()}
-        {phase === 'selecting' && renderSelecting()}
-        {phase === 'intro' && renderIntro()}
-        {phase === 'error' && renderError()}
-        {isPlayerPhase && renderPlayer()}
-        {(phase === 'question' || phase === 'submitting') && renderQuestion()}
-        {phase === 'correct' && renderCorrect()}
-        {phase === 'wrong' && renderWrong()}
-        {phase === 'cycle_failed' && renderCycleFailed()}
-        {phase === 'done' && renderDone()}
+        {listeningLoading ? (
+          renderLoading()
+        ) : listeningDisabledByPlan ? (
+          <div className="p-6 max-w-lg mx-auto pt-8">
+            <ActivityAccessBlocked onSubscribe={onNavigateToSubscription} />
+          </div>
+        ) : (
+          <>
+            {phase === 'loading' && renderLoading()}
+            {phase === 'prompt' && renderPrompt()}
+            {phase === 'generating' && renderGenerating()}
+            {phase === 'group_generating' && renderGroupGenerating()}
+            {phase === 'selecting' && renderSelecting()}
+            {phase === 'intro' && renderIntro()}
+            {phase === 'error' && renderError()}
+            {isPlayerPhase && renderPlayer()}
+            {(phase === 'question' || phase === 'submitting') && renderQuestion()}
+            {phase === 'correct' && renderCorrect()}
+            {phase === 'wrong' && renderWrong()}
+            {phase === 'cycle_failed' && renderCycleFailed()}
+            {phase === 'done' && renderDone()}
+          </>
+        )}
       </div>
 
       {renderTranscriptModal()}

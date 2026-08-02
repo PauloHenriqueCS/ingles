@@ -163,6 +163,7 @@ export default function App() {
         entry={getEntry(selectedDate)}
         onSave={saveEntry}
         onBack={closeDay}
+        onNavigateToSubscription={() => setView('subscription')}
         activeWeekdays={learningSettings.activeWeekdays}
         onActivateDay={handleActivateDay}
       />
@@ -252,7 +253,10 @@ export default function App() {
           <MemoryView onNavigate={setView} onSettingsChange={setLearningSettings} />
         )}
         {view === 'conversation' && (
-          <ConversationView onComplete={() => setConversationRefreshKey((k) => k + 1)} />
+          <ConversationView
+            onComplete={() => setConversationRefreshKey((k) => k + 1)}
+            onNavigateToSubscription={() => setView('subscription')}
+          />
         )}
         {view === 'listening' && (
           <ListeningView
@@ -262,13 +266,14 @@ export default function App() {
               setListeningRefreshKey((k) => k + 1);
               console.log('[LISTENING_CALENDAR_REFRESHED] calendar refresh triggered after listening completion');
             }}
+            onNavigateToSubscription={() => setView('subscription')}
           />
         )}
         {view === 'audio-settings' && (
           <AudioSettingsView onBack={() => setView('home')} />
         )}
         {view === 'pronunciation-training' && (
-          <PronunciationTrainingView onBack={() => setView('home')} />
+          <PronunciationTrainingView onBack={() => setView('home')} onNavigateToSubscription={() => setView('subscription')} />
         )}
         {view === 'settings' && (
           <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />

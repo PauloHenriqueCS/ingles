@@ -32,6 +32,12 @@ function makeMockSupabase({ planRow, tableResults = {} }: MockOptions) {
   } as any;
 }
 
+// A genuine (non-fallback) assignment — assignment_id/starts_at populated,
+// exactly as admin_resolve_effective_plan_v1's IF FOUND branch always
+// returns them. Every existing test below uses this fixture to mean "a
+// legitimately entitled, resolved plan"; see the dedicated 'subscription
+// access gate' describe block further down for the fallback (no genuine
+// assignment) case itself.
 const RESOLVED_PLAN = {
   user_id: 'u1',
   access_allowed: true,
@@ -41,6 +47,9 @@ const RESOLVED_PLAN = {
   plan_version_id: 'version-1',
   version_number: 1,
   is_suspended: false,
+  assignment_id: 'assignment-free-1',
+  starts_at: '2026-01-01T00:00:00Z',
+  ends_at: null,
 };
 
 describe('getCurrentUserPlanEntitlements', () => {
@@ -461,6 +470,131 @@ describe('getCurrentUserPlanEntitlements', () => {
   });
 });
 
+// ── Subscription access gate — the four activities require a GENUINE
+// user_plan_assignments row, not merely access_allowed=true ────────────────
+//
+// admin_resolve_effective_plan_v1's access_allowed only reflects admin
+// suspension. Whenever there is no active assignment row covering `now` —
+// trial expired, a canceled/billing_issue subscription past its paid
+// ends_at, or the user never had an assignment — the RPC falls back to
+// plans.is_default (a safety-net plan the audit found still had
+// writing/listening/pronunciation.enabled=true, only conversation.enabled
+// was false — see 20260727230500_grant_signup_trial.sql's own "nunca teve
+// conversation.enabled" comment). Without this gate, an expired/canceled/
+// billing_issue user would keep a small but real daily allowance for three
+// of the four activities. The gate must win regardless of what the fallback
+// plan's own capability_values say — 'canceled'/'billing_issue' access
+// windows are enforced entirely by the RPC's own WHERE clause (ends_at >
+// p_at); by the time this service sees a fallback row, the paid period is
+// already over, so this file never needs to special-case those two states —
+// "no genuine assignment" already covers all three failure states uniformly.
+describe('getCurrentUserPlanEntitlements — subscription access gate (genuine assignment required)', () => {
+  // Mirrors the real plano-teste-lojas fallback found in homologation:
+  // access_allowed=true (not suspended), no assignment_id/starts_at, and a
+  // configuration that — if trusted — would still grant partial access.
+  const FALLBACK_PLAN_ROW = {
+    user_id: 'u1',
+    access_allowed: true,
+    plan_id: 'plan-default',
+    plan_code: 'plano-teste-lojas',
+    plan_name: 'Plano de teste lojas',
+    plan_version_id: 'version-default-1',
+    version_number: 1,
+    is_suspended: false,
+    assignment_id: null,
+    starts_at: null,
+    ends_at: null,
+  };
+
+  const PARTIALLY_OPEN_FALLBACK_CAPS = [
+    { capability_key: 'writing.enabled', value: true },
+    { capability_key: 'writing.theme_generations_per_day', value: 1 },
+    { capability_key: 'writing.theme_generations_per_day.unlimited', value: false },
+    { capability_key: 'writing.reviews_per_day', value: 1 },
+    { capability_key: 'writing.reviews_per_day.unlimited', value: false },
+    { capability_key: 'listening.enabled', value: true },
+    { capability_key: 'listening.stories_per_day', value: 1 },
+    { capability_key: 'listening.stories_per_day.unlimited', value: false },
+    { capability_key: 'pronunciation.enabled', value: true },
+    { capability_key: 'pronunciation.evaluations_per_day', value: 1 },
+    { capability_key: 'pronunciation.evaluations_per_day.unlimited', value: false },
+    { capability_key: 'conversation.enabled', value: false },
+  ];
+
+  it('trial expired / subscription canceled or billing_issue past its period (resolved via the default-plan fallback): blocks all four activities even though the fallback plan itself would grant three of them', async () => {
+    const supabase = makeMockSupabase({
+      planRow: FALLBACK_PLAN_ROW,
+      tableResults: { plan_capability_values: { data: PARTIALLY_OPEN_FALLBACK_CAPS, error: null } },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.enabled).toBe(false);
+    expect(snapshot.writing.themeGenerations.canStart).toBe(false);
+    expect(snapshot.listening.enabled).toBe(false);
+    expect(snapshot.listening.stories.canStart).toBe(false);
+    expect(snapshot.pronunciation.enabled).toBe(false);
+    expect(snapshot.pronunciation.evaluations.canStart).toBe(false);
+    expect(snapshot.conversation.enabled).toBe(false);
+    expect(snapshot.conversation.monthlyTime.canStart).toBe(false);
+    expect(snapshot.suspended).toBe(false); // fails closed for a different reason, never mislabeled as suspension
+  });
+
+  it('no plan resolved at all (RPC returns nothing, no default plan configured either): blocks all four activities', async () => {
+    const supabase = makeMockSupabase({ planRow: null });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.enabled).toBe(false);
+    expect(snapshot.listening.enabled).toBe(false);
+    expect(snapshot.pronunciation.enabled).toBe(false);
+    expect(snapshot.conversation.enabled).toBe(false);
+  });
+
+  it('trialing (genuine trial assignment) still resolves normal entitlements — the gate never blocks a valid trial', async () => {
+    // No plan_capability_values rows at all -> the existing legacy-fallback
+    // path (scenario 9 above) resolves every activity as enabled+unlimited.
+    // The point of this test is only that the NEW gate itself does not zero
+    // these out for a genuine trial assignment — capability completeness is
+    // already covered by the trial-specific describe block below.
+    const supabase = makeMockSupabase({
+      planRow: {
+        user_id: 'u1', access_allowed: true, plan_id: 'plan-trial', plan_code: 'trial', plan_name: 'Trial',
+        plan_version_id: 'version-trial-1', version_number: 1, is_suspended: false,
+        assignment_id: 'assignment-1', starts_at: '2026-07-10T00:00:00Z', ends_at: '2026-07-17T00:00:00Z',
+      },
+      tableResults: { plan_capability_values: { data: [], error: null } },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
+
+    expect(snapshot.writing.enabled).toBe(true);
+    expect(snapshot.listening.enabled).toBe(true);
+    expect(snapshot.pronunciation.enabled).toBe(true);
+    expect(snapshot.conversation.enabled).toBe(true);
+  });
+
+  it('active commercial plan (genuine assignment, e.g. Essencial/Plus once published) is never blocked by the gate', async () => {
+    const supabase = makeMockSupabase({ planRow: RESOLVED_PLAN });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    // RESOLVED_PLAN has no plan_capability_values configured in this mock,
+    // so the legacy-fallback (permissive) path applies — the point here is
+    // only that the gate itself does not zero these out.
+    expect(snapshot.writing.enabled).toBe(true);
+    expect(snapshot.listening.enabled).toBe(true);
+    expect(snapshot.pronunciation.enabled).toBe(true);
+    expect(snapshot.conversation.enabled).toBe(true);
+  });
+
+  it('a still-valid canceled or billing_issue subscription (genuine assignment, ends_at in the future) is resolved exactly like any other active assignment — the RPC itself (ends_at > p_at), not this service, is what stops returning the row once the period ends', async () => {
+    const supabase = makeMockSupabase({
+      planRow: { ...RESOLVED_PLAN, ends_at: '2026-08-01T00:00:00Z' },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+
+    expect(snapshot.writing.enabled).toBe(true);
+    expect(snapshot.conversation.enabled).toBe(true);
+  });
+});
+
 // ── Etapa 2A — the internal 'trial' plan's lifetime Conversation total ──────
 describe('getCurrentUserPlanEntitlements — trial plan (conversation.realtime.seconds.trial_total)', () => {
   const RESOLVED_TRIAL_PLAN = {
@@ -685,15 +819,26 @@ describe('getCurrentUserPlanEntitlements — trial plan (conversation.realtime.s
     expect(snapshot.conversation.enabled).toBe(false);
   });
 
-  it('a trial-coded plan resolved WITHOUT a real assignment (no assignment_id/starts_at) is a safe config_error, never unlimited', async () => {
+  it('a trial-coded plan resolved WITHOUT a real assignment (no assignment_id/starts_at) is the subscription-access gate\'s fallback case — fully locked, never unlimited, never config_error alone', async () => {
+    // The subscription-access gate (see the dedicated describe block below)
+    // now catches this before any capability is even read: assignment_id/
+    // starts_at both null means "no genuine assignment", exactly the shape
+    // admin_resolve_effective_plan_v1's default-plan fallback returns. This
+    // used to reach the trial-specific trialWindowMissing/config_error path
+    // for conversation only — now every activity fails closed, which is the
+    // strictly safer outcome and the actual point of the gate.
     const supabase = makeMockSupabase({
       planRow: { ...RESOLVED_TRIAL_PLAN, assignment_id: null, starts_at: null, ends_at: null },
       tableResults: { plan_capability_values: { data: TRIAL_CAPS, error: null } },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-12T12:00:00Z') });
 
-    expect(snapshot.conversation.monthlyTime.state).toBe('config_error');
+    expect(snapshot.conversation.enabled).toBe(false);
     expect(snapshot.conversation.monthlyTime.unlimited).toBe(false);
+    expect(snapshot.conversation.monthlyTime.canStart).toBe(false);
+    expect(snapshot.writing.enabled).toBe(false);
+    expect(snapshot.listening.enabled).toBe(false);
+    expect(snapshot.pronunciation.enabled).toBe(false);
     expect(snapshot.trialAssignment).toBeNull();
   });
 

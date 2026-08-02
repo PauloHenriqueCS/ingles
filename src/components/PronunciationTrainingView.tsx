@@ -27,6 +27,7 @@ import type { PronunciationNormalizedResult } from '../types';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
 import { apiUrl } from '../lib/apiUrl';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import ActivityAccessBlocked from './ActivityAccessBlocked';
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -344,11 +345,12 @@ function WordRow({
 
 interface Props {
   onBack: () => void;
+  onNavigateToSubscription: () => void;
 }
 
 type MainPhase = 'generating' | 'ready' | 'results' | 'gen-error' | 'blocked';
 
-export default function PronunciationTrainingView({ onBack }: Props) {
+export default function PronunciationTrainingView({ onBack, onNavigateToSubscription }: Props) {
   const entitlementsState = usePlanEntitlements();
   const pronunciation = entitlementsState.data?.pronunciation ?? null;
   const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
@@ -363,6 +365,11 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
   const [mainPhase, setMainPhase]           = useState<MainPhase>('generating');
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
+  // Only FEATURE_DISABLED means "no valid access at all" — worth a CTA to
+  // /assinatura. DAILY_LIMIT_REACHED means the user already has access and
+  // simply used today's quota; offering to "view plans" there would be
+  // misleading, so the CTA is withheld for that code.
+  const [blockedIsNoAccess, setBlockedIsNoAccess] = useState(false);
   const [sessionId, setSessionId]           = useState<string | null>(null);
   const [sessionStatus, setSessionStatus]   = useState<SessionStatus | null>(null);
   const [generatedText, setGeneratedText]   = useState<string | null>(null);
@@ -451,6 +458,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
     setMainPhase('generating');
     setGenError(null);
     setBlockedMessage(null);
+    setBlockedIsNoAccess(false);
     setWordResults(null);
     setWordCategories(new Map());
     setActiveRecordingWordId(null);
@@ -472,6 +480,7 @@ export default function PronunciationTrainingView({ onBack }: Props) {
       if (!resp.ok) {
         if (json.code === 'FEATURE_DISABLED' || json.code === 'DAILY_LIMIT_REACHED') {
           setBlockedMessage(json.message ?? ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday);
+          setBlockedIsNoAccess(json.code === 'FEATURE_DISABLED');
           setMainPhase('blocked');
           return;
         }
@@ -671,10 +680,14 @@ export default function PronunciationTrainingView({ onBack }: Props) {
 
       {/* ── Blocked by plan (feature off, or a hypothetical 0/day limit) ─── */}
       {mainPhase === 'blocked' && (
-        <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 text-center space-y-2">
-          <Lock className="w-6 h-6 text-amber-400 mx-auto" />
-          <p className="text-sm text-slate-300">{blockedMessage ?? ENTITLEMENT_MESSAGES.featureUnavailable}</p>
-        </div>
+        blockedIsNoAccess ? (
+          <ActivityAccessBlocked message={blockedMessage ?? undefined} onSubscribe={onNavigateToSubscription} />
+        ) : (
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 text-center space-y-2">
+            <Lock className="w-6 h-6 text-amber-400 mx-auto" />
+            <p className="text-sm text-slate-300">{blockedMessage ?? ENTITLEMENT_MESSAGES.featureUnavailable}</p>
+          </div>
+        )
       )}
 
       {/* ── Generation error ────────────────────────────────────────────── */}

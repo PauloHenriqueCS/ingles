@@ -20,12 +20,14 @@ import DailyThemeCard from './DailyThemeCard';
 import MissionGrammarGuide from './MissionGrammarGuide';
 import RewriteSection from './RewriteSection';
 import PronunciationRecorder from './PronunciationRecorder';
+import ActivityAccessBlocked from './ActivityAccessBlocked';
 
 interface Props {
   date: string;
   entry: DayEntry | null;
   onSave: (patch: Partial<DayEntry> & { date: string }) => Promise<void>;
   onBack: () => void;
+  onNavigateToSubscription: () => void;
   activeWeekdays?: number[];
   onActivateDay?: (date: string) => Promise<void>;
 }
@@ -40,7 +42,7 @@ type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type HistoryState = 'idle' | 'saved';
 
-export default function DayView({ date, entry, onSave, onBack, activeWeekdays = [1,2,3,4,5], onActivateDay }: Props) {
+export default function DayView({ date, entry, onSave, onBack, onNavigateToSubscription, activeWeekdays = [1,2,3,4,5], onActivateDay }: Props) {
   const dow = new Date(date + 'T12:00:00').getDay();
   const isScheduledDay = activeWeekdays.includes(dow);
 
@@ -322,6 +324,13 @@ export default function DayView({ date, entry, onSave, onBack, activeWeekdays = 
           <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
         ) : (
           <>
+        {/* No valid trial/subscription access — banner only, never replaces
+            the page: past content on this day (if any) must stay viewable,
+            only starting new writing/review activity is blocked. */}
+        {!writingLoading && writingDisabledByPlan && (
+          <ActivityAccessBlocked compact onSubscribe={onNavigateToSubscription} />
+        )}
+
         <DailyThemeCard
           theme={dailyTheme}
           onThemeReady={(t) => { setDailyTheme(t); entitlements.refetch(); }}

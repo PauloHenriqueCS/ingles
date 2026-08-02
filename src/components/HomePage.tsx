@@ -77,6 +77,7 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           state={writingCardState(resolved, config)}
           disabledMessage={config?.['features.writing'].unavailableMessage}
           onClick={onStartPractice}
+          onDisabledByPlanClick={() => onNavigate('subscription')}
           accent="blue"
           icon={<PenSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
           title="Praticar escrita e voz"
@@ -89,6 +90,7 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           state={conversationCardState(resolved, config)}
           disabledMessage={config?.['features.conversation'].unavailableMessage}
           onClick={() => onNavigate('conversation')}
+          onDisabledByPlanClick={() => onNavigate('subscription')}
           accent="teal"
           icon={<MessagesSquare className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
           title="Conversar com IA"
@@ -101,6 +103,7 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           state={listeningCardState(resolved, config)}
           disabledMessage={config?.['features.listening'].unavailableMessage}
           onClick={() => onNavigate('listening')}
+          onDisabledByPlanClick={() => onNavigate('subscription')}
           accent="purple"
           icon={<Headphones className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
           title="Praticar listening"
@@ -113,6 +116,7 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           state={pronunciationCardState(resolved, config)}
           disabledMessage={config?.['features.pronunciation'].unavailableMessage}
           onClick={() => onNavigate('pronunciation-training')}
+          onDisabledByPlanClick={() => onNavigate('subscription')}
           accent="orange"
           icon={<AudioLines className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />}
           title="Treinar pronúncia"
@@ -138,6 +142,11 @@ const ACCENTS = {
 interface ActivityCardProps {
   state: CardVisualState;
   onClick: () => void;
+  /** disabled_by_plan (no valid trial/subscription access, or this plan
+   *  simply excludes the activity) — opens the subscription screen instead
+   *  of starting the activity. Never a window.alert: the ticket requires an
+   *  actual path to /assinatura from the blocked card itself. */
+  onDisabledByPlanClick: () => void;
   accent: keyof typeof ACCENTS;
   icon: React.ReactNode;
   title: string;
@@ -148,7 +157,7 @@ interface ActivityCardProps {
   disabledMessage?: string;
 }
 
-function ActivityCard({ state, onClick, accent, icon, title, description, cta, exhaustedBadge, disabledMessage }: ActivityCardProps) {
+function ActivityCard({ state, onClick, onDisabledByPlanClick, accent, icon, title, description, cta, exhaustedBadge, disabledMessage }: ActivityCardProps) {
   const a = ACCENTS[accent];
   const isDisabledByPlan = state === 'disabled_by_plan';
   const isDisabledGlobally = state === 'disabled_globally';
@@ -162,7 +171,7 @@ function ActivityCard({ state, onClick, accent, icon, title, description, cta, e
       return;
     }
     if (isDisabledByPlan) {
-      window.alert(ENTITLEMENT_MESSAGES.featureUnavailable);
+      onDisabledByPlanClick();
       return;
     }
     // limit_reached and available both navigate through — the destination

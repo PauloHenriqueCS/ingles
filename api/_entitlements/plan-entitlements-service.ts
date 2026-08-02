@@ -182,7 +182,22 @@ export async function getCurrentUserPlanEntitlements(
 
   const plan = (Array.isArray(planRowsRaw) ? planRowsRaw[0] : planRowsRaw) as EffectivePlanRow | undefined;
 
-  if (!plan || !plan.access_allowed) {
+  // access_allowed only reflects admin suspension — it says nothing about
+  // subscription validity. admin_resolve_effective_plan_v1 falls back to
+  // plans.is_default (a safety-net plan, never meant as a commercial grant —
+  // see 20260727230500_grant_signup_trial.sql) whenever there is no genuine
+  // user_plan_assignments row covering `now`: trial expired, a canceled or
+  // billing_issue subscription past its paid ends_at, or no assignment ever
+  // granted. That fallback is the ONLY case where assignment_id/starts_at
+  // come back null (a real assignment lookup always populates both — see
+  // the RPC's IF FOUND branch). The four activities must fail closed here,
+  // before any capability_values are even read, regardless of what the
+  // fallback plan's own configuration happens to allow — this is what
+  // actually enforces "sem trial/assinatura válida, sem acesso às quatro
+  // atividades" (subscription-status-service.ts's 'expired' derivation
+  // mirrors this exact same genuine-assignment test).
+  const hasGenuineAssignment = plan != null && plan.assignment_id != null && plan.starts_at != null;
+  if (!plan || !plan.access_allowed || !hasGenuineAssignment) {
     const snapshot = lockedSnapshot(now);
     snapshot.suspended = Boolean(plan?.is_suspended);
     return snapshot;

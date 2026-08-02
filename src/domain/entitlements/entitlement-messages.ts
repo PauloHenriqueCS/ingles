@@ -50,4 +50,14 @@ export const ENTITLEMENT_MESSAGES = {
   notIncludedInPlanBadge: 'Não incluído no plano',
   dailyLimitReachedBadge: 'Limite de hoje atingido',
   minutesExhaustedBadge: 'Minutos esgotados',
+
+  /** No valid trial/subscription access at all (subscription status
+   *  'expired', or 'canceled'/'billing_issue' past their access window) —
+   *  distinct from featureUnavailable, which can also mean "this specific
+   *  plan simply doesn't include this activity". */
+  noValidAccessMessage: 'Seu teste gratuito terminou ou sua assinatura não está mais ativa.',
+  viewPlansCta: 'Ver planos',
+  checkingAccessMessage: 'Verificando seu acesso...',
+  accessCheckFailedMessage: 'Não foi possível verificar seu acesso agora.',
+  tryAgainCta: 'Tentar novamente',
 } as const;
