@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { createClient } from '@supabase/supabase-js';
 import { requireAuth } from './_auth';
 import { getSupabaseServiceCredentials } from './_env';
-import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { methodGuard, sizeGuard, readRawBody, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
@@ -13,7 +13,19 @@ import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-mes
 import { handleAccountDeactivateRoute } from './_account/deactivate-route-handler';
 import { handleConfigPublicRoute } from './_config/public-route-handler';
 import { handleSubscriptionStatusRoute } from './_entitlements/subscription-status-route-handler';
+import { handleRevenueCatWebhookRoute } from './_billing/revenuecat-webhook-route-handler';
+import { handleSubscriptionSyncRoute } from './_billing/subscription-sync-route-handler';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
+
+// Disables Vercel's automatic JSON body parsing for this ENTIRE file —
+// required so the revenuecat-webhook route (rewritten in here, see
+// vercel.json and the __lemonRoute branches below) can verify HMAC over the
+// exact raw bytes RevenueCat signed. Every route in this file that reads a
+// body now reads it itself via readRawBody (api/_helpers.ts) — only the
+// grammar-explanation route below actually has one; account-deactivate/
+// config-public/subscription-status are GET or take no meaningful body, and
+// subscription-sync takes none either (see its own handler).
+export const config = { api: { bodyParser: false } };
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -156,6 +168,17 @@ export default async function handler(req: any, res: any) {
   if (req.query?.__lemonRoute === 'subscription-status') {
     return handleSubscriptionStatusRoute(req, res);
   }
+  // Rewritten here from POST /api/billing/revenuecat/webhook (see
+  // vercel.json) — same function-budget reuse as the branches above. Reads
+  // the raw body itself (config.api.bodyParser = false above) to verify
+  // HMAC over the exact bytes RevenueCat signed.
+  if (req.query?.__lemonRoute === 'revenuecat-webhook') {
+    return handleRevenueCatWebhookRoute(req, res);
+  }
+  // Rewritten here from POST /api/subscription/sync (see vercel.json).
+  if (req.query?.__lemonRoute === 'subscription-sync') {
+    return handleSubscriptionSyncRoute(req, res);
+  }
 
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.GRAMMAR)) return;
@@ -164,7 +187,14 @@ export default async function handler(req: any, res: any) {
   if (!auth) return;
   const { userId } = auth;
 
-  const { grammarName } = req.body ?? {};
+  let grammarName: unknown;
+  try {
+    const raw = await readRawBody(req, PAYLOAD_LIMITS.GRAMMAR);
+    const parsed = raw.length > 0 ? JSON.parse(raw.toString('utf8')) : {};
+    grammarName = (parsed as Record<string, unknown> | null)?.grammarName;
+  } catch {
+    return jsonError(res, 400, 'INVALID_REQUEST', 'Corpo da requisição inválido.');
+  }
   if (!grammarName || typeof grammarName !== 'string') {
     return jsonError(res, 400, 'INVALID_REQUEST', 'grammarName é obrigatório.');
   }

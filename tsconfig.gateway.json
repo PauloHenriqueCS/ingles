@@ -54,6 +54,13 @@
     "api/__tests__/plan-entitlements-service.test.ts",
     "api/__tests__/require-feature-access.test.ts",
     "api/__tests__/listening-today-entitlements.test.ts",
-    "src/domain/entitlements/**/*.ts"
+    "src/domain/entitlements/**/*.ts",
+    "api/grammar-explanation.ts",
+    "api/_billing/**/*.ts",
+    "api/__tests__/revenuecat-webhook-verify.test.ts",
+    "api/__tests__/revenuecat-subscription-sync-service.test.ts",
+    "api/__tests__/revenuecat-minute-credit-service.test.ts",
+    "api/__tests__/revenuecat-webhook-route-handler.test.ts",
+    "api/__tests__/subscription-sync-route-handler.test.ts"
   ]
 }

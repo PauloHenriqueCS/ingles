@@ -358,6 +358,22 @@ describe('compare-rewrite handler', () => {
 
 // ─── grammar-explanation ─────────────────────────────────────────────────────
 
+// config.api.bodyParser = false on grammar-explanation.ts (see that file)
+// means the handler reads the raw body itself via readRawBody — a real
+// Vercel request is an async-iterable stream, so unlike the generic makeReq
+// above, this one must be too rather than pre-populating req.body.
+function makeGrammarReq(body: unknown, overrides: Partial<{ method: string; headers: Record<string, string> }> = {}) {
+  const bodyBuffer = Buffer.from(JSON.stringify(body), 'utf8');
+  return {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'content-length': '50' },
+    ...overrides,
+    async *[Symbol.asyncIterator]() {
+      yield bodyBuffer;
+    },
+  };
+}
+
 describe('grammar-explanation handler', () => {
   let handler: (req: any, res: any) => Promise<void>;
 
@@ -397,7 +413,7 @@ describe('grammar-explanation handler', () => {
 
   it('returns 400 for missing grammarName', async () => {
     authOk();
-    const req = makeReq({ method: 'POST', body: {} });
+    const req = makeGrammarReq({});
     const res = makeRes();
     await handler(req, res);
     expect(res._status()).toBe(400);
@@ -405,7 +421,7 @@ describe('grammar-explanation handler', () => {
 
   it('returns 400 for grammarName exceeding max length', async () => {
     authOk();
-    const req = makeReq({ method: 'POST', body: { grammarName: 'a'.repeat(101) } });
+    const req = makeGrammarReq({ grammarName: 'a'.repeat(101) });
     const res = makeRes();
     await handler(req, res);
     expect(res._status()).toBe(400);
@@ -413,7 +429,7 @@ describe('grammar-explanation handler', () => {
 
   it('returns 400 for grammarName with invalid characters', async () => {
     authOk();
-    const req = makeReq({ method: 'POST', body: { grammarName: 'Present Simple <script>' } });
+    const req = makeGrammarReq({ grammarName: 'Present Simple <script>' });
     const res = makeRes();
     await handler(req, res);
     expect(res._status()).toBe(400);
@@ -427,7 +443,7 @@ describe('grammar-explanation handler', () => {
     mockRequireAuth.mockResolvedValue({ userId: 'u1', supabase } as any);
     const res = makeRes();
     rateLimitBlock(res);
-    const req = makeReq({ method: 'POST', body: { grammarName: 'Present Simple' } });
+    const req = makeGrammarReq({ grammarName: 'Present Simple' });
     await handler(req, res);
     expect(res._status()).toBe(429);
   });

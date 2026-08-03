@@ -132,6 +132,11 @@ function makeSupabaseMock() {
 }
 
 function makeReq(overrides: Record<string, unknown> = {}) {
+  // config.api.bodyParser = false (see grammar-explanation.ts) means the
+  // handler reads the raw body itself via readRawBody — a real Vercel
+  // request is an async-iterable stream, so the mock must be one too rather
+  // than pre-populating req.body.
+  const bodyBuffer = Buffer.from(JSON.stringify({ grammarName: 'Present Simple', ...overrides }), 'utf8');
   return {
     method: 'POST',
     headers: {
@@ -139,7 +144,9 @@ function makeReq(overrides: Record<string, unknown> = {}) {
       'content-length': '50',
       authorization: 'Bearer test-token',
     },
-    body: { grammarName: 'Present Simple', ...overrides },
+    async *[Symbol.asyncIterator]() {
+      yield bodyBuffer;
+    },
   };
 }
 

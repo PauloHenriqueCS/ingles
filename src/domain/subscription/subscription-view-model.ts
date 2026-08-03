@@ -74,7 +74,12 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         canceledPlanName: null,
         accessEndsAtLabel: null,
         showTrialLimits: true,
-        showPlanCards: false,
+        // Trial can preview/choose a commercial plan (native only — the
+        // screen itself gates any actual purchase affordance to iOS; web
+        // never shows a working subscribe button regardless of this flag).
+        // Never treated as an existing purchase — trial state/limits above
+        // are unaffected by this.
+        showPlanCards: true,
         showManageButton: state.canManageSubscription,
         showRestoreButton: state.canRestorePurchases,
       };

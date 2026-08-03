@@ -25,7 +25,7 @@ function state(overrides: Partial<SubscriptionScreenState>): SubscriptionScreenS
 }
 
 describe('buildSubscriptionViewModel — trialing', () => {
-  it('shows the active-trial headline, days remaining, and trial limits — no plan cards, no store actions', () => {
+  it('shows the active-trial headline, days remaining, and trial limits — plan cards visible to preview (never a store action)', () => {
     const vm = buildSubscriptionViewModel(
       state({ status: 'trialing', accessType: 'trial', trialEndsAt: '2026-07-31T12:00:00Z' }),
       NOW,
@@ -33,7 +33,7 @@ describe('buildSubscriptionViewModel — trialing', () => {
     expect(vm.headline).toBe(SUBSCRIPTION_MESSAGES.trialingTitle);
     expect(vm.trialDaysRemainingLabel).toBe('4 dias restantes');
     expect(vm.showTrialLimits).toBe(true);
-    expect(vm.showPlanCards).toBe(false);
+    expect(vm.showPlanCards).toBe(true);
     expect(vm.showManageButton).toBe(false);
     expect(vm.showRestoreButton).toBe(false);
   });
@@ -211,9 +211,9 @@ describe('buildSubscriptionViewModel — button visibility matrix (driven by bac
     }
   });
 
-  it('trialing: no plan cards (so no subscribe buttons)', () => {
+  it('trialing: plan cards visible (native preview) even though no purchase capability exists yet', () => {
     const vm = buildSubscriptionViewModel(state({ status: 'trialing', accessType: 'trial', trialEndsAt: '2026-07-31T12:00:00Z' }), NOW);
-    expect(vm.showPlanCards).toBe(false);
+    expect(vm.showPlanCards).toBe(true);
   });
 
   it('expired: plan cards (both subscribe CTAs) shown', () => {

@@ -52,13 +52,21 @@ export const SUBSCRIPTION_MESSAGES = {
   manageSubscription: 'Gerenciar assinatura',
   backToHome: 'Voltar para o início',
 
-  // placeholder handler feedback — must never claim success
+  // placeholder handler feedback — kept for the (currently always-hidden,
+  // backend-capability-gated) legacy manage/restore buttons; see
+  // SubscriptionView.tsx. Must never claim success.
   devPurchasePlaceholder: (planName: string) =>
     `Ainda em desenvolvimento: a compra do plano ${planName} não está disponível nesta versão. Nenhuma cobrança foi feita e nenhum plano foi alterado.`,
   devRestorePlaceholder:
     'Ainda em desenvolvimento: a restauração de compras não está disponível nesta versão. Nenhuma alteração foi feita.',
   devManageSubscriptionPlaceholder:
     'Ainda em desenvolvimento: o gerenciamento de assinatura não está disponível nesta versão.',
+
+  // Native (iOS) real purchase flow — RevenueCat integration
+  webPurchaseUnavailableNote: 'Assinaturas são feitas pelo aplicativo Orodim. Baixe o app para assinar um plano.',
+  purchasingLabel: 'Processando...',
+  restoringLabel: 'Restaurando...',
+  restoreNoneFoundNote: 'Nenhuma compra encontrada para restaurar.',
 } as const;
 
 export const TRIAL_LIMIT_LABELS = {

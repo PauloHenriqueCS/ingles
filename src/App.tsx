@@ -4,6 +4,7 @@ import { isNativeApp, isPluginAvailable } from './lib/runtimeEnvironment';
 import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
+import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
 import { endSessionAfterAccountDeletion } from './lib/accountSessionCleanup';
@@ -53,6 +54,7 @@ export default function App() {
   const [listeningRefreshKey, setListeningRefreshKey] = useState(0);
   const [conversationRefreshKey, setConversationRefreshKey] = useState(0);
   const { user, loading: authLoading } = useAuth();
+  useRevenueCatIdentitySync(user?.id);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
   useEffect(() => {

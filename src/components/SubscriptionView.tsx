@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2 } from 'lucide-react';
+import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2, ExternalLink } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
@@ -8,6 +8,8 @@ import { SUBSCRIPTION_MESSAGES, TRIAL_LIMIT_LABELS } from '../domain/subscriptio
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
+import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
+import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 
 interface Props {
   onBack: () => void;
@@ -33,22 +35,78 @@ const STATUS_SWITCHER_LABEL: Record<SubscriptionAccessStatus, string> = {
   billing_issue: 'Problema no pagamento',
 };
 
+/** CommercialPlanDisplay.code is English ('essential'/'plus' — legacy
+ *  display-layer naming, pre-existing); plans.apple_product_id is keyed by
+ *  the real DB plan_code ('essencial'/'plus', Portuguese — see
+ *  revenuecat-catalog.ts). This is the one place that bridges them for a
+ *  purchase call — never conflate the two elsewhere. */
+const DISPLAY_CODE_TO_DB_PLAN_CODE: Record<CommercialPlanDisplay['code'], OrodimCommercialPlanCode> = {
+  essential: 'essencial',
+  plus: 'plus',
+};
+
 export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const [mockOverride, setMockOverride] = useState<SubscriptionAccessStatus | null>(initialStatus ?? null);
-  const { state: fetchedState, error } = useSubscriptionStatus();
+  const { state: fetchedState, error, refetch } = useSubscriptionStatus();
   const state = mockOverride ? getMockSubscriptionState(mockOverride) : fetchedState;
   const vm = state ? buildSubscriptionViewModel(state) : null;
   const StatusIcon = vm ? STATUS_ICON[vm.status] : Clock;
+  const nativePurchase = useNativeSubscriptionPurchase();
 
-  function handleSubscribe(plan: CommercialPlanDisplay) {
-    window.alert(SUBSCRIPTION_MESSAGES.devPurchasePlaceholder(plan.name));
+  // FASE 3/4: never offered to the internal plan or during trial — only a
+  // real commercial assignment (active/canceled/billing_issue) or no
+  // assignment at all (choosing a first plan) makes sense to restore/manage.
+  const nativeStoreActionsAllowed = state != null && state.accessType !== 'internal' && state.accessType !== 'trial';
+
+  async function handleSubscribe(plan: CommercialPlanDisplay) {
+    if (!nativePurchase.supported) {
+      // FASE 7: the website never sells subscriptions — no checkout, no
+      // store call, just an honest explanation.
+      window.alert(SUBSCRIPTION_MESSAGES.webPurchaseUnavailableNote);
+      return;
+    }
+    const productId = REVENUECAT_SUBSCRIPTION_PRODUCT_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
+    const purchased = await nativePurchase.purchase(productId);
+    if (purchased) {
+      await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
+    } else if (nativePurchase.lastError && nativePurchase.lastError.code !== 'user_cancelled') {
+      // user_cancelled is never presented as an alarming error (FASE 6).
+      window.alert(nativePurchase.lastError.message);
+    }
   }
 
-  function handleRestore() {
+  async function handleRestore() {
+    if (!nativePurchase.supported) return; // button only ever renders when supported — see below
+    const restored = await nativePurchase.restore();
+    if (restored) {
+      await refetch({ sync: true });
+    } else if (nativePurchase.lastError) {
+      window.alert(
+        nativePurchase.lastError.code === 'user_cancelled'
+          ? SUBSCRIPTION_MESSAGES.restoreNoneFoundNote
+          : nativePurchase.lastError.message,
+      );
+    } else {
+      window.alert(SUBSCRIPTION_MESSAGES.restoreNoneFoundNote);
+    }
+  }
+
+  function handleNativeManage() {
+    if (!nativePurchase.managementUrl) return; // button only ever renders when a real URL exists — see below
+    window.open(nativePurchase.managementUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  // Legacy handlers for the backend-capability-gated buttons further below
+  // (vm.showManageButton/showRestoreButton, driven by
+  // state.canManageSubscription/canRestorePurchases — both hardcoded false
+  // server-side today, see subscription-status-service.ts, so these never
+  // actually render yet). Kept as honest placeholders, never wired to the
+  // real native flow above.
+  function handleLegacyRestore() {
     window.alert(SUBSCRIPTION_MESSAGES.devRestorePlaceholder);
   }
 
-  function handleManage() {
+  function handleLegacyManage() {
     window.alert(SUBSCRIPTION_MESSAGES.devManageSubscriptionPlaceholder);
   }
 
@@ -183,14 +241,58 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
 
         {vm.showPlanCards && (
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-            {COMMERCIAL_PLAN_ORDER.map((code) => (
-              <SubscriptionPlanCard
-                key={code}
-                plan={COMMERCIAL_PLANS[code]}
-                recommended={code === RECOMMENDED_PLAN_CODE}
-                onSubscribe={handleSubscribe}
-              />
-            ))}
+            {COMMERCIAL_PLAN_ORDER.map((code) => {
+              const plan = COMMERCIAL_PLANS[code];
+              // Real Apple-returned price when the native Offering has
+              // loaded — never a fixed price once the real product is
+              // available (FASE 5). Falls back to the static price on web
+              // or before offerings finish loading on native.
+              const realOffering = nativePurchase.offerings.find(
+                (o) => o.productId === REVENUECAT_SUBSCRIPTION_PRODUCT_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]],
+              );
+              return (
+                <SubscriptionPlanCard
+                  key={code}
+                  plan={plan}
+                  recommended={code === RECOMMENDED_PLAN_CODE}
+                  onSubscribe={handleSubscribe}
+                  priceLabel={realOffering?.priceFormatted}
+                  ctaLoading={nativePurchase.purchasing === realOffering?.productId}
+                  ctaDisabled={nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
+                />
+              );
+            })}
+          </section>
+        )}
+
+        {/* Real native (iOS) restore/manage — driven by RevenueCat's own
+            CustomerInfo, never by the backend's still-hardcoded-false
+            canManageSubscription/canRestorePurchases (see the legacy
+            section below, kept dormant and separate on purpose). Never
+            shown for the internal plan or during trial (FASE 3/4). */}
+        {nativeStoreActionsAllowed && nativePurchase.supported && (
+          <section className="space-y-2.5 pt-2">
+            {nativePurchase.managementUrl && (
+              <button
+                type="button"
+                onClick={handleNativeManage}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 transition-colors"
+              >
+                <AppIcon icon={Settings2} className="w-4 h-4 shrink-0" />
+                {SUBSCRIPTION_MESSAGES.manageSubscription}
+                <AppIcon icon={ExternalLink} className="w-3.5 h-3.5 shrink-0 opacity-60" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleRestore}
+              disabled={nativePurchase.restoring}
+              aria-disabled={nativePurchase.restoring}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-slate-800 border border-slate-700 hover:bg-slate-700 disabled:opacity-60 disabled:cursor-not-allowed text-slate-300 transition-colors"
+            >
+              <AppIcon icon={RotateCcw} className="w-4 h-4 shrink-0" />
+              {nativePurchase.restoring ? SUBSCRIPTION_MESSAGES.restoringLabel : SUBSCRIPTION_MESSAGES.restorePurchases}
+            </button>
           </section>
         )}
 
@@ -198,7 +300,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           {vm.showManageButton && (
             <button
               type="button"
-              onClick={handleManage}
+              onClick={handleLegacyManage}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 transition-colors"
             >
               <AppIcon icon={Settings2} className="w-4 h-4 shrink-0" />
@@ -209,7 +311,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           {vm.showRestoreButton && (
             <button
               type="button"
-              onClick={handleRestore}
+              onClick={handleLegacyRestore}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 transition-colors"
             >
               <AppIcon icon={RotateCcw} className="w-4 h-4 shrink-0" />

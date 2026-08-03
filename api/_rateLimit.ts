@@ -34,6 +34,7 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'pronunciation-training-token':         { windowSeconds: 3600, maxRequests: 60  },
   'pronunciation-training-start':         { windowSeconds: 3600, maxRequests: 60  },
   'account-deactivate':   { windowSeconds: 3600, maxRequests: 10  },
+  'subscription-sync':    { windowSeconds: 300,  maxRequests: 10  },
 };
 
 // ── Service role client (singleton) ──────────────────────────────────────────

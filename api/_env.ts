@@ -46,3 +46,26 @@ export function getSupabaseAnonCredentials(): SupabaseCredentials {
 export function getCommunicationSuppressionHmacSecret(): string {
   return readEnv('COMMUNICATION_SUPPRESSION_HMAC_SECRET');
 }
+
+// ── RevenueCat (server-only secrets — see .env.example for the full set,
+// including the client-safe VITE_REVENUECAT_APPLE_API_KEY read directly by
+// src/lib/revenueCat/, never through this file) ─────────────────────────────
+
+/** Shared secret RevenueCat sends as the webhook's Authorization header.
+ *  Empty string when unset — callers must fail closed, never skip the check. */
+export function getRevenueCatWebhookAuthSecret(): string {
+  return readEnv('REVENUECAT_WEBHOOK_AUTH_SECRET');
+}
+
+/** HMAC-SHA256 signing secret for X-RevenueCat-Webhook-Signature. Empty
+ *  string means signing is not configured yet in the RevenueCat dashboard —
+ *  callers must treat that as "HMAC check unavailable", never as "valid". */
+export function getRevenueCatWebhookHmacSecret(): string {
+  return readEnv('REVENUECAT_WEBHOOK_HMAC_SECRET');
+}
+
+/** RevenueCat REST API secret key, for server-initiated CustomerInfo lookups
+ *  (POST /api/subscription/sync). Empty string when unset. */
+export function getRevenueCatApiSecretKey(): string {
+  return readEnv('REVENUECAT_API_SECRET_KEY');
+}

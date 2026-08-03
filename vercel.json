@@ -14,6 +14,8 @@
     { "source": "/api/account/deactivate", "destination": "/api/grammar-explanation?__lemonRoute=account-deactivate" },
     { "source": "/api/config/public", "destination": "/api/grammar-explanation?__lemonRoute=config-public" },
     { "source": "/api/subscription/status", "destination": "/api/grammar-explanation?__lemonRoute=subscription-status" },
+    { "source": "/api/subscription/sync", "destination": "/api/grammar-explanation?__lemonRoute=subscription-sync" },
+    { "source": "/api/billing/revenuecat/webhook", "destination": "/api/grammar-explanation?__lemonRoute=revenuecat-webhook" },
     { "source": "/api/listening/(.*)", "destination": "/api/listening/[...slug]?slug=$1" },
     { "source": "/api/internal/listening/(.*)", "destination": "/api/internal/listening/[...slug]?slug=$1" },
     { "source": "/api/internal/product-config/(.*)", "destination": "/api/internal/listening/[...slug]?slug=product-config/$1" },

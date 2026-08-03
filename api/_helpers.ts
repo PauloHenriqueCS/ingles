@@ -82,6 +82,32 @@ export function sizeGuard(req: any, res: any, maxBytes: number): boolean {
   return true;
 }
 
+// ── Raw body reader ───────────────────────────────────────────────────────────
+
+/**
+ * Buffers the request body verbatim — only usable when the function's own
+ * `export const config = { api: { bodyParser: false } }` has disabled
+ * Vercel's automatic JSON parsing (see api/grammar-explanation.ts). Required
+ * for webhook HMAC verification, which must hash the exact bytes the sender
+ * signed — re-serializing a parsed JSON.parse(...) object can byte-for-byte
+ * differ (key order, whitespace) and silently break every valid signature.
+ * Enforces maxBytes itself (this path never goes through sizeGuard's
+ * Content-Length-only check, since here we actually consume the stream).
+ */
+export async function readRawBody(req: any, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      throw Object.assign(new Error('Raw body exceeds maxBytes'), { code: 'PAYLOAD_TOO_LARGE' });
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
 // ── Safe structured log ───────────────────────────────────────────────────────
 
 /**

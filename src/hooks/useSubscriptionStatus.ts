@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAuthHeader } from '../lib/apiAuth';
 import type { SubscriptionScreenState } from '../domain/subscription/subscription-types';
 
@@ -12,6 +12,11 @@ import type { SubscriptionScreenState } from '../domain/subscription/subscriptio
 export interface UseSubscriptionStatusResult {
   state: SubscriptionScreenState | null;
   error: boolean;
+  /** Re-fetches. sync=true calls POST /api/subscription/sync instead (same
+   *  response shape — api/_billing/subscription-sync-route-handler.ts —
+   *  proactively reconciles with RevenueCat first) — call this right after
+   *  a native purchase/restore, before the webhook necessarily arrives. */
+  refetch: (options?: { sync?: boolean }) => Promise<void>;
 }
 
 interface SubscriptionStatusResponse {
@@ -26,44 +31,49 @@ interface SubscriptionStatusResponse {
   canRestorePurchases: boolean;
 }
 
+function toScreenState(data: SubscriptionStatusResponse): SubscriptionScreenState {
+  return {
+    status: data.status,
+    accessType: data.accessType,
+    trialEndsAt: data.trialEndsAt,
+    trialDaysRemaining: data.trialDaysRemaining,
+    currentPlanCode: data.planCode,
+    currentPlanName: data.planName,
+    // No payment provider integrated yet — never inferred client-side.
+    subscriptionProvider: null,
+    subscriptionExpiresAt: data.subscriptionExpiresAt,
+    canManageSubscription: data.canManageSubscription,
+    canRestorePurchases: data.canRestorePurchases,
+  };
+}
+
 export function useSubscriptionStatus(): UseSubscriptionStatusResult {
   const [state, setState] = useState<SubscriptionScreenState | null>(null);
   const [error, setError] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const headers = await getAuthHeader();
-        const res = await fetch('/api/subscription/status', { headers });
-        if (!res.ok) throw new Error(`status ${res.status}`);
-        const data = (await res.json()) as SubscriptionStatusResponse;
-        if (cancelled) return;
-        setState({
-          status: data.status,
-          accessType: data.accessType,
-          trialEndsAt: data.trialEndsAt,
-          trialDaysRemaining: data.trialDaysRemaining,
-          currentPlanCode: data.planCode,
-          currentPlanName: data.planName,
-          // No payment provider integrated yet — never inferred client-side.
-          subscriptionProvider: null,
-          subscriptionExpiresAt: data.subscriptionExpiresAt,
-          canManageSubscription: data.canManageSubscription,
-          canRestorePurchases: data.canRestorePurchases,
-        });
-        setError(false);
-      } catch {
-        if (cancelled) return;
-        setError(true);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+  const refetch = useCallback(async (options?: { sync?: boolean }) => {
+    try {
+      const headers = await getAuthHeader();
+      const res = options?.sync
+        ? await fetch('/api/subscription/sync', { method: 'POST', headers })
+        : await fetch('/api/subscription/status', { headers });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const data = (await res.json()) as SubscriptionStatusResponse;
+      if (!mountedRef.current) return;
+      setState(toScreenState(data));
+      setError(false);
+    } catch {
+      if (!mountedRef.current) return;
+      setError(true);
+    }
   }, []);
 
-  return { state, error };
+  useEffect(() => {
+    refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return { state, error, refetch };
 }
