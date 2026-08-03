@@ -195,6 +195,22 @@ que documenta `version` (horário real de aplicação) divergindo de `name`
 4. Isso não corrige a divergência já existente da migration do
    `ingles-dashboad` (fora de escopo alterar o histórico remoto ou o outro
    repositório) — só evita que o problema se repita daqui para frente.
+5. **Quando `supabase migration list`/`db push --dry-run` (local ou no
+   workflow de CI) mostrar uma versão remota pertencente ao
+   `ingles-dashboad` sem arquivo local correspondente** (bloqueando
+   qualquer push seguinte, mesmo de migrations legítimas deste
+   repositório — caso real: `20260803000000 plans_store_ids`, 2026-08-03),
+   este repositório recebe um **arquivo marcador** em
+   `supabase/migrations/` com o mesmo timestamp e nome, contendo **apenas
+   comentários** (nenhum DDL/DML/GRANT/REVOKE/chamada de função) — nunca
+   uma cópia do SQL real, que continua propriedade exclusiva do
+   `ingles-dashboad`. O marcador só alinha o histórico local ao remoto para
+   o CLI parar de bloquear; migrations próprias deste repositório continuam
+   contendo o SQL real normalmente. Nunca usar `apply_migration` (MCP) nem
+   `supabase migration repair`/edição direta de
+   `supabase_migrations.schema_migrations` para isso — essas rotas geram ou
+   alteram histórico fora do fluxo versionado por arquivo, exatamente o que
+   este documento já pede para evitar.
 
 ## Onde encontrar mais contexto
 

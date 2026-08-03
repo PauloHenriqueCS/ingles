@@ -1,0 +1,37 @@
+-- =============================================================================
+-- MIGRATION: 20260803000000_plans_store_ids
+-- Projeto: Orodim
+--
+-- MARCADOR DE COMPATIBILIDADE — NÃO EXECUTA NENHUM SQL.
+--
+-- Esta versão (20260803000000, nome "plans_store_ids") NÃO pertence a este
+-- repositório (`ingles`). É uma migration própria do repositório
+-- `ingles-dashboad`, que adiciona a public.plans os IDs de loja
+-- (apple_product_id, google_subscription_product_id, google_base_plan_id)
+-- dos planos comerciais e atualiza public.publish_plan_version() para exigir
+-- esses IDs antes de publicar/ativar um plano Essencial/Plus.
+--
+-- Já foi aplicada e reconciliada diretamente no banco de homologação
+-- compartilhado (ahszqexfzpbirdlkmdci) pelo `ingles-dashboad` — confirmado
+-- por leitura direta de supabase_migrations.schema_migrations (versão
+-- 20260803000000) e das colunas/função reais em information_schema/pg_proc,
+-- em modo leitura, antes de criar este arquivo. Nada aqui recria, reaplica
+-- ou reexecuta esse trabalho.
+--
+-- Motivo de existir: `supabase migration list`/`db push --dry-run` comparam
+-- o diretório local de migrations contra supabase_migrations.schema_migrations
+-- por VERSÃO — sem um arquivo local com este timestamp, o CLI interpreta a
+-- versão remota como "ausente localmente" e bloqueia qualquer push seguinte
+-- (mesmo push de migrations legítimas deste repositório). Este arquivo
+-- existe exclusivamente para alinhar esse histórico local ao remoto — ver
+-- a seção "Banco compartilhado" em supabase/MIGRATIONS.md.
+--
+-- Este arquivo:
+--   - não recria as colunas (nenhum ALTER TABLE);
+--   - não substitui publish_plan_version (nenhum CREATE OR REPLACE FUNCTION);
+--   - não executa DDL, DML, GRANT, REVOKE nem chamada de função alguma;
+--   - nunca deve ganhar SQL real — qualquer alteração à migration
+--     "plans_store_ids" em si pertence exclusivamente ao `ingles-dashboad`.
+--
+-- Nenhuma instrução executável abaixo desta linha, de propósito.
+-- =============================================================================
