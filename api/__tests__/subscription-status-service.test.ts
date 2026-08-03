@@ -8,7 +8,7 @@ vi.mock('../_account/billing-block-repository', () => ({
   hasActiveSubscriptionBillingIssue: mockHasActiveSubscriptionBillingIssue,
 }));
 
-import { resolveSubscriptionStatus } from '../_entitlements/subscription-status-service';
+import { resolveSubscriptionStatus, INTERNAL_UNLIMITED_PLAN_CODE } from '../_entitlements/subscription-status-service';
 
 function makeChain(result: { data: unknown; error?: unknown }) {
   const resolved = Promise.resolve(result);
@@ -200,5 +200,172 @@ describe('resolveSubscriptionStatus', () => {
     });
     const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
     expect(snapshot.status).toBe('expired');
+  });
+});
+
+// ── accessType — internal / trial / commercial / none (tailoring the
+// /assinatura screen, on top of the unchanged `status` derivation) ─────────
+describe('resolveSubscriptionStatus — accessType', () => {
+  it('plano interno ilimitado (INTERNAL_UNLIMITED_PLAN_CODE), atribuição real: accessType=internal, acesso ativo, sem data de renovação, sem capacidades de loja', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'plan-internal', plan_code: INTERNAL_UNLIMITED_PLAN_CODE, plan_name: 'Ilimitado',
+        assignment_id: 'assign-internal-1', starts_at: '2026-07-01T00:00:00Z', ends_at: null,
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: null },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('internal');
+    expect(snapshot.status).toBe('active');
+    expect(snapshot.planName).toBe('Ilimitado');
+    expect(snapshot.subscriptionExpiresAt).toBeNull();
+    expect(snapshot.canManageSubscription).toBe(false);
+    expect(snapshot.canRestorePurchases).toBe(false);
+  });
+
+  it('plano interno exige atribuição real — resolvido via fallback (mesmo plan_code) nunca vira internal', async () => {
+    // Cannot actually happen through the real RPC (the fallback branch never
+    // returns a code equal to a hand-assigned internal plan's own code
+    // unless that plan were also is_default=true, which it is not — see
+    // ETAPA 1). Still exercised explicitly: assignment_id/starts_at null is
+    // what decides 'none', regardless of which plan_code comes back.
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'plan-internal', plan_code: INTERNAL_UNLIMITED_PLAN_CODE, plan_name: 'Ilimitado',
+        assignment_id: null, starts_at: null, ends_at: null, is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('none');
+    expect(snapshot.status).toBe('expired');
+  });
+
+  it('plano default de fallback (plano-teste-lojas): nunca internal, nunca commercial — sempre none', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'default-plan', plan_code: 'plano-teste-lojas', plan_name: 'Plano de teste lojas',
+        assignment_id: null, starts_at: null, ends_at: null, is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('none');
+    expect(snapshot.accessType).not.toBe('internal');
+    expect(snapshot.accessType).not.toBe('commercial');
+  });
+
+  it('trial ativo: accessType=trial, sem gerenciamento, sem restauração', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p', plan_code: 'trial', plan_name: 'Teste gratuito',
+        assignment_id: 'assign-trial-1', starts_at: '2026-07-25T12:00:00Z', ends_at: '2026-08-01T12:00:00Z',
+        is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('trial');
+    expect(snapshot.canManageSubscription).toBe(false);
+    expect(snapshot.canRestorePurchases).toBe(false);
+  });
+
+  it('Essencial ativo: accessType=commercial, nome real, sem capacidades de loja antes do RevenueCat', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-essencial', plan_code: 'essencial', plan_name: 'Essencial',
+        assignment_id: 'assign-2', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-08-01T00:00:00Z',
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: null },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('commercial');
+    expect(snapshot.planName).toBe('Essencial');
+    expect(snapshot.canManageSubscription).toBe(false);
+    expect(snapshot.canRestorePurchases).toBe(false);
+  });
+
+  it('Plus ativo: accessType=commercial, nome real, sem capacidades de loja antes do RevenueCat', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-plus', plan_code: 'plus', plan_name: 'Plus',
+        assignment_id: 'assign-3', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-08-01T00:00:00Z',
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: null },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('commercial');
+    expect(snapshot.planName).toBe('Plus');
+    expect(snapshot.canManageSubscription).toBe(false);
+    expect(snapshot.canRestorePurchases).toBe(false);
+  });
+
+  it('expired: accessType=none, sem renovação, sem gerenciamento', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'default-plan', plan_code: 'plano-teste-lojas', plan_name: 'Plano de teste lojas',
+        assignment_id: null, starts_at: null, ends_at: null, is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.accessType).toBe('none');
+    expect(snapshot.subscriptionExpiresAt).toBeNull();
+    expect(snapshot.canManageSubscription).toBe(false);
+  });
+
+  it('cancelado dentro do período: accessType=commercial, acesso mantido até a data real', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-essencial', plan_code: 'essencial', plan_name: 'Essencial',
+        assignment_id: 'assign-4', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-08-05T00:00:00Z',
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: '2026-07-20T00:00:00Z' },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.status).toBe('canceled');
+    expect(snapshot.accessType).toBe('commercial');
+    expect(snapshot.subscriptionExpiresAt).toBe('2026-08-05T00:00:00Z');
+  });
+
+  it('cancelado após o período: sem atribuição real (fallback) — accessType=none, acesso encerrado', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'default-plan', plan_code: 'plano-teste-lojas', plan_name: 'Plano de teste lojas',
+        assignment_id: null, starts_at: null, ends_at: null, is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.status).toBe('expired');
+    expect(snapshot.accessType).toBe('none');
+  });
+
+  it('billing_issue dentro do período: accessType=commercial, respeita accessUntil (subscriptionExpiresAt = ends_at real, nunca uma tolerância inventada)', async () => {
+    mockHasActiveSubscriptionBillingIssue.mockResolvedValue(true);
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-essencial', plan_code: 'essencial', plan_name: 'Essencial',
+        assignment_id: 'assign-5', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-08-01T00:00:00Z',
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: null },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.status).toBe('billing_issue');
+    expect(snapshot.accessType).toBe('commercial');
+    expect(snapshot.subscriptionExpiresAt).toBe('2026-08-01T00:00:00Z');
+  });
+
+  it('billing_issue após o período: sem atribuição real (fallback) — accessType=none, bloqueado', async () => {
+    mockHasActiveSubscriptionBillingIssue.mockResolvedValue(true);
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'default-plan', plan_code: 'plano-teste-lojas', plan_name: 'Plano de teste lojas',
+        assignment_id: null, starts_at: null, ends_at: null, is_suspended: false,
+      },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.status).toBe('expired');
+    expect(snapshot.accessType).toBe('none');
   });
 });

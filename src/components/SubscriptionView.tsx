@@ -128,7 +128,12 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             <div className="space-y-1">
               <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
               <p className="text-xs text-emerald-400 font-medium">{vm.activeStatusLabel}</p>
-              <p className="text-xs text-slate-500">Próxima renovação: {vm.renewalLabel}</p>
+              {/* Omitted entirely (never an "unavailable" placeholder) when
+                  there is no real renewal date — always the case for the
+                  internal unlimited plan, which has no renewal at all. */}
+              {vm.renewalLabel && (
+                <p className="text-xs text-slate-500">Próxima renovação: {vm.renewalLabel}</p>
+              )}
             </div>
           )}
 

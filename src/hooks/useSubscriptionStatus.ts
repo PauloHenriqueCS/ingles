@@ -16,11 +16,14 @@ export interface UseSubscriptionStatusResult {
 
 interface SubscriptionStatusResponse {
   status: SubscriptionScreenState['status'];
+  accessType: SubscriptionScreenState['accessType'];
   planCode: string | null;
   planName: string | null;
   trialEndsAt: string | null;
   trialDaysRemaining: number | null;
   subscriptionExpiresAt: string | null;
+  canManageSubscription: boolean;
+  canRestorePurchases: boolean;
 }
 
 export function useSubscriptionStatus(): UseSubscriptionStatusResult {
@@ -39,6 +42,7 @@ export function useSubscriptionStatus(): UseSubscriptionStatusResult {
         if (cancelled) return;
         setState({
           status: data.status,
+          accessType: data.accessType,
           trialEndsAt: data.trialEndsAt,
           trialDaysRemaining: data.trialDaysRemaining,
           currentPlanCode: data.planCode,
@@ -46,6 +50,8 @@ export function useSubscriptionStatus(): UseSubscriptionStatusResult {
           // No payment provider integrated yet — never inferred client-side.
           subscriptionProvider: null,
           subscriptionExpiresAt: data.subscriptionExpiresAt,
+          canManageSubscription: data.canManageSubscription,
+          canRestorePurchases: data.canRestorePurchases,
         });
         setError(false);
       } catch {

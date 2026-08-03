@@ -31,23 +31,19 @@ describe('placeholder handler copy — must never claim a real outcome', () => {
 });
 
 describe('no copy anywhere claims an unlimited feature', () => {
-  function flattenStrings(obj: Record<string, unknown>): string[] {
-    const out: string[] = [];
-    for (const value of Object.values(obj)) {
-      if (typeof value === 'string') out.push(value);
-      if (typeof value === 'function') {
-        // Every copy function here takes a single string/number sample arg.
-        const fn = value as (arg: string) => unknown;
-        out.push(String(fn('amostra')));
-      }
-    }
-    return out;
-  }
+  // internalTitle is the one deliberate exception: it labels the
+  // hand-assigned, non-commercial "Ilimitado" plan (plans.code = '24317180'
+  // — see api/_entitlements/subscription-status-service.ts,
+  // INTERNAL_UNLIMITED_PLAN_CODE), which genuinely has no usage limit at
+  // all. This guard still applies to Trial/Essencial/Plus copy — none of
+  // those may ever claim to be unlimited.
+  const ALLOWED_UNLIMITED_KEYS = new Set(['internalTitle']);
 
-  it('SUBSCRIPTION_MESSAGES has no "ilimitado" text outside of a plan-agnostic label', () => {
-    const strings = flattenStrings(SUBSCRIPTION_MESSAGES);
-    for (const s of strings) {
-      expect(s.toLowerCase()).not.toContain('ilimitado');
+  it('SUBSCRIPTION_MESSAGES has no "ilimitado" text outside the internal-plan label', () => {
+    for (const [key, value] of Object.entries(SUBSCRIPTION_MESSAGES)) {
+      if (ALLOWED_UNLIMITED_KEYS.has(key)) continue;
+      const s = typeof value === 'function' ? String((value as (arg: string) => unknown)('amostra')) : String(value);
+      expect(s.toLowerCase(), `key "${key}"`).not.toContain('ilimitado');
     }
   });
 

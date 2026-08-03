@@ -27,8 +27,38 @@ export interface SubscriptionViewModel {
  * The single place that turns raw subscription state into what the screen
  * renders. Mirrors ../entitlements/compute-feature-state.ts — never derive
  * display strings ad-hoc inside SubscriptionView.
+ *
+ * showManageButton/showRestoreButton are read directly from
+ * state.canManageSubscription/canRestorePurchases — never hardcoded by
+ * status or plan name — so the screen is already wired for whenever a real
+ * store integration (RevenueCat) starts returning true for either. Both are
+ * false today for every access type, including 'commercial'.
  */
 export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: Date = new Date()): SubscriptionViewModel {
+  // accessType 'internal' is checked before the status switch: it is
+  // orthogonal to status (an internal assignment normally resolves
+  // status==='active', since it has no cancellation/billing-issue
+  // plumbing), but needs entirely different copy — no billing/renewal
+  // language, no store CTAs, never the commercial "Assinatura ativa" wording.
+  if (state.accessType === 'internal') {
+    return {
+      status: state.status,
+      headline: SUBSCRIPTION_MESSAGES.internalTitle,
+      subheadline: SUBSCRIPTION_MESSAGES.internalComplementaryNote,
+      trialDaysRemainingLabel: null,
+      trialEndsAtLabel: null,
+      currentPlanName: state.currentPlanName,
+      activeStatusLabel: SUBSCRIPTION_MESSAGES.internalStatusLabel,
+      renewalLabel: null,
+      canceledPlanName: null,
+      accessEndsAtLabel: null,
+      showTrialLimits: false,
+      showPlanCards: false,
+      showManageButton: state.canManageSubscription,
+      showRestoreButton: state.canRestorePurchases,
+    };
+  }
+
   switch (state.status) {
     case 'trialing': {
       const days = state.trialEndsAt ? computeDaysRemaining(state.trialEndsAt, now) : (state.trialDaysRemaining ?? 0);
@@ -45,8 +75,8 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         accessEndsAtLabel: null,
         showTrialLimits: true,
         showPlanCards: false,
-        showManageButton: false,
-        showRestoreButton: true,
+        showManageButton: state.canManageSubscription,
+        showRestoreButton: state.canRestorePurchases,
       };
     }
 
@@ -59,15 +89,15 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         trialEndsAtLabel: null,
         currentPlanName: state.currentPlanName,
         activeStatusLabel: SUBSCRIPTION_MESSAGES.activeStatusLabel,
-        renewalLabel: state.subscriptionExpiresAt
-          ? formatDatePtBr(state.subscriptionExpiresAt)
-          : SUBSCRIPTION_MESSAGES.activeRenewalUnavailable,
+        // Null (never a placeholder string) when unknown — the screen omits
+        // the renewal line entirely rather than claim it's "unavailable".
+        renewalLabel: state.subscriptionExpiresAt ? formatDatePtBr(state.subscriptionExpiresAt) : null,
         canceledPlanName: null,
         accessEndsAtLabel: null,
         showTrialLimits: false,
         showPlanCards: false,
-        showManageButton: true,
-        showRestoreButton: true,
+        showManageButton: state.canManageSubscription,
+        showRestoreButton: state.canRestorePurchases,
       };
     }
 
@@ -85,8 +115,8 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         accessEndsAtLabel: null,
         showTrialLimits: false,
         showPlanCards: true,
-        showManageButton: false,
-        showRestoreButton: true,
+        showManageButton: state.canManageSubscription,
+        showRestoreButton: state.canRestorePurchases,
       };
     }
 
@@ -106,8 +136,8 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
           : SUBSCRIPTION_MESSAGES.canceledAccessEndedNote,
         showTrialLimits: false,
         showPlanCards: true,
-        showManageButton: false,
-        showRestoreButton: true,
+        showManageButton: state.canManageSubscription,
+        showRestoreButton: state.canRestorePurchases,
       };
     }
 
@@ -125,8 +155,8 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         accessEndsAtLabel: state.subscriptionExpiresAt ? formatDatePtBr(state.subscriptionExpiresAt) : null,
         showTrialLimits: false,
         showPlanCards: false,
-        showManageButton: true,
-        showRestoreButton: true,
+        showManageButton: state.canManageSubscription,
+        showRestoreButton: state.canRestorePurchases,
       };
     }
   }

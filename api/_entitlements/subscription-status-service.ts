@@ -45,6 +45,26 @@
  *                        null) — there is no 6th state to distinguish these,
  *                        and all three correctly read as "no active
  *                        entitlement, show the plan picker".
+ *
+ * accessType — a SEPARATE, orthogonal classification added on top of
+ * `status` (never replacing it) so the /assinatura screen can tell an
+ * internal, hand-assigned, non-commercial plan apart from a real trial or a
+ * real store subscription:
+ *   - 'trial'      — status === 'trialing'.
+ *   - 'none'       — status === 'expired' (the default-plan fallback; never
+ *                    classified as internal or commercial — same
+ *                    genuine-assignment principle the enforcement gate in
+ *                    plan-entitlements-service.ts already uses).
+ *   - 'internal'   — a genuine non-trial assignment to
+ *                    INTERNAL_UNLIMITED_PLAN_CODE (plans.code = '24317180',
+ *                    the hand-assigned "Ilimitado" plan: is_default=false,
+ *                    is_visible_to_users=false, monthly_price_cents=0,
+ *                    status='active' in homologation — identified by its
+ *                    stable plan_code, never by matching the display name
+ *                    "Ilimitado"). No store, no billing, no renewal — ever.
+ *   - 'commercial' — any other genuine non-trial assignment (Essencial,
+ *                    Plus, or any future paid plan). status can still be
+ *                    'active'/'canceled'/'billing_issue' within this type.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -52,9 +72,15 @@ import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { hasActiveSubscriptionBillingIssue } from '../_account/billing-block-repository';
 
 export type SubscriptionStatus = 'trialing' | 'active' | 'expired' | 'canceled' | 'billing_issue';
+export type SubscriptionAccessType = 'internal' | 'trial' | 'commercial' | 'none';
+
+/** Stable identifier of the hand-assigned, non-commercial "Ilimitado" plan —
+ *  never match on plans.name, which is display text an admin could rename. */
+export const INTERNAL_UNLIMITED_PLAN_CODE = '24317180';
 
 export interface SubscriptionStatusSnapshot {
   status: SubscriptionStatus;
+  accessType: SubscriptionAccessType;
   planCode: string | null;
   planName: string | null;
   /** trialing only. */
@@ -62,10 +88,22 @@ export interface SubscriptionStatusSnapshot {
   /** trialing only — whole days remaining, floored at 0. */
   trialDaysRemaining: number | null;
   /** active/canceled/billing_issue: the current period's end (renewal date,
-   *  or the date access ends after a graceful cancellation). Null otherwise. */
+   *  or the date access ends after a graceful cancellation). Null otherwise.
+   *  Always null for accessType 'internal' — there is no renewal. */
   subscriptionExpiresAt: string | null;
+  /** Real store-management capability, not inferred from plan name or
+   *  status. Hardcoded false for every accessType until a real store
+   *  integration (RevenueCat) exists — never true for 'commercial' either,
+   *  today. Wired so the screen can flip these on later without another
+   *  contract change. */
+  canManageSubscription: boolean;
+  canRestorePurchases: boolean;
   resolvedAt: string;
 }
+
+/** Every branch below returns these two — hardcoded false, see the field
+ *  doc comments on SubscriptionStatusSnapshot. */
+const NO_STORE_CAPABILITIES_YET = { canManageSubscription: false, canRestorePurchases: false } as const;
 
 interface EffectivePlanRow {
   access_allowed: boolean;
@@ -101,11 +139,13 @@ export async function resolveSubscriptionStatus(
 
   const expiredSnapshot = (): SubscriptionStatusSnapshot => ({
     status: 'expired',
+    accessType: 'none',
     planCode: plan?.plan_code ?? null,
     planName: plan?.plan_name ?? null,
     trialEndsAt: null,
     trialDaysRemaining: null,
     subscriptionExpiresAt: null,
+    ...NO_STORE_CAPABILITIES_YET,
     resolvedAt,
   });
 
@@ -121,16 +161,23 @@ export async function resolveSubscriptionStatus(
     const endsAt = plan.ends_at;
     return {
       status: 'trialing',
+      accessType: 'trial',
       planCode: plan.plan_code,
       planName: plan.plan_name,
       trialEndsAt: endsAt,
       trialDaysRemaining: endsAt ? daysRemaining(endsAt, now) : null,
       subscriptionExpiresAt: null,
+      ...NO_STORE_CAPABILITIES_YET,
       resolvedAt,
     };
   }
 
   if (hasRealAssignment) {
+    // Never the default-plan fallback here (hasRealAssignment already
+    // excludes it) — a genuine assignment to INTERNAL_UNLIMITED_PLAN_CODE is
+    // the only thing that ever produces accessType 'internal'.
+    const accessType: SubscriptionAccessType = plan.plan_code === INTERNAL_UNLIMITED_PLAN_CODE ? 'internal' : 'commercial';
+
     const [{ data: assignmentRow }, billingIssue] = await Promise.all([
       supabase
         .from('user_plan_assignments')
@@ -143,11 +190,13 @@ export async function resolveSubscriptionStatus(
     if (billingIssue) {
       return {
         status: 'billing_issue',
+        accessType,
         planCode: plan.plan_code,
         planName: plan.plan_name,
         trialEndsAt: null,
         trialDaysRemaining: null,
         subscriptionExpiresAt: plan.ends_at,
+        ...NO_STORE_CAPABILITIES_YET,
         resolvedAt,
       };
     }
@@ -155,11 +204,14 @@ export async function resolveSubscriptionStatus(
     const cancelledAt = (assignmentRow as { cancelled_at: string | null } | null)?.cancelled_at ?? null;
     return {
       status: cancelledAt ? 'canceled' : 'active',
+      accessType,
       planCode: plan.plan_code,
       planName: plan.plan_name,
       trialEndsAt: null,
       trialDaysRemaining: null,
-      subscriptionExpiresAt: plan.ends_at,
+      // No renewal date for the internal plan — there is no renewal.
+      subscriptionExpiresAt: accessType === 'internal' ? null : plan.ends_at,
+      ...NO_STORE_CAPABILITIES_YET,
       resolvedAt,
     };
   }

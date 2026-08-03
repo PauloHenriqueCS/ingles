@@ -17,9 +17,13 @@ export const SUBSCRIPTION_MESSAGES = {
   expiredTitle: 'Seu período gratuito terminou',
   expiredSubtitle: 'Escolha um plano para continuar praticando.',
 
-  // active
+  // active (commercial)
   activeStatusLabel: 'Assinatura ativa',
-  activeRenewalUnavailable: 'Data de renovação não disponível.',
+
+  // active (internal — hand-assigned, non-commercial unlimited plan)
+  internalTitle: 'Acesso interno ilimitado',
+  internalStatusLabel: 'Acesso ativo',
+  internalComplementaryNote: 'Sem cobrança ou renovação.',
 
   // canceled
   canceledTitle: 'Assinatura cancelada',

@@ -9,14 +9,28 @@
  */
 export type SubscriptionAccessStatus = 'trialing' | 'active' | 'expired' | 'canceled' | 'billing_issue';
 
+/** Orthogonal to SubscriptionAccessStatus (never replaces it) — mirrors
+ *  api/_entitlements/subscription-status-service.ts's SubscriptionAccessType.
+ *  'internal' is the hand-assigned, non-commercial "Ilimitado" plan: no
+ *  store, no billing, no renewal. 'commercial' is Essencial/Plus (or any
+ *  future paid plan) — status can still be active/canceled/billing_issue
+ *  within this type. */
+export type SubscriptionAccessType = 'internal' | 'trial' | 'commercial' | 'none';
+
 export interface SubscriptionScreenState {
   status: SubscriptionAccessStatus;
+  accessType: SubscriptionAccessType;
   trialEndsAt: string | null;
   trialDaysRemaining: number | null;
   currentPlanCode: string | null;
   currentPlanName: string | null;
   subscriptionProvider: 'apple' | 'google' | null;
   subscriptionExpiresAt: string | null;
+  /** Real store-management capability from the backend — never inferred
+   *  from plan name or status on the frontend. Both false until a real
+   *  store integration (RevenueCat) exists, for every access type. */
+  canManageSubscription: boolean;
+  canRestorePurchases: boolean;
 }
 
 export type CommercialPlanCode = 'essential' | 'plus';

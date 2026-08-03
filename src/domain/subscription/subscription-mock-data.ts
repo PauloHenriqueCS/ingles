@@ -16,33 +16,45 @@ function daysFromNowIso(days: number): string {
 export const MOCK_SUBSCRIPTION_STATES: Record<SubscriptionAccessStatus, SubscriptionScreenState> = {
   trialing: {
     status: 'trialing',
+    accessType: 'trial',
     trialEndsAt: daysFromNowIso(4),
     trialDaysRemaining: 4,
     currentPlanCode: null,
     currentPlanName: null,
     subscriptionProvider: null,
     subscriptionExpiresAt: null,
+    canManageSubscription: false,
+    canRestorePurchases: false,
   },
   active: {
     status: 'active',
+    accessType: 'commercial',
     trialEndsAt: null,
     trialDaysRemaining: null,
     currentPlanCode: 'essential',
     currentPlanName: 'Essencial',
     subscriptionProvider: 'apple',
     subscriptionExpiresAt: daysFromNowIso(18),
+    // Hardcoded false for every mock, matching the real backend today (no
+    // store integration yet) — see subscription-status-service.ts.
+    canManageSubscription: false,
+    canRestorePurchases: false,
   },
   expired: {
     status: 'expired',
+    accessType: 'none',
     trialEndsAt: daysFromNowIso(-2),
     trialDaysRemaining: 0,
     currentPlanCode: null,
     currentPlanName: null,
     subscriptionProvider: null,
     subscriptionExpiresAt: null,
+    canManageSubscription: false,
+    canRestorePurchases: false,
   },
   canceled: {
     status: 'canceled',
+    accessType: 'commercial',
     trialEndsAt: null,
     trialDaysRemaining: null,
     currentPlanCode: 'plus',
@@ -51,9 +63,12 @@ export const MOCK_SUBSCRIPTION_STATES: Record<SubscriptionAccessStatus, Subscrip
     // Some providers keep access alive through the end of the paid period
     // after cancellation — still populated here so the screen can show it.
     subscriptionExpiresAt: daysFromNowIso(9),
+    canManageSubscription: false,
+    canRestorePurchases: false,
   },
   billing_issue: {
     status: 'billing_issue',
+    accessType: 'commercial',
     trialEndsAt: null,
     trialDaysRemaining: null,
     currentPlanCode: 'essential',
@@ -62,6 +77,8 @@ export const MOCK_SUBSCRIPTION_STATES: Record<SubscriptionAccessStatus, Subscrip
     // Access typically survives until the period end even with a failed
     // charge — a grace window, same as 'canceled'.
     subscriptionExpiresAt: daysFromNowIso(3),
+    canManageSubscription: false,
+    canRestorePurchases: false,
   },
 };
 
