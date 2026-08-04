@@ -285,25 +285,101 @@ describe('handleRevenueCatWebhookRoute — idempotency', () => {
     expect(mockSyncSubscriptionFromEvent).not.toHaveBeenCalled();
   });
 
-  it('a redelivery of an event whose previous attempt failed IS reprocessed (never silently swallowed)', async () => {
+  it('a redelivery of an event whose previous attempt failed IS reprocessed and ACKs 200 on success (never silently swallowed)', async () => {
     const supabase = makeMockSupabase([
       { id: 'row-0', revenuecat_event_id: 'evt-1', event_type: 'INITIAL_PURCHASE', environment: 'PRODUCTION', app_user_id: 'aaaaaaaa-0000-0000-0000-000000000001', processing_status: 'failed', error_message: 'transient_error' },
     ]);
     mockGetSharedServiceClient.mockReturnValue(supabase);
     const res = makeRes();
     await handleRevenueCatWebhookRoute(makeReq(eventBody()), res);
+    expect(res._status()).toBe(200);
     expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1);
     expect(supabase.__rows[0].processing_status).toBe('processed');
   });
 
-  it('a processing exception is recorded as failed and still ACKs 200 (visible for investigation, never a retry storm)', async () => {
+  it('a redelivery of a previously-failed event that fails again stays failed and ACKs 500 again (eligible for another retry)', async () => {
+    mockSyncSubscriptionFromEvent.mockRejectedValue(new Error('still down'));
+    const supabase = makeMockSupabase([
+      { id: 'row-0', revenuecat_event_id: 'evt-1', event_type: 'INITIAL_PURCHASE', environment: 'PRODUCTION', app_user_id: 'aaaaaaaa-0000-0000-0000-000000000001', processing_status: 'failed', error_message: 'transient_error' },
+    ]);
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody()), res);
+    expect(res._status()).toBe(500);
+    expect(supabase.__rows[0].processing_status).toBe('failed');
+  });
+
+  it('a repeated delivery of an event that already succeeded never re-runs the sync service (no duplicate effect)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const first = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody()), first);
+    expect(first._status()).toBe(200);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1);
+
+    const second = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody()), second);
+    expect(second._status()).toBe(200);
+    expect(second._body()).toMatchObject({ duplicate: true });
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1); // still 1 — never called again
+  });
+});
+
+describe('handleRevenueCatWebhookRoute — transitory failures ACK 500 so RevenueCat retries', () => {
+  it('a subscription-sync exception is recorded as failed and ACKs 500 (never treated as handled)', async () => {
     mockSyncSubscriptionFromEvent.mockRejectedValue(new Error('boom'));
     const supabase = makeMockSupabase();
     mockGetSharedServiceClient.mockReturnValue(supabase);
     const res = makeRes();
     await handleRevenueCatWebhookRoute(makeReq(eventBody()), res);
-    expect(res._status()).toBe(200);
+    expect(res._status()).toBe(500);
     expect(supabase.__rows[0].processing_status).toBe('failed');
     expect(supabase.__rows[0].error_message).toBe('boom');
+  });
+
+  it('a minute-credit exception ACKs 500 and never leaves a partial/half-applied credit', async () => {
+    mockCreditMinutePackagePurchase.mockRejectedValue(new Error('db connection reset'));
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-consumable', type: 'NON_RENEWING_PURCHASE', product_id: 'orodim.conversation.minutes.300', transaction_id: 'txn-c1' })),
+      res,
+    );
+    expect(res._status()).toBe(500);
+    expect(supabase.__rows[0].processing_status).toBe('failed');
+    expect(supabase.__rows[0].error_message).toBe('db connection reset');
+    // The credit service itself is responsible for atomicity (see its own
+    // idempotency tests) — this route handler's only obligation on a thrown
+    // error is to never claim success, which the 500 + 'failed' status above
+    // already proves.
+  });
+
+  it('a database failure looking up the event row ACKs 500', async () => {
+    const supabase = {
+      from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: { message: 'connection reset' } }) }) }) }),
+    };
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody()), res);
+    expect(res._status()).toBe(500);
+    expect(mockSyncSubscriptionFromEvent).not.toHaveBeenCalled();
+  });
+
+  it('a failure confirming the final processing_status (UPDATE fails) ACKs 500, even though the business effect already succeeded', async () => {
+    const supabase = makeMockSupabase();
+    const originalFrom = supabase.from.bind(supabase);
+    (supabase as { from: unknown }).from = (table: string) => {
+      const real = originalFrom(table);
+      return {
+        ...real,
+        update: () => ({ eq: () => Promise.resolve({ data: null, error: { message: 'write conflict' } }) }),
+      };
+    };
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody()), res);
+    expect(res._status()).toBe(500);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1); // the upsert itself DID happen — idempotent on retry
   });
 });

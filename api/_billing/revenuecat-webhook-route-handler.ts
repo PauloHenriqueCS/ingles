@@ -6,9 +6,29 @@
  * explanation's own logic/URL are unaffected.
  *
  * Flow: verify (Authorization + HMAC) -> record the event idempotently by
- * revenuecat_event_id -> dispatch by event-type category -> always ACK 200
- * once durably recorded, even on a processing failure (see the doc comment
- * above the retry-handling block below for why).
+ * revenuecat_event_id -> dispatch by event-type category -> respond by
+ * outcome:
+ *   - auth/HMAC invalid                      -> 401 (never recorded)
+ *   - malformed payload (bad JSON/missing id) -> 400 (never recorded)
+ *   - new event, processed or permanently
+ *     not-actionable (unknown product, non-
+ *     lifecycle event type, business-rule
+ *     rejection)                              -> 200, status processed/ignored
+ *   - duplicate of an already-terminal event
+ *     (processed/ignored)                     -> 200, never reprocessed
+ *   - transitory failure (DB error, RevenueCat
+ *     API error, timeout, unexpected
+ *     exception)                              -> 500, status stays 'failed'
+ *
+ * There is no durable queue here — everything above runs synchronously
+ * before the HTTP response is sent (no fire-and-forget async work), so a 500
+ * genuinely means "not yet handled" and the caller (RevenueCat) retrying the
+ * delivery is what actually gets it processed. A 'failed' status is
+ * deliberately non-terminal (see TERMINAL_STATUSES below): a redelivery of a
+ * previously-failed event id is retried for real, never short-circuited as
+ * a duplicate. Every downstream write (subscription upsert, minute credit)
+ * is independently idempotent, so retrying after a partial failure never
+ * double-applies an effect.
  *
  * Never logs the full payload, a secret, or a token — only route/event
  * metadata (safeLog's own allowlisted-fields contract).
@@ -195,12 +215,25 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
     .update({ processing_status: processingStatus, processed_at: new Date().toISOString(), error_message: errorMessage })
     .eq('revenuecat_event_id', eventId);
   if (updateError) {
+    // Could not durably confirm the outcome — treat exactly like a
+    // processing failure (500, non-terminal row) so RevenueCat retries. The
+    // row is still sitting at 'received' (or the prior 'failed'), never
+    // silently left looking terminal when it isn't.
     safeLog('billing/revenuecat-webhook', 'event_status_update_failed', 500, { eventType });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível confirmar o processamento do evento.');
   }
 
-  // Always ACK 200 once the event is durably recorded (even 'failed') —
-  // the failure is visible in revenuecat_webhook_events.error_message for
-  // investigation/manual reconciliation, never silently swallowed, and
-  // never left to trigger a RevenueCat retry storm.
-  res.status(200).json({ received: true });
+  if (processingStatus === 'failed') {
+    // Transitory failure (DB/RevenueCat API/timeout/unexpected error) — ack
+    // with 500 so RevenueCat retries the delivery instead of treating this
+    // as handled. See the module doc comment for why this is safe (every
+    // downstream effect is independently idempotent).
+    safeLog('billing/revenuecat-webhook', 'processing_failed_will_retry', 500, { eventType });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Falha ao processar o evento.');
+  }
+
+  // 'processed' (new success) or 'ignored' (permanently not-actionable —
+  // unknown product, non-lifecycle event type, business-rule rejection)
+  // both ACK 200: neither should ever be retried by RevenueCat.
+  res.status(200).json({ received: true, status: processingStatus });
 }

@@ -56,6 +56,17 @@ function apiKey(): string | null {
 
 async function doSyncIdentity(userId: string | null): Promise<void> {
   if (!isRevenueCatSupported()) return;
+
+  if (!configured && !userId) {
+    // Never configure anonymously — the RevenueCat App User ID is always a
+    // real Supabase UUID (see the module doc comment). This branch is hit
+    // on cold app start, where useRevenueCatIdentitySync fires once before
+    // useAuth() has resolved a session (userId is undefined/null then).
+    // Nothing to do yet — the SDK isn't even imported — until this is
+    // called again with a real userId once auth resolves.
+    return;
+  }
+
   const key = apiKey();
   if (!key) {
     // Not a hard failure — a homolog/dev build without the key configured
@@ -67,7 +78,9 @@ async function doSyncIdentity(userId: string | null): Promise<void> {
   const { Purchases } = await loadPurchases();
 
   if (!configured) {
-    await Purchases.configure({ apiKey: key, appUserID: userId ?? undefined });
+    // userId is guaranteed non-null here (the early-return above handles
+    // the only case where it wouldn't be) — never appUserID: undefined.
+    await Purchases.configure({ apiKey: key, appUserID: userId as string });
     configured = true;
     identifiedUserId = userId;
     return;

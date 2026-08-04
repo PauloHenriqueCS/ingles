@@ -106,11 +106,26 @@ describe('revenueCatClient on iOS — identity sync', () => {
     expect(mockLogOut).toHaveBeenCalledTimes(1);
   });
 
-  it('the very first sync call configures the SDK even with no user yet (anonymous), never calling logOut', async () => {
+  it('never configures anonymously — a null userId before auth resolves is a pure no-op (no SDK call at all)', async () => {
     await syncIdentity(null);
-    expect(mockConfigure).toHaveBeenCalledTimes(1);
-    expect(mockConfigure).toHaveBeenCalledWith({ apiKey: 'test-apple-key', appUserID: undefined });
+    expect(mockConfigure).not.toHaveBeenCalled();
     expect(mockLogOut).not.toHaveBeenCalled();
+    expect(isRevenueCatSupported()).toBe(true); // sanity: this isn't the web/unsupported no-op path
+  });
+
+  it('a null-first sync followed by the real Supabase UUID configures once, with the real UUID (never undefined/anonymous)', async () => {
+    await syncIdentity(null); // e.g. useAuth() hasn't resolved a session yet on cold start
+    await syncIdentity(USER_A); // auth resolves — App.tsx re-fires the effect with the real id
+    expect(mockConfigure).toHaveBeenCalledTimes(1);
+    expect(mockConfigure).toHaveBeenCalledWith({ apiKey: 'test-apple-key', appUserID: USER_A });
+    expect(mockLogIn).not.toHaveBeenCalled();
+  });
+
+  it('repeated null syncs before auth resolves never configure, no matter how many times the effect re-fires', async () => {
+    await syncIdentity(null);
+    await syncIdentity(null);
+    await syncIdentity(null);
+    expect(mockConfigure).not.toHaveBeenCalled();
   });
 
   it('does not call logOut on a redundant null sync once already signed out post-configure', async () => {

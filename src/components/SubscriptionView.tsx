@@ -10,6 +10,7 @@ import { buildSubscriptionViewModel } from '../domain/subscription/subscription-
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
 import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
+import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
 
 interface Props {
   onBack: () => void;
@@ -56,7 +57,10 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   // FASE 3/4: never offered to the internal plan or during trial — only a
   // real commercial assignment (active/canceled/billing_issue) or no
   // assignment at all (choosing a first plan) makes sense to restore/manage.
-  const nativeStoreActionsAllowed = state != null && state.accessType !== 'internal' && state.accessType !== 'trial';
+  // See native-subscription-actions.ts for the pure, unit-tested rule.
+  const nativeStoreActionsAllowed = state != null && isNativeStoreSectionVisible(state.accessType, nativePurchase.supported);
+  const showManageSubscriptionButton = state != null
+    && shouldShowManageSubscriptionButton(state.accessType, nativePurchase.supported, nativePurchase.managementUrl);
 
   async function handleSubscribe(plan: CommercialPlanDisplay) {
     if (!nativePurchase.supported) {
@@ -270,9 +274,9 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             canManageSubscription/canRestorePurchases (see the legacy
             section below, kept dormant and separate on purpose). Never
             shown for the internal plan or during trial (FASE 3/4). */}
-        {nativeStoreActionsAllowed && nativePurchase.supported && (
+        {nativeStoreActionsAllowed && (
           <section className="space-y-2.5 pt-2">
-            {nativePurchase.managementUrl && (
+            {showManageSubscriptionButton && (
               <button
                 type="button"
                 onClick={handleNativeManage}
