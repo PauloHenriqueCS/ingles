@@ -11,24 +11,19 @@ describe('buildPlanBenefitLines — essential', () => {
   });
 });
 
-describe('buildPlanBenefitLines — plus (undefined conversation minutes)', () => {
-  it('omits any conversation-minutes line in production mode (includeDevOnlyNote=false)', () => {
+describe('buildPlanBenefitLines — plus', () => {
+  it('includes the defined monthly conversation minutes line', () => {
     const lines = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, false);
-    expect(lines).toHaveLength(3);
-    expect(lines.join(' ')).not.toMatch(/minutos de conversação/);
-  });
-
-  it('shows the dev-only "a definir" placeholder only when includeDevOnlyNote=true', () => {
-    const lines = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, true);
+    expect(lines).toContain('70 minutos de conversação por mês');
     expect(lines).toHaveLength(4);
-    expect(lines[3]).toBe(SUBSCRIPTION_MESSAGES.conversationMinutesTbdDev);
   });
 
-  it('never invents a number for Plus conversation minutes in either mode', () => {
-    const prod = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, false).join(' ');
-    const dev = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, true).join(' ');
-    expect(prod).not.toMatch(/\d+ minutos de conversação/);
-    expect(dev).not.toMatch(/\d+ minutos de conversação/);
+  it('never shows the dev-only "a definir" placeholder now that the figure is defined', () => {
+    const prod = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, false);
+    const dev = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, true);
+    expect(prod).not.toContain(SUBSCRIPTION_MESSAGES.conversationMinutesTbdDev);
+    expect(dev).not.toContain(SUBSCRIPTION_MESSAGES.conversationMinutesTbdDev);
+    expect(dev).toHaveLength(4); // dev flag makes no difference once the real number is set
   });
 });
 

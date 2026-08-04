@@ -33,8 +33,8 @@ describe('COMMERCIAL_PLANS.plus', () => {
     expect(plus.listeningPerDay).toBe(3);
   });
 
-  it('does NOT invent a conversation minutes figure — stays null until product defines it', () => {
-    expect(plus.conversationMinutesMonthly).toBeNull();
+  it('grants 70 conversation minutes per month', () => {
+    expect(plus.conversationMinutesMonthly).toBe(70);
   });
 
   it('allows extra minute packages, same as Essencial', () => {
@@ -43,8 +43,8 @@ describe('COMMERCIAL_PLANS.plus', () => {
 });
 
 describe('plan catalog shape', () => {
-  it('recommends Essencial by default', () => {
-    expect(RECOMMENDED_PLAN_CODE).toBe('essential');
+  it('recommends Plus by default', () => {
+    expect(RECOMMENDED_PLAN_CODE).toBe('plus');
   });
 
   it('lists both plans in display order', () => {

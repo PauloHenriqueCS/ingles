@@ -12,8 +12,7 @@ export const TRIAL_DURATION_DAYS = 7;
 
 /**
  * The two commercial plans. Prices and daily limits are product-defined and
- * final. Plus's conversationMinutesMonthly is intentionally null — the
- * franchise has not been decided yet; never invent a number here.
+ * final.
  */
 export const COMMERCIAL_PLANS: Record<CommercialPlanCode, CommercialPlanDisplay> = {
   essential: {
@@ -33,11 +32,11 @@ export const COMMERCIAL_PLANS: Record<CommercialPlanCode, CommercialPlanDisplay>
     writingPerDay: 3,
     pronunciationPerDay: 3,
     listeningPerDay: 3,
-    conversationMinutesMonthly: null,
+    conversationMinutesMonthly: 70,
     allowsExtraMinutePackages: true,
   },
 };
 
-export const RECOMMENDED_PLAN_CODE: CommercialPlanCode = 'essential';
+export const RECOMMENDED_PLAN_CODE: CommercialPlanCode = 'plus';
 
 export const COMMERCIAL_PLAN_ORDER: CommercialPlanCode[] = ['essential', 'plus'];
