@@ -9,7 +9,8 @@ import {
 import type { OrodimProductOffering, OrodimPurchaseError } from '../lib/revenueCat/revenueCatTypes';
 
 export interface NativeSubscriptionPurchaseState {
-  /** false on web/Android — the screen must never render store affordances then. */
+  /** false on web (and on Android/iOS without their store key configured)
+   *  — the screen must never render store affordances then. */
   supported: boolean;
   offerings: OrodimProductOffering[];
   offeringsLoading: boolean;
@@ -24,8 +25,11 @@ export interface NativeSubscriptionPurchaseState {
 }
 
 /**
- * Native-iOS-only purchase affordances for the subscription screen. Never
- * the source of access truth (see subscription-status-service.ts) — a
+ * Native (iOS/Android) purchase affordances for the subscription screen.
+ * Android has no Google Play offerings configured yet, so getOfferings()
+ * returns empty there until that's done (see revenueCatClient.ts's module
+ * doc comment) — this hook itself needs no platform branching for that.
+ * Never the source of access truth (see subscription-status-service.ts) — a
  * successful purchase/restore here only updates local UI optimistically;
  * SubscriptionView is responsible for triggering a backend resync
  * (POST /api/subscription/sync) afterwards so /api/subscription/status

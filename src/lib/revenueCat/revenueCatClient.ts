@@ -1,4 +1,4 @@
-import { isIOSApp, isPluginAvailable } from '../runtimeEnvironment';
+import { isIOSApp, isAndroidApp, isPluginAvailable } from '../runtimeEnvironment';
 import { planCodeForActiveEntitlements } from '../../domain/subscription/revenuecat-catalog';
 import type {
   OrodimCustomerInfo,
@@ -9,11 +9,13 @@ import type {
 
 /**
  * SINGLE entry point to @revenuecat/purchases-capacitor — no other file in
- * this codebase may import that package directly. Everything here is
- * iOS-only: Android is deliberately left unconfigured (no Google Play
- * product ids/key exist yet — see revenuecat-catalog.ts and the FASE 16
- * manual checklist), and the web build never touches the SDK at all (no
- * checkout on the website — see SubscriptionView.tsx).
+ * this codebase may import that package directly. Supported on native iOS
+ * (Apple key) and native Android (Google Play key) only; the web build
+ * never touches the SDK at all (no checkout on the website — see
+ * SubscriptionView.tsx). Android has no Google Play products/offerings
+ * configured yet (see revenuecat-catalog.ts) — the SDK still configures so
+ * the Play Billing dependency ships in the AAB and RevenueCat can see the
+ * app, but getOfferings() will simply return empty until those exist.
  *
  * Identity: the RevenueCat App User ID is always the authenticated Supabase
  * UUID, via syncIdentity(userId), driven by the same session the rest of
@@ -34,8 +36,7 @@ async function loadPurchases() {
 }
 
 export function isRevenueCatSupported(): boolean {
-  // Android intentionally excluded — see module doc comment.
-  return isIOSApp && isPluginAvailable('Purchases');
+  return (isIOSApp || isAndroidApp) && isPluginAvailable('Purchases');
 }
 
 let configured = false;
@@ -49,8 +50,18 @@ let identityChain: Promise<void> = Promise.resolve();
  *  purchaseProduct() — never re-exposes the raw PurchasesPackage. */
 const packageCache = new Map<string, unknown>();
 
+/** Name only — used for the "key not set" warning below, never for lookup
+ *  (the actual read stays a static `import.meta.env.VITE_X` member access
+ *  per platform so Vite can statically inline/tree-shake it). */
+function apiKeyEnvVarName(): string {
+  return isAndroidApp ? 'VITE_REVENUECAT_GOOGLE_API_KEY' : 'VITE_REVENUECAT_APPLE_API_KEY';
+}
+
 function apiKey(): string | null {
-  const key = (import.meta.env.VITE_REVENUECAT_APPLE_API_KEY as string | undefined)?.trim();
+  const raw = isAndroidApp
+    ? (import.meta.env.VITE_REVENUECAT_GOOGLE_API_KEY as string | undefined)
+    : (import.meta.env.VITE_REVENUECAT_APPLE_API_KEY as string | undefined);
+  const key = raw?.trim();
   return key && key.length > 0 ? key : null;
 }
 
@@ -70,8 +81,10 @@ async function doSyncIdentity(userId: string | null): Promise<void> {
   const key = apiKey();
   if (!key) {
     // Not a hard failure — a homolog/dev build without the key configured
-    // yet must not crash the app. Purchases simply stay unavailable.
-    console.warn('[revenueCat] VITE_REVENUECAT_APPLE_API_KEY not set — purchases unavailable this session');
+    // yet must not crash the app. Purchases simply stay unavailable. This is
+    // the expected state for Android until the app is connected to
+    // RevenueCat post-first-upload (see the module doc comment).
+    console.warn(`[revenueCat] ${apiKeyEnvVarName()} not set — purchases unavailable this session`);
     return;
   }
 

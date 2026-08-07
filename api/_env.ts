@@ -48,8 +48,9 @@ export function getCommunicationSuppressionHmacSecret(): string {
 }
 
 // ── RevenueCat (server-only secrets — see .env.example for the full set,
-// including the client-safe VITE_REVENUECAT_APPLE_API_KEY read directly by
-// src/lib/revenueCat/, never through this file) ─────────────────────────────
+// including the client-safe VITE_REVENUECAT_APPLE_API_KEY /
+// VITE_REVENUECAT_GOOGLE_API_KEY read directly by src/lib/revenueCat/, never
+// through this file) ─────────────────────────────────────────────────────────
 
 /** Shared secret RevenueCat sends as the webhook's Authorization header.
  *  Empty string when unset — callers must fail closed, never skip the check. */
