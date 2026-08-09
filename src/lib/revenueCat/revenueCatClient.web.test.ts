@@ -39,7 +39,7 @@ import {
   syncIdentity,
   getCustomerInfo,
   getOfferings,
-  purchaseProduct,
+  purchasePackage,
   restorePurchases,
   getManagementUrl,
   addCustomerInfoListener,
@@ -73,8 +73,8 @@ describe('revenueCatClient on the web build', () => {
     expect(mockGetOfferings).not.toHaveBeenCalled();
   });
 
-  it('purchaseProduct returns a not_configured error, never calls the SDK', async () => {
-    const result = await purchaseProduct('orodim.subscription.essential.monthly');
+  it('purchasePackage returns a not_configured error, never calls the SDK', async () => {
+    const result = await purchasePackage('essential_monthly');
     expect(result).toEqual({ ok: false, customerInfo: null, error: { code: 'not_configured', message: 'Compras não estão disponíveis.' } });
     expect(mockPurchasePackage).not.toHaveBeenCalled();
   });

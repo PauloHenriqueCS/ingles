@@ -111,11 +111,22 @@ export async function syncSubscriptionFromEvent(
     return { ok: false, reason: 'missing_original_transaction_id' };
   }
 
-  // Never by plan name — see FASE 10 of the task this implements.
+  // Resolve the plan by DATA, never by plan name (see FASE 10). RevenueCat
+  // sends each store's own product identifier: bare on Apple (== apple_product_id)
+  // and, on Google Play, the subscription id plus its base plan, e.g.
+  // "orodim.subscription.plus.monthly:monthly". So match plans.apple_product_id
+  // OR plans.google_subscription_product_id, and tolerate the Android base-plan
+  // suffix by also trying the id with everything after ':' stripped — the app
+  // never depends on Apple ids to credit an Android purchase.
+  const bareProductId = event.productId.split(':')[0];
+  const productIdCandidates = Array.from(new Set([event.productId, bareProductId]));
+  const planMatchFilter = productIdCandidates
+    .flatMap((id) => [`apple_product_id.eq.${id}`, `google_subscription_product_id.eq.${id}`])
+    .join(',');
   const { data: planRow, error: planError } = await supabase
     .from('plans')
     .select('id')
-    .eq('apple_product_id', event.productId)
+    .or(planMatchFilter)
     .maybeSingle();
   if (planError) throw new Error(`plans lookup failed: ${planError.message}`);
   if (!planRow) {

@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   REVENUECAT_SUBSCRIPTION_PRODUCT_IDS,
   REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS,
+  REVENUECAT_SUBSCRIPTION_PACKAGE_IDS,
+  REVENUECAT_MINUTE_PACKAGE_IDS,
   REVENUECAT_ENTITLEMENT_IDS,
   planCodeForActiveEntitlements,
   isMinutePackageProductId,
@@ -25,6 +27,27 @@ describe('REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS', () => {
     expect(REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS['pacote-300-min']).toBe('orodim.conversation.minutes.300');
     expect(REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS['pacote-600-min']).toBe('orodim.conversation.minutes.600');
     expect(REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS['pacote-900-min']).toBe('orodim.conversation.minutes.900');
+  });
+});
+
+describe('REVENUECAT_SUBSCRIPTION_PACKAGE_IDS', () => {
+  it('matches the package identifiers configured in the RevenueCat default offering', () => {
+    expect(REVENUECAT_SUBSCRIPTION_PACKAGE_IDS.essencial).toBe('essential_monthly');
+    expect(REVENUECAT_SUBSCRIPTION_PACKAGE_IDS.plus).toBe('plus_monthly');
+  });
+
+  it('never carries an Android base-plan suffix — package ids are store-agnostic', () => {
+    for (const id of Object.values(REVENUECAT_SUBSCRIPTION_PACKAGE_IDS)) {
+      expect(id).not.toContain(':');
+    }
+  });
+});
+
+describe('REVENUECAT_MINUTE_PACKAGE_IDS', () => {
+  it('matches the consumable minute-pack package identifiers in the default offering', () => {
+    expect(REVENUECAT_MINUTE_PACKAGE_IDS['pacote-300-min']).toBe('minutes_300');
+    expect(REVENUECAT_MINUTE_PACKAGE_IDS['pacote-600-min']).toBe('minutes_600');
+    expect(REVENUECAT_MINUTE_PACKAGE_IDS['pacote-900-min']).toBe('minutes_900');
   });
 });
 

@@ -8,8 +8,14 @@ import type { OrodimCommercialPlanCode } from '../../domain/subscription/revenue
  */
 
 export interface OrodimProductOffering {
-  /** Apple product id — matches plans.apple_product_id /
-   *  conversation_minute_packages.apple_product_id. */
+  /** RevenueCat package identifier (e.g. 'essential_monthly') — identical on
+   *  the App Store and Play Store, so this is what the UI matches and
+   *  purchases by. Never match on productId (Android appends ':basePlanId').
+   *  See revenuecat-catalog.ts REVENUECAT_SUBSCRIPTION_PACKAGE_IDS. */
+  packageId: string;
+  /** Store product id exactly as the store returns it — Apple: bare id;
+   *  Android: 'productId:basePlanId'. Matches plans.apple_product_id on iOS;
+   *  kept for display/debug only, never for client-side matching. */
   productId: string;
   title: string;
   description: string;

@@ -41,6 +41,28 @@ export const REVENUECAT_MINUTE_PACKAGE_PRODUCT_IDS = {
 
 export type OrodimCommercialPlanCode = 'essencial' | 'plus';
 
+/**
+ * RevenueCat *package* identifiers in the `default` offering — the ONE key the
+ * client uses to find/purchase a product, because it is identical across the
+ * App Store and Play Store. The store *product* id is NOT safe to match on:
+ * on Android RevenueCat appends the base-plan id (e.g.
+ * `orodim.subscription.essential.monthly:monthly`), so matching by product id
+ * silently fails there. Package ids are configured by a human in the
+ * RevenueCat dashboard and must match these exactly.
+ */
+export const REVENUECAT_SUBSCRIPTION_PACKAGE_IDS: Record<OrodimCommercialPlanCode, string> = {
+  essencial: 'essential_monthly',
+  plus: 'plus_monthly',
+};
+
+/** RevenueCat package identifiers for the consumable minute packs (same on
+ *  both stores — see REVENUECAT_SUBSCRIPTION_PACKAGE_IDS). */
+export const REVENUECAT_MINUTE_PACKAGE_IDS = {
+  'pacote-300-min': 'minutes_300',
+  'pacote-600-min': 'minutes_600',
+  'pacote-900-min': 'minutes_900',
+} as const;
+
 /** RevenueCat entitlement ids — must be created manually in the RevenueCat
  *  dashboard (see this task's final-report checklist) with exactly these
  *  identifiers, each granted by its matching subscription product above. */

@@ -9,7 +9,7 @@ import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscri
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
-import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
+import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
 
 interface Props {
@@ -69,8 +69,8 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
       window.alert(SUBSCRIPTION_MESSAGES.webPurchaseUnavailableNote);
       return;
     }
-    const productId = REVENUECAT_SUBSCRIPTION_PRODUCT_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
-    const purchased = await nativePurchase.purchase(productId);
+    const packageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
+    const purchased = await nativePurchase.purchase(packageId);
     if (purchased) {
       await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
     } else if (nativePurchase.lastError && nativePurchase.lastError.code !== 'user_cancelled') {
@@ -247,12 +247,13 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
             {COMMERCIAL_PLAN_ORDER.map((code) => {
               const plan = COMMERCIAL_PLANS[code];
-              // Real Apple-returned price when the native Offering has
+              // Real store-returned price when the native Offering has
               // loaded — never a fixed price once the real product is
               // available (FASE 5). Falls back to the static price on web
-              // or before offerings finish loading on native.
+              // or before offerings finish loading on native. Matched by
+              // package id so it works on both stores (see the catalog).
               const realOffering = nativePurchase.offerings.find(
-                (o) => o.productId === REVENUECAT_SUBSCRIPTION_PRODUCT_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]],
+                (o) => o.packageId === REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]],
               );
               return (
                 <SubscriptionPlanCard
@@ -261,7 +262,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
                   recommended={code === RECOMMENDED_PLAN_CODE}
                   onSubscribe={handleSubscribe}
                   priceLabel={realOffering?.priceFormatted}
-                  ctaLoading={nativePurchase.purchasing === realOffering?.productId}
+                  ctaLoading={nativePurchase.purchasing === realOffering?.packageId}
                   ctaDisabled={nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
                 />
               );

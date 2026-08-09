@@ -12,10 +12,12 @@ import type {
  * this codebase may import that package directly. Supported on native iOS
  * (Apple key) and native Android (Google Play key) only; the web build
  * never touches the SDK at all (no checkout on the website — see
- * SubscriptionView.tsx). Android has no Google Play products/offerings
- * configured yet (see revenuecat-catalog.ts) — the SDK still configures so
- * the Play Billing dependency ships in the AAB and RevenueCat can see the
- * app, but getOfferings() will simply return empty until those exist.
+ * SubscriptionView.tsx). Both stores have their products/offerings
+ * configured under the `default` offering; getOfferings() returns whichever
+ * store the running native app belongs to. Callers match/purchase by the
+ * RevenueCat package identifier (store-agnostic), never by the store product
+ * id — Android appends the base-plan id to product ids (see
+ * OrodimProductOffering / revenuecat-catalog.ts).
  *
  * Identity: the RevenueCat App User ID is always the authenticated Supabase
  * UUID, via syncIdentity(userId), driven by the same session the rest of
@@ -46,8 +48,9 @@ let identifiedUserId: string | null = null;
 // chains onto this promise instead of firing a second SDK call mid-flight.
 let identityChain: Promise<void> = Promise.resolve();
 
-/** Real Apple product ids from the last getOfferings() call, keyed for
- *  purchaseProduct() — never re-exposes the raw PurchasesPackage. */
+/** Packages from the last getOfferings() call, keyed by RevenueCat package
+ *  identifier (store-agnostic — e.g. 'essential_monthly') for purchasePackage()
+ *  — never re-exposes the raw PurchasesPackage. */
 const packageCache = new Map<string, unknown>();
 
 /** Name only — used for the "key not set" warning below, never for lookup
@@ -158,8 +161,9 @@ export async function getOfferings(): Promise<OrodimProductOffering[]> {
 
   packageCache.clear();
   return current.availablePackages.map((pkg: (typeof current.availablePackages)[number]) => {
-    packageCache.set(pkg.product.identifier, pkg);
+    packageCache.set(pkg.identifier, pkg);
     return {
+      packageId: pkg.identifier,
       productId: pkg.product.identifier,
       title: pkg.product.title,
       description: pkg.product.description,
@@ -183,15 +187,18 @@ function normalizePurchaseError(err: unknown, errorCodes: Record<string, string>
 }
 
 /**
- * Purchases by Apple product id (looked up in the cache populated by the
- * last getOfferings() call — call getOfferings() first). Never disables a
- * caller's own double-click guard; this function itself does not debounce.
+ * Purchases by RevenueCat package identifier (looked up in the cache
+ * populated by the last getOfferings() call — call getOfferings() first).
+ * Package ids are the same on both stores, so this works identically on iOS
+ * and Android (unlike the store product id — see OrodimProductOffering).
+ * Never disables a caller's own double-click guard; this function itself does
+ * not debounce.
  */
-export async function purchaseProduct(productId: string): Promise<OrodimPurchaseResult> {
+export async function purchasePackage(packageId: string): Promise<OrodimPurchaseResult> {
   if (!isRevenueCatSupported() || !configured) {
     return { ok: false, customerInfo: null, error: { code: 'not_configured', message: 'Compras não estão disponíveis.' } };
   }
-  const pkg = packageCache.get(productId);
+  const pkg = packageCache.get(packageId);
   if (!pkg) {
     return { ok: false, customerInfo: null, error: { code: 'unknown', message: 'Produto não encontrado. Atualize e tente novamente.' } };
   }

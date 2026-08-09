@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   isRevenueCatSupported,
   getOfferings,
-  purchaseProduct,
+  purchasePackage,
   restorePurchases,
   getManagementUrl,
 } from '../lib/revenueCat/revenueCatClient';
@@ -14,21 +14,22 @@ export interface NativeSubscriptionPurchaseState {
   supported: boolean;
   offerings: OrodimProductOffering[];
   offeringsLoading: boolean;
-  purchasing: string | null; // productId currently being purchased, for a per-button loading state
+  purchasing: string | null; // packageId currently being purchased, for a per-button loading state
   restoring: boolean;
   managementUrl: string | null;
   lastError: OrodimPurchaseError | null;
-  /** Resolves true only on an actually-completed purchase, never on cancel/error. */
-  purchase: (productId: string) => Promise<boolean>;
+  /** Resolves true only on an actually-completed purchase, never on cancel/error.
+   *  Takes a RevenueCat package identifier (see OrodimProductOffering.packageId). */
+  purchase: (packageId: string) => Promise<boolean>;
   restore: () => Promise<boolean>;
   refetchOfferings: () => void;
 }
 
 /**
  * Native (iOS/Android) purchase affordances for the subscription screen.
- * Android has no Google Play offerings configured yet, so getOfferings()
- * returns empty there until that's done (see revenueCatClient.ts's module
- * doc comment) — this hook itself needs no platform branching for that.
+ * Works identically on both stores — offerings/packages come from the
+ * `default` offering and are matched by package id, so this hook needs no
+ * platform branching (see revenueCatClient.ts's module doc comment).
  * Never the source of access truth (see subscription-status-service.ts) — a
  * successful purchase/restore here only updates local UI optimistically;
  * SubscriptionView is responsible for triggering a backend resync
@@ -68,12 +69,12 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
     return () => { cancelled = true; };
   }, [supported, refetchToken]);
 
-  const purchase = useCallback(async (productId: string): Promise<boolean> => {
+  const purchase = useCallback(async (packageId: string): Promise<boolean> => {
     if (!supported || purchasing) return false; // impedir duplo clique
-    setPurchasing(productId);
+    setPurchasing(packageId);
     setLastError(null);
     try {
-      const result = await purchaseProduct(productId);
+      const result = await purchasePackage(packageId);
       if (!mountedRef.current) return false;
       if (!result.ok) {
         // user_cancelled is never surfaced as an alarming error — the

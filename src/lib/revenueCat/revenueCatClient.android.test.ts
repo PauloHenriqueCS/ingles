@@ -45,7 +45,7 @@ import {
   syncIdentity,
   getCustomerInfo,
   getOfferings,
-  purchaseProduct,
+  purchasePackage,
   restorePurchases,
   getManagementUrl,
   addCustomerInfoListener,
@@ -208,14 +208,17 @@ describe('revenueCatClient on Android — getOfferings', () => {
     await expect(getOfferings()).resolves.toEqual([]);
   });
 
-  it('maps the current offering\'s packages to OrodimProductOffering', async () => {
+  it('maps packages by package id, keeping the store product id (with its Android base-plan suffix) for display only', async () => {
     await syncIdentity(USER_A);
     mockGetOfferings.mockResolvedValue({
       current: {
         availablePackages: [
           {
+            // On Android RevenueCat appends the base-plan id to the product
+            // identifier — the exact reason matching must key off packageId.
+            identifier: 'essential_monthly',
             product: {
-              identifier: 'orodim.subscription.essential.monthly',
+              identifier: 'orodim.subscription.essential.monthly:monthly',
               title: 'Essencial',
               description: '30 minutos de conversação por mês',
               priceString: 'R$ 34,90',
@@ -227,7 +230,8 @@ describe('revenueCatClient on Android — getOfferings', () => {
     const offerings = await getOfferings();
     expect(offerings).toEqual([
       {
-        productId: 'orodim.subscription.essential.monthly',
+        packageId: 'essential_monthly',
+        productId: 'orodim.subscription.essential.monthly:monthly',
         title: 'Essencial',
         description: '30 minutos de conversação por mês',
         priceFormatted: 'R$ 34,90',
@@ -236,31 +240,34 @@ describe('revenueCatClient on Android — getOfferings', () => {
   });
 });
 
-describe('revenueCatClient on Android — purchaseProduct', () => {
-  const PRODUCT_ID = 'orodim.subscription.essential.monthly';
+describe('revenueCatClient on Android — purchasePackage', () => {
+  const PACKAGE_ID = 'essential_monthly';
+  // The suffixed product id proves purchases never depend on it on Android.
+  const ANDROID_PRODUCT_ID = 'orodim.subscription.essential.monthly:monthly';
 
   async function loadOneOffering() {
     mockGetOfferings.mockResolvedValue({
       current: {
-        availablePackages: [{ product: { identifier: PRODUCT_ID, title: 'Essencial', description: '', priceString: 'R$ 34,90' } }],
+        availablePackages: [{ identifier: PACKAGE_ID, product: { identifier: ANDROID_PRODUCT_ID, title: 'Essencial', description: '', priceString: 'R$ 34,90' } }],
       },
     });
     await getOfferings();
   }
 
-  it('rejects a product id not present in the last getOfferings() cache', async () => {
+  it('rejects a package id not present in the last getOfferings() cache', async () => {
     await syncIdentity(USER_A);
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('unknown');
     expect(mockPurchasePackage).not.toHaveBeenCalled();
   });
 
-  it('a completed purchase returns ok:true with the mapped customerInfo', async () => {
+  it('a completed purchase returns ok:true with the mapped customerInfo — matched by package id despite the Android :basePlan suffix', async () => {
     await syncIdentity(USER_A);
     await loadOneOffering();
     mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { essential: {} } }) });
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
+    expect(mockPurchasePackage).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       ok: true,
       customerInfo: { activeEntitlementIds: ['essential'], activePlanCode: 'essencial', managementUrl: null },
@@ -272,7 +279,7 @@ describe('revenueCatClient on Android — purchaseProduct', () => {
     await syncIdentity(USER_A);
     await loadOneOffering();
     mockPurchasePackage.mockRejectedValue({ userCancelled: true, message: 'cancelled' });
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
     expect(result.ok).toBe(false);
     expect(result.error).toEqual({ code: 'user_cancelled', message: 'Compra cancelada.' });
   });
@@ -281,7 +288,7 @@ describe('revenueCatClient on Android — purchaseProduct', () => {
     await syncIdentity(USER_A);
     await loadOneOffering();
     mockPurchasePackage.mockRejectedValue({ code: 'PURCHASE_CANCELLED_ERROR' });
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
     expect(result.error?.code).toBe('user_cancelled');
   });
 
@@ -289,7 +296,7 @@ describe('revenueCatClient on Android — purchaseProduct', () => {
     await syncIdentity(USER_A);
     await loadOneOffering();
     mockPurchasePackage.mockRejectedValue({ code: 'SOME_OTHER_ERROR', message: 'boom' });
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
     expect(result).toEqual({
       ok: false,
       customerInfo: null,
@@ -298,7 +305,7 @@ describe('revenueCatClient on Android — purchaseProduct', () => {
   });
 
   it('returns not_configured before the SDK has been configured', async () => {
-    const result = await purchaseProduct(PRODUCT_ID);
+    const result = await purchasePackage(PACKAGE_ID);
     expect(result.error?.code).toBe('not_configured');
     expect(mockPurchasePackage).not.toHaveBeenCalled();
   });

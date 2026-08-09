@@ -27,15 +27,19 @@ interface MockOptions {
 
 function makeMockSupabase(opts: MockOptions = {}) {
   const upsertCalls: Array<{ row: Record<string, unknown>; options: unknown }> = [];
+  const planFilters: string[] = [];
   return {
     client: {
       from: (table: string) => {
         if (table === 'plans') {
           return {
             select: () => ({
-              eq: () => ({
-                maybeSingle: () => Promise.resolve({ data: opts.planRow ?? null, error: opts.planError ?? null }),
-              }),
+              or: (filter: string) => {
+                planFilters.push(filter);
+                return {
+                  maybeSingle: () => Promise.resolve({ data: opts.planRow ?? null, error: opts.planError ?? null }),
+                };
+              },
             }),
           };
         }
@@ -51,6 +55,7 @@ function makeMockSupabase(opts: MockOptions = {}) {
       },
     } as any,
     upsertCalls,
+    planFilters,
   };
 }
 
@@ -117,10 +122,26 @@ describe('syncSubscriptionFromEvent — Essencial / Plus', () => {
     expect(upsertCalls[0].row.plan_id).toBe(plusPlanId);
   });
 
-  it('never looks up a plan by name — only by apple_product_id (structural: unknown product id is always rejected)', async () => {
+  it('never looks up a plan by name — only by store product id (structural: unknown product id is always rejected)', async () => {
     const { client } = makeMockSupabase({ planRow: null });
     const outcome = await syncSubscriptionFromEvent(baseEvent({ productId: 'not.a.real.product' }), { supabase: client });
     expect(outcome).toEqual({ ok: false, reason: 'unknown_product' });
+  });
+
+  it('resolves the plan by both stores\' product-id columns, tolerating the Android base-plan suffix', async () => {
+    const { client, upsertCalls, planFilters } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    // Android RevenueCat product id carries the base plan (":monthly").
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ productId: 'orodim.subscription.essential.monthly:monthly' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: true, action: 'upserted_assignment' });
+    expect(upsertCalls[0].row.plan_id).toBe(ESSENCIAL_PLAN_ID);
+    // The filter must query google_subscription_product_id and include the
+    // suffix-stripped id, never depend on apple_product_id alone.
+    const filter = planFilters[0];
+    expect(filter).toContain('google_subscription_product_id.eq.orodim.subscription.essential.monthly');
+    expect(filter).toContain('apple_product_id.eq.orodim.subscription.essential.monthly:monthly');
   });
 });
 
@@ -213,12 +234,12 @@ describe('syncSubscriptionFromEvent — safety gates', () => {
     expect(upsertCalls).toHaveLength(1);
   });
 
-  it('a plan resolved by product id is never the internal unlimited plan — it has no apple_product_id, so it structurally can never match', async () => {
+  it('a plan resolved by product id is never the internal unlimited plan — it has no store product id, so it structurally can never match', async () => {
     // No planRow configured for any product id other than a real commercial
     // one — this test documents the invariant rather than exercising a
-    // code branch: INTERNAL_UNLIMITED_PLAN_CODE ('24317180') has no
-    // apple_product_id in the database, so `.eq('apple_product_id', ...)`
-    // can never resolve to it.
+    // code branch: INTERNAL_UNLIMITED_PLAN_CODE ('24317180') has neither an
+    // apple_product_id nor a google_subscription_product_id in the database,
+    // so the product-id filter can never resolve to it.
     const { client } = makeMockSupabase({ planRow: null });
     const outcome = await syncSubscriptionFromEvent(baseEvent({ productId: '24317180' }), { supabase: client });
     expect(outcome).toEqual({ ok: false, reason: 'unknown_product' });
