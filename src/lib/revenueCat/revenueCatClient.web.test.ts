@@ -36,6 +36,8 @@ vi.mock('@revenuecat/purchases-capacitor', () => ({
 
 import {
   isRevenueCatSupported,
+  isRevenueCatConfigured,
+  subscribeReady,
   syncIdentity,
   getCustomerInfo,
   getOfferings,
@@ -93,5 +95,14 @@ describe('revenueCatClient on the web build', () => {
   it('addCustomerInfoListener never registers a listener', async () => {
     await addCustomerInfoListener(() => {});
     expect(mockAddCustomerInfoUpdateListener).not.toHaveBeenCalled();
+  });
+
+  it('subscribeReady never fires and isRevenueCatConfigured stays false (SDK is never configured on web)', async () => {
+    const onReady = vi.fn();
+    const unsub = subscribeReady(onReady);
+    await syncIdentity('aaaaaaaa-0000-0000-0000-000000000001');
+    expect(onReady).not.toHaveBeenCalled();
+    expect(isRevenueCatConfigured()).toBe(false);
+    unsub();
   });
 });

@@ -42,6 +42,8 @@ vi.mock('@revenuecat/purchases-capacitor', () => ({
 
 import {
   isRevenueCatSupported,
+  isRevenueCatConfigured,
+  subscribeReady,
   syncIdentity,
   getCustomerInfo,
   getOfferings,
@@ -254,12 +256,39 @@ describe('revenueCatClient on Android — purchasePackage', () => {
     await getOfferings();
   }
 
-  it('rejects a package id not present in the last getOfferings() cache', async () => {
+  it('a genuinely absent package returns product_not_found after exactly one refresh (no retry loop, no purchase)', async () => {
     await syncIdentity(USER_A);
+    mockGetOfferings.mockResolvedValue({ current: null }); // nothing to load, even after refresh
     const result = await purchasePackage(PACKAGE_ID);
     expect(result.ok).toBe(false);
-    expect(result.error?.code).toBe('unknown');
+    expect(result.error?.code).toBe('product_not_found');
+    expect(mockGetOfferings).toHaveBeenCalledTimes(1); // single safe refresh, never a loop
     expect(mockPurchasePackage).not.toHaveBeenCalled();
+  });
+
+  it('an empty cache triggers ONE offerings refresh that finds the package, then completes the purchase', async () => {
+    // The race: the screen mounted before offerings finished loading, so the
+    // cache is empty when the user taps buy — the refresh must recover it.
+    await syncIdentity(USER_A);
+    mockGetOfferings.mockResolvedValue({
+      current: { availablePackages: [{ identifier: PACKAGE_ID, product: { identifier: ANDROID_PRODUCT_ID, title: 'Essencial', description: '', priceString: 'R$ 34,90' } }] },
+    });
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { essential: {} } }) });
+    const result = await purchasePackage(PACKAGE_ID);
+    expect(mockGetOfferings).toHaveBeenCalledTimes(1); // single refresh
+    expect(mockPurchasePackage).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(result.customerInfo?.activePlanCode).toBe('essencial');
+  });
+
+  it('a package already in cache purchases without any extra refresh', async () => {
+    await syncIdentity(USER_A);
+    await loadOneOffering();
+    mockGetOfferings.mockClear();
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { essential: {} } }) });
+    const result = await purchasePackage(PACKAGE_ID);
+    expect(mockGetOfferings).not.toHaveBeenCalled(); // no wasted refresh on a cache hit
+    expect(result.ok).toBe(true);
   });
 
   it('a completed purchase returns ok:true with the mapped customerInfo — matched by package id despite the Android :basePlan suffix', async () => {
@@ -340,5 +369,81 @@ describe('revenueCatClient on Android — restorePurchases', () => {
     const result = await restorePurchases();
     expect(result.error?.code).toBe('not_configured');
     expect(mockRestorePurchases).not.toHaveBeenCalled();
+  });
+});
+
+describe('revenueCatClient on Android — readiness / offerings race (the "Produto não encontrado" bug)', () => {
+  const OFFERING = {
+    current: {
+      availablePackages: [{ identifier: 'essential_monthly', product: { identifier: 'orodim.subscription.essential.monthly:monthly', title: 'Essencial', description: '', priceString: 'R$ 34,90' } }],
+    },
+  };
+
+  it('getOfferings() called while configure() is still in flight waits for it, then returns the real list (never the empty pre-config list)', async () => {
+    // The exact reproduction: the screen mounts and asks for offerings before
+    // syncIdentity(UUID) has finished configuring the SDK.
+    let resolveConfigure!: () => void;
+    mockConfigure.mockReturnValue(new Promise<void>((resolve) => { resolveConfigure = () => resolve(); }));
+    mockGetOfferings.mockResolvedValue(OFFERING);
+
+    const sync = syncIdentity(USER_A);       // configure() starts, not yet resolved
+    const offeringsPromise = getOfferings();  // hook's first load, mid-sync
+
+    resolveConfigure();
+    await sync;
+    const offerings = await offeringsPromise;
+    expect(offerings.map((o) => o.packageId)).toEqual(['essential_monthly']);
+  });
+
+  it('a pre-configure load gets an empty list, and the readiness subscriber then fires so the screen can reload', async () => {
+    const onReady = vi.fn();
+    subscribeReady(onReady);
+    mockGetOfferings.mockResolvedValue({ current: null });
+
+    // Screen mounts before auth resolves → SDK not configured yet → empty list.
+    expect(await getOfferings()).toEqual([]);
+    expect(onReady).not.toHaveBeenCalled();
+
+    // Auth resolves later; configure completes → subscriber is notified.
+    await syncIdentity(USER_A);
+    expect(onReady).toHaveBeenCalledTimes(1);
+
+    // The reload the subscriber would trigger now sees the real offering.
+    mockGetOfferings.mockResolvedValue(OFFERING);
+    expect((await getOfferings()).map((o) => o.packageId)).toEqual(['essential_monthly']);
+  });
+
+  it('switching users notifies readiness again (offerings are per-identity and must reload)', async () => {
+    await syncIdentity(USER_A);
+    const onReady = vi.fn();
+    subscribeReady(onReady);
+    await syncIdentity(USER_B); // logIn, not a second configure
+    expect(onReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('logout then login keeps the SDK configured and fires readiness on each transition, offerings still load', async () => {
+    await syncIdentity(USER_A);
+    const onReady = vi.fn();
+    subscribeReady(onReady);
+    await syncIdentity(null);   // logOut
+    await syncIdentity(USER_B); // logIn
+    expect(onReady).toHaveBeenCalledTimes(2);
+    expect(isRevenueCatConfigured()).toBe(true); // configure() is never called twice
+    mockGetOfferings.mockResolvedValue(OFFERING);
+    expect((await getOfferings()).map((o) => o.packageId)).toEqual(['essential_monthly']);
+  });
+
+  it('an unsubscribed readiness listener is not notified', async () => {
+    const onReady = vi.fn();
+    const unsub = subscribeReady(onReady);
+    unsub();
+    await syncIdentity(USER_A);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it('isRevenueCatConfigured() reflects configure state', async () => {
+    expect(isRevenueCatConfigured()).toBe(false);
+    await syncIdentity(USER_A);
+    expect(isRevenueCatConfigured()).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   isRevenueCatSupported,
+  subscribeReady,
   getOfferings,
   purchasePackage,
   restorePurchases,
@@ -47,6 +48,18 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
   const [refetchToken, setRefetchToken] = useState(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // Reload offerings whenever the RevenueCat SDK becomes ready or its identity
+  // changes (configure/logIn/logOut completed). This is what closes the
+  // mount-before-syncIdentity race: the first load below may run before the
+  // SDK is configured and get an empty list, so we let the readiness signal
+  // trigger a refetch instead of depending on the user tapping "atualizar".
+  useEffect(() => {
+    if (!supported) return;
+    return subscribeReady(() => {
+      if (mountedRef.current) setRefetchToken((t) => t + 1);
+    });
+  }, [supported]);
 
   useEffect(() => {
     if (!supported) return;

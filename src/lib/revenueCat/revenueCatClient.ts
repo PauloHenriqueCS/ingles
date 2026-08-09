@@ -53,6 +53,44 @@ let identityChain: Promise<void> = Promise.resolve();
  *  — never re-exposes the raw PurchasesPackage. */
 const packageCache = new Map<string, unknown>();
 
+/** Listeners notified whenever the SDK reaches (or changes) a usable identified
+ *  state — after configure() completes, or after a logIn/logOut. This is how a
+ *  screen reloads offerings once the SDK is actually ready, instead of polling
+ *  or leaving an empty list from a getOfferings() that raced the initial
+ *  syncIdentity(UUID). See useNativeSubscriptionPurchase.ts. */
+const readyListeners = new Set<() => void>();
+
+function notifyReady(): void {
+  for (const listener of readyListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.warn('[revenueCat] ready listener threw', err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+/**
+ * Subscribe to RevenueCat readiness/identity changes — the callback fires
+ * after configure() finishes and after every subsequent logIn/logOut, i.e.
+ * exactly when re-reading offerings can succeed. Never fires on web/unsupported
+ * (the SDK is never configured there). Returns an unsubscribe function; safe to
+ * register before the SDK is ready (you just get the next transition).
+ */
+export function subscribeReady(listener: () => void): () => void {
+  readyListeners.add(listener);
+  return () => {
+    readyListeners.delete(listener);
+  };
+}
+
+/** True once configure() has completed for this app session — i.e. offerings
+ *  and purchases are actually usable. Lets a caller decide whether to await
+ *  readiness (via subscribeReady) before its first offerings load. */
+export function isRevenueCatConfigured(): boolean {
+  return configured;
+}
+
 /** Name only — used for the "key not set" warning below, never for lookup
  *  (the actual read stays a static `import.meta.env.VITE_X` member access
  *  per platform so Vite can statically inline/tree-shake it). */
@@ -99,15 +137,21 @@ async function doSyncIdentity(userId: string | null): Promise<void> {
     await Purchases.configure({ apiKey: key, appUserID: userId as string });
     configured = true;
     identifiedUserId = userId;
+    // The SDK is now usable — wake any screen waiting to load offerings so it
+    // never sits on the empty list a pre-configure getOfferings() returned.
+    notifyReady();
     return;
   }
 
   if (userId && userId !== identifiedUserId) {
     await Purchases.logIn({ appUserID: userId });
     identifiedUserId = userId;
+    // Offerings are per-identity — a screen must reload after a user switch.
+    notifyReady();
   } else if (!userId && identifiedUserId) {
     await Purchases.logOut();
     identifiedUserId = null;
+    notifyReady();
   }
 }
 
@@ -153,7 +197,12 @@ export async function addCustomerInfoListener(onUpdate: (info: OrodimCustomerInf
 }
 
 export async function getOfferings(): Promise<OrodimProductOffering[]> {
-  if (!isRevenueCatSupported() || !configured) return [];
+  if (!isRevenueCatSupported()) return [];
+  // Wait for any in-flight configure()/logIn()/logOut() to settle first, so a
+  // screen that mounted mid-syncIdentity doesn't read an unconfigured SDK and
+  // cache an empty list — the race that surfaced "Produto não encontrado".
+  await identityChain;
+  if (!configured) return [];
   const { Purchases } = await loadPurchases();
   const offerings = await Purchases.getOfferings();
   const current = offerings.current;
@@ -195,12 +244,27 @@ function normalizePurchaseError(err: unknown, errorCodes: Record<string, string>
  * not debounce.
  */
 export async function purchasePackage(packageId: string): Promise<OrodimPurchaseResult> {
+  // Settle any in-flight identity sync before deciding we're not configured —
+  // a purchase tapped moments after the screen opened must not lose the race.
+  await identityChain;
   if (!isRevenueCatSupported() || !configured) {
     return { ok: false, customerInfo: null, error: { code: 'not_configured', message: 'Compras não estão disponíveis.' } };
   }
-  const pkg = packageCache.get(packageId);
+  let pkg = packageCache.get(packageId);
   if (!pkg) {
-    return { ok: false, customerInfo: null, error: { code: 'unknown', message: 'Produto não encontrado. Atualize e tente novamente.' } };
+    // The cache can be legitimately empty if offerings hadn't finished loading
+    // when the screen mounted. Do exactly ONE safe refresh (never a retry
+    // loop) before giving up — a refresh failure just falls through to
+    // product_not_found, never crashes the purchase.
+    try {
+      await getOfferings();
+    } catch (err) {
+      console.warn('[revenueCat] offerings refresh before purchase failed', err instanceof Error ? err.message : err);
+    }
+    pkg = packageCache.get(packageId);
+  }
+  if (!pkg) {
+    return { ok: false, customerInfo: null, error: { code: 'product_not_found', message: 'Produto não encontrado. Atualize e tente novamente.' } };
   }
   const { Purchases, PURCHASES_ERROR_CODE } = await loadPurchases();
   try {
@@ -239,4 +303,5 @@ export function __resetRevenueCatClientForTests(): void {
   identityChain = Promise.resolve();
   listenerRegistered = false;
   packageCache.clear();
+  readyListeners.clear();
 }

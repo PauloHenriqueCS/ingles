@@ -40,6 +40,10 @@ export type OrodimPurchaseErrorCode =
   | 'already_purchased'
   | 'network_error'
   | 'not_configured'
+  /** The requested package id was not in the current offering, even after a
+   *  single fresh getOfferings() refresh — i.e. genuinely absent, not merely
+   *  a not-yet-loaded cache (that race is handled by the refresh). */
+  | 'product_not_found'
   | 'unknown';
 
 export interface OrodimPurchaseError {
