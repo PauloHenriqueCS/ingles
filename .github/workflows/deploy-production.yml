@@ -125,16 +125,42 @@ jobs:
             --project-ref "$SUPABASE_PROJECT_REF" \
             --password "$SUPABASE_DB_PASSWORD"
 
-      # ── 7. Migration history + dry-run, against the linked production project ──
+      # ── 6b. Exclude the homologation-only migration from the PRODUCTION push.
+      # 20260725120002_seed_ai_runtime_controls.sql is develop/homologation-only
+      # — production already has the 28 real ai_runtime_controls rows since the
+      # legacy history, and re-seeding them there would overwrite real data (see
+      # supabase/MIGRATIONS.md, "O corte de baseline"). It is removed from THIS
+      # ephemeral runner's checkout only — never from the repo, so homologation
+      # (.github/workflows/homologation.yml) still applies it — so the push below
+      # can never carry it to production. Not migration repair, not manual SQL:
+      # the file simply isn't present for this one push. ────────────────────────
+      - name: Exclude homologation-only migration from the production set
+        run: |
+          f="supabase/migrations/20260725120002_seed_ai_runtime_controls.sql"
+          if [ -f "$f" ]; then
+            rm -f "$f"
+            echo "Excluded $f from the production migration set (homologation-only)."
+          else
+            echo "Note: $f not present in this checkout; nothing to exclude."
+          fi
+
+      # ── 7. Migration history + dry-run, against the linked production project.
+      # --include-all: the trial/commercial-plans/minute-packages migrations
+      # (20260727*, 20260802*) carry timestamps earlier than a migration already
+      # applied to production by the ingles-dashboad repo (20260803000000), so
+      # they are "out of order" and a plain `db push` refuses them. --include-all
+      # is Supabase's documented, non-destructive way to apply out-of-order
+      # pending migrations; each one here was audited to be idempotent and
+      # additive before this flag was added. ────────────────────────────────────
       - name: Migration history (before)
         run: supabase migration list
       - name: Migration dry-run
-        run: supabase db push --dry-run
+        run: supabase db push --dry-run --include-all
 
       # ── 8. Apply migrations. Any failure here stops the job outright: no
       # repair/ignore/manual-SQL fallback, no Vercel deploy after this point. ────
       - name: Apply migrations
-        run: supabase db push
+        run: supabase db push --include-all
       - name: Migration history (after)
         run: supabase migration list
 
