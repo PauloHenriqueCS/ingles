@@ -9,7 +9,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 const sql = readFileSync(
-  resolve(__dirname, '..', '20260727230600_essencial_plus_commercial_plans.sql'),
+  resolve(__dirname, '..', '..', 'migrations', '20260727230600_essencial_plus_commercial_plans.sql'),
   'utf8',
 );
 

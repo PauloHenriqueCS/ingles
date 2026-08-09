@@ -16,7 +16,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 const sql = readFileSync(
-  resolve(__dirname, '..', '20260727224300_fix_authorize_trial_conversation_session_ambiguity.sql'),
+  resolve(__dirname, '..', '..', 'migrations', '20260727224300_fix_authorize_trial_conversation_session_ambiguity.sql'),
   'utf8',
 );
 

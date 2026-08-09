@@ -9,7 +9,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 const sql = readFileSync(
-  resolve(__dirname, '..', '20260727224200_authorize_trial_conversation_session.sql'),
+  resolve(__dirname, '..', '..', 'migrations', '20260727224200_authorize_trial_conversation_session.sql'),
   'utf8',
 );
 

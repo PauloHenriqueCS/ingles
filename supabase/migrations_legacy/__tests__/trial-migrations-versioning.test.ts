@@ -21,7 +21,10 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync } from 'fs';
 import { resolve } from 'path';
 
-const MIGRATIONS_DIR = resolve(__dirname, '..');
+// The Etapa 2A trio was promoted from migrations_legacy/ into the active
+// supabase/migrations/ directory — assert against where the files actually
+// live now (this test file itself stays archived here).
+const MIGRATIONS_DIR = resolve(__dirname, '..', '..', 'migrations');
 const ALL_MIGRATION_FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql'));
 
 const TRIAL_FILES = [
