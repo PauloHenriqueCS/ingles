@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
-import { executeAiGatewayCall, getProductionDeps, estimateTextTokens } from '../_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedServiceClient } from '../_ai-gateway/index';
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
@@ -20,6 +20,7 @@ import {
   WORD_PRACTICE_MAX_ATTEMPTS,
   WORD_PRACTICE_MAX_DURATION_SECONDS,
   isWordPracticeOwnerType,
+  type WordPracticeOwnerType,
 } from '../../src/domain/pronunciation/word-practice-limits';
 
 type AccessDenial = { status: number; code: string; message: string };
@@ -357,6 +358,40 @@ const WORD_ATTEMPT_ERROR_STATUS: Record<string, number> = {
 };
 
 /**
+ * Refunds the single attempt that register_word_practice_attempt just
+ * consumed, used ONLY when the server itself failed to deliver the Azure
+ * token (so no client-side evaluation could ever happen). Refund is
+ * server-decided and therefore un-bypassable — it is never triggered by a
+ * client-reported failure (SDK/conversion/network-after-token/modal close),
+ * which would reopen the register→release→register bypass.
+ *
+ * Called through the service-role client because release_word_practice_attempt
+ * is granted to service_role only (never to the client, for the same reason).
+ * Best-effort: a refund failure is logged and never masks the original
+ * token-issuance error the caller is about to surface. Scoped to the exact
+ * (user, ownerType, ownerId, word) row and floored at zero in SQL, so it can
+ * never go negative nor touch a concurrent valid attempt.
+ */
+async function refundWordPracticeAttempt(
+  userId: string,
+  ownerType: WordPracticeOwnerType,
+  ownerId: string,
+  word: string,
+): Promise<void> {
+  try {
+    const supabase = getSharedServiceClient();
+    await supabase.rpc('release_word_practice_attempt', {
+      p_user_id: userId,
+      p_owner_type: ownerType,
+      p_owner_id: ownerId,
+      p_word: word,
+    });
+  } catch {
+    safeLog('pronunciation-training/token', 'word_attempt_refund_failed', 500);
+  }
+}
+
+/**
  * This endpoint serves ONLY the individual-word training drill (both
  * surfaces: WordRow and PracticeWordRow — the full-text flows use /start,
  * which mints its own token). Every call is therefore one word-practice
@@ -450,6 +485,12 @@ async function handleToken(req: any, res: any) {
       maxDurationSeconds: WORD_PRACTICE_MAX_DURATION_SECONDS,
     });
   } catch (err) {
+    // The attempt was already registered above, but the server never delivered
+    // a token (Azure 401/5xx/timeout, or any internal error before returning
+    // it) — refund that attempt before surfacing the original error. Reachable
+    // only after a successful register: the limit/owner-not-found paths return
+    // earlier, before any increment, so this never over-refunds.
+    await refundWordPracticeAttempt(auth.userId, ownerType, ownerId, word);
     if (err instanceof AzureSpeechError) {
       const status = AZURE_ERROR_STATUS[err.code] ?? 503;
       return jsonError(res, status, err.code, 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
