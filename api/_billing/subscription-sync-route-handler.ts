@@ -26,7 +26,7 @@ import { getRevenueCatApiSecretKey } from '../_env';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { resolveSubscriptionStatus } from '../_entitlements/subscription-status-service';
 import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS } from '../../src/domain/subscription/revenuecat-catalog';
-import { syncSubscriptionFromEvent, type RevenueCatLifecycleEvent } from './revenuecat-subscription-sync-service';
+import { syncSubscriptionFromEvent, baseStoreProductId, type RevenueCatLifecycleEvent } from './revenuecat-subscription-sync-service';
 
 const KNOWN_SUBSCRIPTION_PRODUCT_IDS: string[] = Object.values(REVENUECAT_SUBSCRIPTION_PRODUCT_IDS);
 
@@ -78,9 +78,15 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
 
   const subscriptions = body.subscriber?.subscriptions ?? {};
   const supabase = getSharedServiceClient();
+  const knownProductIds = new Set<string>(KNOWN_SUBSCRIPTION_PRODUCT_IDS);
 
-  for (const productId of KNOWN_SUBSCRIPTION_PRODUCT_IDS) {
-    const sub = subscriptions[productId];
+  // RevenueCat keys `subscriptions` by the STORE product id: bare on Apple,
+  // but 'productId:basePlanId' on Google Play (e.g.
+  // 'orodim.subscription.plus.monthly:monthly'). Iterate the real entries and
+  // match on the BASE product id, so a Google base-plan subscription is never
+  // silently skipped — indexing by the bare id would only ever match Apple.
+  for (const [storeProductId, sub] of Object.entries(subscriptions)) {
+    if (!knownProductIds.has(baseStoreProductId(storeProductId))) continue;
     if (!sub || !sub.original_transaction_id) continue;
 
     // A generic "this is the subscriber's current known state" signal —
@@ -89,12 +95,16 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
     // event.type for CANCELLATION/UNCANCELLATION (cancelled_at handling);
     // every other type, including this synthetic one, reconciles purely
     // from the data fields (starts_at/ends_at/product), which is exactly
-    // what a subscriber snapshot actually is.
+    // what a subscriber snapshot actually is. The full store product id
+    // (with any ':basePlanId') and the SANDBOX/PRODUCTION environment are
+    // forwarded unchanged into syncSubscriptionFromEvent — the same
+    // centralized place (isSandboxBlockedHere + the allowlist) the webhook
+    // path also funnels through, so the two can never diverge.
     const event: RevenueCatLifecycleEvent = {
       type: 'RENEWAL',
       appUserId: userId,
       environment: sub.is_sandbox ? 'SANDBOX' : 'PRODUCTION',
-      productId,
+      productId: storeProductId,
       purchasedAtMs: sub.purchase_date ? new Date(sub.purchase_date).getTime() : null,
       expirationAtMs: sub.expires_date ? new Date(sub.expires_date).getTime() : null,
       originalTransactionId: sub.original_transaction_id,
@@ -103,7 +113,7 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
     try {
       await syncSubscriptionFromEvent(event, { supabase });
     } catch {
-      safeLog('subscription/sync', 'reconcile_failed', 500, { productId });
+      safeLog('subscription/sync', 'reconcile_failed', 500, { productId: baseStoreProductId(storeProductId) });
     }
   }
 }

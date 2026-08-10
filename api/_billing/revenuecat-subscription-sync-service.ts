@@ -43,6 +43,16 @@ export function isValidUuid(value: string | null | undefined): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
+/** Google Play appends the base plan id to the store product id (e.g.
+ *  'orodim.subscription.plus.monthly:monthly'); Apple and consumables never
+ *  do. Strips the ':basePlanId' suffix so a store product id can be compared
+ *  against the base subscription id regardless of platform — the ONE place
+ *  that ':basePlanId' rule lives (reconcileFromRevenueCat reuses it, so the
+ *  webhook and the immediate sync normalize identically). */
+export function baseStoreProductId(storeProductId: string): string {
+  return storeProductId.split(':')[0];
+}
+
 /** Subscription-lifecycle event types this service reconciles. Anything
  *  else (NON_RENEWING_PURCHASE, TEST, paywall/analytics events, ...) is the
  *  route handler's responsibility to route elsewhere or acknowledge-only. */
@@ -85,7 +95,7 @@ export async function syncSubscriptionFromEvent(
     return { ok: false, reason: 'invalid_app_user_id' };
   }
 
-  if (isSandboxBlockedHere(event.environment)) {
+  if (isSandboxBlockedHere(event.environment, event.appUserId)) {
     return { ok: false, reason: 'sandbox_blocked_in_production' };
   }
 
@@ -118,8 +128,7 @@ export async function syncSubscriptionFromEvent(
   // OR plans.google_subscription_product_id, and tolerate the Android base-plan
   // suffix by also trying the id with everything after ':' stripped — the app
   // never depends on Apple ids to credit an Android purchase.
-  const bareProductId = event.productId.split(':')[0];
-  const productIdCandidates = Array.from(new Set([event.productId, bareProductId]));
+  const productIdCandidates = Array.from(new Set([event.productId, baseStoreProductId(event.productId)]));
   const planMatchFilter = productIdCandidates
     .flatMap((id) => [`apple_product_id.eq.${id}`, `google_subscription_product_id.eq.${id}`])
     .join(',');

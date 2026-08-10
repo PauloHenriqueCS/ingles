@@ -51,7 +51,7 @@ export async function creditMinutePackagePurchase(
   const supabase = deps?.supabase ?? getSharedServiceClient();
   const now = deps?.now ?? new Date();
 
-  if (isSandboxBlockedHere(purchase.environment)) {
+  if (isSandboxBlockedHere(purchase.environment, purchase.appUserId)) {
     return { ok: false, reason: 'sandbox_blocked_in_production' };
   }
   if (!isValidUuid(purchase.appUserId)) {

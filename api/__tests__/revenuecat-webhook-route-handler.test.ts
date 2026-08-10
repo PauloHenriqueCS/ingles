@@ -270,6 +270,34 @@ describe('handleRevenueCatWebhookRoute — valid events', () => {
     await handleRevenueCatWebhookRoute(makeReq(eventBody({ id: 'evt-sandbox', environment: 'SANDBOX' })), res);
     expect(supabase.__rows[0].environment).toBe('SANDBOX');
   });
+
+  it('a SANDBOX subscription event forwards the SANDBOX environment AND app_user_id into the shared policy (syncSubscriptionFromEvent) — same centralized sandbox rule as /api/subscription/sync', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-sandbox-policy', environment: 'SANDBOX', app_user_id: 'aaaaaaaa-0000-0000-0000-000000000001' })),
+      res,
+    );
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: 'SANDBOX', appUserId: 'aaaaaaaa-0000-0000-0000-000000000001' }),
+      expect.anything(),
+    );
+  });
+
+  it('a SANDBOX event whose user is blocked by the shared policy is ACKed 200 and marked ignored (never a failure/retry)', async () => {
+    // The route handler stays policy-agnostic: whatever syncSubscriptionFromEvent
+    // returns (here the centralized sandbox_blocked_in_production) is a terminal
+    // 'ignored', never a 500 that RevenueCat would keep retrying.
+    mockSyncSubscriptionFromEvent.mockResolvedValue({ ok: false, reason: 'sandbox_blocked_in_production' });
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody({ id: 'evt-sandbox-blocked', environment: 'SANDBOX' })), res);
+    expect(res._status()).toBe(200);
+    expect(supabase.__rows[0].processing_status).toBe('ignored');
+    expect(supabase.__rows[0].error_message).toBe('sandbox_blocked_in_production');
+  });
 });
 
 describe('handleRevenueCatWebhookRoute — idempotency', () => {

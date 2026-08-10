@@ -70,3 +70,18 @@ export function getRevenueCatWebhookHmacSecret(): string {
 export function getRevenueCatApiSecretKey(): string {
   return readEnv('REVENUECAT_API_SECRET_KEY');
 }
+
+/** Comma-separated Supabase UUIDs explicitly allowed to apply SANDBOX (test)
+ *  purchases on the PRODUCTION deployment — Google Play Internal Testing /
+ *  license testers, whose purchases are always is_sandbox=true even though the
+ *  app talks to the production backend. SERVER-ONLY: never a VITE_ var, never
+ *  exposed to the client. Empty set when unset — production then blocks every
+ *  sandbox event exactly as before. UUID matching is case-insensitive. */
+export function getRevenueCatSandboxTestUserIds(): Set<string> {
+  return new Set(
+    readEnv('REVENUECAT_SANDBOX_TEST_USER_IDS')
+      .split(',')
+      .map((id) => id.trim().toLowerCase())
+      .filter((id) => id.length > 0),
+  );
+}

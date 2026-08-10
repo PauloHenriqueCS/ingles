@@ -152,6 +152,69 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
     expect(res._body()).toEqual(STATUS_SNAPSHOT);
   });
 
+  it('reconciles a Google base-plan subscription keyed with the :monthly suffix (matched by base product id, not exact key)', async () => {
+    // The real regression: RevenueCat keys the Google subscription with the
+    // base plan (':monthly'), so indexing by the bare id silently missed it.
+    mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subscriber: {
+          subscriptions: {
+            'orodim.subscription.plus.monthly:monthly': {
+              purchase_date: '2026-08-01T00:00:00Z',
+              expires_date: '2026-09-01T00:00:00Z',
+              original_transaction_id: 'txn-plus-1',
+              is_sandbox: true,
+            },
+          },
+        },
+      }),
+    });
+    const res = makeRes();
+    await handleSubscriptionSyncRoute(makeReq(), res);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1);
+    // Same centralized policy inputs the webhook path also feeds: the SANDBOX
+    // environment and the authenticated app_user_id are forwarded into
+    // syncSubscriptionFromEvent (where isSandboxBlockedHere + the allowlist
+    // decide), and the full ':basePlanId' product id is preserved.
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appUserId: USER_ID,
+        environment: 'SANDBOX',
+        productId: 'orodim.subscription.plus.monthly:monthly',
+        originalTransactionId: 'txn-plus-1',
+      }),
+      expect.anything(),
+    );
+    expect(res._status()).toBe(200);
+  });
+
+  it('a non-sandbox base-plan subscription forwards environment PRODUCTION', async () => {
+    mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subscriber: {
+          subscriptions: {
+            'orodim.subscription.essential.monthly:monthly': {
+              purchase_date: '2026-08-01T00:00:00Z',
+              expires_date: '2026-09-01T00:00:00Z',
+              original_transaction_id: 'txn-ess-1',
+              is_sandbox: false,
+            },
+          },
+        },
+      }),
+    });
+    const res = makeRes();
+    await handleSubscriptionSyncRoute(makeReq(), res);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: 'PRODUCTION', productId: 'orodim.subscription.essential.monthly:monthly' }),
+      expect.anything(),
+    );
+  });
+
   it('a subscriber with no matching known product id triggers no reconciliation', async () => {
     mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
     (global.fetch as any).mockResolvedValue({ ok: true, json: async () => ({ subscriber: { subscriptions: {} } }) });

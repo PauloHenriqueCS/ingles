@@ -74,13 +74,18 @@ function baseEvent(overrides: Partial<RevenueCatLifecycleEvent>): RevenueCatLife
 }
 
 const originalVercelEnv = process.env.VERCEL_ENV;
+const originalSandboxAllowlist = process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
 beforeEach(() => {
   mockFlagBillingIssue.mockClear();
   mockClearBillingIssue.mockClear();
   delete process.env.VERCEL_ENV;
+  delete process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
 });
 afterEach(() => {
-  process.env.VERCEL_ENV = originalVercelEnv;
+  if (originalVercelEnv === undefined) delete process.env.VERCEL_ENV;
+  else process.env.VERCEL_ENV = originalVercelEnv;
+  if (originalSandboxAllowlist === undefined) delete process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
+  else process.env.REVENUECAT_SANDBOX_TEST_USER_IDS = originalSandboxAllowlist;
 });
 
 describe('isValidUuid', () => {
@@ -256,6 +261,79 @@ describe('syncSubscriptionFromEvent — safety gates', () => {
     const { client } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
     const outcome = await syncSubscriptionFromEvent(baseEvent({ type: 'PAYWALL_IMPRESSION' }), { supabase: client });
     expect(outcome).toEqual({ ok: true, action: 'ignored_not_lifecycle_event' });
+  });
+});
+
+describe('syncSubscriptionFromEvent — Android base plans (:basePlanId) & sandbox test allowlist', () => {
+  const PLUS_PLAN_ID = 'cccccccc-0000-0000-0000-000000000003';
+
+  it('Plus bare product id + production upserts', async () => {
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: PLUS_PLAN_ID } });
+    process.env.VERCEL_ENV = 'production';
+    const outcome = await syncSubscriptionFromEvent(baseEvent({ productId: 'orodim.subscription.plus.monthly' }), { supabase: client });
+    expect(outcome).toEqual({ ok: true, action: 'upserted_assignment' });
+    expect(upsertCalls[0].row.plan_id).toBe(PLUS_PLAN_ID);
+  });
+
+  it('Plus with the Android :monthly base-plan suffix resolves the plan and upserts (production)', async () => {
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: PLUS_PLAN_ID } });
+    process.env.VERCEL_ENV = 'production';
+    const outcome = await syncSubscriptionFromEvent(baseEvent({ productId: 'orodim.subscription.plus.monthly:monthly' }), { supabase: client });
+    expect(outcome).toEqual({ ok: true, action: 'upserted_assignment' });
+    expect(upsertCalls[0].row.plan_id).toBe(PLUS_PLAN_ID);
+  });
+
+  it('Android :monthly + is_sandbox=false (environment PRODUCTION) upserts even on the production deployment', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: PLUS_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ productId: 'orodim.subscription.plus.monthly:monthly', environment: 'PRODUCTION' }),
+      { supabase: client },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(upsertCalls).toHaveLength(1);
+  });
+
+  it('Android :monthly + SANDBOX in production is APPLIED for an allowlisted test user', async () => {
+    process.env.VERCEL_ENV = 'production';
+    process.env.REVENUECAT_SANDBOX_TEST_USER_IDS = `eeeeeeee-0000-0000-0000-000000000009,${VALID_USER_ID}`;
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: PLUS_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ productId: 'orodim.subscription.plus.monthly:monthly', environment: 'SANDBOX' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: true, action: 'upserted_assignment' });
+    expect(upsertCalls).toHaveLength(1);
+  });
+
+  it('Android :monthly + SANDBOX in production is STILL BLOCKED for a user NOT on the allowlist', async () => {
+    process.env.VERCEL_ENV = 'production';
+    process.env.REVENUECAT_SANDBOX_TEST_USER_IDS = 'dddddddd-0000-0000-0000-000000000004';
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: PLUS_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ productId: 'orodim.subscription.plus.monthly:monthly', environment: 'SANDBOX' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(upsertCalls).toHaveLength(0);
+  });
+
+  it('allowlist UUID match is case-insensitive', async () => {
+    process.env.VERCEL_ENV = 'production';
+    process.env.REVENUECAT_SANDBOX_TEST_USER_IDS = VALID_USER_ID.toUpperCase();
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(baseEvent({ environment: 'SANDBOX' }), { supabase: client });
+    expect(outcome.ok).toBe(true);
+    expect(upsertCalls).toHaveLength(1);
+  });
+
+  it('an empty allowlist keeps the original behaviour: every sandbox event blocked in production', async () => {
+    process.env.VERCEL_ENV = 'production';
+    // REVENUECAT_SANDBOX_TEST_USER_IDS unset (cleared in beforeEach)
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(baseEvent({ environment: 'SANDBOX' }), { supabase: client });
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(upsertCalls).toHaveLength(0);
   });
 });
 
