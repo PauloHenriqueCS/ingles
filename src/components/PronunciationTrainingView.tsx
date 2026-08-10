@@ -28,6 +28,13 @@ import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '
 import { apiUrl } from '../lib/apiUrl';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
+import { fetchWordPracticeToken, WordAttemptLimitError } from '../lib/wordPracticeToken';
+import {
+  WORD_PRACTICE_MAX_ATTEMPTS,
+  WORD_PRACTICE_MAX_DURATION_MS,
+  wordPracticeAttemptLabel,
+  wordPracticeAttemptsExhausted,
+} from '../domain/pronunciation/word-practice-limits';
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -54,24 +61,13 @@ async function fetchTtsUrl(text: string, voice: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
-async function fetchAzureToken(): Promise<{ token: string; region: string }> {
-  const headers = await getAuthHeader();
-  const resp = await fetch(apiUrl('/api/pronunciation-training/token'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
-  });
-  if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}));
-    throw new Error((j as Record<string, string>).message ?? 'Token unavailable');
-  }
-  return resp.json();
-}
-
 // ── WordRow ───────────────────────────────────────────────────────────────────
-// Per-word re-practice after results are shown — unrelated to the daily
-// text/evaluation limits (a free-standing drill, not "um novo envio
-// oficial"), so it keeps calling /token directly and is untouched by this
-// task's limit enforcement.
+// Per-word re-practice after results are shown. This individual-word drill is
+// limited to WORD_PRACTICE_MAX_DURATION (8s per recording, auto-stopped) and
+// WORD_PRACTICE_MAX_ATTEMPTS (3 tries per word), enforced server-side at
+// /api/pronunciation-training/token (anchored to this training session's id).
+// These limits are exclusive to the word drill and never touch the full-text
+// evaluation's own recording duration / evaluation quotas.
 
 interface WordRowProps {
   word: PronunciationWordDetail;
@@ -81,6 +77,8 @@ interface WordRowProps {
   voice: string;
   speed: AudioSettings['playbackRate'];
   activeRecordingWordId: string | null;
+  /** pronunciation_training_sessions.id — anchors the per-word attempt count. */
+  sessionId: string | null;
   onRecordingChange: (wordId: string | null) => void;
   onCategoryUpdate: (wordId: string, category: TrainingCategory) => void;
   onAudioStart: () => void;
@@ -94,6 +92,7 @@ function WordRow({
   voice,
   speed,
   activeRecordingWordId,
+  sessionId,
   onRecordingChange,
   onCategoryUpdate,
   onAudioStart,
@@ -103,8 +102,9 @@ function WordRow({
   const [displayCategory, setDisplayCategory] = useState<TrainingCategory>(currentCategory);
   const [errorMsg, setErrorMsg]           = useState<string | null>(null);
   const [justGood, setJustGood]           = useState(false);
+  const [attemptsUsed, setAttemptsUsed]   = useState(0);
 
-  const recorder     = useAudioRecorder();
+  const recorder     = useAudioRecorder(WORD_PRACTICE_MAX_DURATION_MS);
   const mountedRef   = useRef(true);
   const myAudioRef   = useRef<HTMLAudioElement | null>(null);
   const cancelRef    = useRef<(() => void) | null>(null);
@@ -172,6 +172,8 @@ function WordRow({
 
   // ── Recording ─────────────────────────────────────────────────────────────
 
+  const attemptsExhausted = wordPracticeAttemptsExhausted(attemptsUsed);
+
   function handleMicClick() {
     if (analysisState === 'analyzing') return;
 
@@ -181,6 +183,8 @@ function WordRow({
     }
 
     if (activeRecordingWordId !== null && activeRecordingWordId !== word.id) return;
+    // Hard stop once the 3 per-word attempts are spent (server also enforces).
+    if (attemptsExhausted) return;
 
     myAudioRef.current?.pause();
     setTtsPhase('idle');
@@ -201,11 +205,22 @@ function WordRow({
 
   async function runAnalysis(audioBlob: Blob, audioDurationMs: number) {
     if (!mountedRef.current) return;
+    if (!sessionId) {
+      setErrorMsg('Contexto indisponível.');
+      setAnalysisState('error');
+      return;
+    }
+    // Each analyzed recording is one attempt. Count optimistically so the mic
+    // locks after the 3rd even if Azure later fails; the server is the
+    // authoritative gate and its returned count reconciles this below.
+    setAttemptsUsed((n) => Math.min(n + 1, WORD_PRACTICE_MAX_ATTEMPTS));
     setAnalysisState('analyzing');
     onRecordingChange(null);
 
     try {
-      const { token, region } = await fetchAzureToken();
+      const tokenResult = await fetchWordPracticeToken(cleanWord, 'training', sessionId);
+      setAttemptsUsed(tokenResult.attemptsUsed);
+      const { token, region } = tokenResult;
       const wavFile = await convertToWavPcm(audioBlob);
       const session = createRecognitionSession({ token, region, referenceText: cleanWord, wavFile, audioDurationMs });
       cancelRef.current = session.cancel;
@@ -231,6 +246,14 @@ function WordRow({
       submittedRef.current = false;
       if (!mountedRef.current) return;
 
+      // Server rejected a 4th+ attempt — lock the word to its exhausted state.
+      if (err instanceof WordAttemptLimitError) {
+        setAttemptsUsed(WORD_PRACTICE_MAX_ATTEMPTS);
+        setErrorMsg('Tentativas esgotadas.');
+        setAnalysisState('error');
+        return;
+      }
+
       let msg = 'Erro. Gravar novamente.';
       if (err instanceof PronunciationServiceError) {
         switch (err.code) {
@@ -254,10 +277,11 @@ function WordRow({
   const isRecording  = recorder.phase === 'recording' || recorder.phase === 'requesting';
   const isAnalyzing  = analysisState === 'analyzing';
   const otherActive  = activeRecordingWordId !== null && activeRecordingWordId !== word.id;
-  const micDisabled  = isAnalyzing || otherActive;
+  const micDisabled  = isAnalyzing || otherActive || attemptsExhausted;
 
   const colors = TRAINING_CATEGORY_COLORS[displayCategory];
   const label  = TRAINING_CATEGORY_LABELS[displayCategory];
+  const attemptLabel = wordPracticeAttemptLabel(attemptsUsed);
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 min-h-[52px]">
@@ -310,27 +334,40 @@ function WordRow({
                 : 'bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-slate-100'
           }`}
           aria-label={
-            isRecording
-              ? `Parar gravação de ${word.displayWord}`
-              : `Gravar pronúncia de ${word.displayWord}`
-          }
-          title={
-            otherActive
-              ? 'Aguarde a gravação anterior terminar'
+            attemptsExhausted
+              ? `Tentativas esgotadas para ${word.displayWord}`
               : isRecording
                 ? `Parar gravação de ${word.displayWord}`
-                : `Gravar pronúncia de ${word.displayWord}`
+                : `Gravar pronúncia de ${word.displayWord} (${attemptLabel})`
+          }
+          title={
+            attemptsExhausted
+              ? `As ${WORD_PRACTICE_MAX_ATTEMPTS} tentativas desta palavra foram usadas`
+              : otherActive
+                ? 'Aguarde a gravação anterior terminar'
+                : isRecording
+                  ? `Parar gravação de ${word.displayWord}`
+                  : `Gravar pronúncia de ${word.displayWord}`
           }
         >
-          {isAnalyzing
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : isRecording
-              ? <Square className="w-4 h-4" />
-              : analysisState === 'done'
-                ? <CheckCircle className="w-4 h-4" />
-                : <Mic className="w-4 h-4" />
+          {attemptsExhausted && !isRecording && !isAnalyzing
+            ? <Lock className="w-4 h-4" />
+            : isAnalyzing
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : isRecording
+                ? <Square className="w-4 h-4" />
+                : analysisState === 'done'
+                  ? <CheckCircle className="w-4 h-4" />
+                  : <Mic className="w-4 h-4" />
           }
         </button>
+        {/* Per-word attempt counter — always visible so the limit is clear */}
+        <span
+          className={`text-[9px] leading-tight text-center ${attemptsExhausted ? 'text-amber-400 font-semibold' : 'text-slate-500'}`}
+          aria-live="polite"
+        >
+          {attemptLabel}
+        </span>
         {errorMsg && (
           <span className="text-[9px] text-red-400 leading-tight text-center max-w-[80px]">
             {errorMsg}
@@ -955,6 +992,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
                           voice={audioVoice}
                           speed={speed}
                           activeRecordingWordId={activeRecordingWordId}
+                          sessionId={sessionId}
                           onRecordingChange={handleWordRecordingChange}
                           onCategoryUpdate={handleWordCategoryUpdate}
                           onAudioStart={handleWordAudioStart}

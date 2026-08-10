@@ -6,6 +6,8 @@ import PronunciationWordGrid from './PronunciationWordGrid';
 interface Props {
   result: PronunciationNormalizedResult;
   referenceText: string;
+  /** english_reviews.id (text version) — anchors the per-word attempt limit. */
+  reviewId: string | null;
 }
 
 function ScoreRow({ label, value }: { label: string; value: number | null }) {
@@ -29,7 +31,7 @@ function ScoreRow({ label, value }: { label: string; value: number | null }) {
   );
 }
 
-export default function PronunciationResult({ result, referenceText }: Props) {
+export default function PronunciationResult({ result, referenceText, reviewId }: Props) {
   // Compute alignment once — only recomputes when rawSegments or referenceText changes
   const { aligned, insertions, hasWordDetail } = useMemo(() => {
     if (!Array.isArray(result.rawSegments) || result.rawSegments.length === 0) {
@@ -82,7 +84,7 @@ export default function PronunciationResult({ result, referenceText }: Props) {
       {/* ── Word detail section ──────────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl p-4">
         {hasWordDetail ? (
-          <PronunciationWordGrid aligned={aligned} insertions={insertions} />
+          <PronunciationWordGrid aligned={aligned} insertions={insertions} reviewId={reviewId} />
         ) : (
           <div className="space-y-1">
             <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">

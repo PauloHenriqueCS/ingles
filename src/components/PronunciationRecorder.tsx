@@ -246,7 +246,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
       {/* ── Completed: show result + allow new attempt ───────────────────── */}
       {analysis.phase === 'completed' && analysis.result && (
         <>
-          <PronunciationResult result={analysis.result} referenceText={referenceText} />
+          <PronunciationResult result={analysis.result} referenceText={referenceText} reviewId={reviewId} />
           <div className="space-y-2">
             <button
               onClick={handleNewAttempt}

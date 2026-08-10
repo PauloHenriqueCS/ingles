@@ -16,6 +16,11 @@ import type { PronunciationNormalizedResult, PronunciationFailCode } from '../..
 import { isValidUuid } from '../../src/lib/pronunciationAssessment';
 import { getTodaySP } from '../../src/lib/timezone';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
+import {
+  WORD_PRACTICE_MAX_ATTEMPTS,
+  WORD_PRACTICE_MAX_DURATION_SECONDS,
+  isWordPracticeOwnerType,
+} from '../../src/domain/pronunciation/word-practice-limits';
 
 type AccessDenial = { status: number; code: string; message: string };
 
@@ -339,6 +344,29 @@ function extractTokenMetrics(): GatewayUsageMetric[] {
   ];
 }
 
+// Longest single word we will ever count/train — generous vs. any real
+// English word, but bounds the DB key and rejects junk from a direct caller.
+const MAX_WORD_PRACTICE_WORD_LENGTH = 80;
+
+const WORD_ATTEMPT_ERROR_STATUS: Record<string, number> = {
+  UNAUTHORIZED: 401,
+  INVALID_OWNER_TYPE: 400,
+  INVALID_WORD: 400,
+  OWNER_NOT_FOUND: 404,
+  WORD_ATTEMPT_LIMIT_REACHED: 429,
+};
+
+/**
+ * This endpoint serves ONLY the individual-word training drill (both
+ * surfaces: WordRow and PracticeWordRow — the full-text flows use /start,
+ * which mints its own token). Every call is therefore one word-practice
+ * attempt, and the per-word 3-attempt limit is enforced HERE, server-side,
+ * BEFORE any Azure credential is minted — so a direct API call cannot exceed
+ * it. The count is anchored to a server-owned row (ownerId) whose ownership
+ * is re-verified inside register_word_practice_attempt, never trusted from
+ * the request. The 8s cap is fixed and returned as maxDurationSeconds so the
+ * recorder's auto-stop uses a server-authoritative value.
+ */
 async function handleToken(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   const auth = await requireAuth(req, res);
@@ -347,6 +375,48 @@ async function handleToken(req: any, res: any) {
   const tokenAccess = await requirePronunciationEnabled(auth.userId);
   if (isAccessDenial(tokenAccess)) return jsonError(res, tokenAccess.status, tokenAccess.code, tokenAccess.message);
   if (!await applyRateLimit(res, auth.userId, 'pronunciation-training-token')) return;
+
+  // ── Per-word attempt gate (individual-word drill) ──────────────────────────
+  const { word, ownerType, ownerId } = (req.body ?? {}) as {
+    word?: unknown; ownerType?: unknown; ownerId?: unknown;
+  };
+  if (typeof word !== 'string' || word.trim() === '' || word.length > MAX_WORD_PRACTICE_WORD_LENGTH) {
+    return jsonError(res, 400, 'INVALID_WORD', 'Palavra inválida para o treino individual.');
+  }
+  if (!isWordPracticeOwnerType(ownerType)) {
+    return jsonError(res, 400, 'INVALID_OWNER_TYPE', 'Contexto de treino inválido.');
+  }
+  if (typeof ownerId !== 'string' || !isValidUuid(ownerId)) {
+    return jsonError(res, 400, 'INVALID_OWNER_ID', 'Identificador de contexto inválido.');
+  }
+
+  const { data: attemptData, error: attemptError } = await auth.supabase.rpc('register_word_practice_attempt', {
+    p_owner_type: ownerType,
+    p_owner_id: ownerId,
+    p_word: word,
+    p_max_attempts: WORD_PRACTICE_MAX_ATTEMPTS,
+  });
+  if (attemptError) {
+    safeLog('pronunciation-training/token', 'word_attempt_rpc_error', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao registrar a tentativa.');
+  }
+  const attempt = (attemptData ?? {}) as { error?: string; attemptsUsed?: number };
+  if (attempt.error) {
+    const status = WORD_ATTEMPT_ERROR_STATUS[attempt.error] ?? 500;
+    if (attempt.error === 'WORD_ATTEMPT_LIMIT_REACHED') {
+      return res.status(status).json({
+        code: 'WORD_ATTEMPT_LIMIT_REACHED',
+        message: `Você já usou as ${WORD_PRACTICE_MAX_ATTEMPTS} tentativas desta palavra.`,
+        attemptsUsed: attempt.attemptsUsed ?? WORD_PRACTICE_MAX_ATTEMPTS,
+        maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
+      });
+    }
+    if (attempt.error === 'OWNER_NOT_FOUND') {
+      return jsonError(res, status, 'OWNER_NOT_FOUND', 'Contexto de treino não encontrado.');
+    }
+    return jsonError(res, status, attempt.error, 'Não foi possível registrar a tentativa.');
+  }
+  const attemptsUsed = typeof attempt.attemptsUsed === 'number' ? attempt.attemptsUsed : 1;
 
   const gatewayDeps = getProductionDeps();
   try {
@@ -371,7 +441,14 @@ async function handleToken(req: any, res: any) {
       extractTokenMetrics,
     );
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(200).json({ token, region, expiresInSeconds });
+    return res.status(200).json({
+      token,
+      region,
+      expiresInSeconds,
+      attemptsUsed,
+      maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
+      maxDurationSeconds: WORD_PRACTICE_MAX_DURATION_SECONDS,
+    });
   } catch (err) {
     if (err instanceof AzureSpeechError) {
       const status = AZURE_ERROR_STATUS[err.code] ?? 503;
