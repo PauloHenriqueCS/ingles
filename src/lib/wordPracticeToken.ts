@@ -59,6 +59,6 @@ export async function fetchWordPracticeToken(
     region: String(data.region ?? ''),
     attemptsUsed: typeof data.attemptsUsed === 'number' ? data.attemptsUsed : 1,
     maxAttempts: typeof data.maxAttempts === 'number' ? data.maxAttempts : WORD_PRACTICE_MAX_ATTEMPTS,
-    maxDurationSeconds: typeof data.maxDurationSeconds === 'number' ? data.maxDurationSeconds : 8,
+    maxDurationSeconds: typeof data.maxDurationSeconds === 'number' ? data.maxDurationSeconds : 5,
   };
 }

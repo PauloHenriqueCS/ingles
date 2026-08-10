@@ -399,7 +399,7 @@ async function refundWordPracticeAttempt(
  * BEFORE any Azure credential is minted — so a direct API call cannot exceed
  * it. The count is anchored to a server-owned row (ownerId) whose ownership
  * is re-verified inside register_word_practice_attempt, never trusted from
- * the request. The 8s cap is fixed and returned as maxDurationSeconds so the
+ * the request. The 5s cap is fixed and returned as maxDurationSeconds so the
  * recorder's auto-stop uses a server-authoritative value.
  */
 async function handleToken(req: any, res: any) {

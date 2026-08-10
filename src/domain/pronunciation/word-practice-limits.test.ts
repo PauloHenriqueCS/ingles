@@ -10,10 +10,10 @@ import {
 } from './word-practice-limits';
 
 describe('word-practice limit constants', () => {
-  it('are the fixed product rule: 3 attempts, 8 seconds', () => {
+  it('are the fixed product rule: 3 attempts, 5 seconds', () => {
     expect(WORD_PRACTICE_MAX_ATTEMPTS).toBe(3);
-    expect(WORD_PRACTICE_MAX_DURATION_SECONDS).toBe(8);
-    expect(WORD_PRACTICE_MAX_DURATION_MS).toBe(8000);
+    expect(WORD_PRACTICE_MAX_DURATION_SECONDS).toBe(5);
+    expect(WORD_PRACTICE_MAX_DURATION_MS).toBe(5000);
   });
 });
 

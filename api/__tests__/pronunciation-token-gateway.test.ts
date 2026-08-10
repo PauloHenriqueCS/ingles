@@ -187,7 +187,7 @@ describe('LEGACY mode', () => {
     const body = res._body() as any;
     expect(body.attemptsUsed).toBe(1);
     expect(body.maxAttempts).toBe(WORD_PRACTICE_MAX_ATTEMPTS);
-    expect(body.maxDurationSeconds).toBe(8);
+    expect(body.maxDurationSeconds).toBe(5);
   });
 });
 

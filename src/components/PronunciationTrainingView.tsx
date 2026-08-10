@@ -63,7 +63,7 @@ async function fetchTtsUrl(text: string, voice: string): Promise<string> {
 
 // ── WordRow ───────────────────────────────────────────────────────────────────
 // Per-word re-practice after results are shown. This individual-word drill is
-// limited to WORD_PRACTICE_MAX_DURATION (8s per recording, auto-stopped) and
+// limited to WORD_PRACTICE_MAX_DURATION (5s per recording, auto-stopped) and
 // WORD_PRACTICE_MAX_ATTEMPTS (3 tries per word), enforced server-side at
 // /api/pronunciation-training/token (anchored to this training session's id).
 // These limits are exclusive to the word drill and never touch the full-text
