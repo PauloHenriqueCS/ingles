@@ -108,7 +108,7 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
     // types only, never any value/token/id. This picks the correct idempotency
     // source (the code currently requires original_transaction_id, which the
     // REST subscriber response does not populate).
-    const subObj = (sub ?? {}) as Record<string, unknown>;
+    const subObj = (sub ?? {}) as unknown as Record<string, unknown>;
     const typeOf = (k: string): string => (k in subObj ? typeof subObj[k] : 'absent');
     safeLog('subscription/sync', 'SYNC_DIAG_fields', 200, {
       user: userId.slice(0, 8) + '…',
