@@ -29,6 +29,8 @@ import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS } from '../../src/domain/subscripti
 import { syncSubscriptionFromEvent, baseStoreProductId, type RevenueCatLifecycleEvent } from './revenuecat-subscription-sync-service';
 // TEMP DIAGNOSTIC (SYNC_DIAG_*, remove after root-cause) — sandbox allowlist visibility.
 import { isSandboxTestUser, isSandboxBlockedHere } from './revenuecat-environment';
+// TEMP DIAGNOSTIC — short irreversible hash to compare store_transaction_id across renewals.
+import { createHash } from 'node:crypto';
 
 const KNOWN_SUBSCRIPTION_PRODUCT_IDS: string[] = Object.values(REVENUECAT_SUBSCRIPTION_PRODUCT_IDS);
 
@@ -132,6 +134,18 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
       matchedKnownPlan: knownProductIds.has(base),
       isSandbox: sub?.is_sandbox === true,
       hasOriginalTxn: !!sub?.original_transaction_id,
+    });
+    // TEMP DIAGNOSTIC (remove after root-cause): is store_transaction_id stable
+    // across renewals? Log ONLY a short irreversible hash — never the real id —
+    // plus the dates, to compare two /sync calls straddling a renewal.
+    const storeTxn = typeof subObj.store_transaction_id === 'string' ? subObj.store_transaction_id : '';
+    safeLog('subscription/sync', 'SYNC_DIAG_txn', 200, {
+      user: userId.slice(0, 8) + '…',
+      rawProductId: storeProductId,
+      store_transaction_id_hash: storeTxn ? createHash('sha256').update(storeTxn).digest('hex').slice(0, 12) : '(none)',
+      expires_date: typeof subObj.expires_date === 'string' ? subObj.expires_date : String(subObj.expires_date ?? ''),
+      purchase_date: typeof subObj.purchase_date === 'string' ? subObj.purchase_date : String(subObj.purchase_date ?? ''),
+      is_sandbox: subObj.is_sandbox === true,
     });
     if (!knownProductIds.has(base)) continue;
     if (!sub || !sub.original_transaction_id) continue;
