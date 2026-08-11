@@ -27,6 +27,8 @@ import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { resolveSubscriptionStatus } from '../_entitlements/subscription-status-service';
 import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS } from '../../src/domain/subscription/revenuecat-catalog';
 import { syncSubscriptionFromEvent, baseStoreProductId, type RevenueCatLifecycleEvent } from './revenuecat-subscription-sync-service';
+// TEMP DIAGNOSTIC (SYNC_DIAG_*, remove after root-cause) — sandbox allowlist visibility.
+import { isSandboxTestUser, isSandboxBlockedHere } from './revenuecat-environment';
 
 const KNOWN_SUBSCRIPTION_PRODUCT_IDS: string[] = Object.values(REVENUECAT_SUBSCRIPTION_PRODUCT_IDS);
 
@@ -64,6 +66,10 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
     if (response.status !== 404) {
       // 404 = no subscriber record yet (never purchased) — expected, not an error.
       safeLog('subscription/sync', 'revenuecat_lookup_failed', response.status);
+    } else {
+      // TEMP DIAGNOSTIC (remove after root-cause): RevenueCat has no subscriber
+      // record for this user at the moment /sync ran (the race hypothesis).
+      safeLog('subscription/sync', 'SYNC_DIAG_no_subscriber', 404, { user: userId.slice(0, 8) + '…' });
     }
     return;
   }
@@ -80,14 +86,45 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
   const supabase = getSharedServiceClient();
   const knownProductIds = new Set<string>(KNOWN_SUBSCRIPTION_PRODUCT_IDS);
 
+  // TEMP DIAGNOSTIC (remove after root-cause): what the RevenueCat REST
+  // subscriber snapshot actually contained when /sync ran — no secrets, no
+  // tokens, no auth headers; app_user_id masked to its first 8 chars.
+  const subscriptionKeys = Object.keys(subscriptions);
+  safeLog('subscription/sync', 'SYNC_DIAG_subs', 200, {
+    user: userId.slice(0, 8) + '…',
+    keys: subscriptionKeys.join('|') || '(none)',
+    count: subscriptionKeys.length,
+  });
+
   // RevenueCat keys `subscriptions` by the STORE product id: bare on Apple,
   // but 'productId:basePlanId' on Google Play (e.g.
   // 'orodim.subscription.plus.monthly:monthly'). Iterate the real entries and
   // match on the BASE product id, so a Google base-plan subscription is never
   // silently skipped — indexing by the bare id would only ever match Apple.
   for (const [storeProductId, sub] of Object.entries(subscriptions)) {
-    if (!knownProductIds.has(baseStoreProductId(storeProductId))) continue;
+    const base = baseStoreProductId(storeProductId);
+    // TEMP DIAGNOSTIC (remove after root-cause): raw vs normalized product id
+    // and whether it matched a known plan.
+    safeLog('subscription/sync', 'SYNC_DIAG_key', 200, {
+      user: userId.slice(0, 8) + '…',
+      rawProductId: storeProductId,
+      baseProductId: base,
+      matchedKnownPlan: knownProductIds.has(base),
+      isSandbox: sub?.is_sandbox === true,
+      hasOriginalTxn: !!sub?.original_transaction_id,
+    });
+    if (!knownProductIds.has(base)) continue;
     if (!sub || !sub.original_transaction_id) continue;
+
+    const environment = sub.is_sandbox ? 'SANDBOX' : 'PRODUCTION';
+    // TEMP DIAGNOSTIC (remove after root-cause): the sandbox allowlist decision
+    // for this exact call — proves whether the tester UUID is being recognized.
+    safeLog('subscription/sync', 'SYNC_DIAG_policy', 200, {
+      user: userId.slice(0, 8) + '…',
+      environment,
+      isSandboxTestUser: isSandboxTestUser(userId),
+      isSandboxBlockedHere: isSandboxBlockedHere(environment, userId),
+    });
 
     // A generic "this is the subscriber's current known state" signal —
     // never a fabricated cancellation/renewal event name. RENEWAL is safe
@@ -103,7 +140,7 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
     const event: RevenueCatLifecycleEvent = {
       type: 'RENEWAL',
       appUserId: userId,
-      environment: sub.is_sandbox ? 'SANDBOX' : 'PRODUCTION',
+      environment,
       productId: storeProductId,
       purchasedAtMs: sub.purchase_date ? new Date(sub.purchase_date).getTime() : null,
       expirationAtMs: sub.expires_date ? new Date(sub.expires_date).getTime() : null,
@@ -111,9 +148,22 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
       transferredTo: null,
     };
     try {
-      await syncSubscriptionFromEvent(event, { supabase });
-    } catch {
-      safeLog('subscription/sync', 'reconcile_failed', 500, { productId: baseStoreProductId(storeProductId) });
+      const outcome = await syncSubscriptionFromEvent(event, { supabase });
+      // TEMP DIAGNOSTIC (remove after root-cause): the actual sync outcome
+      // (upserted_assignment vs sandbox_blocked_in_production vs unknown_product).
+      safeLog('subscription/sync', 'SYNC_DIAG_outcome', 200, {
+        user: userId.slice(0, 8) + '…',
+        baseProductId: base,
+        outcome: JSON.stringify(outcome),
+      });
+    } catch (err) {
+      safeLog('subscription/sync', 'reconcile_failed', 500, { productId: base });
+      // TEMP DIAGNOSTIC (remove after root-cause): sync threw.
+      safeLog('subscription/sync', 'SYNC_DIAG_outcome', 500, {
+        user: userId.slice(0, 8) + '…',
+        baseProductId: base,
+        outcome: 'threw:' + (err instanceof Error ? err.message : 'unknown'),
+      });
     }
   }
 }
