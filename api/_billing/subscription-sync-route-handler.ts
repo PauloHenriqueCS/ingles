@@ -103,6 +103,26 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
   // silently skipped — indexing by the bare id would only ever match Apple.
   for (const [storeProductId, sub] of Object.entries(subscriptions)) {
     const base = baseStoreProductId(storeProductId);
+    // TEMP DIAGNOSTIC (remove after root-cause): which transactional-identifier
+    // fields the REST subscription entry actually carries — FIELD NAMES and
+    // types only, never any value/token/id. This picks the correct idempotency
+    // source (the code currently requires original_transaction_id, which the
+    // REST subscriber response does not populate).
+    const subObj = (sub ?? {}) as Record<string, unknown>;
+    const typeOf = (k: string): string => (k in subObj ? typeof subObj[k] : 'absent');
+    safeLog('subscription/sync', 'SYNC_DIAG_fields', 200, {
+      user: userId.slice(0, 8) + '…',
+      rawProductId: storeProductId,
+      keys: Object.keys(subObj).join('|') || '(none)',
+      has_original_transaction_id: 'original_transaction_id' in subObj,
+      has_transaction_id: 'transaction_id' in subObj,
+      has_store_transaction_id: 'store_transaction_id' in subObj,
+      has_original_store_transaction_id: 'original_store_transaction_id' in subObj,
+      has_purchase_token: 'purchase_token' in subObj,
+      types: ['original_transaction_id', 'transaction_id', 'store_transaction_id', 'original_store_transaction_id', 'purchase_token']
+        .map((k) => `${k}:${typeOf(k)}`)
+        .join('|'),
+    });
     // TEMP DIAGNOSTIC (remove after root-cause): raw vs normalized product id
     // and whether it matched a known plan.
     safeLog('subscription/sync', 'SYNC_DIAG_key', 200, {
