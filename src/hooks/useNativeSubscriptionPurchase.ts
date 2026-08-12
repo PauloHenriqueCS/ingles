@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   isRevenueCatSupported,
+  isRevenueCatConfigured,
   subscribeReady,
   getOfferings,
+  getCustomerInfo,
+  addCustomerInfoListener,
   purchasePackage,
   restorePurchases,
-  getManagementUrl,
 } from '../lib/revenueCat/revenueCatClient';
-import type { OrodimPlanChangeMode, OrodimProductOffering, OrodimPurchaseError } from '../lib/revenueCat/revenueCatTypes';
+import type { OrodimCustomerInfo, OrodimPlanChangeMode, OrodimProductOffering, OrodimPurchaseError } from '../lib/revenueCat/revenueCatTypes';
 
 export interface NativeSubscriptionPurchaseState {
   /** false on web (and on Android/iOS without their store key configured)
@@ -18,6 +20,15 @@ export interface NativeSubscriptionPurchaseState {
   purchasing: string | null; // packageId currently being purchased, for a per-button loading state
   restoring: boolean;
   managementUrl: string | null;
+  /** RevenueCat CustomerInfo.entitlements.active keys — the store's OWNERSHIP
+   *  truth, fed to resolveSubscriptionUiState so a stale backend can never
+   *  offer a plan the store already owns. Empty until loaded / on web. */
+  activeEntitlementIds: string[];
+  /** true once a getCustomerInfo() round-trip completed while the SDK was
+   *  configured — OR immediately on web (nothing to load). Gates the
+   *  reconciliation decision: an unconfigured empty read must not be mistaken
+   *  for "owns nothing". */
+  customerInfoLoaded: boolean;
   lastError: OrodimPurchaseError | null;
   /** Resolves true only on an actually-completed purchase, never on cancel/error.
    *  Takes a RevenueCat package identifier (see OrodimProductOffering.packageId). */
@@ -30,6 +41,9 @@ export interface NativeSubscriptionPurchaseState {
   changePlan: (targetPackageId: string, currentProductId: string, mode: OrodimPlanChangeMode) => Promise<boolean>;
   restore: () => Promise<boolean>;
   refetchOfferings: () => void;
+  /** Re-read offerings AND CustomerInfo from the store — call after a backend
+   *  /sync so the store ownership shown reflects the reconciled state. */
+  refreshStore: () => void;
 }
 
 /**
@@ -50,10 +64,21 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
   const [purchasing, setPurchasing] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [managementUrl, setManagementUrl] = useState<string | null>(null);
+  const [activeEntitlementIds, setActiveEntitlementIds] = useState<string[]>([]);
+  // On web (unsupported) there is nothing to load — treat as loaded so the
+  // screen resolves immediately from the backend alone.
+  const [customerInfoLoaded, setCustomerInfoLoaded] = useState(!supported);
   const [lastError, setLastError] = useState<OrodimPurchaseError | null>(null);
   const [refetchToken, setRefetchToken] = useState(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // Apply a fresh CustomerInfo (from a load, a purchase/restore result, or the
+  // live listener) to the store-ownership + management-url state in one place.
+  const applyCustomerInfo = useCallback((info: OrodimCustomerInfo | null) => {
+    setActiveEntitlementIds(info?.activeEntitlementIds ?? []);
+    setManagementUrl(info?.managementUrl ?? null);
+  }, []);
 
   // Reload offerings whenever the RevenueCat SDK becomes ready or its identity
   // changes (configure/logIn/logOut completed). This is what closes the
@@ -71,11 +96,19 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
     if (!supported) return;
     let cancelled = false;
     setOfferingsLoading(true);
-    Promise.all([getOfferings(), getManagementUrl()])
-      .then(([offeringsResult, url]) => {
+    // One CustomerInfo read serves both the store-ownership signal and the
+    // management URL (getCustomerInfo already returns null pre-configure, so a
+    // read that raced configure() just yields no ownership — the readiness
+    // subscriber below re-runs this effect once the SDK is actually ready).
+    Promise.all([getOfferings(), getCustomerInfo()])
+      .then(([offeringsResult, info]) => {
         if (cancelled || !mountedRef.current) return;
         setOfferings(offeringsResult);
-        setManagementUrl(url);
+        applyCustomerInfo(info);
+        // Only trust an empty ownership read once the SDK is actually
+        // configured — otherwise leave customerInfoLoaded false and wait for
+        // the readiness-triggered refetch.
+        if (isRevenueCatConfigured()) setCustomerInfoLoaded(true);
       })
       .catch(() => {
         if (cancelled || !mountedRef.current) return;
@@ -86,7 +119,19 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
         setOfferingsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [supported, refetchToken]);
+  }, [supported, refetchToken, applyCustomerInfo]);
+
+  // Keep store ownership fresh while the screen is open — a renewal, a
+  // store-side change, or a purchase reflected from another surface all fire
+  // this. Registered at most once (guarded in the client).
+  useEffect(() => {
+    if (!supported) return;
+    let active = true;
+    void addCustomerInfoListener((info) => {
+      if (active && mountedRef.current) applyCustomerInfo(info);
+    });
+    return () => { active = false; };
+  }, [supported, applyCustomerInfo]);
 
   // Shared purchase/change runner — same per-button loading + double-click
   // guard + error handling. A first purchase passes no `change`; an
@@ -108,12 +153,12 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
         setLastError(result.error);
         return false;
       }
-      setManagementUrl(result.customerInfo?.managementUrl ?? null);
+      applyCustomerInfo(result.customerInfo);
       return true;
     } finally {
       if (mountedRef.current) setPurchasing(null);
     }
-  }, [supported, purchasing]);
+  }, [supported, purchasing, applyCustomerInfo]);
 
   const purchase = useCallback((packageId: string) => runPurchase(packageId), [runPurchase]);
   const changePlan = useCallback(
@@ -133,14 +178,30 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
         setLastError(result.error);
         return false;
       }
-      setManagementUrl(result.customerInfo?.managementUrl ?? null);
+      applyCustomerInfo(result.customerInfo);
       return true;
     } finally {
       if (mountedRef.current) setRestoring(false);
     }
-  }, [supported, restoring]);
+  }, [supported, restoring, applyCustomerInfo]);
 
   const refetchOfferings = useCallback(() => setRefetchToken((t) => t + 1), []);
+  const refreshStore = refetchOfferings; // one token re-reads offerings + CustomerInfo
 
-  return { supported, offerings, offeringsLoading, purchasing, restoring, managementUrl, lastError, purchase, changePlan, restore, refetchOfferings };
+  return {
+    supported,
+    offerings,
+    offeringsLoading,
+    purchasing,
+    restoring,
+    managementUrl,
+    activeEntitlementIds,
+    customerInfoLoaded,
+    lastError,
+    purchase,
+    changePlan,
+    restore,
+    refetchOfferings,
+    refreshStore,
+  };
 }

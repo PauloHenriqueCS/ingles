@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2, ExternalLink } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2, ExternalLink, RefreshCw } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
@@ -7,10 +7,11 @@ import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
-import { planCardAction, currentCommercialPlanCode, type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
+import { type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
+import { resolveSubscriptionUiState, type StoreSubscriptionSnapshot } from '../domain/subscription/resolve-subscription-ui-state';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
-import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
+import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, REVENUECAT_ENTITLEMENT_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
 
 interface Props {
@@ -52,8 +53,55 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const { state: fetchedState, error, refetch } = useSubscriptionStatus();
   const state = mockOverride ? getMockSubscriptionState(mockOverride) : fetchedState;
   const vm = state ? buildSubscriptionViewModel(state) : null;
-  const StatusIcon = vm ? STATUS_ICON[vm.status] : Clock;
   const nativePurchase = useNativeSubscriptionPurchase();
+
+  // A one-shot backend↔store reconciliation is in flight (the neutral
+  // "Atualizando sua assinatura…" state). UI-only; the ref makes it fire at
+  // most once per screen entry — never a loop, even if /sync fails to converge.
+  const [reconciling, setReconciling] = useState(false);
+  const reconcileAttempted = useRef(false);
+
+  // The single coherent state — backend (access truth) folded with RevenueCat
+  // CustomerInfo (ownership truth). Every CTA/badge below reads from here, so
+  // the screen can never offer a plan the store already owns (the bug).
+  const storeSnapshot: StoreSubscriptionSnapshot = {
+    supported: nativePurchase.supported,
+    loaded: nativePurchase.customerInfoLoaded,
+    activeEntitlementIds: nativePurchase.activeEntitlementIds,
+    managementUrl: nativePurchase.managementUrl,
+  };
+  const resolved = state ? resolveSubscriptionUiState(state, storeSnapshot, reconciling) : null;
+  const isReconciling = resolved?.subscriptionState === 'reconciling';
+  const StatusIcon = isReconciling ? RefreshCw : vm ? STATUS_ICON[vm.status] : Clock;
+
+  // Auto-reconcile ONCE when the store proves the user owns a commercial plan
+  // the backend hasn't caught up to yet (e.g. backend still "trial" while the
+  // Play Store already owns Essencial). Runs a single POST /sync, then re-reads
+  // /status and the store. Never on the DEV mock switcher, never on web
+  // (needsReconciliation is false there), never more than once.
+  const needsReconciliation = resolved?.needsReconciliation ?? false;
+  useEffect(() => {
+    if (mockOverride) return;
+    if (!nativePurchase.customerInfoLoaded) return;
+    if (!needsReconciliation || reconcileAttempted.current) return;
+    reconcileAttempted.current = true;
+    let cancelled = false;
+    setReconciling(true);
+    (async () => {
+      try {
+        await refetch({ sync: true });
+        nativePurchase.refreshStore();
+      } catch {
+        // Reconciliation is best-effort — a /sync failure must never break the
+        // screen or retry in a loop. The resolved state still stays coherent
+        // via the union of backend + store, so no bad "subscribe" is offered.
+      } finally {
+        if (!cancelled) setReconciling(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsReconciliation, nativePurchase.customerInfoLoaded, mockOverride]);
 
   // FASE 3/4: never offered to the internal plan or during trial — only a
   // real commercial assignment (active/canceled/billing_issue) or no
@@ -68,21 +116,43 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   // plan's store product id so the store REPLACES the subscription (never a
   // parallel one). 'current' never reaches here (its CTA is disabled).
   async function handlePlanCta(plan: CommercialPlanDisplay, action: PlanCardAction) {
-    if (action === 'current') return;
+    if (action === 'current' || isReconciling) return;
     if (!nativePurchase.supported) {
       // FASE 7: the website never sells subscriptions — no checkout, no
       // store call, just an honest explanation.
       window.alert(SUBSCRIPTION_MESSAGES.webPurchaseUnavailableNote);
       return;
     }
-    const targetPackageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
+    const targetDbCode = DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code];
+    const targetPackageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[targetDbCode];
+
+    // Click guard: never call the store for a product it already owns. Google
+    // Play's "Você já possui este produto" must not be how the user discovers
+    // their real state — if the store already owns the target, silently
+    // reconcile with the backend and reassure instead of purchasing again.
+    if (nativePurchase.activeEntitlementIds.includes(REVENUECAT_ENTITLEMENT_IDS[targetDbCode])) {
+      setReconciling(true);
+      try {
+        await refetch({ sync: true });
+        nativePurchase.refreshStore();
+      } catch {
+        // best-effort — never break the screen on a sync failure
+      } finally {
+        setReconciling(false);
+      }
+      window.alert(SUBSCRIPTION_MESSAGES.alreadyActiveNote);
+      return;
+    }
+
     let done = false;
     if (action === 'subscribe') {
       done = await nativePurchase.purchase(targetPackageId);
     } else {
-      // upgrade | downgrade — resolve the current plan's store product id from
-      // the loaded offerings (needed by Android's replacement flow).
-      const currentCode = state ? currentCommercialPlanCode(state) : null;
+      // upgrade | downgrade — resolve the CURRENT plan from the unified,
+      // store-aware state (not backend-only), so a replacement still works
+      // while the backend is momentarily stale. Android's replacement flow
+      // needs the current plan's store product id.
+      const currentCode = resolved?.currentPlan ?? null;
       const currentPackageId = currentCode ? REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[currentCode]] : null;
       const currentOffering = currentPackageId
         ? nativePurchase.offerings.find((o) => o.packageId === currentPackageId)
@@ -95,6 +165,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
     }
     if (done) {
       await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
+      nativePurchase.refreshStore();
     } else if (nativePurchase.lastError && nativePurchase.lastError.code !== 'user_cancelled') {
       // user_cancelled is never presented as an alarming error (FASE 6).
       window.alert(nativePurchase.lastError.message);
@@ -192,13 +263,19 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
 
         <section className="bg-slate-800 rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2">
-            <AppIcon icon={StatusIcon} className="w-5 h-5 text-blue-400 shrink-0" />
-            <h2 className="text-base font-semibold text-slate-100">{vm.headline}</h2>
+            <AppIcon icon={StatusIcon} className={`w-5 h-5 text-blue-400 shrink-0 ${isReconciling ? 'animate-spin' : ''}`} />
+            <h2 className="text-base font-semibold text-slate-100">
+              {isReconciling ? SUBSCRIPTION_MESSAGES.reconcilingTitle : vm.headline}
+            </h2>
           </div>
 
-          {vm.subheadline && <p className="text-sm text-slate-400 leading-relaxed">{vm.subheadline}</p>}
+          {isReconciling ? (
+            <p className="text-sm text-slate-400 leading-relaxed">{SUBSCRIPTION_MESSAGES.reconcilingSubtitle}</p>
+          ) : (
+            vm.subheadline && <p className="text-sm text-slate-400 leading-relaxed">{vm.subheadline}</p>
+          )}
 
-          {vm.status === 'trialing' && (
+          {!isReconciling && vm.status === 'trialing' && (
             <div className="space-y-0.5">
               <p className="text-sm text-slate-300">{vm.trialDaysRemainingLabel}</p>
               {vm.trialEndsAtLabel && (
@@ -207,7 +284,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             </div>
           )}
 
-          {vm.status === 'active' && (
+          {!isReconciling && vm.status === 'active' && (
             <div className="space-y-1">
               <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
               <p className="text-xs text-emerald-400 font-medium">{vm.activeStatusLabel}</p>
@@ -220,7 +297,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             </div>
           )}
 
-          {vm.status === 'canceled' && (
+          {!isReconciling && vm.status === 'canceled' && (
             <div className="space-y-1">
               {vm.canceledPlanName && (
                 <p className="text-sm text-slate-300">Plano anterior: <span className="font-medium text-slate-100">{vm.canceledPlanName}</span></p>
@@ -229,7 +306,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             </div>
           )}
 
-          {vm.status === 'billing_issue' && (
+          {!isReconciling && vm.status === 'billing_issue' && (
             <div className="space-y-1">
               {vm.currentPlanName && (
                 <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
@@ -244,11 +321,14 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
         {/* Plans are the focus — right below the short status, never hidden
             once the user subscribed. An existing plan is badged "Plano atual"
             and the other stays visible as an upgrade/downgrade. */}
-        {vm.showPlanCards && state && (
+        {vm.showPlanCards && state && resolved && (
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {COMMERCIAL_PLAN_ORDER.map((code) => {
               const plan = COMMERCIAL_PLANS[code];
-              const action = planCardAction(code, state);
+              // CTA/badge come from the unified state (backend + store), never
+              // backend-only — this is what keeps a store-owned plan out of a
+              // "subscribe" CTA.
+              const action = code === 'essential' ? resolved.essentialCardAction : resolved.plusCardAction;
               const packageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]];
               // Real store-returned price once the native Offering loaded
               // (FASE 5); static fallback on web / before load. Matched by
@@ -263,7 +343,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
                   onCta={handlePlanCta}
                   priceLabel={realOffering?.priceFormatted}
                   ctaLoading={nativePurchase.purchasing === packageId}
-                  ctaDisabled={nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
+                  ctaDisabled={resolved.cardsDisabled || nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
                 />
               );
             })}
@@ -272,7 +352,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
 
         {/* Honest footnote moved BELOW the plans so no big text block pushes the
             cards down (redesign requirement #1/#10). */}
-        {(vm.status === 'trialing' || vm.status === 'expired' || vm.status === 'canceled') && (
+        {!isReconciling && (vm.status === 'trialing' || vm.status === 'expired' || vm.status === 'canceled') && (
           <p className="text-xs text-slate-500 leading-relaxed px-1">{SUBSCRIPTION_MESSAGES.trialDataPreservedNote}</p>
         )}
 

@@ -76,6 +76,16 @@ export const SUBSCRIPTION_MESSAGES = {
   purchasingLabel: 'Processando...',
   restoringLabel: 'Restaurando...',
   restoreNoneFoundNote: 'Nenhuma compra encontrada para restaurar.',
+
+  // Reconciliation — shown when the backend and the store disagree and the
+  // screen is silently re-syncing (see resolve-subscription-ui-state.ts).
+  // Deliberately neutral: never claims a plan, a charge, or a trial.
+  reconcilingTitle: 'Atualizando sua assinatura…',
+  reconcilingSubtitle: 'Estamos confirmando os detalhes do seu plano. Isso leva só um instante.',
+  // Click guard — the user tapped a plan the store already owns. We never call
+  // the store again; we sync and reassure instead of surfacing Google Play's
+  // "Você já possui este produto" as the discovery mechanism.
+  alreadyActiveNote: 'Sua assinatura já está ativa. Atualizamos a tela para refletir isso.',
 } as const;
 
 export const TRIAL_LIMIT_LABELS = {
