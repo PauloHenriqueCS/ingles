@@ -1,6 +1,7 @@
 import { Check } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import type { CommercialPlanDisplay } from '../domain/subscription/subscription-types';
+import type { PlanCardAction } from '../domain/subscription/subscription-plan-actions';
 import { formatPriceBRL } from '../domain/subscription/subscription-formatting';
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
 import { buildPlanBenefitLines } from '../domain/subscription/subscription-plan-benefits';
@@ -8,31 +9,60 @@ import { buildPlanBenefitLines } from '../domain/subscription/subscription-plan-
 interface Props {
   plan: CommercialPlanDisplay;
   recommended: boolean;
-  onSubscribe: (plan: CommercialPlanDisplay) => void;
-  /** Real Apple-returned price string (e.g. "R$ 34,90"), when the native
-   *  Offerings are loaded — overrides the static formatPriceBRL fallback.
-   *  Never fixed once the real store product is available (see FASE 5). */
+  /** What this card offers given the user's current subscription — decides the
+   *  CTA/badge. 'current' shows the "Plano atual" badge and a disabled CTA;
+   *  a plan the user isn't on is always still offered (upgrade/downgrade),
+   *  never hidden. See subscription-plan-actions.ts. */
+  action: PlanCardAction;
+  /** Unified handler for subscribe/upgrade/downgrade — never called for 'current'. */
+  onCta: (plan: CommercialPlanDisplay, action: PlanCardAction) => void;
+  /** Real store-returned price string (e.g. "R$ 34,90"), when the native
+   *  Offerings are loaded — overrides the static formatPriceBRL fallback. */
   priceLabel?: string;
-  /** Per-card purchase-in-flight state — never a global spinner, and the
-   *  button disables itself to prevent a double-tap double-purchase. */
+  /** Per-card in-flight state — never a global spinner; the button disables
+   *  itself to prevent a double-tap. */
   ctaLoading?: boolean;
   ctaDisabled?: boolean;
 }
 
-export default function SubscriptionPlanCard({ plan, recommended, onSubscribe, priceLabel, ctaLoading, ctaDisabled }: Props) {
-  const benefits = buildPlanBenefitLines(plan, import.meta.env.DEV);
+function ctaLabelFor(plan: CommercialPlanDisplay, action: PlanCardAction): string {
+  switch (action) {
+    case 'current':
+      return SUBSCRIPTION_MESSAGES.currentPlanBadge;
+    case 'upgrade':
+      return SUBSCRIPTION_MESSAGES.upgradeToPlanCta(plan.name);
+    case 'downgrade':
+      return SUBSCRIPTION_MESSAGES.changeToPlanCta(plan.name);
+    case 'subscribe':
+      return plan.code === 'essential' ? SUBSCRIPTION_MESSAGES.subscribeEssential : SUBSCRIPTION_MESSAGES.subscribePlus;
+  }
+}
 
-  const subscribeLabel = plan.code === 'essential' ? SUBSCRIPTION_MESSAGES.subscribeEssential : SUBSCRIPTION_MESSAGES.subscribePlus;
+export default function SubscriptionPlanCard({ plan, recommended, action, onCta, priceLabel, ctaLoading, ctaDisabled }: Props) {
+  const benefits = buildPlanBenefitLines(plan, import.meta.env.DEV);
+  const isCurrent = action === 'current';
+  // 'current' takes precedence over 'recommended' for the top badge.
+  const badge = isCurrent
+    ? { text: SUBSCRIPTION_MESSAGES.currentPlanBadge, className: 'bg-emerald-600' }
+    : recommended
+      ? { text: SUBSCRIPTION_MESSAGES.recommendedBadge, className: 'bg-blue-600' }
+      : null;
+  const loadingLabel = action === 'upgrade' || action === 'downgrade'
+    ? SUBSCRIPTION_MESSAGES.planChangeProcessingLabel
+    : SUBSCRIPTION_MESSAGES.purchasingLabel;
+  const disabled = isCurrent || ctaDisabled || ctaLoading;
 
   return (
     <div
       className={`relative bg-slate-800 border rounded-2xl p-5 flex flex-col gap-4 ${
-        recommended ? 'border-blue-600 ring-1 ring-blue-600/40' : 'border-slate-700'
+        isCurrent ? 'border-emerald-600/70 ring-1 ring-emerald-600/30' : recommended ? 'border-blue-600 ring-1 ring-blue-600/40' : 'border-slate-700'
       }`}
+      data-testid={`plan-card-${plan.code}`}
+      data-action={action}
     >
-      {recommended && (
-        <span className="absolute -top-3 left-4 px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-semibold">
-          {SUBSCRIPTION_MESSAGES.recommendedBadge}
+      {badge && (
+        <span className={`absolute -top-3 left-4 px-2 py-0.5 rounded-full ${badge.className} text-white text-xs font-semibold`}>
+          {badge.text}
         </span>
       )}
 
@@ -57,15 +87,25 @@ export default function SubscriptionPlanCard({ plan, recommended, onSubscribe, p
         <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.extraMinutePackagesNote}</p>
       )}
 
-      <button
-        type="button"
-        onClick={() => { if (!ctaDisabled && !ctaLoading) onSubscribe(plan); }}
-        disabled={ctaDisabled || ctaLoading}
-        aria-disabled={ctaDisabled || ctaLoading}
-        className="w-full px-4 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed text-white transition-colors"
-      >
-        {ctaLoading ? SUBSCRIPTION_MESSAGES.purchasingLabel : subscribeLabel}
-      </button>
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          onClick={() => { if (!disabled) onCta(plan, action); }}
+          disabled={disabled}
+          aria-disabled={disabled}
+          className={`w-full px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed ${
+            isCurrent
+              ? 'bg-slate-700 text-slate-300 disabled:opacity-100'
+              : 'bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-60'
+          }`}
+        >
+          {ctaLoading ? loadingLabel : ctaLabelFor(plan, action)}
+        </button>
+        {/* Google Play downgrades take effect at the next renewal (DEFERRED). */}
+        {action === 'downgrade' && (
+          <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.downgradeDeferredNote}</p>
+        )}
+      </div>
     </div>
   );
 }

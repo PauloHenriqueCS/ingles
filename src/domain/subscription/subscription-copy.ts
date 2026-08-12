@@ -52,6 +52,15 @@ export const SUBSCRIPTION_MESSAGES = {
   manageSubscription: 'Gerenciar assinatura',
   backToHome: 'Voltar para o início',
 
+  // plan cards — current plan + upgrade/downgrade CTAs (redesign)
+  currentPlanBadge: 'Plano atual',
+  upgradeToPlanCta: (planName: string) => `Fazer upgrade para ${planName}`,
+  changeToPlanCta: (planName: string) => `Mudar para ${planName}`,
+  /** Google Play downgrades apply at the next renewal (DEFERRED) — communicate it. */
+  downgradeDeferredNote: 'A mudança passa a valer na próxima renovação. Você mantém o plano atual até lá.',
+  planChangeProcessingLabel: 'Alterando plano...',
+  planChangeUnavailableNote: 'Não foi possível preparar a troca de plano agora. Tente novamente em instantes.',
+
   // placeholder handler feedback — kept for the (currently always-hidden,
   // backend-capability-gated) legacy manage/restore buttons; see
   // SubscriptionView.tsx. Must never claim success.

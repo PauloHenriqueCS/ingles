@@ -25,14 +25,14 @@ function state(overrides: Partial<SubscriptionScreenState>): SubscriptionScreenS
 }
 
 describe('buildSubscriptionViewModel — trialing', () => {
-  it('shows the active-trial headline, days remaining, and trial limits — plan cards visible to preview (never a store action)', () => {
+  it('shows the short trial headline + days remaining, plan cards visible — no big trial-limits block (redesign)', () => {
     const vm = buildSubscriptionViewModel(
       state({ status: 'trialing', accessType: 'trial', trialEndsAt: '2026-07-31T12:00:00Z' }),
       NOW,
     );
     expect(vm.headline).toBe(SUBSCRIPTION_MESSAGES.trialingTitle);
     expect(vm.trialDaysRemainingLabel).toBe('4 dias restantes');
-    expect(vm.showTrialLimits).toBe(true);
+    expect(vm.showTrialLimits).toBe(false); // redesign: no big benefits/limits block
     expect(vm.showPlanCards).toBe(true);
     expect(vm.showManageButton).toBe(false);
     expect(vm.showRestoreButton).toBe(false);
@@ -94,7 +94,7 @@ describe('buildSubscriptionViewModel — active (commercial)', () => {
     expect(vm.currentPlanName).toBe('Essencial');
     expect(vm.activeStatusLabel).toBe(SUBSCRIPTION_MESSAGES.activeStatusLabel);
     expect(vm.renewalLabel).toMatch(/\d{1,2} de \w+ de 2026/);
-    expect(vm.showPlanCards).toBe(false);
+    expect(vm.showPlanCards).toBe(true); // redesign: never hide the other plan (upgrade/downgrade)
   });
 
   it('Plus: headline/plan name reflect the real plan, not a hardcoded label', () => {
@@ -181,7 +181,7 @@ describe('buildSubscriptionViewModel — billing_issue', () => {
     expect(vm.subheadline).toBe(SUBSCRIPTION_MESSAGES.billingIssueSubtitle);
     expect(vm.currentPlanName).toBe('Essencial');
     expect(vm.accessEndsAtLabel).toMatch(/\d{1,2} de \w+ de 2026/);
-    expect(vm.showPlanCards).toBe(false);
+    expect(vm.showPlanCards).toBe(true); // redesign: plans stay visible during a billing issue too
     expect(vm.showTrialLimits).toBe(false);
   });
 

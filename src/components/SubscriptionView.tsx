@@ -3,10 +3,11 @@ import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateC
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
-import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE, TRIAL_DAILY_LIMITS } from '../domain/subscription/subscription-plans';
-import { SUBSCRIPTION_MESSAGES, TRIAL_LIMIT_LABELS } from '../domain/subscription/subscription-copy';
+import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '../domain/subscription/subscription-plans';
+import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
+import { planCardAction, currentCommercialPlanCode, type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
 import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
@@ -62,16 +63,37 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const showManageSubscriptionButton = state != null
     && shouldShowManageSubscriptionButton(state.accessType, nativePurchase.supported, nativePurchase.managementUrl);
 
-  async function handleSubscribe(plan: CommercialPlanDisplay) {
+  // Unified subscribe / upgrade / downgrade. A first purchase ('subscribe')
+  // calls purchase(); an upgrade/downgrade calls changePlan() with the CURRENT
+  // plan's store product id so the store REPLACES the subscription (never a
+  // parallel one). 'current' never reaches here (its CTA is disabled).
+  async function handlePlanCta(plan: CommercialPlanDisplay, action: PlanCardAction) {
+    if (action === 'current') return;
     if (!nativePurchase.supported) {
       // FASE 7: the website never sells subscriptions — no checkout, no
       // store call, just an honest explanation.
       window.alert(SUBSCRIPTION_MESSAGES.webPurchaseUnavailableNote);
       return;
     }
-    const packageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
-    const purchased = await nativePurchase.purchase(packageId);
-    if (purchased) {
+    const targetPackageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code]];
+    let done = false;
+    if (action === 'subscribe') {
+      done = await nativePurchase.purchase(targetPackageId);
+    } else {
+      // upgrade | downgrade — resolve the current plan's store product id from
+      // the loaded offerings (needed by Android's replacement flow).
+      const currentCode = state ? currentCommercialPlanCode(state) : null;
+      const currentPackageId = currentCode ? REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[currentCode]] : null;
+      const currentOffering = currentPackageId
+        ? nativePurchase.offerings.find((o) => o.packageId === currentPackageId)
+        : undefined;
+      if (!currentOffering) {
+        window.alert(SUBSCRIPTION_MESSAGES.planChangeUnavailableNote);
+        return;
+      }
+      done = await nativePurchase.changePlan(targetPackageId, currentOffering.productId, action);
+    }
+    if (done) {
       await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
     } else if (nativePurchase.lastError && nativePurchase.lastError.code !== 'user_cancelled') {
       // user_cancelled is never presented as an alarming error (FASE 6).
@@ -177,12 +199,11 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           {vm.subheadline && <p className="text-sm text-slate-400 leading-relaxed">{vm.subheadline}</p>}
 
           {vm.status === 'trialing' && (
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               <p className="text-sm text-slate-300">{vm.trialDaysRemainingLabel}</p>
               {vm.trialEndsAtLabel && (
                 <p className="text-xs text-slate-500">Termina em {vm.trialEndsAtLabel}</p>
               )}
-              <p className="text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.trialDurationNote}</p>
             </div>
           )}
 
@@ -220,54 +241,39 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           )}
         </section>
 
-        {vm.showTrialLimits && (
-          <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-            <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">{SUBSCRIPTION_MESSAGES.trialLimitsIntro}</p>
-            <ul className="space-y-1.5 text-sm text-slate-300">
-              <li>{TRIAL_LIMIT_LABELS.writingPerDay(TRIAL_DAILY_LIMITS.writingPerDay)}</li>
-              <li>{TRIAL_LIMIT_LABELS.pronunciationPerDay(TRIAL_DAILY_LIMITS.pronunciationPerDay)}</li>
-              <li>{TRIAL_LIMIT_LABELS.listeningPerDay(TRIAL_DAILY_LIMITS.listeningPerDay)}</li>
-              <li>{TRIAL_LIMIT_LABELS.conversationMinutesTotal(TRIAL_DAILY_LIMITS.conversationMinutesTotal)}</li>
-            </ul>
-            <div className="pt-2 border-t border-slate-700 space-y-1.5">
-              <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.trialDataPreservedNote}</p>
-              <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.trialBlockedActivitiesNote}</p>
-            </div>
-          </section>
-        )}
-
-        {vm.status === 'expired' && (
-          <section className="bg-slate-800 rounded-xl p-5 space-y-1.5">
-            <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.trialDataPreservedNote}</p>
-            <p className="text-xs text-slate-500 leading-relaxed">{SUBSCRIPTION_MESSAGES.trialBlockedActivitiesNote}</p>
-          </section>
-        )}
-
-        {vm.showPlanCards && (
-          <section className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+        {/* Plans are the focus — right below the short status, never hidden
+            once the user subscribed. An existing plan is badged "Plano atual"
+            and the other stays visible as an upgrade/downgrade. */}
+        {vm.showPlanCards && state && (
+          <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {COMMERCIAL_PLAN_ORDER.map((code) => {
               const plan = COMMERCIAL_PLANS[code];
-              // Real store-returned price when the native Offering has
-              // loaded — never a fixed price once the real product is
-              // available (FASE 5). Falls back to the static price on web
-              // or before offerings finish loading on native. Matched by
+              const action = planCardAction(code, state);
+              const packageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]];
+              // Real store-returned price once the native Offering loaded
+              // (FASE 5); static fallback on web / before load. Matched by
               // package id so it works on both stores (see the catalog).
-              const realOffering = nativePurchase.offerings.find(
-                (o) => o.packageId === REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[code]],
-              );
+              const realOffering = nativePurchase.offerings.find((o) => o.packageId === packageId);
               return (
                 <SubscriptionPlanCard
                   key={code}
                   plan={plan}
                   recommended={code === RECOMMENDED_PLAN_CODE}
-                  onSubscribe={handleSubscribe}
+                  action={action}
+                  onCta={handlePlanCta}
                   priceLabel={realOffering?.priceFormatted}
-                  ctaLoading={nativePurchase.purchasing === realOffering?.packageId}
+                  ctaLoading={nativePurchase.purchasing === packageId}
                   ctaDisabled={nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
                 />
               );
             })}
           </section>
+        )}
+
+        {/* Honest footnote moved BELOW the plans so no big text block pushes the
+            cards down (redesign requirement #1/#10). */}
+        {(vm.status === 'trialing' || vm.status === 'expired' || vm.status === 'canceled') && (
+          <p className="text-xs text-slate-500 leading-relaxed px-1">{SUBSCRIPTION_MESSAGES.trialDataPreservedNote}</p>
         )}
 
         {/* Real native (iOS) restore/manage — driven by RevenueCat's own

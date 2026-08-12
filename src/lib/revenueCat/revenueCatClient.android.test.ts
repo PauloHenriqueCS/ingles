@@ -340,6 +340,50 @@ describe('revenueCatClient on Android — purchasePackage', () => {
   });
 });
 
+describe('revenueCatClient on Android — plan change (upgrade/downgrade replacement)', () => {
+  const ESSENTIAL_PRODUCT = 'orodim.subscription.essential.monthly:monthly';
+  const PLUS_PRODUCT = 'orodim.subscription.plus.monthly:monthly';
+  async function loadBothOfferings() {
+    mockGetOfferings.mockResolvedValue({
+      current: {
+        availablePackages: [
+          { identifier: 'essential_monthly', product: { identifier: ESSENTIAL_PRODUCT, title: 'Essencial', description: '', priceString: 'R$ 34,90' } },
+          { identifier: 'plus_monthly', product: { identifier: PLUS_PRODUCT, title: 'Plus', description: '', priceString: 'R$ 59,90' } },
+        ],
+      },
+    });
+    await getOfferings();
+  }
+
+  it('upgrade sends storeProductChangeInfo with WITH_TIME_PRORATION and the current plan\'s product id as oldProductIdentifier', async () => {
+    await syncIdentity(USER_A);
+    await loadBothOfferings();
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { plus: {} } }) });
+    const result = await purchasePackage('plus_monthly', { oldProductId: ESSENTIAL_PRODUCT, mode: 'upgrade' });
+    expect(result.ok).toBe(true);
+    const arg = mockPurchasePackage.mock.calls[0][0] as any;
+    expect(arg.storeProductChangeInfo).toEqual({ oldProductIdentifier: ESSENTIAL_PRODUCT, replacementMode: 'WITH_TIME_PRORATION' });
+  });
+
+  it('downgrade sends DEFERRED (takes effect at the next renewal)', async () => {
+    await syncIdentity(USER_A);
+    await loadBothOfferings();
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { essential: {} } }) });
+    await purchasePackage('essential_monthly', { oldProductId: PLUS_PRODUCT, mode: 'downgrade' });
+    const arg = mockPurchasePackage.mock.calls[0][0] as any;
+    expect(arg.storeProductChangeInfo).toEqual({ oldProductIdentifier: PLUS_PRODUCT, replacementMode: 'DEFERRED' });
+  });
+
+  it('a plain first purchase (no change) never sends storeProductChangeInfo', async () => {
+    await syncIdentity(USER_A);
+    await loadBothOfferings();
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo() });
+    await purchasePackage('plus_monthly');
+    const arg = mockPurchasePackage.mock.calls[0][0] as any;
+    expect(arg.storeProductChangeInfo).toBeUndefined();
+  });
+});
+
 describe('revenueCatClient on Android — restorePurchases', () => {
   it('an explicit restore returns ok:true with the mapped customerInfo', async () => {
     await syncIdentity(USER_A);

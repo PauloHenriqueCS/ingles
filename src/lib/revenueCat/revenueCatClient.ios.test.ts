@@ -325,6 +325,22 @@ describe('revenueCatClient on iOS — purchasePackage', () => {
   });
 });
 
+describe('revenueCatClient on iOS — plan change never sends store change info (App Store manages the group)', () => {
+  it('a change (upgrade/downgrade) still only sends aPackage on iOS — storeProductChangeInfo is Android-only', async () => {
+    await syncIdentity(USER_A);
+    mockGetOfferings.mockResolvedValue({
+      current: { availablePackages: [{ identifier: 'plus_monthly', product: { identifier: 'orodim.subscription.plus.monthly', title: 'Plus', description: '', priceString: 'R$ 59,90' } }] },
+    });
+    await getOfferings();
+    mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { plus: {} } }) });
+    const result = await purchasePackage('plus_monthly', { oldProductId: 'orodim.subscription.essential.monthly', mode: 'upgrade' });
+    expect(result.ok).toBe(true);
+    const arg = mockPurchasePackage.mock.calls[0][0] as any;
+    expect(arg.storeProductChangeInfo).toBeUndefined();
+    expect(arg.aPackage).toBeDefined();
+  });
+});
+
 describe('revenueCatClient on iOS — restorePurchases', () => {
   it('an explicit restore returns ok:true with the mapped customerInfo', async () => {
     await syncIdentity(USER_A);

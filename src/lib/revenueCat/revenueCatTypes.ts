@@ -56,3 +56,17 @@ export interface OrodimPurchaseResult {
   customerInfo: OrodimCustomerInfo | null;
   error: OrodimPurchaseError | null;
 }
+
+/** A subscription plan change (upgrade/downgrade) rather than a first purchase.
+ *  'upgrade' applies immediately with time proration; 'downgrade' is deferred
+ *  to the next renewal — see revenueCatClient.purchasePackage. Android maps
+ *  these to STORE_REPLACEMENT_MODE; on iOS the App Store handles the change
+ *  within the subscription group, so no mode is sent. */
+export type OrodimPlanChangeMode = 'upgrade' | 'downgrade';
+
+export interface OrodimPlanChange {
+  /** Store product id of the CURRENT subscription being replaced — the
+   *  OrodimProductOffering.productId of the plan the user is on now. */
+  oldProductId: string;
+  mode: OrodimPlanChangeMode;
+}

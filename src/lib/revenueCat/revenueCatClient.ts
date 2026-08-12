@@ -2,6 +2,7 @@ import { isIOSApp, isAndroidApp, isPluginAvailable } from '../runtimeEnvironment
 import { planCodeForActiveEntitlements } from '../../domain/subscription/revenuecat-catalog';
 import type {
   OrodimCustomerInfo,
+  OrodimPlanChange,
   OrodimProductOffering,
   OrodimPurchaseError,
   OrodimPurchaseResult,
@@ -242,8 +243,18 @@ function normalizePurchaseError(err: unknown, errorCodes: Record<string, string>
  * and Android (unlike the store product id — see OrodimProductOffering).
  * Never disables a caller's own double-click guard; this function itself does
  * not debounce.
+ *
+ * When `change` is provided this is a plan CHANGE (upgrade/downgrade), not a
+ * first purchase. On Android it sends storeProductChangeInfo so Google Play
+ * REPLACES the current subscription (never a second parallel one):
+ *   - upgrade   → WITH_TIME_PRORATION (immediate, remaining time credited)
+ *   - downgrade → DEFERRED (takes effect at the next renewal)
+ * On iOS the change info is intentionally omitted — the App Store handles
+ * upgrade/downgrade within the subscription group when you simply purchase the
+ * new package (both products must be in the same group, an App Store Connect
+ * setting). The RevenueCat package identifier is still store-agnostic.
  */
-export async function purchasePackage(packageId: string): Promise<OrodimPurchaseResult> {
+export async function purchasePackage(packageId: string, change?: OrodimPlanChange): Promise<OrodimPurchaseResult> {
   // Settle any in-flight identity sync before deciding we're not configured —
   // a purchase tapped moments after the screen opened must not lose the race.
   await identityChain;
@@ -268,7 +279,19 @@ export async function purchasePackage(packageId: string): Promise<OrodimPurchase
   }
   const { Purchases, PURCHASES_ERROR_CODE } = await loadPurchases();
   try {
-    const result = await Purchases.purchasePackage({ aPackage: pkg as Parameters<typeof Purchases.purchasePackage>[0]['aPackage'] });
+    const options: Record<string, unknown> = { aPackage: pkg };
+    // Android-only replacement. On iOS we never send change info — the App
+    // Store manages the switch within the subscription group on a plain
+    // purchase of the new package (see the doc comment above).
+    if (change && isAndroidApp) {
+      options.storeProductChangeInfo = {
+        oldProductIdentifier: change.oldProductId,
+        // STORE_REPLACEMENT_MODE values are plain strings the native bridge
+        // reads directly (see @revenuecat/purchases-typescript-internal-esm).
+        replacementMode: change.mode === 'upgrade' ? 'WITH_TIME_PRORATION' : 'DEFERRED',
+      };
+    }
+    const result = await Purchases.purchasePackage(options as unknown as Parameters<typeof Purchases.purchasePackage>[0]);
     return { ok: true, customerInfo: toOrodimCustomerInfo(result.customerInfo), error: null };
   } catch (err) {
     return { ok: false, customerInfo: null, error: normalizePurchaseError(err, PURCHASES_ERROR_CODE as unknown as Record<string, string>) };

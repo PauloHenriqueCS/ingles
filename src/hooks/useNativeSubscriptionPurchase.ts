@@ -7,7 +7,7 @@ import {
   restorePurchases,
   getManagementUrl,
 } from '../lib/revenueCat/revenueCatClient';
-import type { OrodimProductOffering, OrodimPurchaseError } from '../lib/revenueCat/revenueCatTypes';
+import type { OrodimPlanChangeMode, OrodimProductOffering, OrodimPurchaseError } from '../lib/revenueCat/revenueCatTypes';
 
 export interface NativeSubscriptionPurchaseState {
   /** false on web (and on Android/iOS without their store key configured)
@@ -22,6 +22,12 @@ export interface NativeSubscriptionPurchaseState {
   /** Resolves true only on an actually-completed purchase, never on cancel/error.
    *  Takes a RevenueCat package identifier (see OrodimProductOffering.packageId). */
   purchase: (packageId: string) => Promise<boolean>;
+  /** Upgrade/downgrade between commercial plans — replaces the current
+   *  subscription instead of starting a parallel one. `targetPackageId` is the
+   *  plan being switched TO; `currentProductId` is the store product id of the
+   *  plan the user is on now (OrodimProductOffering.productId), needed by
+   *  Android's replacement flow. Resolves true only on a completed change. */
+  changePlan: (targetPackageId: string, currentProductId: string, mode: OrodimPlanChangeMode) => Promise<boolean>;
   restore: () => Promise<boolean>;
   refetchOfferings: () => void;
 }
@@ -82,12 +88,19 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
     return () => { cancelled = true; };
   }, [supported, refetchToken]);
 
-  const purchase = useCallback(async (packageId: string): Promise<boolean> => {
+  // Shared purchase/change runner — same per-button loading + double-click
+  // guard + error handling. A first purchase passes no `change`; an
+  // upgrade/downgrade passes the replacement descriptor (Android replaces the
+  // current subscription; iOS ignores it — see revenueCatClient.purchasePackage).
+  const runPurchase = useCallback(async (
+    packageId: string,
+    change?: { oldProductId: string; mode: OrodimPlanChangeMode },
+  ): Promise<boolean> => {
     if (!supported || purchasing) return false; // impedir duplo clique
     setPurchasing(packageId);
     setLastError(null);
     try {
-      const result = await purchasePackage(packageId);
+      const result = await purchasePackage(packageId, change);
       if (!mountedRef.current) return false;
       if (!result.ok) {
         // user_cancelled is never surfaced as an alarming error — the
@@ -101,6 +114,13 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
       if (mountedRef.current) setPurchasing(null);
     }
   }, [supported, purchasing]);
+
+  const purchase = useCallback((packageId: string) => runPurchase(packageId), [runPurchase]);
+  const changePlan = useCallback(
+    (targetPackageId: string, currentProductId: string, mode: OrodimPlanChangeMode) =>
+      runPurchase(targetPackageId, { oldProductId: currentProductId, mode }),
+    [runPurchase],
+  );
 
   const restore = useCallback(async (): Promise<boolean> => {
     if (!supported || restoring) return false;
@@ -122,5 +142,5 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
 
   const refetchOfferings = useCallback(() => setRefetchToken((t) => t + 1), []);
 
-  return { supported, offerings, offeringsLoading, purchasing, restoring, managementUrl, lastError, purchase, restore, refetchOfferings };
+  return { supported, offerings, offeringsLoading, purchasing, restoring, managementUrl, lastError, purchase, changePlan, restore, refetchOfferings };
 }

@@ -73,7 +73,11 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         renewalLabel: null,
         canceledPlanName: null,
         accessEndsAtLabel: null,
-        showTrialLimits: true,
+        // Redesign: no big trial-benefits/limits block on this screen — the
+        // top shows only the short "teste ativo / termina em X dias" status,
+        // and the plan cards are the focus (kept always false; the block was
+        // removed from SubscriptionView).
+        showTrialLimits: false,
         // Trial can preview/choose a commercial plan (native only — the
         // screen itself gates any actual purchase affordance to iOS; web
         // never shows a working subscribe button regardless of this flag).
@@ -100,7 +104,9 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         canceledPlanName: null,
         accessEndsAtLabel: null,
         showTrialLimits: false,
-        showPlanCards: false,
+        // Redesign: NEVER hide the plan cards just because the user already
+        // subscribed — the other plan must stay visible as an upgrade/downgrade.
+        showPlanCards: true,
         showManageButton: state.canManageSubscription,
         showRestoreButton: state.canRestorePurchases,
       };
@@ -159,7 +165,9 @@ export function buildSubscriptionViewModel(state: SubscriptionScreenState, now: 
         canceledPlanName: null,
         accessEndsAtLabel: state.subscriptionExpiresAt ? formatDatePtBr(state.subscriptionExpiresAt) : null,
         showTrialLimits: false,
-        showPlanCards: false,
+        // Redesign: keep the plan cards visible during a billing issue too, so
+        // the user can re-choose/switch a plan; the status message stays above.
+        showPlanCards: true,
         showManageButton: state.canManageSubscription,
         showRestoreButton: state.canRestorePurchases,
       };
