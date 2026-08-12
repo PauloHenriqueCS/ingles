@@ -17,6 +17,7 @@ import {
   getTodayListening,
   generateListeningStory,
   startStoryPractice,
+  getPendingListeningStory,
   completeStoryListening,
   processNextGroupListeningStep,
   retryGroupListeningGeneration,
@@ -364,6 +365,28 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       }
       if (result.status === 'empty_inventory') {
         setStoryMode(true);
+        // Auto-recover a story ALREADY PREPARED (pending) today (SP) and resume
+        // it — without preparing, selecting, generating, or consuming anything.
+        // Backend is the source of truth, so this survives refresh/logout/other
+        // device. The counter does NOT change (no consume/refetch here). No
+        // pending → fall back to the prompt.
+        try {
+          const pending = await getPendingListeningStory();
+          if (pending) {
+            revokeAudioUrls();
+            const url0 = base64ToBlobUrl(pending.parts[0].audioBase64, pending.parts[0].audioMimeType);
+            base64ToBlobUrl(pending.parts[1].audioBase64, pending.parts[1].audioMimeType); // pre-create part 2
+            setStoryData(pending);
+            setStoryPackage(null);
+            practiceStartedRef.current = false; // the first real answer will consume, once
+            player.load(url0);
+            player.setOnEnded(() => setPhase('question'));
+            setPhase('intro');
+            return;
+          }
+        } catch (err) {
+          console.error('[listening] pending auto-recover failed', err);
+        }
         setPhase('prompt');
         return;
       }
@@ -539,20 +562,12 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   // story from the daily quota, then reconcile the counter from the backend
   // (authoritative — never an optimistic decrement as the source of truth).
   // Idempotent client-side (ref) and server-side (completed flag).
-  async function beginPractice() {
+  // "Começar a ouvir" only starts the audio — it does NOT consume the quota.
+  // Consumption happens later, at the first real exercise interaction (the first
+  // answer submit in handleStorySubmit). Just playing/leaving here never costs a
+  // story.
+  function beginPractice() {
     setPhase('ready_to_play');
-    const id = storyData?.sharedStoryId;
-    if (!id || practiceStartedRef.current) return;
-    practiceStartedRef.current = true;
-    try {
-      await startStoryPractice(id);
-      entitlementsState.refetch();
-    } catch (err) {
-      // Non-fatal: the already-prepared story still plays. Allow a retry to
-      // record the practice later — the backend consumes at most once.
-      console.error('[listening] practice-start failed', err);
-      practiceStartedRef.current = false;
-    }
   }
 
   function handleStoryAdvance() {
@@ -573,6 +588,21 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
 
   async function handleStorySubmit() {
     if (storySelectedOption === null || !storyData || phase === 'submitting') return;
+
+    // FIRST real exercise interaction (the first answer submit) = the moment the
+    // user is unambiguously practicing → consume ONE story from the daily quota,
+    // exactly once per prepared story (the ref guards the client; the RPC is
+    // idempotent server-side). Fired BEFORE the correctness branch so a wrong
+    // first answer still counts. Fire-and-forget so it never blocks the answer
+    // UX; on failure the ref is reset so a later answer records it. Neither
+    // preparing, recovering, "Começar a ouvir", playing, nor pausing gets here.
+    if (storyData.sharedStoryId && !practiceStartedRef.current) {
+      practiceStartedRef.current = true;
+      startStoryPractice(storyData.sharedStoryId)
+        .then(() => entitlementsState.refetch())
+        .catch((err) => { console.error('[listening] practice-start failed', err); practiceStartedRef.current = false; });
+    }
+
     const part = storyData.parts[currentPartIdx];
 
     const correct = Number(storySelectedOption) === Number(part.question.correctOptionIndex);

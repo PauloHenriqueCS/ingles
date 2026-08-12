@@ -194,6 +194,35 @@ function reconstructFromContent(content: SharedStoryContent, audio: [string, str
 }
 
 /**
+ * READ-ONLY: the user's already-PREPARED (pending) story for today (SP), ready
+ * to auto-recover on entering Listening — WITHOUT preparing, selecting,
+ * generating, attaching, or consuming anything. Returns null when there is no
+ * pending, or when the pending isn't a fully-ready shared story yet
+ * (generating/failed/incomplete → the user resolves it via the normal prepare
+ * flow). The one-pending-per-day + activity_date filters in findPendingStory
+ * mean only TODAY's SP pending is ever returned; a stale pending from another
+ * day is neither recovered nor touched.
+ */
+export async function getPendingListeningStoryForToday(
+  userId: string,
+  serviceClient: SupabaseClient,
+  secret: string,
+): Promise<(ListeningStoryResult & { sharedStoryId: string }) | null> {
+  const practiceDate = resolveListeningActivityDate();
+  const pending = await findPendingStory(serviceClient, userId, practiceDate);
+  if (!pending) return null;
+  if (pending.status !== 'ready' || !pending.content || !pending.part1_audio_path || !pending.part2_audio_path) {
+    return null;
+  }
+  const [a1, a2] = await Promise.all([
+    downloadPartAudioBase64(serviceClient, pending.part1_audio_path),
+    downloadPartAudioBase64(serviceClient, pending.part2_audio_path),
+  ]);
+  const story = reconstructFromContent(pending.content, [a1, a2], pending.audio_mime_type ?? 'audio/mpeg', secret);
+  return { ...story, sharedStoryId: pending.id };
+}
+
+/**
  * Wraps the EXISTING on-the-fly story flow (generateListeningStory) with
  * reuse + a database-backed lock, keyed by (level_group, practice_date) —
  * see supabase/migrations/20260724050000_create_listening_shared_stories.sql.

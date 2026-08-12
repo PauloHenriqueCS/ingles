@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Loader2, Square, Play, X } from 'lucide-react';
 import type { AIPreferences } from '../types';
 import type { UseTutorPreferences } from '../hooks/useTutorPreferences';
@@ -34,21 +34,31 @@ interface Props {
 // ── Voice preview hook ────────────────────────────────────────────────────────
 
 function useVoicePreview() {
-  const audioRef    = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef   = useRef<string | null>(null);
   const [playing, setPlaying]   = useState<string | null>(null);
   const [loading, setLoading]   = useState<string | null>(null);
   const [error, setError]       = useState<string | null>(null);
 
-  const stop = useCallback(() => {
-    audioRef.current?.pause();
-    if (audioRef.current) audioRef.current.src = '';
-    setPlaying(null);
+  // Tear down the current audio element AND revoke its object URL — so stopping
+  // mid-play, switching voices, an error, or unmounting never leaks a blob URL
+  // (previously only the natural `onended` revoked it).
+  const teardown = useCallback(() => {
+    const a = audioRef.current;
+    if (a) { a.onended = null; a.onerror = null; a.pause(); a.src = ''; }
+    audioRef.current = null;
+    if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null; }
   }, []);
 
+  const stop = useCallback(() => {
+    teardown();
+    setPlaying(null);
+  }, [teardown]);
+
   const preview = useCallback(async (voiceId: string, pace: AIPreferences['speechPace']) => {
-    if (loading) return;
-    if (playing === voiceId) { stop(); return; }
-    stop();
+    if (loading) return;                       // ignore double-clicks while loading
+    if (playing === voiceId) { stop(); return; } // clicking the playing voice stops it
+    stop();                                    // switching voices stops + cleans up the previous one
     setLoading(voiceId);
     setError(null);
     try {
@@ -61,18 +71,25 @@ function useVoicePreview() {
       if (!resp.ok) throw new Error('preview failed');
       const blob = await resp.blob();
       const url  = URL.createObjectURL(blob);
+      urlRef.current = url;
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.onended = () => { setPlaying(null); URL.revokeObjectURL(url); };
-      audio.onerror = () => { setPlaying(null); setError('Erro ao reproduzir.'); };
+      audio.onended = () => stop();
+      audio.onerror = () => { setError('Não foi possível reproduzir a amostra.'); stop(); };
       await audio.play();
       setPlaying(voiceId);
     } catch {
+      // Failure never breaks voice SELECTION (that's separate state); the sample
+      // just didn't load. A later retry works once the backend is healthy.
+      teardown();
       setError('Não foi possível carregar a amostra.');
     } finally {
       setLoading(null);
     }
-  }, [loading, playing, stop]);
+  }, [loading, playing, stop, teardown]);
+
+  // Revoke any live object URL / stop audio when the sheet unmounts.
+  useEffect(() => teardown, [teardown]);
 
   return { playing, loading, error, preview, stop };
 }

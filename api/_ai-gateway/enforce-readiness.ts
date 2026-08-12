@@ -51,7 +51,7 @@ export const MIGRATION_VERSION = '20260718030000_ai_gateway_enforcement_budget_c
 export const REALTIME_HARD_CONTROL_VERSION = 'session_control_unified_interface_v1';
 
 export const FEATURE_PROVIDER_MODEL: Record<AiFeatureKey, { provider: 'openai' | 'azure'; model: string | null }> = {
-  'conversation.preview_tts':              { provider: 'openai', model: 'tts-1' },
+  'conversation.preview_tts':              { provider: 'openai', model: 'gpt-4o-mini-tts' },
   'conversation.create_session':           { provider: 'openai', model: 'gpt-realtime-2.1-mini' },
   'conversation.webrtc_connect':           { provider: 'openai', model: 'gpt-realtime-2.1-mini' },
   'conversation.realtime_usage':           { provider: 'openai', model: 'gpt-realtime-2.1-mini' },
