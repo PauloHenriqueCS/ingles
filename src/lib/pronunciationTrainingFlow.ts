@@ -26,6 +26,8 @@ export interface TrainingAnalysisState {
   result?: PronunciationNormalizedResult;
   errorMessage?: string;
   errorCode?: string;
+  /** Authoritative count of completed analyses today (SP), from the server. */
+  dailyCompleted?: number;
 }
 
 export interface TrainingFlowRefs {
@@ -168,6 +170,7 @@ export async function runTrainingAnalysisFlow(
 
   // Step 4: Save the result
   setPhase({ phase: 'saving_result' });
+  let dailyCompleted: number | undefined;
   try {
     const headers = await getAuthHeader();
     const resp = await fetch(apiUrl('/api/pronunciation-training/complete'), {
@@ -184,6 +187,8 @@ export async function runTrainingAnalysisFlow(
       refs.flowLockRef.current = false;
       return;
     }
+    const completeJson = await resp.json().catch(() => ({}));
+    dailyCompleted = typeof completeJson?.dailyCompleted === 'number' ? completeJson.dailyCompleted : undefined;
   } catch {
     setPhase({ phase: 'failed', errorMessage: 'Erro de rede ao salvar o resultado. Tente novamente.' });
     refs.flowLockRef.current = false;
@@ -195,5 +200,5 @@ export async function runTrainingAnalysisFlow(
   refs.attemptIdRef.current = null;
   refs.flowLockRef.current  = false;
 
-  setPhase({ phase: 'completed', result });
+  setPhase({ phase: 'completed', result, dailyCompleted });
 }

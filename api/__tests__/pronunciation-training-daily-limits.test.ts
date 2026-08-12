@@ -1,14 +1,15 @@
 /**
- * api/pronunciation-training/[...slug].ts — daily plan-limit enforcement for
- * "Treino de Pronúncia" (start/complete/fail + generate-text's get-or-create
- * behavior). HTTP-handler-level coverage: entitlement gating, request
- * validation, and RPC-response-to-HTTP-response mapping.
+ * api/pronunciation-training/[...slug].ts — dynamic per-plan daily-limit
+ * enforcement for "Treino de Pronúncia" (generate-text get-or-create +
+ * start/complete/fail). HTTP-handler-level coverage: entitlement gating,
+ * request validation, and RPC-response-to-HTTP-response mapping.
  *
- * True concurrency-safety and day-scoping (America/Sao_Paulo) are proven
- * against the real database/RPCs separately — see the live RPC test run
- * during this task (25/25 passed: concurrent reserve calls, idempotent
- * retries, day rollover). This file complements that with the request-shape
- * contract a mocked unit test is actually suited for.
+ * The effective daily limit is the plan capability
+ * (pronunciation.evaluations.limit / .unlimited), resolved server-side and
+ * passed to the RPCs — never hardcoded. True atomic concurrency-safety and
+ * day-scoping (America/Sao_Paulo) are proven against the real DB/RPCs
+ * separately; this file complements that with the request-shape contract a
+ * mocked unit test is suited for.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -95,7 +96,18 @@ function entitlementsWith(overrides: { maxRecordingSeconds?: number; maxRecordin
   };
 }
 
-function makeSupabase(overrides: { existingSession?: Record<string, unknown> | null; rpcResults?: Record<string, unknown> } = {}) {
+// The generate-text handler issues, for pronunciation_training_sessions:
+//   - active-row lookup: .select().eq(user).eq(date).neq('status','completed').maybeSingle()
+//   - completed-count head query: .select('id',{count,head}).eq().eq().eq('status','completed')  (awaited)
+//   - (when returning the completed state) latest-completed lookup:
+//        .eq('status','completed').order('completed_at').limit(1).maybeSingle()
+// The mock routes by which filters were applied on each fresh chain.
+function makeSupabase(overrides: {
+  activeRow?: Record<string, unknown> | null;
+  completedCount?: number;
+  latestCompleted?: Record<string, unknown> | null;
+  rpcResults?: Record<string, unknown>;
+} = {}) {
   const rpc = vi.fn((fnName: string) => {
     const result = overrides.rpcResults?.[fnName];
     return Promise.resolve(result !== undefined ? { data: result, error: null } : { data: null, error: null });
@@ -103,11 +115,21 @@ function makeSupabase(overrides: { existingSession?: Record<string, unknown> | n
   return {
     from: vi.fn((table: string) => {
       if (table === 'pronunciation_training_sessions') {
-        return {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          maybeSingle: vi.fn().mockResolvedValue({ data: overrides.existingSession ?? null, error: null }),
+        const state = { neq: false, statusCompletedEq: false, ordered: false };
+        const chain: any = {
+          select: vi.fn(() => chain),
+          eq: vi.fn((col?: string, val?: string) => { if (col === 'status' && val === 'completed') state.statusCompletedEq = true; return chain; }),
+          neq: vi.fn(() => { state.neq = true; return chain; }),
+          order: vi.fn(() => { state.ordered = true; return chain; }),
+          limit: vi.fn(() => chain),
+          maybeSingle: vi.fn(() => {
+            if (state.neq) return Promise.resolve({ data: overrides.activeRow ?? null, error: null });
+            if (state.ordered && state.statusCompletedEq) return Promise.resolve({ data: overrides.latestCompleted ?? null, error: null });
+            return Promise.resolve({ data: null, error: null });
+          }),
+          then: (resolve: (v: unknown) => unknown) => resolve({ data: null, count: overrides.completedCount ?? 0, error: null }),
         };
+        return chain;
       }
       return {
         select: vi.fn().mockReturnThis(),
@@ -121,6 +143,17 @@ function makeSupabase(overrides: { existingSession?: Record<string, unknown> | n
   };
 }
 
+const activeTextRow = (o: Record<string, unknown> = {}) => ({
+  id: 's1', level: 'B1', generated_text: 'Text.', status: 'text_generated',
+  pronunciation_score: null, accuracy_score: null, fluency_score: null, completeness_score: null, prosody_score: null,
+  recognized_text: null, words_json: null, raw_result_json: null, audio_duration_seconds: null, ...o,
+});
+const completedRow = (o: Record<string, unknown> = {}) => ({
+  id: 's-done', level: 'B1', generated_text: 'Done text.', status: 'completed',
+  pronunciation_score: 91.2, accuracy_score: 92, fluency_score: 90, completeness_score: 95, prosody_score: 88,
+  recognized_text: 'done', words_json: [], raw_result_json: [], audio_duration_seconds: 10.5, ...o,
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(gw, createMockGatewayDeps());
@@ -133,33 +166,27 @@ beforeEach(() => {
 // ─── generate-text: daily get-or-create ───────────────────────────────────────
 
 describe('generate-text — daily get-or-create', () => {
-  it('1) first generation of the day calls the AI provider and persists via RPC', async () => {
+  it('1) first generation of the day calls the AI provider and persists via RPC with the dynamic limit params', async () => {
     mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Fresh text.' } }] });
-
     const supabase = makeSupabase({
-      existingSession: null,
-      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Fresh text.', level: 'B1', status: 'text_generated', result: null } },
+      activeRow: null, completedCount: 0,
+      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Fresh text.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 0 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('generate-text'), res);
 
     expect(res._status()).toBe(200);
     expect((res._body() as any).status).toBe('text_generated');
+    expect((res._body() as any).dailyLimit).toBe(3);
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_level: expect.any(String) }));
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_start_new_round: false, p_effective_limit: 3, p_unlimited: false }));
   });
 
-  it('2) a session already exists for today: returns it and never touches the AI provider', async () => {
-    const supabase = makeSupabase({
-      existingSession: {
-        id: 's1', level: 'B1', generated_text: 'Existing text.', status: 'text_generated',
-        pronunciation_score: null, accuracy_score: null, fluency_score: null, completeness_score: null, prosody_score: null,
-        recognized_text: null, words_json: null, raw_result_json: null, audio_duration_seconds: null,
-      },
-    });
+  it('2) an active (pending) session exists for today: returns it and never touches the AI provider', async () => {
+    const supabase = makeSupabase({ activeRow: activeTextRow({ generated_text: 'Existing text.' }), completedCount: 0 });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
 
@@ -169,56 +196,23 @@ describe('generate-text — daily get-or-create', () => {
     expect(res._status()).toBe(200);
     expect((res._body() as any).text).toBe('Existing text.');
     expect((res._body() as any).sessionId).toBe('s1');
-    expect(supabase.rpc).not.toHaveBeenCalled(); // no create_pronunciation_training_text call — no AI needed
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it('3) reload same day returns byte-identical text/session across repeated calls', async () => {
-    const existingRow = {
-      id: 's1', level: 'A2', generated_text: 'Stable text across reloads.', status: 'text_generated',
-      pronunciation_score: null, accuracy_score: null, fluency_score: null, completeness_score: null, prosody_score: null,
-      recognized_text: null, words_json: null, raw_result_json: null, audio_duration_seconds: null,
-    };
-    const supabase = makeSupabase({ existingSession: existingRow });
+    const supabase = makeSupabase({ activeRow: activeTextRow({ generated_text: 'Stable text.' }), completedCount: 0 });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
 
-    const res1 = makeRes();
-    await handler(makeReq('generate-text'), res1);
-    const res2 = makeRes();
-    await handler(makeReq('generate-text'), res2);
+    const res1 = makeRes(); await handler(makeReq('generate-text'), res1);
+    const res2 = makeRes(); await handler(makeReq('generate-text'), res2);
 
     expect((res1._body() as any).text).toBe((res2._body() as any).text);
     expect((res1._body() as any).sessionId).toBe((res2._body() as any).sessionId);
   });
 
-  it('9) reopening after completion returns the saved result, still no AI call', async () => {
-    const supabase = makeSupabase({
-      existingSession: {
-        id: 's1', level: 'B1', generated_text: 'Completed text.', status: 'completed',
-        pronunciation_score: 91.2, accuracy_score: 92, fluency_score: 90, completeness_score: 95, prosody_score: 88,
-        recognized_text: 'completed text', words_json: [], raw_result_json: [], audio_duration_seconds: 10.5,
-      },
-    });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
-
-    const res = makeRes();
-    await handler(makeReq('generate-text'), res);
-
-    expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('completed');
-    expect((res._body() as any).result.pronunciationScore).toBe(91.2);
-    expect(supabase.rpc).not.toHaveBeenCalled();
-  });
-
-  it('4) repeated generate-text calls (simulating record/delete/re-record without ever submitting) never touch the reservation RPC — only /start can advance status past text_generated', async () => {
-    const supabase = makeSupabase({
-      existingSession: {
-        id: 's1', level: 'B1', generated_text: 'Text.', status: 'text_generated',
-        pronunciation_score: null, accuracy_score: null, fluency_score: null, completeness_score: null, prosody_score: null,
-        recognized_text: null, words_json: null, raw_result_json: null, audio_duration_seconds: null,
-      },
-    });
+  it('4) repeated generate-text calls (record/delete/re-record without submitting) never touch any RPC', async () => {
+    const supabase = makeSupabase({ activeRow: activeTextRow(), completedCount: 0 });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
 
@@ -227,9 +221,6 @@ describe('generate-text — daily get-or-create', () => {
       await handler(makeReq('generate-text'), res);
       expect((res._body() as any).status).toBe('text_generated');
     }
-    // Neither create_pronunciation_training_text (no AI call needed — a row
-    // already exists) nor reserve_pronunciation_training_assessment (that's
-    // only called by /start) is ever invoked by repeated recording activity.
     expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
@@ -246,11 +237,11 @@ describe('generate-text — daily get-or-create', () => {
     expect(supabase.from).not.toHaveBeenCalled();
   });
 
-  it('unlimited plan, no session yet today: creates normally (limit=0 + unlimited=true never blocks, matching a real "Ilimitado" plan row)', async () => {
+  it('unlimited plan, no session yet today: creates normally (limit=0 + unlimited=true never blocks)', async () => {
     mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Fresh text.' } }] });
     const supabase = makeSupabase({
-      existingSession: null,
-      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Fresh text.', level: 'B1', status: 'text_generated', result: null } },
+      activeRow: null, completedCount: 0,
+      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Fresh text.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 0 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 0, evaluationsUnlimited: true }));
@@ -259,118 +250,111 @@ describe('generate-text — daily get-or-create', () => {
     await handler(makeReq('generate-text'), res);
 
     expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('text_generated');
-    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_force_new: false }));
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_start_new_round: false, p_unlimited: true }));
   });
 });
 
-// ─── generate-text: unlimited-plan same-day reset (the bug fix) ──────────────
-// Root cause: reserve_pronunciation_training_assessment's "completed is
-// terminal for the day" rule never consulted pronunciation.evaluations.
-// unlimited — an account with unlimited pronunciation training was blocked
-// with DAILY_LIMIT_REACHED-shaped messaging exactly like an exhausted plan,
-// right after finishing its first round of the day. See migration
-// 20260724020000_pronunciation_training_unlimited_daily_reset.
+// ─── generate-text: dynamic per-plan daily limit (the core of this change) ─────
+// Replaces the old "1/day fixed + unlimited-only reset" behavior: a limited
+// plan can now start new rounds up to its configured N, and is blocked at N —
+// the number always comes from pronunciation.evaluations.limit, never hardcoded.
 
-describe('generate-text — unlimited-plan same-day reset (forceNew)', () => {
-  function completedSession(overrides: Record<string, unknown> = {}) {
-    return {
-      id: 's1', level: 'B1', generated_text: 'Completed text.', status: 'completed',
-      pronunciation_score: 91.2, accuracy_score: 92, fluency_score: 90, completeness_score: 95, prosody_score: 88,
-      recognized_text: 'completed text', words_json: [], raw_result_json: [], audio_duration_seconds: 10.5,
-      ...overrides,
-    };
-  }
-
-  it('scenario 1: unlimited plan + zero prior evaluations today (no existing row) authorizes generation', async () => {
-    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Day one text.' } }] });
+describe('generate-text — dynamic per-plan daily limit', () => {
+  it('limit 3, 1 completed, user starts a new round (forceNew): authorized, generates round 2 via AI + RPC', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Round 2.' } }] });
     const supabase = makeSupabase({
-      existingSession: null,
-      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Day one text.', level: 'B1', status: 'text_generated', result: null } },
+      activeRow: null, completedCount: 1, latestCompleted: completedRow(),
+      rpcResults: { create_pronunciation_training_text: { sessionId: 's2', text: 'Round 2.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 1 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: true }));
-
-    const res = makeRes();
-    await handler(makeReq('generate-text', { body: { forceNew: false } }), res);
-
-    expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('text_generated');
-  });
-
-  it('scenario 2: unlimited plan, already completed today, forceNew=true regenerates a new round via the AI provider and RPC', async () => {
-    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Second round text.' } }] });
-    const supabase = makeSupabase({
-      existingSession: completedSession(),
-      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Second round text.', level: 'B1', status: 'text_generated', result: null } },
-    });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: true }));
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
 
     expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('text_generated');
-    expect((res._body() as any).text).toBe('Second round text.');
+    expect((res._body() as any).text).toBe('Round 2.');
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_force_new: true }));
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_start_new_round: true, p_effective_limit: 3, p_unlimited: false }));
   });
 
-  it('scenario 2b: unlimited plan with MANY accumulated completed rounds still authorizes yet another one (never compares against a consumed count)', async () => {
-    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Round N text.' } }] });
+  it('limit 3, already 3 completed, 4th round (forceNew): blocked 403 DAILY_LIMIT_REACHED, no AI call', async () => {
+    const supabase = makeSupabase({ activeRow: null, completedCount: 3, latestCompleted: completedRow() });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
+
+    const res = makeRes();
+    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
+
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
+    expect((res._body() as any).dailyCompleted).toBe(3);
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  it('limit 1 (trial/essential): 1 completed, forceNew blocked — a limited plan cannot exceed its own N', async () => {
+    const supabase = makeSupabase({ activeRow: null, completedCount: 1, latestCompleted: completedRow() });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 1 }));
+
+    const res = makeRes();
+    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
+
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('the limit is taken from the plan, not hardcoded: raising it to 5 lets a 4th round through', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Round 4.' } }] });
     const supabase = makeSupabase({
-      existingSession: completedSession(),
-      rpcResults: { create_pronunciation_training_text: { sessionId: 's1', text: 'Round N text.', level: 'B1', status: 'text_generated', result: null } },
+      activeRow: null, completedCount: 3, latestCompleted: completedRow(),
+      rpcResults: { create_pronunciation_training_text: { sessionId: 's4', text: 'Round 4.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 3 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    // consumed/limit are irrelevant once unlimited=true — no field here represents "how many rounds already used".
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 5 }));
+
+    const res = makeRes();
+    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
+
+    expect(res._status()).toBe(200);
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_effective_limit: 5 }));
+  });
+
+  it('unlimited plan with many accumulated completed rounds still authorizes another (never compares a count)', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Round N.' } }] });
+    const supabase = makeSupabase({
+      activeRow: null, completedCount: 9, latestCompleted: completedRow(),
+      rpcResults: { create_pronunciation_training_text: { sessionId: 'sN', text: 'Round N.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 9 } },
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: true, evaluationsLimit: 0 }));
 
     const res = makeRes();
     await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
 
     expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('text_generated');
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_unlimited: true }));
   });
 
-  it('unlimited plan, already completed today, forceNew=false (plain reload) still returns the saved result — never auto-discards it', async () => {
-    const supabase = makeSupabase({ existingSession: completedSession() });
+  it('completed today, forceNew=false (plain reload) returns the saved result — never auto-discards or auto-advances a round', async () => {
+    const supabase = makeSupabase({ activeRow: null, completedCount: 1, latestCompleted: completedRow({ pronunciation_score: 88 }) });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: true }));
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('generate-text', { body: { forceNew: false } }), res);
 
     expect(res._status()).toBe(200);
     expect((res._body() as any).status).toBe('completed');
-    expect((res._body() as any).result.pronunciationScore).toBe(91.2);
+    expect((res._body() as any).result.pronunciationScore).toBe(88);
     expect(mockCreate).not.toHaveBeenCalled();
     expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
-  it('scenario 5 / limited-plan regression guard: a LIMITED plan sending forceNew=true is still blocked exactly like today — never bypasses its own limit', async () => {
-    const supabase = makeSupabase({ existingSession: completedSession() });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: false, evaluationsLimit: 1 }));
-
-    const res = makeRes();
-    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
-
-    expect(res._status()).toBe(200);
-    expect((res._body() as any).status).toBe('completed'); // unchanged existing row, not a fresh round
-    expect(mockCreate).not.toHaveBeenCalled();
-    expect(supabase.rpc).not.toHaveBeenCalled();
-  });
-
-  it('unlimited plan but today\'s round is still in progress (not completed): forceNew has no effect — never interrupts an active round', async () => {
-    const supabase = makeSupabase({
-      existingSession: {
-        id: 's1', level: 'B1', generated_text: 'In-progress text.', status: 'processing',
-        pronunciation_score: null, accuracy_score: null, fluency_score: null, completeness_score: null, prosody_score: null,
-        recognized_text: null, words_json: null, raw_result_json: null, audio_duration_seconds: null,
-      },
-    });
+  it('an active (in-progress) round: forceNew never interrupts it', async () => {
+    const supabase = makeSupabase({ activeRow: activeTextRow({ generated_text: 'In-progress.', status: 'processing' }), completedCount: 0 });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsUnlimited: true }));
 
@@ -379,13 +363,30 @@ describe('generate-text — unlimited-plan same-day reset (forceNew)', () => {
 
     expect(res._status()).toBe(200);
     expect((res._body() as any).status).toBe('processing');
-    expect((res._body() as any).text).toBe('In-progress text.');
+    expect((res._body() as any).text).toBe('In-progress.');
     expect(mockCreate).not.toHaveBeenCalled();
     expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
-  it('scenario 7: a plan-entitlements load failure surfaces as a real 500 error, never as a limit-reached block', async () => {
-    const supabase = makeSupabase({ existingSession: completedSession() });
+  it('concurrent race: pre-check passes but the RPC returns DAILY_LIMIT_REACHED (authoritative) → 403', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Racy.' } }] });
+    const supabase = makeSupabase({
+      activeRow: null, completedCount: 2, latestCompleted: completedRow(),
+      rpcResults: { create_pronunciation_training_text: { error: 'DAILY_LIMIT_REACHED', dailyCompleted: 3 } },
+    });
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
+
+    const res = makeRes();
+    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
+
+    expect(res._status()).toBe(403);
+    expect((res._body() as any).code).toBe('DAILY_LIMIT_REACHED');
+    expect((res._body() as any).dailyCompleted).toBe(3);
+  });
+
+  it('a plan-entitlements load failure surfaces as a real 500 error, never a limit-reached block', async () => {
+    const supabase = makeSupabase({ activeRow: null, completedCount: 1 });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockRejectedValue(new Error('supabase rpc timeout'));
 
@@ -397,30 +398,17 @@ describe('generate-text — unlimited-plan same-day reset (forceNew)', () => {
     expect((res._body() as any).code).not.toBe('DAILY_LIMIT_REACHED');
     expect(mockCreate).not.toHaveBeenCalled();
   });
-
-  it('scenario 6: no valid plan (locked snapshot) reports FEATURE_DISABLED, never a limit-reached code', async () => {
-    const supabase = makeSupabase({ existingSession: completedSession() });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ pronunciationEnabled: false, evaluationsUnlimited: false, evaluationsLimit: 0 }));
-
-    const res = makeRes();
-    await handler(makeReq('generate-text', { body: { forceNew: true } }), res);
-
-    expect(res._status()).toBe(403);
-    expect((res._body() as any).code).toBe('FEATURE_DISABLED');
-    expect((res._body() as any).code).not.toBe('DAILY_LIMIT_REACHED');
-  });
 });
 
 // ─── start: reserve the official submission slot ──────────────────────────────
 
 describe('start — reserve the daily official submission', () => {
-  it('6) first official submission reserves successfully and returns a token', async () => {
+  it('6) first official submission reserves successfully, returns a token, and passes the dynamic limit to the RPC', async () => {
     const supabase = makeSupabase({
-      rpcResults: { reserve_pronunciation_training_assessment: { action: 'reserved', sessionId: 's1', referenceText: 'The text.' } },
+      rpcResults: { reserve_pronunciation_training_assessment: { action: 'reserved', sessionId: 's1', referenceText: 'The text.', dailyCompleted: 1 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('start', { body: { attemptId: '11111111-1111-1111-1111-111111111111' } }), res);
@@ -429,14 +417,15 @@ describe('start — reserve the daily official submission', () => {
     expect((res._body() as any).sessionId).toBe('s1');
     expect((res._body() as any).token).toBe('azure-token');
     expect((res._body() as any).referenceText).toBe('The text.');
+    expect(supabase.rpc).toHaveBeenCalledWith('reserve_pronunciation_training_assessment', expect.objectContaining({ p_effective_limit: 3, p_unlimited: false }));
   });
 
-  it('7) second submission attempt the same day is blocked with DAILY_LIMIT_REACHED', async () => {
+  it('7) a submission past the limit is blocked with DAILY_LIMIT_REACHED (RPC enforces N atomically)', async () => {
     const supabase = makeSupabase({
-      rpcResults: { reserve_pronunciation_training_assessment: { error: 'DAILY_LIMIT_REACHED', sessionId: 's1' } },
+      rpcResults: { reserve_pronunciation_training_assessment: { error: 'DAILY_LIMIT_REACHED', sessionId: 's1', dailyCompleted: 3 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith());
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('start', { body: { attemptId: '22222222-2222-2222-2222-222222222222' } }), res);
@@ -446,7 +435,7 @@ describe('start — reserve the daily official submission', () => {
     expect(mockIssueAzureSpeechToken).not.toHaveBeenCalled();
   });
 
-  it('8) a concurrent request holding the slot gets ASSESSMENT_IN_PROGRESS (409)', async () => {
+  it('8) a concurrent request holding the active slot gets ASSESSMENT_IN_PROGRESS (409)', async () => {
     const supabase = makeSupabase({
       rpcResults: { reserve_pronunciation_training_assessment: { error: 'ASSESSMENT_IN_PROGRESS', sessionId: 's1' } },
     });
@@ -514,18 +503,20 @@ function validResultBody(overrides: Record<string, unknown> = {}) {
 }
 
 describe('complete — server-side recording duration re-validation (60s default plan)', () => {
-  it('5) accepts a recording at/under the plan limit and marks the session completed', async () => {
+  it('5) accepts a recording at/under the plan limit, marks completed, and reports the updated daily count', async () => {
     const supabase = makeSupabase({
-      rpcResults: { complete_pronunciation_training_assessment: { action: 'completed' } },
+      rpcResults: { complete_pronunciation_training_assessment: { action: 'completed', dailyCompleted: 2 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ maxRecordingSeconds: 60 }));
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ maxRecordingSeconds: 60, evaluationsLimit: 3 }));
 
     const res = makeRes();
     await handler(makeReq('complete', { body: validResultBody({ audioDurationSeconds: 60 }), headers: { authorization: 'Bearer t', 'content-length': '500' } }), res);
 
     expect(res._status()).toBe(200);
     expect((res._body() as any).status).toBe('completed');
+    expect((res._body() as any).dailyCompleted).toBe(2);
+    expect((res._body() as any).dailyLimit).toBe(3);
   });
 
   it('blocks a recording over the plan limit (>60s) and releases the slot via fail RPC, never calling complete', async () => {
@@ -544,7 +535,7 @@ describe('complete — server-side recording duration re-validation (60s default
 
   it('never applies the duration cap when the plan reports unlimited recording', async () => {
     const supabase = makeSupabase({
-      rpcResults: { complete_pronunciation_training_assessment: { action: 'completed' } },
+      rpcResults: { complete_pronunciation_training_assessment: { action: 'completed', dailyCompleted: 1 } },
     });
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ maxRecordingUnlimited: true }));
@@ -584,7 +575,7 @@ describe('complete — server-side recording duration re-validation (60s default
 
 // ─── fail ───────────────────────────────────────────────────────────────────
 
-describe('fail — releases the slot without consuming the daily evaluation', () => {
+describe('fail — releases the slot without consuming a daily analysis', () => {
   it('rejects an unrecognized error code', async () => {
     const supabase = makeSupabase();
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
@@ -613,12 +604,6 @@ describe('fail — releases the slot without consuming the daily evaluation', ()
 // ─── unauthenticated ──────────────────────────────────────────────────────────
 
 describe('unauthenticated requests never reach any RPC', () => {
-  // requireAuth is fully mocked here (as in every other gateway test in this
-  // repo) — a bare mock resolving null does not itself write res.status the
-  // way the real implementation does, so these assert on the absence of the
-  // downstream side effect (AI call / entitlement lookup) rather than a
-  // specific status code, matching the established convention in
-  // pronunciation-generate-text-gateway.test.ts and pronunciation-token-gateway.test.ts.
   it('generate-text', async () => {
     mockRequireAuth.mockResolvedValue(null);
     await handler(makeReq('generate-text'), makeRes());
@@ -642,7 +627,6 @@ describe('unauthenticated requests never reach any RPC', () => {
   it('fail', async () => {
     mockRequireAuth.mockResolvedValue(null);
     await handler(makeReq('fail', { body: { sessionId: '1', attemptId: '2', code: 'AZURE_NO_MATCH' } }), makeRes());
-    // requireAuth itself is the only thing that should have been consulted.
     expect(mockRequireAuth).toHaveBeenCalledTimes(1);
   });
 });

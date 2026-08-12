@@ -49,11 +49,19 @@ function makeSupabase() {
       // no existing session by default, so every test below still exercises
       // the AI-generation path unless it overrides this explicitly.
       if (table === 'pronunciation_training_sessions') {
-        return {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
+        // Two shapes now: the active-row lookup (…neq('status','completed')
+        // .maybeSingle()) and the completed-count head query (awaited directly).
+        // Default: no active row and zero completed → the AI-generation path.
+        const chain: any = {
+          select: vi.fn(() => chain),
+          eq: vi.fn(() => chain),
+          neq: vi.fn(() => chain),
+          order: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
           maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+          then: (resolve: (v: unknown) => unknown) => resolve({ data: null, count: 0, error: null }),
         };
+        return chain;
       }
       // english_learning_memory (current CEFR level lookup)
       return {

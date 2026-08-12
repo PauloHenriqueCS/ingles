@@ -220,37 +220,70 @@ async function handleGenerateText(req: any, res: any) {
   if (!await applyRateLimit(res, userId, 'pronunciation-training-generate-text')) return;
 
   const practiceDate = getTodaySP();
+  // `forceNew` is the user's "Gerar outro texto" intent (start a new round). The
+  // effective daily limit is the plan capability, resolved server-side — a new
+  // round is authorized purely by the dynamic count vs. that limit below, never
+  // by the request body. Any plan (not only unlimited) can start another round
+  // while under its configured N.
+  const forceNew = Boolean((req.body ?? {}).forceNew);
+  const evals = entitlements.pronunciation.evaluations;
+  const dailyLimit = evals.limit;
+  const dailyUnlimited = evals.unlimited;
 
-  const { data: existing, error: existingError } = await supabase
-    .from('pronunciation_training_sessions')
-    .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds')
-    .eq('user_id', userId)
-    .eq('practice_date', practiceDate)
-    .maybeSingle();
-  if (existingError) {
+  // At most ONE active (non-completed) row per user/day exists (partial unique
+  // index uq_pts_active_per_day); completed rounds accumulate. Fetch the active
+  // row (if any) and count today's completed rounds — the real per-day counter.
+  const [activeRes, completedRes] = await Promise.all([
+    supabase
+      .from('pronunciation_training_sessions')
+      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds')
+      .eq('user_id', userId).eq('practice_date', practiceDate).neq('status', 'completed')
+      .maybeSingle(),
+    supabase
+      .from('pronunciation_training_sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId).eq('practice_date', practiceDate).eq('status', 'completed'),
+  ]);
+  if (activeRes.error || completedRes.error) {
     safeLog('pronunciation-training/generate-text', 'existing_lookup_error', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar o texto de hoje. Tente novamente.');
   }
+  const activeRow = activeRes.data as TrainingSessionRow | null;
+  const dailyCompleted = completedRes.count ?? 0;
+  const dailyMeta = { dailyCompleted, dailyLimit, dailyUnlimited };
 
-  // Unlimited-plan "new round" reset — the ONLY case where an already-
-  // 'completed' session for today is not simply returned as-is. `forceNew`
-  // is a client-supplied UX hint (the user clicked "Gerar outro texto"); the
-  // actual authorization is `entitlements.pronunciation.evaluations.unlimited`,
-  // resolved server-side above and never trusted from the request body — a
-  // limited-plan account sending forceNew:true still gets the existing
-  // completed row back unchanged, exactly like today. See migration
-  // 20260724020000_pronunciation_training_unlimited_daily_reset.
-  const { forceNew } = (req.body ?? {}) as { forceNew?: unknown };
-  const existingRow = existing as TrainingSessionRow | null;
-  const wantsNewRound = Boolean(forceNew) && entitlements.pronunciation.evaluations.unlimited && existingRow?.status === 'completed';
-
-  if (existingRow && !wantsNewRound) {
-    safeLog('pronunciation-training/generate-text', 'returned_existing', 200);
-    return res.status(200).json(buildGenerateTextResponse(existingRow));
+  // A pending round (text not yet analyzed, in progress, or a retryable
+  // failure): reloading always returns it — never generates a new text while a
+  // round is pending. Preserves the "reload returns the same in-progress text".
+  if (activeRow) {
+    safeLog('pronunciation-training/generate-text', 'returned_active', 200);
+    return res.status(200).json({ ...buildGenerateTextResponse(activeRow), ...dailyMeta });
   }
 
-  if (!existingRow && !dailyPronunciationTrainingAllowedByPlan(entitlements)) {
-    return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday);
+  // No active row. If the user already finished at least one round today and is
+  // NOT explicitly starting a new one, return the latest completed round (the
+  // "concluído" state) with no generation — preserves reload-after-finishing.
+  if (dailyCompleted > 0 && !forceNew) {
+    const { data: latestCompleted, error: latestErr } = await supabase
+      .from('pronunciation_training_sessions')
+      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds')
+      .eq('user_id', userId).eq('practice_date', practiceDate).eq('status', 'completed')
+      .order('completed_at', { ascending: false }).limit(1).maybeSingle();
+    if (latestErr || !latestCompleted) {
+      safeLog('pronunciation-training/generate-text', 'latest_completed_lookup_error', 500);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar o texto de hoje. Tente novamente.');
+    }
+    safeLog('pronunciation-training/generate-text', 'returned_completed', 200);
+    return res.status(200).json({ ...buildGenerateTextResponse(latestCompleted as TrainingSessionRow), ...dailyMeta });
+  }
+
+  // Need to create a new round (first text of the day, or an explicit new
+  // round). Dynamic quota gate — the effective limit is the plan capability,
+  // never a hardcoded number; unlimited plans are never blocked. (Also covers a
+  // 0/day or disabled plan, subsuming the old enabled-and->=1 pre-check.)
+  if (!dailyUnlimited && dailyCompleted >= dailyLimit) {
+    safeLog('pronunciation-training/generate-text', 'daily_limit_reached', 403);
+    return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted, dailyMeta);
   }
 
   let userLevel = 'A2';
@@ -301,7 +334,8 @@ async function handleGenerateText(req: any, res: any) {
     // here — never two sessions for the same user+day, even under a real
     // race between two simultaneous requests.
     const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
-      p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text, p_force_new: wantsNewRound,
+      p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
+      p_start_new_round: forceNew, p_effective_limit: dailyLimit, p_unlimited: dailyUnlimited,
     });
     if (createError) {
       safeLog('pronunciation-training/generate-text', 'persist_rpc_error', 500);
@@ -309,6 +343,14 @@ async function handleGenerateText(req: any, res: any) {
     }
     const result = (created ?? {}) as Record<string, unknown>;
     if (result.error) {
+      // A concurrent request may have reached the limit between our pre-check
+      // and this call — the RPC re-checks atomically and is authoritative.
+      if (result.error === 'DAILY_LIMIT_REACHED') {
+        safeLog('pronunciation-training/generate-text', 'daily_limit_reached_rpc', 403);
+        return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted, {
+          dailyCompleted: (result.dailyCompleted as number) ?? dailyCompleted, dailyLimit, dailyUnlimited,
+        });
+      }
       safeLog('pronunciation-training/generate-text', 'persist_rejected', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
@@ -318,6 +360,9 @@ async function handleGenerateText(req: any, res: any) {
       text: result.text,
       level: result.level,
       status: result.status,
+      dailyCompleted: (result.dailyCompleted as number) ?? dailyCompleted,
+      dailyLimit,
+      dailyUnlimited,
       ...(result.result ? { result: result.result } : {}),
     });
   } catch (err) {
@@ -545,14 +590,19 @@ async function handleTrainingStart(req: any, res: any) {
   if (!await applyRateLimit(res, userId, 'pronunciation-training-start')) return;
 
   const practiceDate = getTodaySP();
+  // The effective daily limit + unlimited flag come from the already-resolved
+  // plan entitlement; the RPC enforces N atomically (no number hardcoded in SQL
+  // or here). Unlimited plans pass null-limit and are never blocked by count.
   const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_training_assessment', {
     p_practice_date: practiceDate, p_azure_region: azureRegion, p_attempt_id: attemptId,
+    p_effective_limit: entitlements.pronunciation.evaluations.limit,
+    p_unlimited: entitlements.pronunciation.evaluations.unlimited,
   });
   if (rpcError) {
     safeLog('pronunciation-training/start', 'reserve_rpc_error', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao reservar a avaliação.');
   }
-  const reserved = (reserveData ?? {}) as { error?: string; sessionId?: string; referenceText?: string };
+  const reserved = (reserveData ?? {}) as { error?: string; sessionId?: string; referenceText?: string; dailyCompleted?: number };
   if (reserved.error) {
     const status = TRAINING_RESERVE_ERROR_STATUS[reserved.error] ?? 500;
     const message = reserved.error === 'DAILY_LIMIT_REACHED'
@@ -609,6 +659,9 @@ async function handleTrainingStart(req: any, res: any) {
   return res.status(200).json({
     sessionId, attemptId, token: tokenResult.token, region: tokenResult.region,
     language: audioDefaults.defaultLocale, referenceText,
+    dailyCompleted: reserved.dailyCompleted,
+    dailyLimit: entitlements.pronunciation.evaluations.limit,
+    dailyUnlimited: entitlements.pronunciation.evaluations.unlimited,
   });
 }
 
@@ -692,7 +745,12 @@ async function handleTrainingComplete(req: any, res: any) {
   }
 
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(200).json({ sessionId, status: 'completed', result });
+  return res.status(200).json({
+    sessionId, status: 'completed', result,
+    dailyCompleted: (rpc.dailyCompleted as number | undefined),
+    dailyLimit: entitlements.pronunciation.evaluations.limit,
+    dailyUnlimited: entitlements.pronunciation.evaluations.unlimited,
+  });
 }
 
 // ─── POST /api/pronunciation-training/fail ────────────────────────────────────

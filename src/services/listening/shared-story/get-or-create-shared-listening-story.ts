@@ -153,7 +153,14 @@ export async function getOrCreateSharedListeningStory(
   const levelGroup = levelGroupForCefr(cefrLevel);
   const practiceDate = resolveListeningActivityDate();
 
+  // User-aware acquire: returns the next shared story this user has NOT opened
+  // yet for today's level group (cache reuse across users), or allocates a new
+  // slot to generate only when none is available — enabling multiple distinct
+  // stories per level/day so a plan's configured N is actually reachable. The
+  // daily limit itself stays enforced by checkListeningCanStart (the handler),
+  // consistent with every other daily counter — not duplicated in SQL.
   const { data, error } = await serviceClient.rpc('acquire_or_get_listening_shared_story', {
+    p_user_id: userId,
     p_level_group: levelGroup,
     p_target_level: cefrLevel,
     p_practice_date: practiceDate,
