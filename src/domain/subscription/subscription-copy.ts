@@ -77,6 +77,19 @@ export const SUBSCRIPTION_MESSAGES = {
   restoringLabel: 'Restaurando...',
   restoreNoneFoundNote: 'Nenhuma compra encontrada para restaurar.',
 
+  // pending plan change (Google Play DEFERRED downgrade) — the current plan
+  // stays active; the scheduled plan is shown as "Próximo plano", never
+  // re-offered, and NEVER presented as a cancellation.
+  nextPlanBadge: 'Próximo plano',
+  planScheduledLabel: 'Mudança agendada',
+  pendingChangeScheduledNote: (planName: string, date: string) => `Mudança para ${planName} agendada para ${date}.`,
+  pendingChangeGenericNote: (planName: string) => `Seu plano muda para ${planName} na próxima renovação. Você mantém o plano atual até lá.`,
+
+  // not_renewing — won't auto-renew, no known pending plan (the honest fallback
+  // when the store reports "won't renew" without naming a target). Access
+  // continues until the period end; never claims a cancellation.
+  notRenewingNote: 'Sua assinatura não será renovada automaticamente. Você mantém o acesso ao plano atual até:',
+
   // Reconciliation — shown when the backend and the store disagree and the
   // screen is silently re-syncing (see resolve-subscription-ui-state.ts).
   // Deliberately neutral: never claims a plan, a charge, or a trial.

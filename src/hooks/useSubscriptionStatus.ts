@@ -21,9 +21,13 @@ export interface UseSubscriptionStatusResult {
 
 interface SubscriptionStatusResponse {
   status: SubscriptionScreenState['status'];
+  subscriptionState?: SubscriptionScreenState['subscriptionState'];
   accessType: SubscriptionScreenState['accessType'];
   planCode: string | null;
   planName: string | null;
+  pendingPlanCode?: string | null;
+  pendingPlanName?: string | null;
+  effectiveChangeAt?: string | null;
   trialEndsAt: string | null;
   trialDaysRemaining: number | null;
   subscriptionExpiresAt: string | null;
@@ -34,11 +38,15 @@ interface SubscriptionStatusResponse {
 function toScreenState(data: SubscriptionStatusResponse): SubscriptionScreenState {
   return {
     status: data.status,
+    subscriptionState: data.subscriptionState,
     accessType: data.accessType,
     trialEndsAt: data.trialEndsAt,
     trialDaysRemaining: data.trialDaysRemaining,
     currentPlanCode: data.planCode,
     currentPlanName: data.planName,
+    pendingPlanCode: data.pendingPlanCode ?? null,
+    pendingPlanName: data.pendingPlanName ?? null,
+    effectiveChangeAt: data.effectiveChangeAt ?? null,
     // No payment provider integrated yet — never inferred client-side.
     subscriptionProvider: null,
     subscriptionExpiresAt: data.subscriptionExpiresAt,

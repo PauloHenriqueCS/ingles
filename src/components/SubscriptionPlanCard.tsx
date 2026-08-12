@@ -35,27 +35,35 @@ function ctaLabelFor(plan: CommercialPlanDisplay, action: PlanCardAction): strin
       return SUBSCRIPTION_MESSAGES.changeToPlanCta(plan.name);
     case 'subscribe':
       return plan.code === 'essential' ? SUBSCRIPTION_MESSAGES.subscribeEssential : SUBSCRIPTION_MESSAGES.subscribePlus;
+    case 'next':
+      // A change already scheduled — locked, never a live CTA.
+      return SUBSCRIPTION_MESSAGES.planScheduledLabel;
   }
 }
 
 export default function SubscriptionPlanCard({ plan, recommended, action, onCta, priceLabel, ctaLoading, ctaDisabled }: Props) {
   const benefits = buildPlanBenefitLines(plan, import.meta.env.DEV);
   const isCurrent = action === 'current';
-  // 'current' takes precedence over 'recommended' for the top badge.
+  // 'next' = the plan a DEFERRED change is already scheduled to — badge only,
+  // never re-offered as a purchase/change.
+  const isNext = action === 'next';
+  // 'current'/'next' take precedence over 'recommended' for the top badge.
   const badge = isCurrent
     ? { text: SUBSCRIPTION_MESSAGES.currentPlanBadge, className: 'bg-emerald-600' }
-    : recommended
-      ? { text: SUBSCRIPTION_MESSAGES.recommendedBadge, className: 'bg-blue-600' }
-      : null;
+    : isNext
+      ? { text: SUBSCRIPTION_MESSAGES.nextPlanBadge, className: 'bg-amber-600' }
+      : recommended
+        ? { text: SUBSCRIPTION_MESSAGES.recommendedBadge, className: 'bg-blue-600' }
+        : null;
   const loadingLabel = action === 'upgrade' || action === 'downgrade'
     ? SUBSCRIPTION_MESSAGES.planChangeProcessingLabel
     : SUBSCRIPTION_MESSAGES.purchasingLabel;
-  const disabled = isCurrent || ctaDisabled || ctaLoading;
+  const disabled = isCurrent || isNext || ctaDisabled || ctaLoading;
 
   return (
     <div
       className={`relative bg-slate-800 border rounded-2xl p-5 flex flex-col gap-4 ${
-        isCurrent ? 'border-emerald-600/70 ring-1 ring-emerald-600/30' : recommended ? 'border-blue-600 ring-1 ring-blue-600/40' : 'border-slate-700'
+        isCurrent ? 'border-emerald-600/70 ring-1 ring-emerald-600/30' : isNext ? 'border-amber-600/60 ring-1 ring-amber-600/25' : recommended ? 'border-blue-600 ring-1 ring-blue-600/40' : 'border-slate-700'
       }`}
       data-testid={`plan-card-${plan.code}`}
       data-action={action}
@@ -94,7 +102,7 @@ export default function SubscriptionPlanCard({ plan, recommended, action, onCta,
           disabled={disabled}
           aria-disabled={disabled}
           className={`w-full px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed ${
-            isCurrent
+            isCurrent || isNext
               ? 'bg-slate-700 text-slate-300 disabled:opacity-100'
               : 'bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-60'
           }`}

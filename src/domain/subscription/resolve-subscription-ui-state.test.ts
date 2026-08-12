@@ -147,23 +147,64 @@ describe('resolveSubscriptionUiState — 18 required subscription scenarios', ()
     expect(r.needsReconciliation).toBe(false);
   });
 
-  // 9. pending upgrade (store reports both entitlements mid-change)
-  it('[9] pending change: store owns BOTH → subscriptionState "pending_change", higher plan (Plus) is current', () => {
-    const r = resolveSubscriptionUiState(COMMERCIAL_ESSENTIAL, store({ activeEntitlementIds: OWNS_BOTH }));
-    expect(r.storeOwnership).toBe('both');
-    expect(r.subscriptionState).toBe('pending_change');
-    // Union treats the higher entitlement as owned → Plus current, Essencial downgrade.
+  // 9. pending DOWNGRADE (the reported bug): backend authoritative — Plus stays
+  //    current, Essencial is the scheduled "next" plan; NEVER "cancelada",
+  //    never re-offered as "Mudar para Essencial".
+  it('[9] pending_downgrade: Plus "current", Essencial "next" (locked), effective date exposed, downgrade never re-offered', () => {
+    const b = backend({
+      status: 'active',
+      subscriptionState: 'pending_downgrade',
+      accessType: 'commercial',
+      currentPlanCode: 'plus',
+      currentPlanName: 'Plus',
+      pendingPlanCode: 'essencial',
+      pendingPlanName: 'Essencial',
+      effectiveChangeAt: '2999-01-15T00:00:00Z',
+    });
+    const r = resolveSubscriptionUiState(b, store({ activeEntitlementIds: OWNS_PLUS }));
+    expect(r.subscriptionState).toBe('pending_downgrade');
+    expect(r.currentPlan).toBe('plus');
+    expect(r.pendingPlan).toBe('essential');
+    expect(r.effectiveChangeAt).toBe('2999-01-15T00:00:00Z');
     expect(r.plusCardAction).toBe('current');
-    expect(r.essentialCardAction).toBe('downgrade');
+    expect(r.essentialCardAction).toBe('next'); // <- not 'downgrade', not 'subscribe'
+    expect(r.availableActions).not.toContain('downgrade_to_essential');
+    expect(r.availableActions).not.toContain('subscribe_essential');
   });
 
-  // 10. pending downgrade (deferred: user stays on Plus until renewal)
-  it('[10] deferred downgrade: still Plus until renewal → active, Plus current, Essencial still offered as downgrade', () => {
-    const r = resolveSubscriptionUiState(COMMERCIAL_PLUS, store({ activeEntitlementIds: OWNS_PLUS }));
-    expect(r.subscriptionState).toBe('active');
+  // 10. pending UPGRADE (rare — upgrades are immediate, so short-lived)
+  it('[10] pending_upgrade: Essencial "current", Plus "next" (locked)', () => {
+    const b = backend({
+      status: 'active',
+      subscriptionState: 'pending_upgrade',
+      accessType: 'commercial',
+      currentPlanCode: 'essencial',
+      currentPlanName: 'Essencial',
+      pendingPlanCode: 'plus',
+      pendingPlanName: 'Plus',
+      effectiveChangeAt: '2999-01-15T00:00:00Z',
+    });
+    const r = resolveSubscriptionUiState(b, store({ activeEntitlementIds: OWNS_ESSENTIAL }));
+    expect(r.subscriptionState).toBe('pending_upgrade');
+    expect(r.essentialCardAction).toBe('current');
+    expect(r.plusCardAction).toBe('next');
+  });
+
+  // 10b. not_renewing (honest fallback: won't renew, no known pending plan)
+  it('[10b] not_renewing: Plus stays "current", never claims a cancellation, other plan still switchable', () => {
+    const b = backend({
+      status: 'active',
+      subscriptionState: 'not_renewing',
+      accessType: 'commercial',
+      currentPlanCode: 'plus',
+      currentPlanName: 'Plus',
+      subscriptionExpiresAt: '2999-01-10T00:00:00Z',
+    });
+    const r = resolveSubscriptionUiState(b, store({ activeEntitlementIds: OWNS_PLUS }));
+    expect(r.subscriptionState).toBe('not_renewing');
+    expect(r.pendingPlan).toBeNull();
     expect(r.plusCardAction).toBe('current');
     expect(r.essentialCardAction).toBe('downgrade');
-    expect(r.availableActions).toEqual(['downgrade_to_essential']);
   });
 
   // 11. product already owned → never re-subscribe

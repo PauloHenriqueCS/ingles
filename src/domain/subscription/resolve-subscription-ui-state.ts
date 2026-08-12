@@ -45,9 +45,12 @@ export type SubscriptionUiState =
   | 'trial'
   | 'active'
   | 'cancelled_active'
-  | 'pending_change'
+  | 'pending_downgrade'
+  | 'pending_upgrade'
+  | 'not_renewing'
   | 'expired'
-  | 'internal';
+  | 'internal'
+  | 'billing_issue';
 
 export type SubscriptionUiAction =
   | 'subscribe_essential'
@@ -88,6 +91,13 @@ export interface ResolvedSubscriptionUiState {
    *  the current subscription's store product id for an upgrade/downgrade
    *  replacement even while the backend is momentarily stale. */
   currentPlan: 'essential' | 'plus' | null;
+  /** The plan scheduled to take effect at the next renewal (backend
+   *  pending_downgrade/pending_upgrade), or null. Its card shows "Próximo
+   *  plano" and never re-offers the already-requested change. */
+  pendingPlan: 'essential' | 'plus' | null;
+  /** ISO timestamp the pending change takes effect, for the "agendada para
+   *  DD/MM" copy. Null when there is no scheduled change. */
+  effectiveChangeAt: string | null;
   /** Per-card resolved CTA, folding in ownership from BOTH authorities, so a
    *  plan the store already owns is 'current' (disabled), never 'subscribe'. */
   essentialCardAction: PlanCardAction;
@@ -135,6 +145,50 @@ function cardAction(card: CommercialPlan, owned: CommercialPlan | null): PlanCar
   return PLAN_RANK[card] > PLAN_RANK[owned] ? 'upgrade' : 'downgrade';
 }
 
+/** As cardAction, but the plan a change is already SCHEDULED to becomes 'next'
+ *  (locked, never re-offered) — so a pending downgrade never shows "Mudar para
+ *  Essencial" again. */
+function cardActionWithPending(
+  card: CommercialPlan,
+  owned: CommercialPlan | null,
+  pendingPlan: CommercialPlan | null,
+): PlanCardAction {
+  if (pendingPlan && card === pendingPlan) return 'next';
+  return cardAction(card, owned);
+}
+
+/** DB plan code (essencial/plus, Portuguese) → client display code. */
+function dbCodeToDisplay(code: string | null): CommercialPlan | null {
+  if (code === 'essencial') return 'essential';
+  if (code === 'plus') return 'plus';
+  return null;
+}
+
+/** The backend owns the commercial lifecycle; prefer its richer
+ *  subscriptionState, falling back to legacy `status` for older responses / DEV
+ *  mocks that don't set it. */
+function uiStateFromBackend(backend: SubscriptionScreenState): SubscriptionUiState {
+  switch (backend.subscriptionState) {
+    case 'pending_downgrade': return 'pending_downgrade';
+    case 'pending_upgrade': return 'pending_upgrade';
+    case 'not_renewing': return 'not_renewing';
+    case 'cancelled_active': return 'cancelled_active';
+    case 'billing_issue': return 'billing_issue';
+    case 'trialing': return 'trial';
+    case 'expired': return 'expired';
+    case 'active': return 'active';
+    case 'internal': return 'internal';
+    default:
+      switch (backend.status) {
+        case 'trialing': return 'trial';
+        case 'canceled': return 'cancelled_active';
+        case 'expired': return 'expired';
+        case 'billing_issue': return 'billing_issue';
+        default: return 'active';
+      }
+  }
+}
+
 function accessPlanFor(
   backend: SubscriptionScreenState,
   backendPlan: CommercialPlan | null,
@@ -167,6 +221,12 @@ export function resolveSubscriptionUiState(
 
   const accessPlan = accessPlanFor(backend, backendPlan);
 
+  // A backend-scheduled plan change (from the PRODUCT_CHANGE webhook). Only
+  // trusted when the backend itself is in a pending state — never inferred from
+  // the store (which can't see a Google Play DEFERRED change).
+  const pendingPlan = dbCodeToDisplay(backend.pendingPlanCode ?? null);
+  const effectiveChangeAt = pendingPlan ? backend.effectiveChangeAt ?? null : null;
+
   // The store proves ownership of a commercial plan the backend has not yet
   // reflected. Only ever fires when the store knows MORE (owns a commercial
   // plan the backend doesn't currently name) — never to revoke access.
@@ -177,43 +237,30 @@ export function resolveSubscriptionUiState(
     backendPlan !== storePlan;
 
   // ---- subscriptionState -------------------------------------------------
+  // The backend owns the commercial lifecycle (pending / cancelled / not
+  // renewing); the store only drives the trial-divergence reconciliation above.
   let subscriptionState: SubscriptionUiState;
   if (reconciling) {
     subscriptionState = 'reconciling';
   } else if (backend.accessType === 'internal') {
     subscriptionState = 'internal';
-  } else if (storeOwnership === 'both') {
-    // Two commercial entitlements active at once — a plan change the store is
-    // still settling (e.g. an immediate upgrade before the old one drops).
-    subscriptionState = 'pending_change';
   } else {
-    switch (backend.status) {
-      case 'trialing':
-        subscriptionState = 'trial';
-        break;
-      case 'canceled':
-        subscriptionState = 'cancelled_active';
-        break;
-      case 'expired':
-        subscriptionState = 'expired';
-        break;
-      // 'active' and 'billing_issue' both still grant access.
-      default:
-        subscriptionState = 'active';
-        break;
-    }
+    subscriptionState = uiStateFromBackend(backend);
   }
 
   // ---- per-card CTAs -----------------------------------------------------
-  const essentialCardAction = cardAction('essential', owned);
-  const plusCardAction = cardAction('plus', owned);
+  const essentialCardAction = cardActionWithPending('essential', owned, pendingPlan);
+  const plusCardAction = cardActionWithPending('plus', owned, pendingPlan);
 
   // ---- availableActions (contract/telemetry view of the same decision) ---
   const availableActions: SubscriptionUiAction[] = [];
-  if (reconciling) {
+  if (reconciling || backend.accessType === 'internal') {
     availableActions.push('none');
-  } else if (backend.accessType === 'internal') {
-    availableActions.push('none');
+  } else if (pendingPlan) {
+    // A change is already scheduled — never offer another purchase/change;
+    // only store management (if the store provides a URL).
+    if (store.managementUrl || backend.canManageSubscription) availableActions.push('manage');
+    if (availableActions.length === 0) availableActions.push('none');
   } else {
     if (!owned) {
       availableActions.push('subscribe_essential', 'subscribe_plus');
@@ -234,6 +281,8 @@ export function resolveSubscriptionUiState(
     availableActions,
     needsReconciliation,
     currentPlan: owned,
+    pendingPlan,
+    effectiveChangeAt,
     essentialCardAction,
     plusCardAction,
     cardsDisabled: reconciling,

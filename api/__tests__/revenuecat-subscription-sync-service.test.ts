@@ -541,15 +541,26 @@ describe('reconcileSubscriptionStateFromRest — state, not transaction', () => 
     expect(inserts).toHaveLength(0);
   });
 
-  it('a graceful cancellation (unsubscribe_detected_at) sets cancelled_at but keeps status active until ends_at', async () => {
+  it('unsubscribe_detected_at only flips auto_renew (never cancelled_at) — REST cannot tell a real cancel from a deferred downgrade', async () => {
     const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
     await reconcileSubscriptionStateFromRest(
       restState({ unsubscribeDetectedAtMs: Date.parse('2026-08-15T00:00:00Z') }),
       { supabase: client, now: NOW },
     );
+    expect(inserts[0].status).toBe('active'); // access continues until ends_at
+    expect(inserts[0].auto_renew).toBe(false); // won't auto-renew as-is
+    // cancelled_at/pending_plan_id are owned by the CANCELLATION/PRODUCT_CHANGE
+    // webhooks, never inferred from a REST unsubscribe flag (that was the
+    // "Assinatura cancelada" bug for a pending downgrade).
+    expect(inserts[0].cancelled_at).toBeUndefined();
+    expect(inserts[0].pending_plan_id).toBeUndefined();
+  });
+
+  it('a normally-renewing subscription reconciles with auto_renew true', async () => {
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    await reconcileSubscriptionStateFromRest(restState({ unsubscribeDetectedAtMs: null }), { supabase: client, now: NOW });
     expect(inserts[0].status).toBe('active');
-    expect(inserts[0].cancelled_at).toBe('2026-08-15T00:00:00.000Z');
-    expect(inserts[0].cancel_reason).toBe('revenuecat_unsubscribe_detected');
+    expect(inserts[0].auto_renew).toBe(true);
   });
 
   it('an already-expired subscription (expires_date in the past) reconciles as expired', async () => {
@@ -560,5 +571,83 @@ describe('reconcileSubscriptionStateFromRest — state, not transaction', () => 
     );
     expect(outcome).toEqual({ ok: true, action: 'reconciled_expired' });
     expect(inserts[0].status).toBe('expired');
+  });
+});
+
+// ── PRODUCT_CHANGE → pending plan (the deferred-downgrade model) ─────────────
+// (PLUS_PLAN_ID / PLUS_PRODUCT already declared above for the reconcile tests.)
+const ESSENCIAL_PRODUCT = 'orodim.subscription.essential.monthly';
+
+/** Mock that resolves BOTH plan-id-by-product (`.or().maybeSingle()`) and
+ *  price-by-id (`.eq('id',...).maybeSingle()`), so PRODUCT_CHANGE can compare
+ *  tiers. Essencial=3490, Plus=5990. */
+function makeProductChangeMock() {
+  const upsertCalls: Array<{ row: Record<string, unknown> }> = [];
+  const planIdFor = (filter: string) => (filter.includes('plus') ? PLUS_PLAN_ID : ESSENCIAL_PLAN_ID);
+  const priceFor = (id: string) => (id === PLUS_PLAN_ID ? 5990 : 3490);
+  return {
+    client: {
+      from: (table: string) => {
+        if (table === 'plans') {
+          return {
+            select: () => ({
+              or: (filter: string) => ({ maybeSingle: () => Promise.resolve({ data: { id: planIdFor(filter) }, error: null }) }),
+              eq: (_col: string, id: string) => ({ maybeSingle: () => Promise.resolve({ data: { monthly_price_cents: priceFor(id) }, error: null }) }),
+            }),
+          };
+        }
+        if (table === 'user_plan_assignments') {
+          return { upsert: (row: Record<string, unknown>) => { upsertCalls.push({ row }); return Promise.resolve({ data: null, error: null }); } };
+        }
+        throw new Error(`unexpected table ${table}`);
+      },
+    } as any,
+    upsertCalls,
+  };
+}
+
+describe('syncSubscriptionFromEvent — PRODUCT_CHANGE pending plan', () => {
+  it('deferred DOWNGRADE (Plus→Essencial): current row stays Plus + schedules the pending Essencial at period end, never cancelled', async () => {
+    const { client, upsertCalls } = makeProductChangeMock();
+    await syncSubscriptionFromEvent(
+      baseEvent({
+        type: 'PRODUCT_CHANGE',
+        productId: PLUS_PRODUCT,
+        newProductId: ESSENCIAL_PRODUCT,
+        expirationAtMs: Date.parse('2026-09-01T00:00:00Z'),
+      }),
+      { supabase: client },
+    );
+    const row = upsertCalls[0].row;
+    expect(row.plan_id).toBe(PLUS_PLAN_ID);        // current plan unchanged
+    expect(row.status).toBe('active');
+    expect(row.pending_plan_id).toBe(ESSENCIAL_PLAN_ID);
+    expect(row.pending_effective_at).toBe('2026-09-01T00:00:00.000Z'); // current period end
+    expect(row.auto_renew).toBe(false);
+    expect(row.cancelled_at).toBeUndefined();      // never a cancellation
+  });
+
+  it('immediate UPGRADE (Essencial→Plus): no pending change lingers on the old row', async () => {
+    const { client, upsertCalls } = makeProductChangeMock();
+    await syncSubscriptionFromEvent(
+      baseEvent({ type: 'PRODUCT_CHANGE', productId: ESSENCIAL_PRODUCT, newProductId: PLUS_PRODUCT }),
+      { supabase: client },
+    );
+    const row = upsertCalls[0].row;
+    expect(row.pending_plan_id).toBeNull();
+    expect(row.pending_effective_at).toBeNull();
+    expect(row.auto_renew).toBe(true);
+  });
+
+  it('a RENEWAL of the target clears any pending change (downgrade has effected)', async () => {
+    const { client, upsertCalls } = makeProductChangeMock();
+    await syncSubscriptionFromEvent(
+      baseEvent({ type: 'RENEWAL', productId: ESSENCIAL_PRODUCT }),
+      { supabase: client },
+    );
+    const row = upsertCalls[0].row;
+    expect(row.plan_id).toBe(ESSENCIAL_PLAN_ID);
+    expect(row.pending_plan_id).toBeNull();
+    expect(row.auto_renew).toBe(true);
   });
 });

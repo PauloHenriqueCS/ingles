@@ -192,6 +192,9 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
           purchasedAtMs: num(rawEvent.purchased_at_ms),
           expirationAtMs: num(rawEvent.expiration_at_ms),
           originalTransactionId: str(rawEvent.original_transaction_id),
+          // PRODUCT_CHANGE only — the plan the subscription is scheduled to
+          // change to (Google Play DEFERRED downgrade). Absent on other events.
+          newProductId: str(rawEvent.new_product_id),
           transferredTo: strArray(rawEvent.transferred_to),
         };
         const outcome = await syncSubscriptionFromEvent(lifecycleEvent, { supabase });

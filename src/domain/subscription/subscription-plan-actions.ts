@@ -15,8 +15,12 @@ import type { CommercialPlanCode, SubscriptionScreenState } from './subscription
  *                   'commercial' until ends_at — see subscription-status-service).
  *   - 'upgrade'   — a higher-tier plan than the current one.
  *   - 'downgrade' — a lower-tier plan than the current one.
+ *   - 'next'      — this plan is a SCHEDULED change already requested (a Google
+ *                   Play DEFERRED downgrade). Badge "Próximo plano", no CTA —
+ *                   the change is pending, never re-offered. Only the unified
+ *                   selector (resolve-subscription-ui-state) produces this.
  */
-export type PlanCardAction = 'subscribe' | 'current' | 'upgrade' | 'downgrade';
+export type PlanCardAction = 'subscribe' | 'current' | 'upgrade' | 'downgrade' | 'next';
 
 /** Tier ordering by price — essential (R$34,90) < plus (R$59,90). Higher rank
  *  than the current plan is an upgrade, lower is a downgrade. */

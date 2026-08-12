@@ -98,8 +98,26 @@ export interface RevenueCatLifecycleEvent {
   purchasedAtMs: number | null;
   expirationAtMs: number | null;
   originalTransactionId: string | null;
+  /** PRODUCT_CHANGE only — the store product id the subscription is scheduled
+   *  to change TO. For a Google Play DEFERRED downgrade this is the ONLY
+   *  authoritative signal for the pending plan (the REST subscriber snapshot
+   *  never names it — see reconcileSubscriptionStateFromRest). Null otherwise. */
+  newProductId?: string | null;
   /** TRANSFER only — the app_user_id(s) the subscription moved to. */
   transferredTo?: string[] | null;
+}
+
+/** Monthly price of a plan, used ONLY to tell an upgrade from a downgrade on a
+ *  PRODUCT_CHANGE (higher price = upgrade = immediate; lower = downgrade =
+ *  DEFERRED). Never a display value. Null when the plan can't be read. */
+async function planPriceCents(supabase: SupabaseClient, planId: string): Promise<number | null> {
+  const { data, error } = await supabase
+    .from('plans')
+    .select('monthly_price_cents')
+    .eq('id', planId)
+    .maybeSingle();
+  if (error) throw new Error(`plans price lookup failed: ${error.message}`);
+  return (data as { monthly_price_cents: number } | null)?.monthly_price_cents ?? null;
 }
 
 export type SyncOutcome =
@@ -165,15 +183,56 @@ export async function syncSubscriptionFromEvent(
     reason: `RevenueCat ${event.type} (${event.environment})`,
     idempotency_key: `revenuecat:subscription:${event.originalTransactionId}`,
   };
-  // Only these two event types ever touch cancellation fields — every
-  // other event type omits the keys entirely, so the UPSERT's generated
-  // DO UPDATE SET never clobbers an existing cancelled_at/cancel_reason.
+
+  // Cancellation + pending-change fields are set per event type; every key NOT
+  // added here is omitted from the UPSERT, so its existing value is preserved
+  // (Postgres DO UPDATE SET only touches columns present in the payload).
   if (event.type === 'CANCELLATION') {
+    // A real cancellation of THIS product — access continues until ends_at,
+    // but it won't renew. Never touches pending_plan (a cancellation is not a
+    // plan change). cancelled_at stays owned solely by this event type.
     row.cancelled_at = new Date().toISOString();
     row.cancel_reason = 'revenuecat_cancellation';
+    row.auto_renew = false;
   } else if (event.type === 'UNCANCELLATION') {
     row.cancelled_at = null;
     row.cancel_reason = null;
+    row.auto_renew = true;
+    row.pending_plan_id = null;
+    row.pending_effective_at = null;
+  } else if (event.type === 'PRODUCT_CHANGE' && event.newProductId) {
+    // The authoritative pending-plan signal. Distinguish an immediate upgrade
+    // from a DEFERRED downgrade by price: a higher-priced target is an
+    // immediate upgrade (activated by the target product's own
+    // INITIAL_PURCHASE/RENEWAL — nothing pending on THIS row); a lower-priced
+    // target is a Google Play DEFERRED downgrade that takes effect only at the
+    // current product's period end.
+    const newPlanId = await resolvePlanIdByStoreProductId(supabase, event.newProductId);
+    const [currentPrice, newPrice] = newPlanId
+      ? await Promise.all([planPriceCents(supabase, planId), planPriceCents(supabase, newPlanId)])
+      : [null, null];
+    const isDeferredDowngrade =
+      newPlanId != null && newPlanId !== planId && currentPrice != null && newPrice != null && newPrice < currentPrice;
+    if (isDeferredDowngrade) {
+      row.pending_plan_id = newPlanId;
+      row.pending_effective_at = endsAtIso; // current product's period end
+      row.auto_renew = false; // the current product will not renew as-is
+    } else {
+      // Immediate upgrade (or an unresolvable/no-op change) — no pending change
+      // lingers on this row.
+      row.pending_plan_id = null;
+      row.pending_effective_at = null;
+      row.auto_renew = true;
+    }
+  } else if (!isExpiredNow) {
+    // A fresh active period of this product (INITIAL_PURCHASE, RENEWAL,
+    // SUBSCRIPTION_EXTENDED, REFUND_REVERSED, TRANSFER): it is renewing and
+    // carries no scheduled change of its own. When a DEFERRED downgrade
+    // effects, this is the target product's RENEWAL — clearing pending here is
+    // exactly what returns the user to a clean 'active' on the new plan.
+    row.auto_renew = true;
+    row.pending_plan_id = null;
+    row.pending_effective_at = null;
   }
 
   const { error: upsertError } = await supabase
@@ -256,11 +315,19 @@ export async function reconcileSubscriptionStateFromRest(
   const startsAtIso = state.purchaseDateMs ? new Date(state.purchaseDateMs).toISOString() : now.toISOString();
   const endsAtIso = state.expiresDateMs ? new Date(state.expiresDateMs).toISOString() : null;
   const isExpiredNow = endsAtIso !== null && new Date(endsAtIso).getTime() <= now.getTime();
-  const cancelledAtIso = state.unsubscribeDetectedAtMs ? new Date(state.unsubscribeDetectedAtMs).toISOString() : null;
+  // unsubscribe_detected_at means "will not auto-renew as-is" — TRUE for BOTH a
+  // real cancellation AND a Google Play DEFERRED downgrade, and the REST
+  // snapshot cannot tell them apart or name a pending plan. So it drives ONLY
+  // auto_renew here — never cancelled_at (that would render a pending downgrade
+  // as "Assinatura cancelada", the bug) and never pending_plan (a guess). The
+  // pending plan is set solely by the PRODUCT_CHANGE webhook, and a genuine
+  // cancellation solely by the CANCELLATION webhook.
+  const willNotRenew = state.unsubscribeDetectedAtMs != null;
 
   // Only the observed current-state columns — never user_id/plan_id (the state
   // identity + match key) and never idempotency_key (leave whatever created the
-  // row, e.g. the webhook's original_transaction_id key, untouched).
+  // row, e.g. the webhook's original_transaction_id key, untouched). Also never
+  // cancelled_at/pending_plan_id here — those belong to the webhook events.
   const stateFields: Record<string, unknown> = {
     version_policy: 'follow_current_published',
     origin: 'subscription',
@@ -270,10 +337,7 @@ export async function reconcileSubscriptionStateFromRest(
     // store_transaction_id kept only as a human-readable "last observed
     // transaction" reference — never an identity key.
     reason: `RevenueCat REST reconcile (${state.environment})${state.storeTransactionId ? ` [last_txn=${state.storeTransactionId}]` : ''}`,
-    // Graceful cancellation: keep access until ends_at, only flag cancelled_at —
-    // exactly the webhook CANCELLATION contract.
-    cancelled_at: cancelledAtIso,
-    cancel_reason: cancelledAtIso ? 'revenuecat_unsubscribe_detected' : null,
+    auto_renew: !willNotRenew,
   };
 
   // Reconcile the SAME (user, plan) subscription row the effective-plan RPC

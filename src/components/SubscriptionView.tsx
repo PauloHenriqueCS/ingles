@@ -7,6 +7,7 @@ import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
+import { formatDatePtBr } from '../domain/subscription/subscription-formatting';
 import { type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
 import { resolveSubscriptionUiState, type StoreSubscriptionSnapshot } from '../domain/subscription/resolve-subscription-ui-state';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
@@ -72,6 +73,12 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   };
   const resolved = state ? resolveSubscriptionUiState(state, storeSnapshot, reconciling) : null;
   const isReconciling = resolved?.subscriptionState === 'reconciling';
+  // A DEFERRED plan change is scheduled (current plan stays active). Never a
+  // cancellation — see resolve-subscription-ui-state.ts / status service.
+  const isPendingChange = resolved?.subscriptionState === 'pending_downgrade' || resolved?.subscriptionState === 'pending_upgrade';
+  // Won't auto-renew, no known pending plan — the honest fallback.
+  const isNotRenewing = resolved?.subscriptionState === 'not_renewing';
+  const pendingChangeAtLabel = resolved?.effectiveChangeAt ? formatDatePtBr(resolved.effectiveChangeAt) : null;
   const StatusIcon = isReconciling ? RefreshCw : vm ? STATUS_ICON[vm.status] : Clock;
 
   // Auto-reconcile ONCE when the store proves the user owns a commercial plan
@@ -114,9 +121,10 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   // Unified subscribe / upgrade / downgrade. A first purchase ('subscribe')
   // calls purchase(); an upgrade/downgrade calls changePlan() with the CURRENT
   // plan's store product id so the store REPLACES the subscription (never a
-  // parallel one). 'current' never reaches here (its CTA is disabled).
+  // parallel one). 'current' (own plan) and 'next' (already-scheduled pending
+  // change) never reach here — their CTAs are disabled.
   async function handlePlanCta(plan: CommercialPlanDisplay, action: PlanCardAction) {
-    if (action === 'current' || isReconciling) return;
+    if (action === 'current' || action === 'next' || isReconciling) return;
     if (!nativePurchase.supported) {
       // FASE 7: the website never sells subscriptions — no checkout, no
       // store call, just an honest explanation.
@@ -287,12 +295,34 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           {!isReconciling && vm.status === 'active' && (
             <div className="space-y-1">
               <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
-              <p className="text-xs text-emerald-400 font-medium">{vm.activeStatusLabel}</p>
-              {/* Omitted entirely (never an "unavailable" placeholder) when
-                  there is no real renewal date — always the case for the
-                  internal unlimited plan, which has no renewal at all. */}
-              {vm.renewalLabel && (
-                <p className="text-xs text-slate-500">Próxima renovação: {vm.renewalLabel}</p>
+
+              {isPendingChange ? (
+                // A scheduled DEFERRED change — current plan stays active; show
+                // the scheduled plan + date, never "Assinatura ativa"/renovação
+                // (it won't renew as the current plan) and never "cancelada".
+                <p className="text-xs text-amber-400 font-medium">
+                  {state?.pendingPlanName && pendingChangeAtLabel
+                    ? SUBSCRIPTION_MESSAGES.pendingChangeScheduledNote(state.pendingPlanName, pendingChangeAtLabel)
+                    : state?.pendingPlanName
+                      ? SUBSCRIPTION_MESSAGES.pendingChangeGenericNote(state.pendingPlanName)
+                      : null}
+                </p>
+              ) : isNotRenewing ? (
+                // Won't auto-renew, no known target plan — honest, never a
+                // cancellation claim.
+                <p className="text-xs text-slate-400">
+                  {SUBSCRIPTION_MESSAGES.notRenewingNote}{vm.renewalLabel ? ` ${vm.renewalLabel}` : ''}
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs text-emerald-400 font-medium">{vm.activeStatusLabel}</p>
+                  {/* Omitted entirely (never an "unavailable" placeholder) when
+                      there is no real renewal date — always the case for the
+                      internal unlimited plan, which has no renewal at all. */}
+                  {vm.renewalLabel && (
+                    <p className="text-xs text-slate-500">Próxima renovação: {vm.renewalLabel}</p>
+                  )}
+                </>
               )}
             </div>
           )}
