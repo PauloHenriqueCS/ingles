@@ -294,25 +294,22 @@ export async function getCurrentUserPlanEntitlements(
     // its slot the instant it is taken, before the AI call even starts.
     supabase.from('writing_review_reservations').select('id', { count: 'exact', head: true }).eq('user_id', userId).in('status', ['reserved', 'completed']).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
-    // História = the live shared-story listening flow. A story is "consumed"
-    // the moment the user opens it (cached OR generated) — attachUserProgress
-    // upserts one user_listening_shared_progress row per (user, shared_story),
-    // in BOTH the reuse and the just-generated branches
-    // (src/services/listening/shared-story/get-or-create-shared-listening-story.ts).
-    // That per-user-open ledger — NOT the AI generation — is the user's quota
-    // usage, so cache reuse still counts. We count the user's progress rows
-    // whose shared story belongs to TODAY (SP), via the FK to
-    // listening_shared_stories.practice_date (already an SP date).
+    // História = the live shared-story listening flow. Quota is consumed only
+    // when the user actually PRACTICES a story (completed=true), NEVER when it
+    // is merely prepared/opened. Preparing inserts a user_listening_shared_progress
+    // row with completed=false (PENDING) — that must not count. Practicing flips
+    // it to completed=true atomically (see consume_listening_pending_story). So
+    // we count only completed=true rows whose shared story belongs to TODAY (SP),
+    // via the FK to listening_shared_stories.practice_date (already an SP date).
     //
-    // Previously this counted user_listening_assignments where episode_id IS
-    // NOT NULL — but the shared-story flow writes assignments with episode_id
-    // NULL (and the episode_id path is unused in prod), so consumed was always
-    // 0 and História never decremented. The unique (user, shared_story) upsert
-    // also means re-opening the same story is not double-counted.
+    // Historical safety: every pre-existing row is completed=false (the flag was
+    // never written before this change), so this correctly treats past "opens"
+    // as NOT consumed — no retroactive quota is charged to anyone.
     supabase
       .from('user_listening_shared_progress')
       .select('id, listening_shared_stories!inner(practice_date)', { count: 'exact', head: true })
       .eq('user_id', userId)
+      .eq('completed', true)
       .eq('listening_shared_stories.practice_date', todaySpDate),
     (() => {
       let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId);

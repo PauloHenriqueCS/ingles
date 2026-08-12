@@ -992,6 +992,72 @@ async function handleGroupRetry(req: any, res: any) {
 
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
+// ─── POST /api/listening/story/practice-start ────────────────────────────────
+// Consumes exactly ONE story from the daily quota at the first unambiguous
+// practice action ("Começar a ouvir"). Preparing/opening/refreshing never
+// consumes — only this call flips the user's PENDING row to completed=true,
+// atomically and with an entitlement re-check (consume_listening_pending_story).
+// Idempotent: practicing the same story twice consumes once.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function handleStoryPracticeStart(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, 1024)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { supabase, userId } = auth;
+
+  // Feature on/off only — NOT canStart. The numeric limit is re-checked
+  // atomically inside the RPC; a story already prepared must be practiceable.
+  const enabledDenial = await checkListeningEnabled(userId);
+  if (enabledDenial) return jsonError(res, enabledDenial.status, enabledDenial.code, enabledDenial.message);
+
+  const sharedStoryId = typeof req.body?.sharedStoryId === 'string' ? req.body.sharedStoryId : '';
+  if (!UUID_RE.test(sharedStoryId)) {
+    return jsonError(res, 400, 'INVALID_STORY_ID', 'Identificador de história inválido.');
+  }
+
+  let entitlements;
+  try {
+    entitlements = await getCurrentUserPlanEntitlements(userId);
+  } catch {
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível verificar seu plano. Tente novamente.');
+  }
+  const stories = entitlements.listening.stories;
+  const practiceDate = resolveListeningActivityDate();
+
+  const { data, error } = await supabase.rpc('consume_listening_pending_story', {
+    p_shared_story_id: sharedStoryId,
+    p_practice_date: practiceDate,
+    p_effective_limit: stories.limit,
+    p_unlimited: stories.unlimited,
+  });
+  if (error) {
+    safeLog('listening/story/practice-start', 'rpc_error', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível registrar a prática. Tente novamente.');
+  }
+  const rpc = (data ?? {}) as { error?: string; action?: string; consumed?: number };
+  if (rpc.error === 'UNAUTHORIZED') return jsonError(res, 401, 'UNAUTHORIZED', 'Faça login para continuar.');
+  if (rpc.error === 'NOT_PREPARED') return jsonError(res, 409, 'NOT_PREPARED', 'Prepare a história antes de iniciar a prática.');
+  if (rpc.error === 'DAILY_LIMIT_REACHED') {
+    return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.listeningStoriesExhausted, { consumed: rpc.consumed });
+  }
+  if (rpc.error) {
+    safeLog('listening/story/practice-start', 'rpc_rejected', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível registrar a prática. Tente novamente.');
+  }
+
+  const consumed = rpc.consumed ?? 0;
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).json({
+    action: rpc.action,
+    consumed,
+    limit: stories.limit,
+    unlimited: stories.unlimited,
+    remaining: stories.unlimited ? null : Math.max((stories.limit ?? 0) - consumed, 0),
+  });
+}
+
 export default async function handler(req: any, res: any) {
   const slug = resolveSlug(req, '/api/listening');
   switch (slug) {
@@ -1008,6 +1074,7 @@ export default async function handler(req: any, res: any) {
     case 'assignment-result':          return handleAssignmentResult(req, res);
     case 'generate':                   return handleListeningGenerate(req, res);
     case 'story/complete':             return handleStoryComplete(req, res);
+    case 'story/practice-start':       return handleStoryPracticeStart(req, res);
     case 'story/generate':             return handleStoryGenerate(req, res);
     case 'story/verify':               return handleStoryVerify(req, res);
     case 'on-demand/start':            return handleOnDemandStart(req, res);

@@ -64,36 +64,71 @@ interface RpcRow {
   audio_mime_type: string | null; error_message: string | null;
 }
 
-function makeMockDb(rpcRow: RpcRow) {
+// opts.pending drives the new step-0 pending-recovery path (findPendingStory):
+// null → no pending (the default; runs the acquire/generate flow as before).
+function makeMockDb(
+  rpcRow: RpcRow,
+  opts: { pending?: { storyId: string; status: 'ready' | 'generating' | 'failed'; lockExpiresAt?: string | null } | null } = {},
+) {
   const rpcMock = vi.fn(async () => ({ data: [rpcRow], error: null }));
   const updateSharedStoryMock = vi.fn(async () => ({ error: null }));
   const upsertProgressMock = vi.fn(async () => ({ error: null }));
+  const deleteProgressMock = vi.fn(() => ({ error: null }));
   const uploadMock = vi.fn(async () => ({ error: null }));
   const downloadMock = vi.fn(async (path: string) => ({
     data: { arrayBuffer: async () => new TextEncoder().encode(`downloaded:${path}`).buffer },
     error: null,
   }));
 
+  const pending = opts.pending ?? null;
+  const pendingProgressRow = pending ? { shared_story_id: pending.storyId } : null;
+  const ready = pending?.status === 'ready';
+  const pendingStoryRow = pending
+    ? {
+        id: pending.storyId,
+        status: pending.status,
+        content: ready
+          ? { title: 'Pending Story', level: 'A1', summary: 'Pending summary.', parts: [
+              { id: 1, text: 'PP1.', question: { prompt: 'PQ1?', options: ['a', 'b', 'c', 'd', 'e'], correctOptionIndex: 0, explanationPt: 'PE1' } },
+              { id: 2, text: 'PP2.', question: { prompt: 'PQ2?', options: ['a', 'b', 'c', 'd', 'e'], correctOptionIndex: 1, explanationPt: 'PE2' } },
+            ] }
+          : null,
+        part1_audio_path: ready ? 'shared/A1_A2/pending/part1.mp3' : null,
+        part2_audio_path: ready ? 'shared/A1_A2/pending/part2.mp3' : null,
+        audio_mime_type: ready ? 'audio/mpeg' : null,
+        lock_expires_at: pending?.lockExpiresAt ?? null,
+      }
+    : null;
+
   const client = {
     rpc: rpcMock,
     from: (table: string) => {
       if (table === 'listening_shared_stories') {
-        return { update: (patch: Record<string, unknown>) => ({ eq: (_col: string, val: unknown) => updateSharedStoryMock(patch, val) }) };
+        return {
+          update: (patch: Record<string, unknown>) => ({ eq: (_col: string, val: unknown) => updateSharedStoryMock(patch, val) }),
+          // findPendingStory step 2: fetch the pending progress row's story.
+          select: () => { const c: any = { eq: () => c, maybeSingle: async () => ({ data: pendingStoryRow, error: null }) }; return c; },
+        };
       }
       if (table === 'user_listening_shared_progress') {
-        return { upsert: (row: Record<string, unknown>, opts: Record<string, unknown>) => upsertProgressMock(row, opts) };
+        return {
+          // findPendingStory step 1: the user's completed=false row for today.
+          select: () => { const c: any = { eq: () => c, maybeSingle: async () => ({ data: pendingProgressRow, error: null }) }; return c; },
+          upsert: (row: Record<string, unknown>, o: Record<string, unknown>) => upsertProgressMock(row, o),
+          delete: () => { const c: any = { eq: () => c, then: (res: (v: unknown) => unknown) => { deleteProgressMock(); return res({ error: null }); } }; return c; },
+        };
       }
       throw new Error(`Unexpected table in mock: ${table}`);
     },
     storage: {
       from: (bucket: string) => ({
-        upload: (path: string, bytes: unknown, opts: unknown) => uploadMock(bucket, path, bytes, opts),
+        upload: (path: string, bytes: unknown, o: unknown) => uploadMock(bucket, path, bytes, o),
         download: (path: string) => downloadMock(path),
       }),
     },
   };
 
-  return { client: client as any, rpcMock, updateSharedStoryMock, upsertProgressMock, uploadMock, downloadMock };
+  return { client: client as any, rpcMock, updateSharedStoryMock, upsertProgressMock, deleteProgressMock, uploadMock, downloadMock };
 }
 
 function wonRow(overrides: Partial<RpcRow> = {}): RpcRow {
@@ -400,17 +435,17 @@ describe('getOrCreateSharedListeningStory — per-user progress (14)', () => {
     await getOrCreateSharedListeningStory('user-b', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
 
     expect(db.upsertProgressMock).toHaveBeenCalledWith(
-      { user_id: 'user-a', shared_story_id: 'story-1' },
+      { user_id: 'user-a', shared_story_id: 'story-1', activity_date: PRACTICE_DATE },
       expect.objectContaining({ onConflict: 'user_id,shared_story_id' }),
     );
     expect(db.upsertProgressMock).toHaveBeenCalledWith(
-      { user_id: 'user-b', shared_story_id: 'story-1' },
+      { user_id: 'user-b', shared_story_id: 'story-1', activity_date: PRACTICE_DATE },
       expect.objectContaining({ onConflict: 'user_id,shared_story_id' }),
     );
     expect(db.upsertProgressMock).toHaveBeenCalledTimes(2);
   });
 
-  it('the winner of a fresh generation also gets a progress row attached', async () => {
+  it('the winner of a fresh generation also gets a PENDING progress row (completed=false, tagged with activity_date)', async () => {
     vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
@@ -418,8 +453,75 @@ describe('getOrCreateSharedListeningStory — per-user progress (14)', () => {
     await getOrCreateSharedListeningStory('user-winner', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
 
     expect(db.upsertProgressMock).toHaveBeenCalledWith(
-      { user_id: 'user-winner', shared_story_id: 'story-1' },
+      { user_id: 'user-winner', shared_story_id: 'story-1', activity_date: PRACTICE_DATE },
       expect.objectContaining({ onConflict: 'user_id,shared_story_id' }),
     );
+    // Preparing never writes completed — that only happens on practice.
+    const [row] = db.upsertProgressMock.mock.calls[0];
+    expect(row).not.toHaveProperty('completed');
+  });
+});
+
+describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ consumed)', () => {
+  it('a READY pending story is returned as-is: same story, no acquire RPC, no generation, no new attach', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    // rpcRow would advance to a different story if it were ever called.
+    const db = makeMockDb(wonRow({ id: 'different-story' }), { pending: { storyId: 'pending-1', status: 'ready' } });
+
+    const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(result.title).toBe('Pending Story');
+    expect(result.sharedStoryId).toBe('pending-1');
+    expect(db.rpcMock).not.toHaveBeenCalled();          // never selects/advances a new story
+    expect(generateListeningStory).not.toHaveBeenCalled();
+    expect(db.upsertProgressMock).not.toHaveBeenCalled(); // the pending row already exists
+    expect(db.downloadMock).toHaveBeenCalledWith('shared/A1_A2/pending/part1.mp3');
+  });
+
+  it('a still-GENERATING pending (lock not expired) surfaces SharedStoryGeneratingError, never advances', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const db = makeMockDb(wonRow(), { pending: { storyId: 'pending-1', status: 'generating', lockExpiresAt: future } });
+
+    await expect(
+      getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET),
+    ).rejects.toBeInstanceOf(SharedStoryGeneratingError);
+    expect(db.rpcMock).not.toHaveBeenCalled();
+    expect(generateListeningStory).not.toHaveBeenCalled();
+  });
+
+  it('a FAILED pending is dropped, then a fresh story is prepared (falls through to acquire + generate)', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
+    const db = makeMockDb(wonRow({ id: 'fresh-1' }), { pending: { storyId: 'stale-1', status: 'failed' } });
+
+    const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(db.deleteProgressMock).toHaveBeenCalledTimes(1); // stale pending dropped
+    expect(db.rpcMock).toHaveBeenCalledTimes(1);            // fresh selection
+    expect(generateListeningStory).toHaveBeenCalledTimes(1);
+    expect(result.sharedStoryId).toBe('fresh-1');
+  });
+
+  it('an EXPIRED generating pending is treated as stale (dropped, fresh prepared)', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const db = makeMockDb(wonRow({ id: 'fresh-2' }), { pending: { storyId: 'stale-2', status: 'generating', lockExpiresAt: past } });
+
+    const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(db.deleteProgressMock).toHaveBeenCalledTimes(1);
+    expect(generateListeningStory).toHaveBeenCalledTimes(1);
+    expect(result.sharedStoryId).toBe('fresh-2');
+  });
+
+  it('a freshly prepared story exposes its sharedStoryId (needed to consume on practice)', async () => {
+    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    const db = makeMockDb(readyRow({ id: 'story-xyz' }));
+
+    const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    expect(result.sharedStoryId).toBe('story-xyz');
   });
 });

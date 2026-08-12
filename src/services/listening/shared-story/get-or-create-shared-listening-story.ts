@@ -95,14 +95,76 @@ async function markSharedStoryFailed(serviceClient: SupabaseClient, storyId: str
     .then(() => {}, () => {});
 }
 
-async function attachUserProgress(serviceClient: SupabaseClient, userId: string, sharedStoryId: string): Promise<void> {
+// Creates (or leaves untouched) the user's PENDING association to a story:
+// completed=false, tagged with the SP activity_date so "one pending per user per
+// day" is DB-enforced (uq_ulsp_one_pending_per_day). Idempotent per
+// (user, shared_story). NEVER sets completed — preparing does not consume quota.
+async function attachUserProgress(
+  serviceClient: SupabaseClient,
+  userId: string,
+  sharedStoryId: string,
+  activityDate: string,
+  levelGroup: ListeningLevelGroup,
+): Promise<void> {
   const { error } = await serviceClient
     .from('user_listening_shared_progress')
     .upsert(
-      { user_id: userId, shared_story_id: sharedStoryId },
+      { user_id: userId, shared_story_id: sharedStoryId, activity_date: activityDate },
       { onConflict: 'user_id,shared_story_id', ignoreDuplicates: true },
     );
-  if (error) throw new Error(`SHARED_STORY_PROGRESS_ATTACH_FAILED: ${error.message}`);
+  if (!error) return;
+  // A concurrent request already created a DIFFERENT pending for this user/day
+  // (uq_ulsp_one_pending_per_day). Don't create a second pending — signal the
+  // client to retry; the retry recovers the winning pending in step 0.
+  if (error.code === '23505' || /uq_ulsp_one_pending_per_day/.test(error.message ?? '')) {
+    throw new SharedStoryGeneratingError(levelGroup);
+  }
+  throw new Error(`SHARED_STORY_PROGRESS_ATTACH_FAILED: ${error.message}`);
+}
+
+// The user's PENDING (completed=false) story for a given SP day, if any. At most
+// one exists (uq_ulsp_one_pending_per_day). Returns the shared story row so the
+// caller can decide: 'ready' → recover it; 'generating' → still preparing;
+// 'failed'/expired → stale, drop the pending and prepare fresh.
+async function findPendingStory(
+  serviceClient: SupabaseClient,
+  userId: string,
+  practiceDate: string,
+): Promise<{
+  id: string; status: string; content: SharedStoryContent | null;
+  part1_audio_path: string | null; part2_audio_path: string | null;
+  audio_mime_type: string | null; lock_expires_at: string | null;
+} | null> {
+  const { data: pending, error: pErr } = await serviceClient
+    .from('user_listening_shared_progress')
+    .select('shared_story_id')
+    .eq('user_id', userId)
+    .eq('completed', false)
+    .eq('activity_date', practiceDate)
+    .maybeSingle();
+  if (pErr) throw new Error(`SHARED_STORY_PENDING_LOOKUP_FAILED: ${pErr.message}`);
+  if (!pending) return null;
+
+  const { data: story, error: sErr } = await serviceClient
+    .from('listening_shared_stories')
+    .select('id, status, content, part1_audio_path, part2_audio_path, audio_mime_type, lock_expires_at')
+    .eq('id', pending.shared_story_id as string)
+    .maybeSingle();
+  if (sErr) throw new Error(`SHARED_STORY_PENDING_STORY_LOOKUP_FAILED: ${sErr.message}`);
+  return (story as never) ?? null;
+}
+
+async function dropStalePending(serviceClient: SupabaseClient, userId: string, sharedStoryId: string): Promise<void> {
+  // Service-role only (there is no RLS DELETE policy for users). Removes a
+  // pending whose story failed/expired so the user can prepare a fresh one
+  // without hitting the one-pending-per-day unique index.
+  await serviceClient
+    .from('user_listening_shared_progress')
+    .delete()
+    .eq('user_id', userId)
+    .eq('shared_story_id', sharedStoryId)
+    .eq('completed', false)
+    .then(() => {}, () => {});
 }
 
 function reconstructFromContent(content: SharedStoryContent, audio: [string, string], mimeType: string, secret: string): ListeningStoryResult {
@@ -148,17 +210,50 @@ export async function getOrCreateSharedListeningStory(
   secret: string,
   storyPackage?: string | null,
   theme?: string | null,
-): Promise<ListeningStoryResult> {
+): Promise<ListeningStoryResult & { sharedStoryId: string }> {
   const cefrLevel = await resolveUserListeningLevel(serviceClient, userId);
   const levelGroup = levelGroupForCefr(cefrLevel);
   const practiceDate = resolveListeningActivityDate();
 
+  // ── Step 0: RECOVER a PENDING story ────────────────────────────────────────
+  // Preparing a story only creates a PENDING association (completed=false);
+  // while it exists, the user must ALWAYS get that same story back — leaving,
+  // refreshing, logging out, or switching devices must not swap it or advance
+  // the sequence. Because the pending lives in the DB (not local cache), this
+  // is device-independent. At most one pending per user/day (unique index).
+  const pending = await findPendingStory(serviceClient, userId, practiceDate);
+  if (pending) {
+    const lockExpired = pending.lock_expires_at
+      ? new Date(pending.lock_expires_at).getTime() < Date.now()
+      : false;
+    if (pending.status === 'ready' && pending.content && pending.part1_audio_path && pending.part2_audio_path) {
+      const [a1, a2] = await Promise.all([
+        downloadPartAudioBase64(serviceClient, pending.part1_audio_path),
+        downloadPartAudioBase64(serviceClient, pending.part2_audio_path),
+      ]);
+      const story = reconstructFromContent(pending.content, [a1, a2], pending.audio_mime_type ?? 'audio/mpeg', secret);
+      return { ...story, sharedStoryId: pending.id };
+    }
+    if (pending.status === 'generating' && !lockExpired) {
+      // Still being prepared (this or a concurrent request). Client retries.
+      throw new SharedStoryGeneratingError(levelGroup);
+    }
+    // 'failed', an expired 'generating', or a 'ready' row missing content:
+    // stale pending → drop it so a fresh story can be prepared without tripping
+    // the one-pending-per-day index. The user never practiced it, so no quota
+    // was consumed.
+    await dropStalePending(serviceClient, userId, pending.id);
+  }
+
+  // ── Prepare a NEW story ────────────────────────────────────────────────────
+  // Only reached when the user has no valid pending. The daily limit is gated
+  // by checkListeningCanStart in the handler BEFORE this runs — and a pending
+  // always implies "under limit" (preparing at the limit is blocked), so
+  // recovery above never needs the limit; only new preparation is gated.
+  //
   // User-aware acquire: returns the next shared story this user has NOT opened
   // yet for today's level group (cache reuse across users), or allocates a new
-  // slot to generate only when none is available — enabling multiple distinct
-  // stories per level/day so a plan's configured N is actually reachable. The
-  // daily limit itself stays enforced by checkListeningCanStart (the handler),
-  // consistent with every other daily counter — not duplicated in SQL.
+  // slot to generate only when none is available.
   const { data, error } = await serviceClient.rpc('acquire_or_get_listening_shared_story', {
     p_user_id: userId,
     p_level_group: levelGroup,
@@ -190,8 +285,8 @@ export async function getOrCreateSharedListeningStory(
     try {
       const story = await generateListeningStory(userId, serviceClient, openaiKey, azureKey, azureRegion, secret, storyPackage, theme);
       await persistSharedStory(serviceClient, result.id, levelGroup, story);
-      await attachUserProgress(serviceClient, userId, result.id);
-      return story;
+      await attachUserProgress(serviceClient, userId, result.id, practiceDate, levelGroup);
+      return { ...story, sharedStoryId: result.id };
     } catch (err) {
       await markSharedStoryFailed(serviceClient, result.id, err);
       throw err;
@@ -207,8 +302,8 @@ export async function getOrCreateSharedListeningStory(
       downloadPartAudioBase64(serviceClient, result.part2AudioPath),
     ]);
     const story = reconstructFromContent(result.content, [audio1, audio2], result.audioMimeType ?? 'audio/mpeg', secret);
-    await attachUserProgress(serviceClient, userId, result.id);
-    return story;
+    await attachUserProgress(serviceClient, userId, result.id, practiceDate, levelGroup);
+    return { ...story, sharedStoryId: result.id };
   }
 
   // status === 'generating', won === false: another request holds a live lock.
