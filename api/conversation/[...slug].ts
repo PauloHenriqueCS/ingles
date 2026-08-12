@@ -25,6 +25,7 @@ import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count'
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { settleConversationExtraCreditsDebit } from '../_entitlements/conversation-extra-credits-debit';
 import { listPublishedMinutePackages } from '../_entitlements/minute-packages-service';
+import { deriveMinuteBalance } from '../../src/domain/conversation/minute-balance';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import {
   authorizeTrialConversationSession,
@@ -1846,18 +1847,17 @@ async function handleMinutePackages(req: any, res: any) {
   const purchaseAvailable = !isTrial && entitlements.conversation.extraPurchaseEnabled === true;
 
   // Conversation minute balance — server-authoritative, so the packages screen
-  // never invents numbers. Splits plan-included remaining from purchased
-  // (extra) remaining. Unlimited (internal) plans report unlimited=true.
+  // never invents numbers. Derived from the SAME shared formula the conversation
+  // screen uses (deriveMinuteBalance), so the two screens can never diverge.
   const monthly = entitlements.conversation.monthlyTime;
-  const extraRemainingSeconds = entitlements.conversation.extraSecondsAvailable ?? 0;
-  const planIncludedRemainingSeconds = monthly.unlimited ? null : Math.max(0, monthly.limit - monthly.consumed);
+  const m = deriveMinuteBalance(monthly.limit, monthly.consumed, monthly.unlimited, entitlements.conversation.extraSecondsAvailable ?? 0);
   const balance = {
-    unlimited: monthly.unlimited,
+    unlimited: m.unlimited,
     monthlyLimitSeconds: monthly.limit,
     monthlyConsumedSeconds: monthly.consumed,
-    planIncludedRemainingSeconds,
-    extraRemainingSeconds,
-    totalRemainingSeconds: monthly.unlimited ? null : (planIncludedRemainingSeconds ?? 0) + extraRemainingSeconds,
+    planIncludedRemainingSeconds: m.unlimited ? null : m.planRemainingSeconds,
+    extraRemainingSeconds: m.extraRemainingSeconds,
+    totalRemainingSeconds: m.unlimited ? null : m.totalRemainingSeconds,
     period: monthly.period, // 'month' (commercial) | 'lifetime' (trial)
   };
 

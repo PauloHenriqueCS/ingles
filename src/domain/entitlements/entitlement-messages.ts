@@ -30,6 +30,7 @@ export const ENTITLEMENT_MESSAGES = {
     'Seus minutos deste mês acabaram. Você pode adicionar mais minutos para continuar praticando.',
   conversationRecordingStoppedByBalance:
     'A gravação foi encerrada porque seus minutos disponíveis chegaram ao fim.',
+  conversationNoMinutes: 'Sem minutos disponíveis',
 
   dailyLimitGeneric:
     'Você já usou todas as atividades disponíveis para hoje. Seu limite será renovado amanhã.',
