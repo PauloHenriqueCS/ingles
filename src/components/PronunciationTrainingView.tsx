@@ -410,6 +410,10 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
   const [blockedIsNoAccess, setBlockedIsNoAccess] = useState(false);
   const [sessionId, setSessionId]           = useState<string | null>(null);
   const [sessionStatus, setSessionStatus]   = useState<SessionStatus | null>(null);
+  // Authoritative count of analyses completed today (SP) on THIS surface,
+  // returned by the training endpoints — never the entitlements snapshot's
+  // pronunciation.evaluations.consumed (that counts the diary surface).
+  const [dailyCompleted, setDailyCompleted] = useState(0);
   const [generatedText, setGeneratedText]   = useState<string | null>(null);
   const [userLevel, setUserLevel]           = useState<string | null>(null);
   const [genError, setGenError]             = useState<string | null>(null);
@@ -531,6 +535,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
       setSessionStatus(json.status as SessionStatus);
       setGeneratedText(json.text as string);
       setUserLevel(json.level as string ?? null);
+      if (typeof json.dailyCompleted === 'number') setDailyCompleted(json.dailyCompleted);
 
       if (json.status === 'completed' && json.result) {
         const result = json.result as PronunciationNormalizedResult;
@@ -620,6 +625,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
         setAnalysis(state);
         if (state.phase === 'completed' && state.result) {
           setSessionStatus('completed');
+          if (typeof state.dailyCompleted === 'number') setDailyCompleted(state.dailyCompleted);
           const { aligned } = buildWordAlignment(generatedText ?? '', state.result.rawSegments);
           setWordResults(aligned);
           setWordCategories(new Map());
@@ -660,30 +666,25 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
 
   const isCompletedToday = sessionStatus === 'completed';
 
-  // Once a text exists for today there is, by default, never a second one —
-  // "Gerar outro texto" stays disabled for the rest of the day regardless of
-  // whether the evaluation itself has been submitted yet. The one exception:
-  // an unlimited-plan account that already finished today's round may start
-  // another — the backend independently re-verifies
-  // pronunciation.evaluations.unlimited before honoring this (never trusts
-  // this frontend flag alone).
-  const canStartAnotherRound = unlimitedTraining && isCompletedToday;
+  // Effective daily limit for the "Treinar pronúncia" surface comes straight
+  // from the plan capability (pronunciation.evaluations.limit / .unlimited) —
+  // never a hardcoded number. The backend (reserve RPC) enforces it atomically;
+  // this is only the display/enablement mirror. `dailyCompleted` is the real
+  // per-day count from the training endpoints (not the diary-surface snapshot).
+  const evalLimit = pronunciation?.evaluations.limit ?? 0;
+  const analysesRemaining = Math.max(evalLimit - dailyCompleted, 0);
+
+  // After finishing a round, the user may start another whenever they still
+  // have quota left (unlimited, or completed < configured limit). "Gerar outro
+  // texto" is otherwise disabled while a round is pending. The backend
+  // independently re-checks the limit — this flag is never trusted alone.
+  const canStartAnotherRound = isCompletedToday && (unlimitedTraining || dailyCompleted < evalLimit);
   const generateNewDisabled = sessionId !== null && !canStartAnotherRound;
 
-  // Daily analyses counter for the "Treinar pronúncia" surface. This surface
-  // structurally allows ONE completed audio analysis per São Paulo day
-  // (enforced server-side by reserve_pronunciation_training_assessment), or
-  // unlimited for accounts whose pronunciation entitlement is unlimited. This
-  // is deliberately NOT the per-plan pronunciation.evaluations number (that
-  // governs the diary pronunciation surface, a different feature). No hardcoded
-  // commercial limit: the only plan-derived input is the unlimited flag from
-  // the backend snapshot; "1/day" is this feature's fixed daily structure and
-  // "used" is simply whether today's analysis is already done. Shown only while
-  // today's evaluation isn't completed — the completed state has its own
-  // message (pronunciationTrainingDailyEvaluationCompleted) below.
+  // "2 análises restantes hoje" / "Ilimitado" — reuses the shared pattern.
   const analysesRemainingLabel = unlimitedTraining
     ? ENTITLEMENT_MESSAGES.unlimitedLabel
-    : formatDailyRemaining(isCompletedToday ? 0 : 1, 'análise', 'análises');
+    : formatDailyRemaining(analysesRemaining, 'análise', 'análises');
 
   const canSubmit =
     recorder.phase === 'done'    &&
@@ -847,15 +848,22 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
             )}
           </div>
 
-          {/* ── Daily evaluation already completed: saved result only, no re-record ── */}
+          {/* ── Round completed: saved result only, no re-record for this round ── */}
           {isCompletedToday && (
-            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4 flex items-center gap-3">
-              <CheckCircle className="w-5 h-5 text-green-400 shrink-0" aria-hidden="true" />
-              <p className="text-sm text-slate-200">
-                {canStartAnotherRound
-                  ? ENTITLEMENT_MESSAGES.pronunciationTrainingUnlimitedReadyForAnotherRound
-                  : ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted}
-              </p>
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4 flex items-start gap-3">
+              <CheckCircle className="w-5 h-5 text-green-400 shrink-0 mt-0.5" aria-hidden="true" />
+              <div>
+                <p className="text-sm text-slate-200">
+                  {unlimitedTraining
+                    ? ENTITLEMENT_MESSAGES.pronunciationTrainingUnlimitedReadyForAnotherRound
+                    : canStartAnotherRound
+                      ? ENTITLEMENT_MESSAGES.pronunciationTrainingRoundCompletedMoreAvailable
+                      : ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted}
+                </p>
+                {!unlimitedTraining && canStartAnotherRound && (
+                  <p className="text-xs text-slate-500 mt-1">{analysesRemainingLabel}</p>
+                )}
+              </div>
             </div>
           )}
 
