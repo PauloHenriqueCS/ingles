@@ -7,12 +7,12 @@ import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
-import { formatDatePtBr } from '../domain/subscription/subscription-formatting';
+import { formatDatePtBr, computeDaysRemaining, formatTrialDaysRemainingLabel } from '../domain/subscription/subscription-formatting';
 import { type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
-import { resolveSubscriptionUiState, type StoreSubscriptionSnapshot } from '../domain/subscription/resolve-subscription-ui-state';
+import { resolveSubscriptionUiState, resolvePurchaseMode, type StoreSubscriptionSnapshot, type SubscriptionUiState } from '../domain/subscription/resolve-subscription-ui-state';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
-import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, REVENUECAT_ENTITLEMENT_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
+import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
 
 interface Props {
@@ -23,13 +23,20 @@ interface Props {
   initialStatus?: SubscriptionAccessStatus;
 }
 
-const STATUS_ICON = {
-  trialing: Clock,
+/** Topo icon keyed by the UNIFIED resolved state — the whole header derives
+ *  from resolveSubscriptionUiState, never from a backend-only view-model. */
+const STATE_ICON: Record<SubscriptionUiState, typeof Clock> = {
+  reconciling: RefreshCw,
+  trial: Clock,
   active: CheckCircle2,
+  pending_downgrade: CheckCircle2,
+  pending_upgrade: CheckCircle2,
+  not_renewing: CheckCircle2,
+  internal: CheckCircle2,
+  cancelled_active: Ban,
   expired: AlertTriangle,
-  canceled: Ban,
   billing_issue: CreditCard,
-} as const;
+};
 
 const STATUS_SWITCHER_LABEL: Record<SubscriptionAccessStatus, string> = {
   trialing: 'Teste ativo',
@@ -72,14 +79,33 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
     managementUrl: nativePurchase.managementUrl,
   };
   const resolved = state ? resolveSubscriptionUiState(state, storeSnapshot, reconciling) : null;
-  const isReconciling = resolved?.subscriptionState === 'reconciling';
+  const uiState = resolved?.subscriptionState ?? null;
+  const isReconciling = uiState === 'reconciling';
   // A DEFERRED plan change is scheduled (current plan stays active). Never a
   // cancellation — see resolve-subscription-ui-state.ts / status service.
-  const isPendingChange = resolved?.subscriptionState === 'pending_downgrade' || resolved?.subscriptionState === 'pending_upgrade';
+  const isPendingChange = uiState === 'pending_downgrade' || uiState === 'pending_upgrade';
   // Won't auto-renew, no known pending plan — the honest fallback.
-  const isNotRenewing = resolved?.subscriptionState === 'not_renewing';
+  const isNotRenewing = uiState === 'not_renewing';
+  // active / pending / not_renewing all render a "Plano atual: X" header block.
+  const isCommercialActive = uiState === 'active' || isPendingChange || isNotRenewing;
+
+  // ── Topo derived ENTIRELY from `resolved` (single source, no vm.status). ──
+  const StatusIcon = uiState ? STATE_ICON[uiState] : Clock;
+  const currentPlanName = resolved?.currentPlanName ?? null;
+  const pendingPlanName = resolved?.pendingPlanName ?? null;
   const pendingChangeAtLabel = resolved?.effectiveChangeAt ? formatDatePtBr(resolved.effectiveChangeAt) : null;
-  const StatusIcon = isReconciling ? RefreshCw : vm ? STATUS_ICON[vm.status] : Clock;
+  const accessUntilLabel = resolved?.subscriptionExpiresAt ? formatDatePtBr(resolved.subscriptionExpiresAt) : null;
+  const trialDays = resolved ? (resolved.trialEndsAt ? computeDaysRemaining(resolved.trialEndsAt) : resolved.trialDaysRemaining ?? 0) : 0;
+  const trialDaysLabel = formatTrialDaysRemainingLabel(trialDays);
+  const trialEndsLabel = resolved?.trialEndsAt ? formatDatePtBr(resolved.trialEndsAt) : null;
+  const topoTitle =
+    uiState === 'reconciling' ? SUBSCRIPTION_MESSAGES.reconcilingTitle
+    : uiState === 'internal' ? SUBSCRIPTION_MESSAGES.internalTitle
+    : uiState === 'trial' ? SUBSCRIPTION_MESSAGES.trialingTitle
+    : uiState === 'expired' ? SUBSCRIPTION_MESSAGES.expiredTitle
+    : uiState === 'cancelled_active' ? SUBSCRIPTION_MESSAGES.canceledTitle
+    : uiState === 'billing_issue' ? SUBSCRIPTION_MESSAGES.billingIssueTitle
+    : (currentPlanName ?? '—'); // active / pending / not_renewing
 
   // Auto-reconcile ONCE when the store proves the user owns a commercial plan
   // the backend hasn't caught up to yet (e.g. backend still "trial" while the
@@ -118,11 +144,12 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const showManageSubscriptionButton = state != null
     && shouldShowManageSubscriptionButton(state.accessType, nativePurchase.supported, nativePurchase.managementUrl);
 
-  // Unified subscribe / upgrade / downgrade. A first purchase ('subscribe')
-  // calls purchase(); an upgrade/downgrade calls changePlan() with the CURRENT
-  // plan's store product id so the store REPLACES the subscription (never a
-  // parallel one). 'current' (own plan) and 'next' (already-scheduled pending
-  // change) never reach here — their CTAs are disabled.
+  // Subscribe / upgrade / downgrade. The mode is decided from the store's LIVE
+  // entitlements (resolvePurchaseMode), NOT a stale union currentPlan — so we
+  // only ever send a replacement (oldProductIdentifier) when the source plan is
+  // genuinely active in the store right now. Otherwise it's a plain purchase, so
+  // Google Play checkout actually opens (the audited invalid-replacement bug).
+  // 'current'/'next' never reach here — their CTAs are disabled.
   async function handlePlanCta(plan: CommercialPlanDisplay, action: PlanCardAction) {
     if (action === 'current' || action === 'next' || isReconciling) return;
     if (!nativePurchase.supported) {
@@ -133,12 +160,10 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
     }
     const targetDbCode = DISPLAY_CODE_TO_DB_PLAN_CODE[plan.code];
     const targetPackageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[targetDbCode];
+    const decision = resolvePurchaseMode(plan.code, nativePurchase.activeEntitlementIds);
 
-    // Click guard: never call the store for a product it already owns. Google
-    // Play's "Você já possui este produto" must not be how the user discovers
-    // their real state — if the store already owns the target, silently
-    // reconcile with the backend and reassure instead of purchasing again.
-    if (nativePurchase.activeEntitlementIds.includes(REVENUECAT_ENTITLEMENT_IDS[targetDbCode])) {
+    // Already owns the target — never re-call the store; reconcile + reassure.
+    if (decision.mode === 'blocked_owned_target') {
       setReconciling(true);
       try {
         await refetch({ sync: true });
@@ -153,23 +178,22 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
     }
 
     let done = false;
-    if (action === 'subscribe') {
+    if (decision.mode === 'new_purchase' || !decision.sourcePlan) {
+      // No commercial subscription genuinely active → plain purchase (NO
+      // oldProductIdentifier), so checkout opens even if the backend/union
+      // still thinks a now-expired plan is "current".
       done = await nativePurchase.purchase(targetPackageId);
     } else {
-      // upgrade | downgrade — resolve the CURRENT plan from the unified,
-      // store-aware state (not backend-only), so a replacement still works
-      // while the backend is momentarily stale. Android's replacement flow
-      // needs the current plan's store product id.
-      const currentCode = resolved?.currentPlan ?? null;
-      const currentPackageId = currentCode ? REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[currentCode]] : null;
-      const currentOffering = currentPackageId
-        ? nativePurchase.offerings.find((o) => o.packageId === currentPackageId)
-        : undefined;
-      if (!currentOffering) {
-        window.alert(SUBSCRIPTION_MESSAGES.planChangeUnavailableNote);
-        return;
+      const sourcePackageId = REVENUECAT_SUBSCRIPTION_PACKAGE_IDS[DISPLAY_CODE_TO_DB_PLAN_CODE[decision.sourcePlan]];
+      const sourceOffering = nativePurchase.offerings.find((o) => o.packageId === sourcePackageId);
+      if (!sourceOffering) {
+        // The genuinely-active source has no loaded offering (rare) — fall back
+        // to a plain purchase rather than send an unverifiable oldProductId.
+        done = await nativePurchase.purchase(targetPackageId);
+      } else {
+        const mode = decision.mode === 'upgrade_replacement' ? 'upgrade' : 'downgrade';
+        done = await nativePurchase.changePlan(targetPackageId, sourceOffering.productId, mode);
       }
-      done = await nativePurchase.changePlan(targetPackageId, currentOffering.productId, action);
     }
     if (done) {
       await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
@@ -269,80 +293,85 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
           </section>
         )}
 
+        {/* Status header — derived ENTIRELY from `resolved` (same source as the
+            cards below). Never trial-topo + commercial-card simultaneously. */}
         <section className="bg-slate-800 rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2">
             <AppIcon icon={StatusIcon} className={`w-5 h-5 text-blue-400 shrink-0 ${isReconciling ? 'animate-spin' : ''}`} />
-            <h2 className="text-base font-semibold text-slate-100">
-              {isReconciling ? SUBSCRIPTION_MESSAGES.reconcilingTitle : vm.headline}
-            </h2>
+            <h2 className="text-base font-semibold text-slate-100">{topoTitle}</h2>
           </div>
 
-          {isReconciling ? (
+          {uiState === 'reconciling' && (
             <p className="text-sm text-slate-400 leading-relaxed">{SUBSCRIPTION_MESSAGES.reconcilingSubtitle}</p>
-          ) : (
-            vm.subheadline && <p className="text-sm text-slate-400 leading-relaxed">{vm.subheadline}</p>
           )}
 
-          {!isReconciling && vm.status === 'trialing' && (
-            <div className="space-y-0.5">
-              <p className="text-sm text-slate-300">{vm.trialDaysRemainingLabel}</p>
-              {vm.trialEndsAtLabel && (
-                <p className="text-xs text-slate-500">Termina em {vm.trialEndsAtLabel}</p>
-              )}
+          {uiState === 'internal' && (
+            <div className="space-y-1">
+              <p className="text-xs text-emerald-400 font-medium">{SUBSCRIPTION_MESSAGES.internalStatusLabel}</p>
+              <p className="text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.internalComplementaryNote}</p>
             </div>
           )}
 
-          {!isReconciling && vm.status === 'active' && (
+          {uiState === 'trial' && (
+            <div className="space-y-0.5">
+              <p className="text-sm text-slate-300">{trialDaysLabel}</p>
+              {trialEndsLabel && <p className="text-xs text-slate-500">Termina em {trialEndsLabel}</p>}
+            </div>
+          )}
+
+          {uiState === 'expired' && (
+            <p className="text-sm text-slate-400 leading-relaxed">{SUBSCRIPTION_MESSAGES.expiredSubtitle}</p>
+          )}
+
+          {isCommercialActive && (
             <div className="space-y-1">
-              <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
+              <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{currentPlanName}</span></p>
 
               {isPendingChange ? (
                 // A scheduled DEFERRED change — current plan stays active; show
                 // the scheduled plan + date, never "Assinatura ativa"/renovação
-                // (it won't renew as the current plan) and never "cancelada".
+                // and never "cancelada".
                 <p className="text-xs text-amber-400 font-medium">
-                  {state?.pendingPlanName && pendingChangeAtLabel
-                    ? SUBSCRIPTION_MESSAGES.pendingChangeScheduledNote(state.pendingPlanName, pendingChangeAtLabel)
-                    : state?.pendingPlanName
-                      ? SUBSCRIPTION_MESSAGES.pendingChangeGenericNote(state.pendingPlanName)
+                  {pendingPlanName && pendingChangeAtLabel
+                    ? SUBSCRIPTION_MESSAGES.pendingChangeScheduledNote(pendingPlanName, pendingChangeAtLabel)
+                    : pendingPlanName
+                      ? SUBSCRIPTION_MESSAGES.pendingChangeGenericNote(pendingPlanName)
                       : null}
                 </p>
               ) : isNotRenewing ? (
-                // Won't auto-renew, no known target plan — honest, never a
-                // cancellation claim.
                 <p className="text-xs text-slate-400">
-                  {SUBSCRIPTION_MESSAGES.notRenewingNote}{vm.renewalLabel ? ` ${vm.renewalLabel}` : ''}
+                  {SUBSCRIPTION_MESSAGES.notRenewingNote}{accessUntilLabel ? ` ${accessUntilLabel}` : ''}
                 </p>
               ) : (
                 <>
-                  <p className="text-xs text-emerald-400 font-medium">{vm.activeStatusLabel}</p>
-                  {/* Omitted entirely (never an "unavailable" placeholder) when
-                      there is no real renewal date — always the case for the
-                      internal unlimited plan, which has no renewal at all. */}
-                  {vm.renewalLabel && (
-                    <p className="text-xs text-slate-500">Próxima renovação: {vm.renewalLabel}</p>
+                  <p className="text-xs text-emerald-400 font-medium">{SUBSCRIPTION_MESSAGES.activeStatusLabel}</p>
+                  {accessUntilLabel && (
+                    <p className="text-xs text-slate-500">Próxima renovação: {accessUntilLabel}</p>
                   )}
                 </>
               )}
             </div>
           )}
 
-          {!isReconciling && vm.status === 'canceled' && (
+          {uiState === 'cancelled_active' && (
             <div className="space-y-1">
-              {vm.canceledPlanName && (
-                <p className="text-sm text-slate-300">Plano anterior: <span className="font-medium text-slate-100">{vm.canceledPlanName}</span></p>
+              {currentPlanName && (
+                <p className="text-sm text-slate-300">Plano anterior: <span className="font-medium text-slate-100">{currentPlanName}</span></p>
               )}
-              <p className="text-xs text-slate-500">Acesso até: {vm.accessEndsAtLabel}</p>
+              <p className="text-xs text-slate-500">Acesso até: {accessUntilLabel ?? SUBSCRIPTION_MESSAGES.canceledAccessEndedNote}</p>
             </div>
           )}
 
-          {!isReconciling && vm.status === 'billing_issue' && (
+          {uiState === 'billing_issue' && (
             <div className="space-y-1">
-              {vm.currentPlanName && (
-                <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{vm.currentPlanName}</span></p>
+              {SUBSCRIPTION_MESSAGES.billingIssueSubtitle && (
+                <p className="text-sm text-slate-400 leading-relaxed">{SUBSCRIPTION_MESSAGES.billingIssueSubtitle}</p>
               )}
-              {vm.accessEndsAtLabel && (
-                <p className="text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.billingIssueAccessUntilNote} {vm.accessEndsAtLabel}</p>
+              {currentPlanName && (
+                <p className="text-sm text-slate-300">Plano atual: <span className="font-medium text-slate-100">{currentPlanName}</span></p>
+              )}
+              {accessUntilLabel && (
+                <p className="text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.billingIssueAccessUntilNote} {accessUntilLabel}</p>
               )}
             </div>
           )}
@@ -382,7 +411,7 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
 
         {/* Honest footnote moved BELOW the plans so no big text block pushes the
             cards down (redesign requirement #1/#10). */}
-        {!isReconciling && (vm.status === 'trialing' || vm.status === 'expired' || vm.status === 'canceled') && (
+        {(uiState === 'trial' || uiState === 'expired' || uiState === 'cancelled_active') && (
           <p className="text-xs text-slate-500 leading-relaxed px-1">{SUBSCRIPTION_MESSAGES.trialDataPreservedNote}</p>
         )}
 

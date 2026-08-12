@@ -91,6 +91,16 @@ export interface ResolvedSubscriptionUiState {
    *  the current subscription's store product id for an upgrade/downgrade
    *  replacement even while the backend is momentarily stale. */
   currentPlan: 'essential' | 'plus' | null;
+  /** Display name of the current plan (backend name, or the catalog name when
+   *  only the store knows the plan yet). Drives the TOPO — the whole screen
+   *  reads its "current plan" from here, never from a second resolver. */
+  currentPlanName: string | null;
+  /** Topo passthroughs so the status header derives from THIS resolution alone
+   *  (never from a backend-only view-model): */
+  pendingPlanName: string | null;
+  trialDaysRemaining: number | null;
+  trialEndsAt: string | null;
+  subscriptionExpiresAt: string | null;
   /** The plan scheduled to take effect at the next renewal (backend
    *  pending_downgrade/pending_upgrade), or null. Its card shows "Próximo
    *  plano" and never re-offers the already-requested change. */
@@ -108,6 +118,9 @@ export interface ResolvedSubscriptionUiState {
 
 type CommercialPlan = 'essential' | 'plus';
 const PLAN_RANK: Record<CommercialPlan, number> = { essential: 1, plus: 2 };
+/** Brand display names — matches subscription-plans.ts's COMMERCIAL_PLANS.name;
+ *  used only when the backend hasn't yet supplied a plan name (store-only). */
+const PLAN_DISPLAY_NAME: Record<CommercialPlan, string> = { essential: 'Essencial', plus: 'Plus' };
 
 /** Which commercial plan the store's active entitlements correspond to. Plus
  *  outranks Essencial when both are present ('both' ownership). Mirrors
@@ -126,6 +139,51 @@ function storeCommercialPlan(ownership: StoreOwnership): CommercialPlan | null {
   if (ownership === 'plus' || ownership === 'both') return 'plus';
   if (ownership === 'essential') return 'essential';
   return null;
+}
+
+/**
+ * How to buy `targetPlan`, decided ONLY from the store's LIVE active
+ * entitlements — never from the backend or a stale union `currentPlan`. This is
+ * what the audit found broken: the app sent a replacement with
+ * oldProductIdentifier=essential while the essential subscription had already
+ * expired in the Play sandbox, so Google Play rejected it before checkout.
+ *
+ *   - 'blocked_owned_target'   — the store already owns the target (never
+ *                                re-purchase; the caller reconciles instead).
+ *   - 'new_purchase'           — no commercial subscription is active in the
+ *                                store right now → a plain purchase (NO
+ *                                oldProductIdentifier), so checkout opens.
+ *   - 'upgrade_replacement'    — a lower-tier plan is genuinely active → replace
+ *                                it (Android CHARGE_PRORATED_PRICE).
+ *   - 'downgrade_replacement'  — a higher-tier plan is genuinely active →
+ *                                replace it (Android DEFERRED).
+ *
+ * `sourcePlan` is the plan actually active in the store to be replaced (its
+ * store product id becomes oldProductIdentifier); null for new/blocked.
+ */
+export type PurchaseMode = 'new_purchase' | 'upgrade_replacement' | 'downgrade_replacement' | 'blocked_owned_target';
+
+export interface PurchaseDecision {
+  mode: PurchaseMode;
+  sourcePlan: CommercialPlan | null;
+}
+
+export function resolvePurchaseMode(
+  targetPlan: CommercialPlan,
+  storeActiveEntitlementIds: readonly string[],
+): PurchaseDecision {
+  const ownership = storeOwnershipFromEntitlements(storeActiveEntitlementIds);
+  const owns = (plan: CommercialPlan) =>
+    plan === 'plus' ? ownership === 'plus' || ownership === 'both' : ownership === 'essential' || ownership === 'both';
+
+  if (owns(targetPlan)) return { mode: 'blocked_owned_target', sourcePlan: null };
+
+  const source = storeCommercialPlan(ownership); // the live active commercial plan, if any
+  if (!source) return { mode: 'new_purchase', sourcePlan: null };
+
+  return PLAN_RANK[targetPlan] > PLAN_RANK[source]
+    ? { mode: 'upgrade_replacement', sourcePlan: source }
+    : { mode: 'downgrade_replacement', sourcePlan: source };
 }
 
 /** The plan we treat as currently owned for CTA purposes — the higher-ranked
@@ -236,17 +294,27 @@ export function resolveSubscriptionUiState(
     storePlan !== null &&
     backendPlan !== storePlan;
 
-  // ---- subscriptionState -------------------------------------------------
+  // ---- subscriptionState (display-effective) -----------------------------
   // The backend owns the commercial lifecycle (pending / cancelled / not
-  // renewing); the store only drives the trial-divergence reconciliation above.
+  // renewing). But when the backend still says trial/expired while the store
+  // already owns a commercial plan (owned != null), we show that plan as
+  // active — NEVER "trial + Essencial Plano atual" on the same screen (the
+  // audited split). This is the single state the whole screen renders from.
   let subscriptionState: SubscriptionUiState;
   if (reconciling) {
     subscriptionState = 'reconciling';
   } else if (backend.accessType === 'internal') {
     subscriptionState = 'internal';
   } else {
-    subscriptionState = uiStateFromBackend(backend);
+    const backendState = uiStateFromBackend(backend);
+    subscriptionState = (backendState === 'trial' || backendState === 'expired') && owned != null
+      ? 'active'
+      : backendState;
   }
+
+  // Current plan name for the topo: backend name, or the catalog name when only
+  // the store knows the plan yet (backend still trial/expired mid-reconcile).
+  const currentPlanName = backend.currentPlanName ?? (owned ? PLAN_DISPLAY_NAME[owned] : null);
 
   // ---- per-card CTAs -----------------------------------------------------
   const essentialCardAction = cardActionWithPending('essential', owned, pendingPlan);
@@ -281,8 +349,13 @@ export function resolveSubscriptionUiState(
     availableActions,
     needsReconciliation,
     currentPlan: owned,
+    currentPlanName,
     pendingPlan,
+    pendingPlanName: pendingPlan ? backend.pendingPlanName ?? null : null,
     effectiveChangeAt,
+    trialDaysRemaining: backend.trialDaysRemaining,
+    trialEndsAt: backend.trialEndsAt,
+    subscriptionExpiresAt: backend.subscriptionExpiresAt,
     essentialCardAction,
     plusCardAction,
     cardsDisabled: reconciling,

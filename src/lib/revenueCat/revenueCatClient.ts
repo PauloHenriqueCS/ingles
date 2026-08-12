@@ -296,6 +296,24 @@ export async function purchasePackage(packageId: string, change?: OrodimPlanChan
     const result = await Purchases.purchasePackage(options as unknown as Parameters<typeof Purchases.purchasePackage>[0]);
     return { ok: true, customerInfo: toOrodimCustomerInfo(result.customerInfo), error: null };
   } catch (err) {
+    // Structured, secret-free diagnostics so a plan-change failure is
+    // debuggable beyond the friendly user message — captures the raw store
+    // error and the exact replacement descriptor we sent (see FASE 5 of the
+    // audit: "não aceitar 'unknown' sem extrair o erro nativo real"). Never
+    // logs tokens/receipts — only ids, codes and messages.
+    const e = err as { code?: string; message?: string; userCancelled?: boolean; underlyingErrorMessage?: string; readableErrorCode?: string } | undefined;
+    if (!e?.userCancelled) {
+      console.warn('[revenueCat] purchasePackage failed', {
+        packageId,
+        isChange: Boolean(change),
+        oldProductIdentifier: change?.oldProductId ?? null,
+        replacementMode: change ? (change.mode === 'upgrade' ? 'CHARGE_PRORATED_PRICE' : 'DEFERRED') : null,
+        code: e?.code ?? null,
+        readableErrorCode: e?.readableErrorCode ?? null,
+        message: e?.message ?? null,
+        underlyingErrorMessage: e?.underlyingErrorMessage ?? null,
+      });
+    }
     return { ok: false, customerInfo: null, error: normalizePurchaseError(err, PURCHASES_ERROR_CODE as unknown as Record<string, string>) };
   }
 }

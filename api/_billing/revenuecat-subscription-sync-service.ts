@@ -326,8 +326,7 @@ export async function reconcileSubscriptionStateFromRest(
 
   // Only the observed current-state columns — never user_id/plan_id (the state
   // identity + match key) and never idempotency_key (leave whatever created the
-  // row, e.g. the webhook's original_transaction_id key, untouched). Also never
-  // cancelled_at/pending_plan_id here — those belong to the webhook events.
+  // row, e.g. the webhook's original_transaction_id key, untouched).
   const stateFields: Record<string, unknown> = {
     version_policy: 'follow_current_published',
     origin: 'subscription',
@@ -339,6 +338,23 @@ export async function reconcileSubscriptionStateFromRest(
     reason: `RevenueCat REST reconcile (${state.environment})${state.storeTransactionId ? ` [last_txn=${state.storeTransactionId}]` : ''}`,
     auto_renew: !willNotRenew,
   };
+
+  // A healthy, auto-renewing subscription (the store reports NO
+  // unsubscribe_detected_at) has, by definition, no cancellation and no
+  // scheduled change. Because this reconcile REUSES the same (user, plan) row
+  // across renewals AND re-subscriptions, a row can carry stale terminal state
+  // from a PAST life (e.g. an Essencial row cancelled at 14:30, re-subscribed at
+  // 16:33) — the bug the audit found. So on a healthy active reconcile, clear
+  // that residue explicitly. When the store DOES report unsubscribe (a real
+  // cancellation OR a DEFERRED downgrade), leave cancelled_at/pending_* exactly
+  // as the CANCELLATION/PRODUCT_CHANGE webhooks set them — REST must never
+  // fabricate OR erase those.
+  if (!willNotRenew) {
+    stateFields.cancelled_at = null;
+    stateFields.cancel_reason = null;
+    stateFields.pending_plan_id = null;
+    stateFields.pending_effective_at = null;
+  }
 
   // Reconcile the SAME (user, plan) subscription row the effective-plan RPC
   // would resolve (latest starts_at) — this is what makes renewals update in

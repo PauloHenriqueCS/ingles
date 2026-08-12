@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveSubscriptionUiState,
+  resolvePurchaseMode,
   storeOwnershipFromEntitlements,
   type StoreSubscriptionSnapshot,
 } from './resolve-subscription-ui-state';
@@ -295,5 +296,70 @@ describe('resolveSubscriptionUiState — divergence direction & manage affordanc
     expect(r.needsReconciliation).toBe(true);
     // Union treats Plus as owned → Plus current, Essencial downgrade.
     expect(r.plusCardAction).toBe('current');
+  });
+});
+
+const OWNS_NONE: string[] = [];
+
+describe('resolvePurchaseMode — replacement only when the source is genuinely active in the store', () => {
+  // 9. upgrade with Essencial genuinely active in the store → replacement
+  it('[C4-9] target Plus + store owns Essencial → upgrade_replacement (source=essential)', () => {
+    expect(resolvePurchaseMode('plus', OWNS_ESSENTIAL)).toEqual({ mode: 'upgrade_replacement', sourcePlan: 'essential' });
+  });
+
+  // 10 + 13. upgrade with NO active source (expired sandbox) → new purchase, never invalid replacement
+  it('[C4-10] target Plus + store owns nothing (source expired) → new_purchase, NO oldProductIdentifier', () => {
+    expect(resolvePurchaseMode('plus', OWNS_NONE)).toEqual({ mode: 'new_purchase', sourcePlan: null });
+  });
+
+  // 11. downgrade with Plus genuinely active → replacement (DEFERRED handled by caller)
+  it('[C4-11] target Essencial + store owns Plus → downgrade_replacement (source=plus)', () => {
+    expect(resolvePurchaseMode('essential', OWNS_PLUS)).toEqual({ mode: 'downgrade_replacement', sourcePlan: 'plus' });
+  });
+
+  // 12. owned target → never re-purchase
+  it('[C4-12] target already owned → blocked_owned_target (never re-purchase)', () => {
+    expect(resolvePurchaseMode('plus', OWNS_PLUS).mode).toBe('blocked_owned_target');
+    expect(resolvePurchaseMode('essential', OWNS_ESSENTIAL).mode).toBe('blocked_owned_target');
+    expect(resolvePurchaseMode('plus', OWNS_BOTH).mode).toBe('blocked_owned_target');
+  });
+
+  // first purchase from trial (store owns nothing) → new purchase
+  it('[C4] target Essencial + store owns nothing → new_purchase', () => {
+    expect(resolvePurchaseMode('essential', OWNS_NONE)).toEqual({ mode: 'new_purchase', sourcePlan: null });
+  });
+});
+
+describe('unified topo+cards — a single resolved state (C3)', () => {
+  // 4 (spec §8): backend trial + store Essencial → after reconcile the WHOLE
+  // screen reads Essencial (topo state + card), never "trial + Essencial atual".
+  it('[C3-4] backend trial + store owns Essencial → subscriptionState "active", currentPlanName "Essencial", card "current"', () => {
+    const r = resolveSubscriptionUiState(backend({ status: 'trialing', accessType: 'trial' }), store({ activeEntitlementIds: OWNS_ESSENTIAL }));
+    expect(r.subscriptionState).toBe('active');          // topo shows the plan, NOT trial
+    expect(r.currentPlanName).toBe('Essencial');
+    expect(r.essentialCardAction).toBe('current');       // card agrees
+    expect(r.currentPlan).toBe('essential');
+  });
+
+  // 5: backend trial + store Plus → same, Plus
+  it('[C3-5] backend trial + store owns Plus → "active", currentPlanName "Plus", Plus card "current"', () => {
+    const r = resolveSubscriptionUiState(backend({ status: 'trialing', accessType: 'trial' }), store({ activeEntitlementIds: OWNS_PLUS }));
+    expect(r.subscriptionState).toBe('active');
+    expect(r.currentPlanName).toBe('Plus');
+    expect(r.plusCardAction).toBe('current');
+  });
+
+  // backend trial + store none → genuinely trial (no commercial owned)
+  it('[C3] backend trial + store owns nothing → stays "trial"', () => {
+    const r = resolveSubscriptionUiState(backend({ status: 'trialing', accessType: 'trial' }), store({ activeEntitlementIds: OWNS_NONE }));
+    expect(r.subscriptionState).toBe('trial');
+    expect(r.currentPlan).toBeNull();
+  });
+
+  // stale-cancelled cleared server-side → backend active, topo shows active, not cancelada
+  it('[C3-6] backend active commercial (no cancelled_at) → "active", never "cancelled_active"', () => {
+    const r = resolveSubscriptionUiState(COMMERCIAL_ESSENTIAL, store({ activeEntitlementIds: OWNS_ESSENTIAL }));
+    expect(r.subscriptionState).toBe('active');
+    expect(r.currentPlanName).toBe('Essencial');
   });
 });

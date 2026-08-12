@@ -368,6 +368,11 @@ interface SeedRow {
   ends_at?: string | null;
   status?: string;
   idempotency_key?: string | null;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
+  pending_plan_id?: string | null;
+  pending_effective_at?: string | null;
+  auto_renew?: boolean;
 }
 
 /** In-memory user_plan_assignments + a resolvable plans lookup, supporting the
@@ -498,6 +503,44 @@ describe('reconcileSubscriptionStateFromRest — state, not transaction', () => 
     expect(inserts).toHaveLength(1); // a new plus row (different (user, plan))
     expect(inserts[0].plan_id).toBe(PLUS_PLAN_ID);
     expect(inserts[0].idempotency_key).toBe(`revenuecat:subscription:reconcile:${VALID_USER_ID}:${PLUS_PRODUCT}`);
+  });
+
+  it('reactivating a plan with a STALE cancelled_at (healthy, auto-renewing) CLEARS it — the audited 14:30→16:33 bug', async () => {
+    const { client, inserts, updates, rows } = makeReconcileMock({
+      planIdForProduct: ESSENCIAL_PLAN_ID,
+      // A row left cancelled from a PAST life of the same (user, plan).
+      seed: [{ user_id: VALID_USER_ID, plan_id: ESSENCIAL_PLAN_ID, origin: 'subscription', status: 'active', starts_at: '2026-07-01T00:00:00.000Z', ends_at: '2026-08-01T00:00:00.000Z', cancelled_at: '2026-07-15T00:00:00.000Z', cancel_reason: 'revenuecat_unsubscribe_detected', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}` }],
+    });
+    // Fresh active subscription, NO unsubscribe flag (auto-renewing).
+    await reconcileSubscriptionStateFromRest(restState({ unsubscribeDetectedAtMs: null }), { supabase: client, now: NOW });
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(rows).toHaveLength(1);            // same row reused, never duplicated
+    expect(rows[0].status).toBe('active');
+    expect(rows[0].cancelled_at).toBeNull(); // <- stale cancellation cleared
+    expect(rows[0].cancel_reason).toBeNull();
+    expect(rows[0].auto_renew).toBe(true);
+  });
+
+  it('reactivating a plan with STALE pending_* (healthy, auto-renewing) CLEARS the pending residue', async () => {
+    const { client, rows } = makeReconcileMock({
+      planIdForProduct: ESSENCIAL_PLAN_ID,
+      seed: [{ user_id: VALID_USER_ID, plan_id: ESSENCIAL_PLAN_ID, origin: 'subscription', status: 'active', starts_at: '2026-07-01T00:00:00.000Z', ends_at: '2026-08-01T00:00:00.000Z', pending_plan_id: PLUS_PLAN_ID, pending_effective_at: '2026-07-20T00:00:00.000Z', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}` }],
+    });
+    await reconcileSubscriptionStateFromRest(restState({ unsubscribeDetectedAtMs: null }), { supabase: client, now: NOW });
+    expect(rows[0].pending_plan_id).toBeNull();
+    expect(rows[0].pending_effective_at).toBeNull();
+  });
+
+  it('when the store DOES report unsubscribe, cancelled_at/pending set by the webhook are PRESERVED (REST never erases them)', async () => {
+    const { client, rows } = makeReconcileMock({
+      planIdForProduct: ESSENCIAL_PLAN_ID,
+      seed: [{ user_id: VALID_USER_ID, plan_id: ESSENCIAL_PLAN_ID, origin: 'subscription', status: 'active', starts_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-09-01T00:00:00.000Z', cancelled_at: '2026-08-03T00:00:00.000Z', cancel_reason: 'revenuecat_cancellation', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}` }],
+    });
+    // Unsubscribe flag present → REST must not touch the webhook-owned fields.
+    await reconcileSubscriptionStateFromRest(restState({ unsubscribeDetectedAtMs: Date.parse('2026-08-03T00:00:00Z') }), { supabase: client, now: NOW });
+    expect(rows[0].cancelled_at).toBe('2026-08-03T00:00:00.000Z'); // preserved
+    expect(rows[0].auto_renew).toBe(false);
   });
 
   it('SANDBOX in production is APPLIED for an allowlisted tester', async () => {
