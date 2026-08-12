@@ -176,6 +176,24 @@ export { reconcileSessionReservation, releaseSessionReservation, releaseExpiredP
 export { summarizeSessionCost } from './session-cost-summary';
 export type { SessionCostEvent, SessionCostSummary } from './session-cost-summary';
 
+// ── Operational alerts (provider-failure e-mail alerting) ─────────────────────
+export {
+  classifyProviderError,
+  evaluateProviderIncident,
+  dispatchProviderIncident,
+  runRecoverySweep,
+  getProductionAlertDeps,
+  resendSendEmail,
+  buildOpenEmail,
+  buildRecoveredEmail,
+  providerLabel,
+  providerDisplayName,
+  resolveAlertEnvironment,
+  mapPronunciationFailCodeToProviderSignal,
+  recordAndAlertBrowserProviderFailure,
+} from './alerts';
+export type { ProviderErrorClass, IncidentSignal, AlertDeps, AlertLogger, AlertEnvironment } from './alerts';
+
 export type {
   EntitlementSource,
   EntitlementLimit,

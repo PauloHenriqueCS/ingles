@@ -3,7 +3,7 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
-import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedServiceClient } from '../_ai-gateway/index';
+import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedServiceClient, mapPronunciationFailCodeToProviderSignal, recordAndAlertBrowserProviderFailure } from '../_ai-gateway/index';
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
@@ -756,7 +756,7 @@ async function handleTrainingComplete(req: any, res: any) {
 // ─── POST /api/pronunciation-training/fail ────────────────────────────────────
 
 const TRAINING_ALLOWED_FAIL_CODES = new Set<PronunciationFailCode>([
-  'AUDIO_DECODE_FAILED', 'AUDIO_EMPTY', 'AZURE_NO_MATCH', 'AZURE_CANCELED',
+  'AUDIO_DECODE_FAILED', 'AUDIO_EMPTY', 'AZURE_NO_MATCH', 'AZURE_CANCELED', 'AZURE_AUTH_FAILED',
   'AZURE_TIMEOUT', 'AZURE_NETWORK_ERROR', 'RESULT_INVALID', 'CLIENT_INTERRUPTED',
 ]);
 
@@ -785,6 +785,24 @@ async function handleTrainingFail(req: any, res: any) {
     safeLog('pronunciation-training/fail', 'rpc_unexpected', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno.');
   }
+
+  // Operational-alert coverage for the browser Azure SDK path (see the
+  // pronunciation /fail handler). Only genuine Azure outages record + alert;
+  // fully isolated from the response.
+  const providerSignal = mapPronunciationFailCodeToProviderSignal(code);
+  if (providerSignal) {
+    try {
+      await recordAndAlertBrowserProviderFailure({
+        featureKey: 'pronunciation.assess_text',
+        providerRaw: 'azure',
+        httpStatus: providerSignal.httpStatus,
+        errorCode: providerSignal.errorCode,
+        service: 'speech_sdk',
+        userId: auth.userId,
+      });
+    } catch { /* isolated — alerting must never affect /fail */ }
+  }
+
   return res.status(200).json({ status: rpc.action ?? 'no_op' });
 }
 

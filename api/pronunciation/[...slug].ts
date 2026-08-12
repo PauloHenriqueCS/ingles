@@ -15,6 +15,8 @@ import {
   estimateConservativeCostUsd,
   reconcileSessionReservation,
   releaseSessionReservation,
+  mapPronunciationFailCodeToProviderSignal,
+  recordAndAlertBrowserProviderFailure,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps, GatewayCallContext } from '../_ai-gateway/index';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
@@ -653,7 +655,7 @@ async function handleComplete(req: any, res: any) {
 // ─── fail ─────────────────────────────────────────────────────────────────────
 
 const ALLOWED_CODES = new Set<PronunciationFailCode>([
-  'AUDIO_DECODE_FAILED', 'AUDIO_EMPTY', 'AZURE_NO_MATCH', 'AZURE_CANCELED',
+  'AUDIO_DECODE_FAILED', 'AUDIO_EMPTY', 'AZURE_NO_MATCH', 'AZURE_CANCELED', 'AZURE_AUTH_FAILED',
   'AZURE_TIMEOUT', 'AZURE_NETWORK_ERROR', 'RESULT_INVALID', 'CLIENT_INTERRUPTED',
 ]);
 
@@ -689,6 +691,24 @@ async function handleFail(req: any, res: any) {
     try {
       await failAssessTextGatewaySession(getProductionDeps(), auth.userId, gatewaySessionId);
     } catch { /* fail-open — already isolated inside, this is a final safety net */ }
+  }
+
+  // Operational-alert coverage for the browser Azure SDK path: the physical
+  // recognition ran in the browser, so no gateway failEvent saw the failure.
+  // Only genuine Azure provider outages (auth/timeout/network) record + alert;
+  // user/no-match/decode codes are ignored. Fully isolated from the response.
+  const providerSignal = mapPronunciationFailCodeToProviderSignal(code);
+  if (providerSignal) {
+    try {
+      await recordAndAlertBrowserProviderFailure({
+        featureKey: 'pronunciation.assess_text',
+        providerRaw: 'azure',
+        httpStatus: providerSignal.httpStatus,
+        errorCode: providerSignal.errorCode,
+        service: 'speech_sdk',
+        userId: auth.userId,
+      });
+    } catch { /* isolated — alerting must never affect /fail */ }
   }
 
   return res.status(200).json({ status: rpc.action ?? 'no_op' });

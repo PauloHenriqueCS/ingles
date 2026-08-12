@@ -255,6 +255,20 @@ function extractStorySessionTtsMetrics(characterCount: number): GatewayUsageMetr
   ];
 }
 
+/**
+ * Azure-TTS error carrying numeric `.status` + string `.code` as real
+ * properties so the gateway's sanitizeError() records a correct
+ * http_status/error_code (and the operational-alert classifier can see a
+ * 401/403). Message text is unchanged from the previous plain Error so nothing
+ * downstream that inspects the message is affected.
+ */
+function azureTtsError(code: string, status?: number): Error {
+  const err = new Error(code) as Error & { code: string; status?: number };
+  err.code = code;
+  if (status !== undefined) err.status = status;
+  return err;
+}
+
 async function synthesizeAudio(
   text: string,
   azureKey: string,
@@ -314,17 +328,17 @@ async function synthesizeAudio(
         });
       } catch (err: unknown) {
         const isAbort = err instanceof Error && err.name === 'AbortError';
-        throw new Error(isAbort ? 'AZURE_TTS_TIMEOUT' : `AZURE_TTS_NETWORK_ERROR`);
+        throw azureTtsError(isAbort ? 'AZURE_TTS_TIMEOUT' : 'AZURE_TTS_NETWORK_ERROR'); // connectivity — no HTTP status
       } finally {
         clearTimeout(timer);
       }
 
-      if (resp.status === 429) throw new Error('AZURE_TTS_RATE_LIMITED');
-      if (resp.status === 401 || resp.status === 403) throw new Error('AZURE_TTS_AUTH_FAILED');
-      if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}`);
+      if (resp.status === 429) throw azureTtsError('AZURE_TTS_RATE_LIMITED', 429);
+      if (resp.status === 401 || resp.status === 403) throw azureTtsError('AZURE_TTS_AUTH_FAILED', resp.status);
+      if (!resp.ok) throw azureTtsError(`AZURE_TTS_HTTP_${resp.status}`, resp.status);
 
       const b = await resp.arrayBuffer();
-      if (!b.byteLength) throw new Error('AZURE_TTS_EMPTY_AUDIO');
+      if (!b.byteLength) throw azureTtsError('AZURE_TTS_EMPTY_AUDIO');
       return b;
     },
     gatewayDeps,

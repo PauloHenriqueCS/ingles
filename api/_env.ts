@@ -85,3 +85,28 @@ export function getRevenueCatSandboxTestUserIds(): Set<string> {
       .filter((id) => id.length > 0),
   );
 }
+
+// ── Operational alerts (server-only, never VITE_/NEXT_PUBLIC_) ────────────────
+// Used exclusively by api/_ai-gateway/alerts.ts to e-mail an administrator when
+// an external provider (OpenAI / Azure Speech / …) starts failing. Every getter
+// returns '' when unset; the alert module treats any missing value as "alerting
+// not configured" and fails safe — it logs a sanitized line and never throws,
+// so the user-facing request is never affected.
+
+/** Resend API key. Empty string when unset → alert e-mails are skipped
+ *  (only a sanitized log line is emitted), never an error. */
+export function getResendApiKey(): string {
+  return readEnv('RESEND_API_KEY');
+}
+
+/** Administrator recipient for operational alerts. Empty string when unset →
+ *  alert e-mails are skipped. Never hardcode a personal address in code. */
+export function getAlertRecipientEmail(): string {
+  return readEnv('ALERT_RECIPIENT_EMAIL');
+}
+
+/** From address for operational alerts. Falls back to a neutral default on a
+ *  verified sending domain; override per environment via ALERT_FROM_EMAIL. */
+export function getAlertFromEmail(): string {
+  return readEnv('ALERT_FROM_EMAIL') || 'alerts@orodim.com.br';
+}

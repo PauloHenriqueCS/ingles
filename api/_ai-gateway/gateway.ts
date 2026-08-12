@@ -38,6 +38,7 @@ import { SupabaseReservationsRepository, type ReservationsRepositoryInterface } 
 import { SupabaseBudgetChecker, type BudgetCheckerInterface } from './budgets';
 import { SupabaseCircuitBreaker, type CircuitBreakerInterface } from './circuit-breaker';
 import { executeEnforcedPipeline } from './enforcement';
+import { dispatchProviderIncident } from './alerts';
 
 // ── Dependency injection ──────────────────────────────────────────────────────
 
@@ -219,14 +220,14 @@ async function executeWithTelemetry<T>(
   try {
     result = await invoke();
   } catch (invokeErr) {
+    const latencyMs = deps.clock() - startedAt;
+    const errInfo   = sanitizeError(invokeErr, {
+      provider: context.provider,
+      model:    context.model,
+      latencyMs,
+    });
     if (eventId !== undefined) {
       try {
-        const latencyMs = deps.clock() - startedAt;
-        const errInfo   = sanitizeError(invokeErr, {
-          provider: context.provider,
-          model:    context.model,
-          latencyMs,
-        });
         await deps.usageRepository.failEvent(eventId, {
           latencyMs,
           httpStatus:             errInfo.httpStatus,
@@ -238,6 +239,21 @@ async function executeWithTelemetry<T>(
         deps.logger('gateway.failEvent.failed', sanitizeError(telErr));
       }
     }
+    // Operational alerting — fire-and-forget, fully isolated. It builds its own
+    // dependencies, never awaits on this path, and can never throw into or
+    // delay the original request (see api/_ai-gateway/alerts.ts). Only already
+    // sanitized fields are passed — never the raw error.
+    dispatchProviderIncident({
+      providerRaw:       context.provider,
+      featureKey,
+      httpStatus:        errInfo.httpStatus ?? null,
+      errorCode:         errInfo.code ?? null,
+      errorCategory:     errInfo.category ?? null,
+      service:           context.service ?? null,
+      operationPart:     context.operationPart ?? null,
+      providerRequestId: errInfo.requestId ?? null,
+      correlationId:     correlationId,
+    }, deps.logger);
     // Always re-throw the original error from invoke.
     throw invokeErr;
   }

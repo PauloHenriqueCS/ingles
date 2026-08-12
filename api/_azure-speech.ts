@@ -17,9 +17,20 @@ export type AzureErrorCode =
   | 'AZURE_SPEECH_UNAVAILABLE';
 
 export class AzureSpeechError extends Error {
+  /**
+   * @param code   Stable AzureErrorCode (also surfaces as error_code in gateway
+   *               telemetry / operational alerts).
+   * @param status Original Azure HTTP status when the failure was an HTTP
+   *               response (401/403/429/5xx). Exposed as `.status` so
+   *               sanitizeError() records a real http_status — the field the
+   *               operational-alert classifier keys on — instead of NULL.
+   *               Left undefined for timeouts / network errors (connectivity),
+   *               which have no HTTP status.
+   */
   constructor(
     public readonly code: AzureErrorCode,
     message: string,
+    public readonly status?: number,
   ) {
     super(message);
     this.name = 'AzureSpeechError';
@@ -88,15 +99,15 @@ export async function issueAzureSpeechToken(): Promise<AzureSpeechTokenResult> {
 
   if (response.status === 401 || response.status === 403) {
     console.error(`[azure-speech] Auth rejected by Azure: HTTP ${response.status}, region=${config.region}`);
-    throw new AzureSpeechError('AZURE_SPEECH_AUTH_FAILED', `Azure rejected credentials: HTTP ${response.status}`);
+    throw new AzureSpeechError('AZURE_SPEECH_AUTH_FAILED', `Azure rejected credentials: HTTP ${response.status}`, response.status);
   }
   if (response.status === 429) {
     console.error(`[azure-speech] Rate limited by Azure, region=${config.region}`);
-    throw new AzureSpeechError('AZURE_SPEECH_RATE_LIMITED', 'Azure Speech rate limit exceeded');
+    throw new AzureSpeechError('AZURE_SPEECH_RATE_LIMITED', 'Azure Speech rate limit exceeded', 429);
   }
   if (!response.ok) {
     console.error(`[azure-speech] Unexpected status from Azure: HTTP ${response.status}, region=${config.region}`);
-    throw new AzureSpeechError('AZURE_SPEECH_UNAVAILABLE', `Azure Speech returned HTTP ${response.status}`);
+    throw new AzureSpeechError('AZURE_SPEECH_UNAVAILABLE', `Azure Speech returned HTTP ${response.status}`, response.status);
   }
 
   const token = await response.text();

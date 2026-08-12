@@ -20,7 +20,7 @@ import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
 import { handleProductConfigStatusRoute } from '../_product-config-status-route-handler';
 import {
   getSharedServiceClient, getProductionDeps, reconcileSessionReservation, releaseSessionReservation,
-  releaseExpiredPendingReservations,
+  releaseExpiredPendingReservations, runRecoverySweep, getProductionAlertDeps,
 } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
 import { settleConversationExtraCreditsDebit } from '../../_entitlements/conversation-extra-credits-debit';
@@ -580,6 +580,32 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
   }
 }
 
+// ── GET /api/internal/listening/alerts-recovery-sweep ────────────────────────
+// Operational-alerts recovery / backstop. Unrelated to listening — folded into
+// this dispatcher for the same 12-function-cap reason as handleConversationSweep
+// above. Scheduled via pg_cron + pg_net every 5 min (public
+// .alerts_cron_recovery_sweep, documented in
+// supabase/migrations/20260812170000_operational_alerts.sql). This is NOT the
+// primary detector: a provider failure is detected and e-mailed IMMEDIATELY at
+// the gateway failure sink (see api/_ai-gateway/alerts.ts). The sweep only:
+//   • resolves an open incident once the provider is healthy again (a recent
+//     success + no recent same-class failures) → single RECOVERED e-mail;
+//   • closes long-orphaned incidents (no traffic at all) with no e-mail.
+// Every state transition is atomic in the DB (resolve_provider_incident_if_
+// recovered), so concurrent sweep ticks can never send duplicate RECOVERED
+// e-mails. Failures here never affect anything else.
+async function handleAlertsRecoverySweep(req: any, res: any): Promise<void> {
+  if (!methodGuard(req, res, ['GET'])) return;
+  try {
+    const result = await runRecoverySweep(getProductionAlertDeps());
+    safeLog('internal/listening/alerts-recovery-sweep', 'sweep_done', 200, result);
+    return res.status(200).json({ success: true, ...result });
+  } catch (err) {
+    safeLog('internal/listening/alerts-recovery-sweep', 'sweep_error', 500, { error: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ success: false, error: 'Alerts recovery sweep failed.' });
+  }
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -608,6 +634,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     case 'cleanup':            return handleCleanup(req, res);
     case 'supply':             return handleSupply(req, res);
     case 'conversation-sweep': return handleConversationSweep(req, res);
+    case 'alerts-recovery-sweep': return handleAlertsRecoverySweep(req, res);
     default:
       return res.status(404).json({ error: 'Route not found', slug });
   }

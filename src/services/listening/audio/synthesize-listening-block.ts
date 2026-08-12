@@ -115,7 +115,25 @@ export { azureTicksToMilliseconds };
  * do Azure: failed"); the retry loop below still makes the same
  * retryable/non-retryable decision as before.
  */
+// Maps the Azure Speech SDK's CancellationErrorCode (a string, not an HTTP
+// status) to the equivalent HTTP status, so a cancellation-based failure still
+// reaches the gateway's sanitizeError() with a real `.status` — and therefore
+// lets the operational-alert classifier see e.g. an AuthenticationFailure as
+// `auth`. Codes with no HTTP equivalent (ServiceTimeout / ConnectionFailure)
+// are left without a status and classified as connectivity via `.code`.
+const AZURE_CANCELLATION_STATUS: Record<string, number> = {
+  AuthenticationFailure: 401,
+  Forbidden: 403,
+  TooManyRequests: 429,
+  ServiceError: 500,
+  ServiceUnavailable: 503,
+  BadRequest: 400,
+};
+
 class SynthesisCancellationSignal extends Error {
+  // Exposed so sanitizeError() records a real http_status / error_code.
+  public readonly status?: number;
+  public readonly code: string;
   constructor(
     public readonly retryable: boolean,
     public readonly errorCodeStr: string,
@@ -123,6 +141,9 @@ class SynthesisCancellationSignal extends Error {
   ) {
     super(`Azure synthesis canceled: ${cancellationDetails}`);
     this.name = 'SynthesisCancellationSignal';
+    this.code = `AZURE_SPEECH_${errorCodeStr}`;
+    const mapped = AZURE_CANCELLATION_STATUS[errorCodeStr];
+    if (mapped !== undefined) this.status = mapped;
   }
 }
 

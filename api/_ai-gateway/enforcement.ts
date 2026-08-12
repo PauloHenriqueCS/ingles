@@ -58,6 +58,7 @@ import { GatewayError, type GatewayErrorCode } from './errors';
 import { recordDecisionSafely } from './decisions';
 import type { GatewayDeps, MetricExtractor } from './gateway';
 import { sanitizeError } from './sanitize';
+import { dispatchProviderIncident } from './alerts';
 import { reconcileEventCost } from './cost-calculator';
 import { estimateConservativeCostUsd } from './cost-estimator';
 import { rebuildDailyBucketForEvent } from './daily-rollup';
@@ -302,10 +303,10 @@ export async function executeEnforcedPipeline<T>(
   try {
     result = await invoke();
   } catch (invokeErr) {
+    const latencyMs = deps.clock() - startedAt;
+    const errInfo = sanitizeError(invokeErr, { provider: context.provider, model: context.model, latencyMs });
     if (eventId !== undefined) {
       try {
-        const latencyMs = deps.clock() - startedAt;
-        const errInfo = sanitizeError(invokeErr, { provider: context.provider, model: context.model, latencyMs });
         await deps.usageRepository.failEvent(eventId, {
           latencyMs, httpStatus: errInfo.httpStatus, errorCode: errInfo.code,
           errorCategory: errInfo.category, sanitizedErrorMessage: errInfo.sanitizedMessage,
@@ -323,6 +324,19 @@ export async function executeEnforcedPipeline<T>(
     if (deps.circuitBreaker) {
       await deps.circuitBreaker.recordOutcome(context.provider, context.model ?? null, featureKey, false).catch(() => undefined);
     }
+    // Operational alerting — fire-and-forget, fully isolated (see gateway.ts and
+    // api/_ai-gateway/alerts.ts). Never awaits, never throws into this path.
+    dispatchProviderIncident({
+      providerRaw:       context.provider,
+      featureKey,
+      httpStatus:        errInfo.httpStatus ?? null,
+      errorCode:         errInfo.code ?? null,
+      errorCategory:     errInfo.category ?? null,
+      service:           context.service ?? null,
+      operationPart:     context.operationPart ?? null,
+      providerRequestId: errInfo.requestId ?? null,
+      correlationId:     context.correlationId ?? null,
+    }, deps.logger);
     throw invokeErr;
   }
 
