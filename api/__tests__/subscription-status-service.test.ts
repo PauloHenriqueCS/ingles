@@ -21,15 +21,28 @@ function makeChain(result: { data: unknown; error?: unknown }) {
   return chain;
 }
 
-interface MockOptions {
-  planRow: Record<string, unknown> | null;
-  assignmentRow?: { cancelled_at: string | null } | null;
+interface AssignmentRow {
+  cancelled_at: string | null;
+  auto_renew?: boolean | null;
+  pending_plan_id?: string | null;
+  pending_effective_at?: string | null;
 }
 
-function makeMockSupabase({ planRow, assignmentRow = null }: MockOptions) {
+interface MockOptions {
+  planRow: Record<string, unknown> | null;
+  assignmentRow?: AssignmentRow | null;
+  /** Row returned by the pending-plan lookup (from('plans').eq('id', pendingId)). */
+  pendingPlanRow?: { code: string; name: string } | null;
+}
+
+function makeMockSupabase({ planRow, assignmentRow = null, pendingPlanRow = null }: MockOptions) {
   return {
     rpc: vi.fn().mockResolvedValue({ data: planRow ? [planRow] : [], error: null }),
-    from: vi.fn(() => makeChain({ data: assignmentRow, error: null })),
+    from: vi.fn((table: string) =>
+      table === 'plans'
+        ? makeChain({ data: pendingPlanRow, error: null })
+        : makeChain({ data: assignmentRow, error: null }),
+    ),
   } as any;
 }
 
@@ -282,6 +295,48 @@ describe('resolveSubscriptionStatus — accessType', () => {
     expect(snapshot.planName).toBe('Essencial');
     expect(snapshot.canManageSubscription).toBe(false);
     expect(snapshot.canRestorePurchases).toBe(false);
+  });
+
+  it('Plus + pending downgrade cujo pending_effective_at já passou, mas ends_at futuro → pending_downgrade (usa ends_at, NÃO cai em not_renewing)', async () => {
+    // The exact sandbox case: PRODUCT_CHANGE recorded pending_plan_id=essencial,
+    // but pending_effective_at (a stale tiny-period expiration) is already in the
+    // past while Plus is still active until ends_at. Must still be pending_downgrade.
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-plus', plan_code: 'plus', plan_name: 'Plus',
+        assignment_id: 'assign-pd', starts_at: '2026-07-20T00:00:00Z', ends_at: '2026-08-10T00:00:00Z', // future
+        is_suspended: false,
+      },
+      assignmentRow: {
+        cancelled_at: null,
+        auto_renew: false,
+        pending_plan_id: 'p-essencial',
+        pending_effective_at: '2026-07-21T00:00:00Z', // BEFORE NOW (2026-07-27) — stale/past
+      },
+      pendingPlanRow: { code: 'essencial', name: 'Essencial' },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.subscriptionState).toBe('pending_downgrade');
+    expect(snapshot.pendingPlanCode).toBe('essencial');
+    expect(snapshot.pendingPlanName).toBe('Essencial');
+    // effective date is the LIVE period end (ends_at), not the stale stored value
+    expect(snapshot.effectiveChangeAt).toBe('2026-08-10T00:00:00Z');
+    expect(snapshot.status).toBe('active'); // never 'canceled'
+    expect(snapshot.subscriptionState).not.toBe('not_renewing');
+  });
+
+  it('Plus + auto_renew false SEM pending_plan_id → not_renewing (fallback honesto, nunca cancelada)', async () => {
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-plus', plan_code: 'plus', plan_name: 'Plus',
+        assignment_id: 'assign-nr', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-08-10T00:00:00Z',
+        is_suspended: false,
+      },
+      assignmentRow: { cancelled_at: null, auto_renew: false, pending_plan_id: null, pending_effective_at: null },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.subscriptionState).toBe('not_renewing');
+    expect(snapshot.status).toBe('active');
   });
 
   it('Plus ativo: accessType=commercial, nome real, sem capacidades de loja antes do RevenueCat', async () => {
