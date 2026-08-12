@@ -615,6 +615,22 @@ describe('reconcileSubscriptionStateFromRest — state, not transaction', () => 
     expect(outcome).toEqual({ ok: true, action: 'reconciled_expired' });
     expect(inserts[0].status).toBe('expired');
   });
+
+  it('reconciling an EXPIRED row clears any pending change — an ended product can carry no scheduled change (orphan-pending guard)', async () => {
+    const { client, rows } = makeReconcileMock({
+      planIdForProduct: PLUS_PLAN_ID,
+      // A Plus row that still carries a pending downgrade from its active life.
+      seed: [{ user_id: VALID_USER_ID, plan_id: PLUS_PLAN_ID, origin: 'subscription', status: 'active', starts_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-08-02T00:00:00.000Z', pending_plan_id: ESSENCIAL_PLAN_ID, pending_effective_at: '2026-08-02T00:00:00.000Z', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${PLUS_PRODUCT}` }],
+    });
+    // Now the store reports it expired (expires in the past vs NOW).
+    await reconcileSubscriptionStateFromRest(
+      restState({ productId: PLUS_PRODUCT, expiresDateMs: Date.parse('2026-08-02T00:00:00Z') }),
+      { supabase: client, now: NOW },
+    );
+    expect(rows[0].status).toBe('expired');
+    expect(rows[0].pending_plan_id).toBeNull();
+    expect(rows[0].pending_effective_at).toBeNull();
+  });
 });
 
 // ── PRODUCT_CHANGE → pending plan (the deferred-downgrade model) ─────────────
@@ -692,5 +708,17 @@ describe('syncSubscriptionFromEvent — PRODUCT_CHANGE pending plan', () => {
     expect(row.plan_id).toBe(ESSENCIAL_PLAN_ID);
     expect(row.pending_plan_id).toBeNull();
     expect(row.auto_renew).toBe(true);
+  });
+
+  it('an EXPIRATION event marks the row expired AND clears any pending change (orphan-pending guard)', async () => {
+    const { client, upsertCalls } = makeProductChangeMock();
+    await syncSubscriptionFromEvent(
+      baseEvent({ type: 'EXPIRATION', productId: PLUS_PRODUCT }),
+      { supabase: client },
+    );
+    const row = upsertCalls[0].row;
+    expect(row.status).toBe('expired');
+    expect(row.pending_plan_id).toBeNull();
+    expect(row.pending_effective_at).toBeNull();
   });
 });

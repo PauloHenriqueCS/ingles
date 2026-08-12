@@ -228,6 +228,16 @@ export async function resolveSubscriptionStatus(
     // the only thing that ever produces accessType 'internal'.
     const accessType: SubscriptionAccessType = plan.plan_code === INTERNAL_UNLIMITED_PLAN_CODE ? 'internal' : 'commercial';
 
+    // Defense-in-depth: a commercial assignment whose period has ALREADY ended
+    // must never be classified as active/cancelled_active/pending/billing_issue,
+    // even if a stale row (status still 'active' with a past ends_at, a leftover
+    // pending, or a pre-fix cancelled_at) somehow resolves here.
+    // admin_resolve_effective_plan_v1 already filters by time, so this only
+    // guards a residual/edge row. Internal has no renewal (ends_at null) → exempt.
+    if (accessType !== 'internal' && plan.ends_at != null && new Date(plan.ends_at).getTime() <= now.getTime()) {
+      return expiredSnapshot();
+    }
+
     const [{ data: assignmentRow }, billingIssue] = await Promise.all([
       supabase
         .from('user_plan_assignments')
