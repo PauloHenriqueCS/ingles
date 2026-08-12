@@ -278,9 +278,12 @@ export function createRecognitionSession(options: PronunciationServiceOptions): 
           finish();
           return;
         }
-        // CancellationErrorCode.AuthenticationFailure = 1
-        const isAuthError = typeof e.errorCode === 'number' && e.errorCode === 1;
-        const code: PronunciationFailCode = isAuthError ? 'AZURE_NETWORK_ERROR' : 'AZURE_CANCELED';
+        // Azure SDK CancellationErrorCode: AuthenticationFailure = 1, Forbidden = 2.
+        // Surface auth failures distinctly (previously mislabeled as
+        // AZURE_NETWORK_ERROR) so the server can record a real Azure auth
+        // failure for this browser-side call and raise an operational alert.
+        const isAuthError = typeof e.errorCode === 'number' && (e.errorCode === 1 || e.errorCode === 2);
+        const code: PronunciationFailCode = isAuthError ? 'AZURE_AUTH_FAILED' : 'AZURE_CANCELED';
         finish(new PronunciationServiceError(code, e.errorDetails ?? 'Azure cancelou a sessão.'));
       };
 

@@ -392,6 +392,11 @@ export type PronunciationFailCode =
   | 'AUDIO_EMPTY'
   | 'AZURE_NO_MATCH'
   | 'AZURE_CANCELED'
+  // Azure rejected the (already-issued) authorization token mid-stream — a
+  // distinct signal from a generic network cancellation, so the server can
+  // record a real auth failure for the browser-side Azure call and raise an
+  // operational alert (the physical call never touched our server otherwise).
+  | 'AZURE_AUTH_FAILED'
   | 'AZURE_TIMEOUT'
   | 'AZURE_NETWORK_ERROR'
   | 'RESULT_INVALID'

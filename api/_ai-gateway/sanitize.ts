@@ -85,6 +85,9 @@ export interface SanitizedError {
   provider?: string;
   model?: string;
   latencyMs?: number;
+  // Provider-assigned request id (e.g. OpenAI's x-request-id). A correlation
+  // handle, never a secret — safe to surface in an operational alert.
+  requestId?: string;
   [key: string]: unknown;
 }
 
@@ -107,14 +110,29 @@ export function sanitizeError(
   if (err && typeof err === 'object') {
     const e = err as Record<string, unknown>;
 
+    // Prefer the standard `status` (OpenAI SDK, fetch Response wrappers), then
+    // fall back to `azureStatus` — a safety net so an Azure error class that
+    // exposes the numeric HTTP status only under that name still reaches
+    // telemetry (and therefore the operational alerts) with a real http_status
+    // instead of NULL. Error classes are additionally normalized to also carry
+    // `.status` (see api/_azure-speech.ts, api/tts.ts, listening synthesis);
+    // this fallback covers anything not yet normalized.
     if (typeof e['status'] === 'number') {
       result.httpStatus = e['status'] as number;
+    } else if (typeof e['azureStatus'] === 'number') {
+      result.httpStatus = e['azureStatus'] as number;
     }
     if (typeof e['code'] === 'string') {
       result.code = (e['code'] as string).slice(0, 64);
     }
     if (typeof e['name'] === 'string') {
       result.category = (e['name'] as string).slice(0, 64);
+    }
+    // Provider request id — a safe correlation handle (never a secret).
+    if (typeof e['requestId'] === 'string') {
+      result.requestId = (e['requestId'] as string).slice(0, 128);
+    } else if (typeof e['request_id'] === 'string') {
+      result.requestId = (e['request_id'] as string).slice(0, 128);
     }
 
     // Include message only when it doesn't look like it carries secrets

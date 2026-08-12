@@ -380,6 +380,21 @@ function extractTwoPartTtsMetrics(characterCount: number): GatewayUsageMetric[] 
   ];
 }
 
+/**
+ * Builds an Azure-TTS error that carries the numeric HTTP `.status` and the
+ * string `.code` as real properties (not only inside the message). This is what
+ * lets the gateway's sanitizeError() persist a correct http_status/error_code —
+ * and therefore lets the operational-alert classifier see a 401/403 auth
+ * failure — while the message text stays identical to before so the existing
+ * StoryTtsError packing downstream is unaffected.
+ */
+function azureTtsError(code: string, status?: number): Error {
+  const err = new Error(code) as Error & { code: string; status?: number };
+  err.code = code;
+  if (status !== undefined) err.status = status;
+  return err;
+}
+
 async function synthesizeAudio(
   text: string,
   azureKey: string,
@@ -450,7 +465,7 @@ async function synthesizeAudio(
         const isAbort = err instanceof Error && err.name === 'AbortError';
         const code = isAbort ? `AZURE_TTS_TIMEOUT_${partLabel}` : `AZURE_TTS_NETWORK_ERROR_${partLabel}`;
         stepLog(requestId, 'tts_fetch_error', { partLabel, code, region: azureRegion });
-        throw new Error(code);
+        throw azureTtsError(code); // connectivity — no HTTP status
       } finally {
         clearTimeout(timer);
       }
@@ -458,12 +473,12 @@ async function synthesizeAudio(
       const ttsMs = Date.now() - t0;
       stepLog(requestId, 'tts_response', { partLabel, httpStatus: resp.status, ttsMs, region: azureRegion });
 
-      if (resp.status === 429) throw new Error(`AZURE_TTS_RATE_LIMITED_${partLabel}`);
-      if (resp.status === 401 || resp.status === 403) throw new Error(`AZURE_TTS_AUTH_FAILED_${partLabel}`);
-      if (!resp.ok) throw new Error(`AZURE_TTS_HTTP_${resp.status}_${partLabel}`);
+      if (resp.status === 429) throw azureTtsError(`AZURE_TTS_RATE_LIMITED_${partLabel}`, 429);
+      if (resp.status === 401 || resp.status === 403) throw azureTtsError(`AZURE_TTS_AUTH_FAILED_${partLabel}`, resp.status);
+      if (!resp.ok) throw azureTtsError(`AZURE_TTS_HTTP_${resp.status}_${partLabel}`, resp.status);
 
       const b = await resp.arrayBuffer();
-      if (!b.byteLength) throw new Error(`AZURE_TTS_EMPTY_AUDIO_${partLabel}`);
+      if (!b.byteLength) throw azureTtsError(`AZURE_TTS_EMPTY_AUDIO_${partLabel}`);
 
       stepLog(requestId, 'tts_audio_received', { partLabel, bytes: b.byteLength });
       return b;

@@ -63,18 +63,26 @@ function getAzureConfig(): { key: string; region: string } {
 // ── Gateway wiring — wraps only the physical Azure fetch call ─────────────────
 
 class AzureTtsHttpError extends Error {
+  // `.status` mirrors azureStatus so sanitizeError() records a real http_status
+  // (the field the operational-alert classifier keys on). `.azureStatus` is
+  // kept for the existing client-facing mapping below (unchanged behavior).
+  readonly status: number;
+  readonly code = 'AZURE_TTS_HTTP_ERROR';
   constructor(public readonly azureStatus: number) {
     super(`Azure TTS returned HTTP ${azureStatus}`);
     this.name = 'AzureTtsHttpError';
+    this.status = azureStatus;
   }
 }
 class AzureTtsTimeoutError extends Error {
+  readonly code = 'AZURE_TTS_TIMEOUT';
   constructor() {
     super('Azure TTS request timed out');
     this.name = 'AzureTtsTimeoutError';
   }
 }
 class AzureTtsNetworkError extends Error {
+  readonly code = 'AZURE_TTS_NETWORK';
   constructor() {
     super('Could not reach Azure TTS');
     this.name = 'AzureTtsNetworkError';
