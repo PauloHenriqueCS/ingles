@@ -247,7 +247,9 @@ function normalizePurchaseError(err: unknown, errorCodes: Record<string, string>
  * When `change` is provided this is a plan CHANGE (upgrade/downgrade), not a
  * first purchase. On Android it sends storeProductChangeInfo so Google Play
  * REPLACES the current subscription (never a second parallel one):
- *   - upgrade   → WITH_TIME_PRORATION (immediate, remaining time credited)
+ *   - upgrade   → CHARGE_PRORATED_PRICE (immediate; the billing cycle is kept
+ *                 and the prorated price for the remaining period is charged —
+ *                 upgrade-only replacement mode)
  *   - downgrade → DEFERRED (takes effect at the next renewal)
  * On iOS the change info is intentionally omitted — the App Store handles
  * upgrade/downgrade within the subscription group when you simply purchase the
@@ -288,7 +290,7 @@ export async function purchasePackage(packageId: string, change?: OrodimPlanChan
         oldProductIdentifier: change.oldProductId,
         // STORE_REPLACEMENT_MODE values are plain strings the native bridge
         // reads directly (see @revenuecat/purchases-typescript-internal-esm).
-        replacementMode: change.mode === 'upgrade' ? 'WITH_TIME_PRORATION' : 'DEFERRED',
+        replacementMode: change.mode === 'upgrade' ? 'CHARGE_PRORATED_PRICE' : 'DEFERRED',
       };
     }
     const result = await Purchases.purchasePackage(options as unknown as Parameters<typeof Purchases.purchasePackage>[0]);

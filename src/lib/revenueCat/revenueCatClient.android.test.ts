@@ -355,14 +355,14 @@ describe('revenueCatClient on Android — plan change (upgrade/downgrade replace
     await getOfferings();
   }
 
-  it('upgrade sends storeProductChangeInfo with WITH_TIME_PRORATION and the current plan\'s product id as oldProductIdentifier', async () => {
+  it('upgrade sends storeProductChangeInfo with CHARGE_PRORATED_PRICE and the current plan\'s product id as oldProductIdentifier', async () => {
     await syncIdentity(USER_A);
     await loadBothOfferings();
     mockPurchasePackage.mockResolvedValue({ customerInfo: customerInfo({ activeEntitlements: { plus: {} } }) });
     const result = await purchasePackage('plus_monthly', { oldProductId: ESSENTIAL_PRODUCT, mode: 'upgrade' });
     expect(result.ok).toBe(true);
     const arg = mockPurchasePackage.mock.calls[0][0] as any;
-    expect(arg.storeProductChangeInfo).toEqual({ oldProductIdentifier: ESSENTIAL_PRODUCT, replacementMode: 'WITH_TIME_PRORATION' });
+    expect(arg.storeProductChangeInfo).toEqual({ oldProductIdentifier: ESSENTIAL_PRODUCT, replacementMode: 'CHARGE_PRORATED_PRICE' });
   });
 
   it('downgrade sends DEFERRED (takes effect at the next renewal)', async () => {
