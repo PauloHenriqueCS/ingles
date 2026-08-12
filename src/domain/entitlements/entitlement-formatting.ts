@@ -31,6 +31,23 @@ export function formatTrialRemaining(totalSeconds: number): string {
   return `${formatSecondsAsMinSec(totalSeconds)} restantes no período de teste`;
 }
 
+/** "1830 min disponíveis" — the TOTAL usable balance (plan + purchased extra),
+ *  shown when both exist so purchased minutes are never hidden. */
+export function formatTotalMinutesAvailable(totalSeconds: number): string {
+  return `${formatSecondsAsMinSec(totalSeconds)} disponíveis`;
+}
+
+/** "30 min do plano + 1800 min adicionais" — the breakdown line under the total. */
+export function formatConversationBalanceBreakdown(planSeconds: number, extraSeconds: number): string {
+  return `${formatSecondsAsMinSec(planSeconds)} do plano + ${formatSecondsAsMinSec(extraSeconds)} adicionais`;
+}
+
+/** "1800 min adicionais disponíveis" — plan exhausted, only purchased credits
+ *  left. Never "restantes neste mês": extra credits aren't the monthly plan. */
+export function formatExtraMinutesAvailable(extraSeconds: number): string {
+  return `${formatSecondsAsMinSec(extraSeconds)} adicionais disponíveis`;
+}
+
 /** "00:12" — mm:ss clock for recording timers. */
 export function formatClock(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
