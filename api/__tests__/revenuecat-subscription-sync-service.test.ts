@@ -12,8 +12,10 @@ vi.mock('../_account/billing-block-repository', () => ({
 
 import {
   syncSubscriptionFromEvent,
+  reconcileSubscriptionStateFromRest,
   isValidUuid,
   type RevenueCatLifecycleEvent,
+  type RevenueCatRestSubscriptionState,
 } from '../_billing/revenuecat-subscription-sync-service';
 
 const VALID_USER_ID = 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -347,5 +349,216 @@ describe('syncSubscriptionFromEvent — TRANSFER', () => {
     );
     expect(upsertCalls[0].row.user_id).toBe(transferredToUserId);
     expect(upsertCalls[0].row.created_by).toBe(transferredToUserId);
+  });
+});
+
+// ── REST state reconciliation (POST /api/subscription/sync) — the real REST
+// payload has NO original_transaction_id and a per-transaction
+// store_transaction_id, so identity is (user, plan) state, never a txn.
+const PLUS_PLAN_ID = 'cccccccc-0000-0000-0000-000000000003';
+const ESSENTIAL_PRODUCT = 'orodim.subscription.essential.monthly';
+const PLUS_PRODUCT = 'orodim.subscription.plus.monthly';
+
+interface SeedRow {
+  id?: string;
+  user_id: string;
+  plan_id: string;
+  origin: string;
+  starts_at: string;
+  ends_at?: string | null;
+  status?: string;
+  idempotency_key?: string | null;
+}
+
+/** In-memory user_plan_assignments + a resolvable plans lookup, supporting the
+ *  exact select/update/insert chain reconcileSubscriptionStateFromRest uses. */
+function makeReconcileMock(opts: { planIdForProduct?: string | null; seed?: SeedRow[] } = {}) {
+  const rows: Array<Record<string, unknown>> = (opts.seed ?? []).map((r, i) => ({ id: r.id ?? `seed-${i}`, ...r }));
+  const inserts: Array<Record<string, unknown>> = [];
+  const updates: Array<{ col: string; val: unknown; fields: Record<string, unknown> }> = [];
+  let insCount = 0;
+  const client = {
+    from: (table: string) => {
+      if (table === 'plans') {
+        return {
+          select: () => ({
+            or: () => ({
+              maybeSingle: () => Promise.resolve({ data: opts.planIdForProduct ? { id: opts.planIdForProduct } : null, error: null }),
+            }),
+          }),
+        };
+      }
+      if (table === 'user_plan_assignments') {
+        return {
+          select: () => {
+            const filters: Record<string, unknown> = {};
+            const api: Record<string, unknown> = {
+              eq: (col: string, val: unknown) => { filters[col] = val; return api; },
+              order: () => api,
+              limit: () => api,
+              maybeSingle: () => {
+                const match = rows
+                  .filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v))
+                  .sort((a, b) => String(b.starts_at ?? '').localeCompare(String(a.starts_at ?? '')))[0];
+                return Promise.resolve({ data: match ? { id: match.id } : null, error: null });
+              },
+            };
+            return api;
+          },
+          update: (fields: Record<string, unknown>) => ({
+            eq: (col: string, val: unknown) => {
+              const target = rows.find((r) => r[col] === val);
+              if (target) Object.assign(target, fields);
+              updates.push({ col, val, fields });
+              return Promise.resolve({ data: null, error: null });
+            },
+          }),
+          insert: (row: Record<string, unknown>) => {
+            if (row.idempotency_key && rows.some((r) => r.idempotency_key === row.idempotency_key)) {
+              return Promise.resolve({ data: null, error: { code: '23505' } });
+            }
+            const created = { id: `ins-${insCount++}`, ...row };
+            rows.push(created);
+            inserts.push(created);
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+      }
+      throw new Error(`unexpected table ${table}`);
+    },
+  } as unknown as Parameters<typeof reconcileSubscriptionStateFromRest>[1] extends { supabase?: infer S } ? S : never;
+  return { client, rows, inserts, updates };
+}
+
+function restState(overrides: Partial<RevenueCatRestSubscriptionState> = {}): RevenueCatRestSubscriptionState {
+  return {
+    appUserId: VALID_USER_ID,
+    environment: 'PRODUCTION',
+    productId: ESSENTIAL_PRODUCT,
+    purchaseDateMs: Date.parse('2026-08-01T00:00:00Z'),
+    expiresDateMs: Date.parse('2026-09-01T00:00:00Z'),
+    unsubscribeDetectedAtMs: null,
+    storeTransactionId: 'gpa.txn-aaa',
+    ...overrides,
+  };
+}
+
+const NOW = new Date('2026-08-05T00:00:00Z'); // between purchase and expiry above
+
+describe('reconcileSubscriptionStateFromRest — state, not transaction', () => {
+  it('inserts a commercial assignment from a REST snapshot with NO original_transaction_id, keyed STABLY by (user, plan) — never by store_transaction_id', async () => {
+    const { client, inserts, updates } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(restState(), { supabase: client, now: NOW });
+    expect(outcome).toEqual({ ok: true, action: 'reconciled_active' });
+    expect(inserts).toHaveLength(1);
+    expect(updates).toHaveLength(0);
+    expect(inserts[0].plan_id).toBe(ESSENCIAL_PLAN_ID);
+    expect(inserts[0].origin).toBe('subscription');
+    expect(inserts[0].status).toBe('active');
+    expect(inserts[0].starts_at).toBe('2026-08-01T00:00:00.000Z');
+    expect(inserts[0].ends_at).toBe('2026-09-01T00:00:00.000Z');
+    // Stable per-(user, product) key — the store_transaction_id never appears in it.
+    expect(inserts[0].idempotency_key).toBe(`revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}`);
+    expect(String(inserts[0].idempotency_key)).not.toContain('gpa.txn-aaa');
+  });
+
+  it('a renewal (store_transaction_id changed, ends_at advanced) UPDATES the same (user, plan) row — never a new one', async () => {
+    const { client, inserts, updates, rows } = makeReconcileMock({
+      planIdForProduct: ESSENCIAL_PLAN_ID,
+      seed: [{ user_id: VALID_USER_ID, plan_id: ESSENCIAL_PLAN_ID, origin: 'subscription', starts_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-09-01T00:00:00.000Z', status: 'active', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}` }],
+    });
+    // New renewal: later purchase/expiry and a DIFFERENT store_transaction_id.
+    const outcome = await reconcileSubscriptionStateFromRest(
+      restState({ purchaseDateMs: Date.parse('2026-09-01T00:00:00Z'), expiresDateMs: Date.parse('2026-10-01T00:00:00Z'), storeTransactionId: 'gpa.txn-DIFFERENT' }),
+      { supabase: client, now: NOW },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(inserts).toHaveLength(0);       // no new row
+    expect(updates).toHaveLength(1);       // updated in place
+    expect(rows).toHaveLength(1);          // still exactly one row
+    expect(rows[0].ends_at).toBe('2026-10-01T00:00:00.000Z'); // ends_at advanced
+  });
+
+  it('repeated /sync with the same state does not duplicate (insert once, then update)', async () => {
+    const { client, inserts, rows } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    await reconcileSubscriptionStateFromRest(restState(), { supabase: client, now: NOW });
+    await reconcileSubscriptionStateFromRest(restState(), { supabase: client, now: NOW });
+    await reconcileSubscriptionStateFromRest(restState(), { supabase: client, now: NOW });
+    expect(inserts).toHaveLength(1);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('Essential -> Plus reconciles the Plus (user, plan) row (its own stable key), leaving the essential row alone', async () => {
+    const { client, inserts } = makeReconcileMock({
+      planIdForProduct: PLUS_PLAN_ID,
+      seed: [{ user_id: VALID_USER_ID, plan_id: ESSENCIAL_PLAN_ID, origin: 'subscription', starts_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-09-01T00:00:00.000Z', status: 'active', idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${ESSENTIAL_PRODUCT}` }],
+    });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ productId: PLUS_PRODUCT }), { supabase: client, now: NOW });
+    expect(outcome.ok).toBe(true);
+    expect(inserts).toHaveLength(1); // a new plus row (different (user, plan))
+    expect(inserts[0].plan_id).toBe(PLUS_PLAN_ID);
+    expect(inserts[0].idempotency_key).toBe(`revenuecat:subscription:reconcile:${VALID_USER_ID}:${PLUS_PRODUCT}`);
+  });
+
+  it('SANDBOX in production is APPLIED for an allowlisted tester', async () => {
+    process.env.VERCEL_ENV = 'production';
+    process.env.REVENUECAT_SANDBOX_TEST_USER_IDS = VALID_USER_ID;
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: PLUS_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ productId: PLUS_PRODUCT, environment: 'SANDBOX' }), { supabase: client, now: NOW });
+    expect(outcome.ok).toBe(true);
+    expect(inserts).toHaveLength(1);
+  });
+
+  it('SANDBOX in production is BLOCKED (no write) for a non-allowlisted user', async () => {
+    process.env.VERCEL_ENV = 'production';
+    // allowlist unset
+    const { client, inserts, updates } = makeReconcileMock({ planIdForProduct: PLUS_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ environment: 'SANDBOX' }), { supabase: client, now: NOW });
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+  });
+
+  it('a PRODUCTION (non-sandbox) subscription reconciles normally on the production deployment', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ environment: 'PRODUCTION' }), { supabase: client, now: NOW });
+    expect(outcome.ok).toBe(true);
+    expect(inserts).toHaveLength(1);
+  });
+
+  it('an unknown product resolves no plan and writes nothing', async () => {
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: null });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ productId: 'not.a.real.product' }), { supabase: client, now: NOW });
+    expect(outcome).toEqual({ ok: false, reason: 'unknown_product' });
+    expect(inserts).toHaveLength(0);
+  });
+
+  it('an invalid app_user_id writes nothing', async () => {
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(restState({ appUserId: 'not-a-uuid' }), { supabase: client, now: NOW });
+    expect(outcome).toEqual({ ok: false, reason: 'invalid_app_user_id' });
+    expect(inserts).toHaveLength(0);
+  });
+
+  it('a graceful cancellation (unsubscribe_detected_at) sets cancelled_at but keeps status active until ends_at', async () => {
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    await reconcileSubscriptionStateFromRest(
+      restState({ unsubscribeDetectedAtMs: Date.parse('2026-08-15T00:00:00Z') }),
+      { supabase: client, now: NOW },
+    );
+    expect(inserts[0].status).toBe('active');
+    expect(inserts[0].cancelled_at).toBe('2026-08-15T00:00:00.000Z');
+    expect(inserts[0].cancel_reason).toBe('revenuecat_unsubscribe_detected');
+  });
+
+  it('an already-expired subscription (expires_date in the past) reconciles as expired', async () => {
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: ESSENCIAL_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(
+      restState({ expiresDateMs: Date.parse('2026-08-02T00:00:00Z') }), // before NOW (2026-08-05)
+      { supabase: client, now: NOW },
+    );
+    expect(outcome).toEqual({ ok: true, action: 'reconciled_expired' });
+    expect(inserts[0].status).toBe('expired');
   });
 });

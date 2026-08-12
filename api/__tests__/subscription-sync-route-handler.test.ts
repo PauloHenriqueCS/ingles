@@ -6,14 +6,14 @@ const {
   mockResolveSubscriptionStatus,
   mockGetRevenueCatApiSecretKey,
   mockGetSharedServiceClient,
-  mockSyncSubscriptionFromEvent,
+  mockReconcileState,
 } = vi.hoisted(() => ({
   mockRequireAuth: vi.fn(),
   mockApplyRateLimit: vi.fn().mockResolvedValue(true),
   mockResolveSubscriptionStatus: vi.fn(),
   mockGetRevenueCatApiSecretKey: vi.fn(),
   mockGetSharedServiceClient: vi.fn().mockReturnValue({}),
-  mockSyncSubscriptionFromEvent: vi.fn().mockResolvedValue({ ok: true, action: 'upserted_assignment' }),
+  mockReconcileState: vi.fn().mockResolvedValue({ ok: true, action: 'reconciled_active' }),
 }));
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
@@ -28,7 +28,7 @@ vi.mock('../_env', async (importOriginal) => {
 vi.mock('../_ai-gateway/usage-repository', () => ({ getSharedServiceClient: mockGetSharedServiceClient }));
 vi.mock('../_billing/revenuecat-subscription-sync-service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_billing/revenuecat-subscription-sync-service')>();
-  return { ...actual, syncSubscriptionFromEvent: mockSyncSubscriptionFromEvent };
+  return { ...actual, reconcileSubscriptionStateFromRest: mockReconcileState };
 });
 
 import { handleSubscriptionSyncRoute } from '../_billing/subscription-sync-route-handler';
@@ -71,7 +71,7 @@ beforeEach(() => {
   mockApplyRateLimit.mockReset().mockResolvedValue(true);
   mockResolveSubscriptionStatus.mockReset().mockResolvedValue(STATUS_SNAPSHOT);
   mockGetRevenueCatApiSecretKey.mockReset().mockReturnValue('');
-  mockSyncSubscriptionFromEvent.mockClear();
+  mockReconcileState.mockClear().mockResolvedValue({ ok: true, action: 'reconciled_active' });
   global.fetch = vi.fn();
 });
 
@@ -120,17 +120,19 @@ describe('handleSubscriptionSyncRoute — RevenueCat not configured', () => {
 });
 
 describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
-  it('reconciles an active essencial subscription found on RevenueCat, then returns the fresh backend status', async () => {
+  it('reconciles by STATE from the real REST payload (no original_transaction_id; has store_transaction_id), then returns the fresh backend status', async () => {
     mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
     (global.fetch as any).mockResolvedValue({
       ok: true,
       json: async () => ({
         subscriber: {
           subscriptions: {
+            // Real /v1/subscribers shape: NO original_transaction_id; the only
+            // transactional id is store_transaction_id (per-transaction).
             'orodim.subscription.essential.monthly': {
               purchase_date: '2026-08-01T00:00:00Z',
               expires_date: '2026-09-01T00:00:00Z',
-              original_transaction_id: 'txn-1',
+              store_transaction_id: 'gpa.1111-2222-3333',
               is_sandbox: false,
             },
           },
@@ -143,18 +145,23 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
       expect.stringContaining(encodeURIComponent(USER_ID)),
       expect.objectContaining({ headers: { Authorization: 'Bearer rc-secret-key' } }),
     );
-    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1);
-    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ appUserId: USER_ID, productId: 'orodim.subscription.essential.monthly', originalTransactionId: 'txn-1' }),
+    expect(mockReconcileState).toHaveBeenCalledTimes(1);
+    expect(mockReconcileState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appUserId: USER_ID,
+        environment: 'PRODUCTION',
+        productId: 'orodim.subscription.essential.monthly',
+        purchaseDateMs: Date.parse('2026-08-01T00:00:00Z'),
+        expiresDateMs: Date.parse('2026-09-01T00:00:00Z'),
+        storeTransactionId: 'gpa.1111-2222-3333',
+      }),
       expect.anything(),
     );
     expect(res._status()).toBe(200);
     expect(res._body()).toEqual(STATUS_SNAPSHOT);
   });
 
-  it('reconciles a Google base-plan subscription keyed with the :monthly suffix (matched by base product id, not exact key)', async () => {
-    // The real regression: RevenueCat keys the Google subscription with the
-    // base plan (':monthly'), so indexing by the bare id silently missed it.
+  it('reconciles a Google base-plan subscription keyed with the :monthly suffix (matched by base product id, full store id preserved)', async () => {
     mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
     (global.fetch as any).mockResolvedValue({
       ok: true,
@@ -164,7 +171,7 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
             'orodim.subscription.plus.monthly:monthly': {
               purchase_date: '2026-08-01T00:00:00Z',
               expires_date: '2026-09-01T00:00:00Z',
-              original_transaction_id: 'txn-plus-1',
+              store_transaction_id: 'gpa.plus-1',
               is_sandbox: true,
             },
           },
@@ -173,24 +180,23 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
     });
     const res = makeRes();
     await handleSubscriptionSyncRoute(makeReq(), res);
-    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledTimes(1);
-    // Same centralized policy inputs the webhook path also feeds: the SANDBOX
-    // environment and the authenticated app_user_id are forwarded into
-    // syncSubscriptionFromEvent (where isSandboxBlockedHere + the allowlist
-    // decide), and the full ':basePlanId' product id is preserved.
-    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+    expect(mockReconcileState).toHaveBeenCalledTimes(1);
+    // SANDBOX + the authed app_user_id feed the same central policy
+    // (isSandboxBlockedHere + allowlist) inside reconcileSubscriptionStateFromRest;
+    // the full ':basePlanId' product id is preserved.
+    expect(mockReconcileState).toHaveBeenCalledWith(
       expect.objectContaining({
         appUserId: USER_ID,
         environment: 'SANDBOX',
         productId: 'orodim.subscription.plus.monthly:monthly',
-        originalTransactionId: 'txn-plus-1',
+        storeTransactionId: 'gpa.plus-1',
       }),
       expect.anything(),
     );
     expect(res._status()).toBe(200);
   });
 
-  it('a non-sandbox base-plan subscription forwards environment PRODUCTION', async () => {
+  it('a non-sandbox base-plan subscription forwards environment PRODUCTION and unsubscribe_detected_at', async () => {
     mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
     (global.fetch as any).mockResolvedValue({
       ok: true,
@@ -200,7 +206,8 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
             'orodim.subscription.essential.monthly:monthly': {
               purchase_date: '2026-08-01T00:00:00Z',
               expires_date: '2026-09-01T00:00:00Z',
-              original_transaction_id: 'txn-ess-1',
+              unsubscribe_detected_at: '2026-08-15T00:00:00Z',
+              store_transaction_id: 'gpa.ess-1',
               is_sandbox: false,
             },
           },
@@ -209,8 +216,12 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
     });
     const res = makeRes();
     await handleSubscriptionSyncRoute(makeReq(), res);
-    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ environment: 'PRODUCTION', productId: 'orodim.subscription.essential.monthly:monthly' }),
+    expect(mockReconcileState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environment: 'PRODUCTION',
+        productId: 'orodim.subscription.essential.monthly:monthly',
+        unsubscribeDetectedAtMs: Date.parse('2026-08-15T00:00:00Z'),
+      }),
       expect.anything(),
     );
   });
@@ -220,7 +231,7 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
     (global.fetch as any).mockResolvedValue({ ok: true, json: async () => ({ subscriber: { subscriptions: {} } }) });
     const res = makeRes();
     await handleSubscriptionSyncRoute(makeReq(), res);
-    expect(mockSyncSubscriptionFromEvent).not.toHaveBeenCalled();
+    expect(mockReconcileState).not.toHaveBeenCalled();
     expect(res._status()).toBe(200);
   });
 

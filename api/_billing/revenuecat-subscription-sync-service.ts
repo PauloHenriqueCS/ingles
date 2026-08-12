@@ -53,6 +53,27 @@ export function baseStoreProductId(storeProductId: string): string {
   return storeProductId.split(':')[0];
 }
 
+/**
+ * Resolve a plan id from a store product id by DATA, never by plan name (see
+ * FASE 10). Matches plans.apple_product_id OR plans.google_subscription_product_id,
+ * tolerating the Android base-plan suffix by also trying the ':'-stripped id.
+ * Shared by the webhook (syncSubscriptionFromEvent) and the REST reconcile so
+ * the mapping can never drift. Returns null when no plan matches.
+ */
+async function resolvePlanIdByStoreProductId(supabase: SupabaseClient, storeProductId: string): Promise<string | null> {
+  const productIdCandidates = Array.from(new Set([storeProductId, baseStoreProductId(storeProductId)]));
+  const planMatchFilter = productIdCandidates
+    .flatMap((id) => [`apple_product_id.eq.${id}`, `google_subscription_product_id.eq.${id}`])
+    .join(',');
+  const { data: planRow, error: planError } = await supabase
+    .from('plans')
+    .select('id')
+    .or(planMatchFilter)
+    .maybeSingle();
+  if (planError) throw new Error(`plans lookup failed: ${planError.message}`);
+  return planRow ? (planRow as { id: string }).id : null;
+}
+
 /** Subscription-lifecycle event types this service reconciles. Anything
  *  else (NON_RENEWING_PURCHASE, TEST, paywall/analytics events, ...) is the
  *  route handler's responsibility to route elsewhere or acknowledge-only. */
@@ -121,24 +142,10 @@ export async function syncSubscriptionFromEvent(
     return { ok: false, reason: 'missing_original_transaction_id' };
   }
 
-  // Resolve the plan by DATA, never by plan name (see FASE 10). RevenueCat
-  // sends each store's own product identifier: bare on Apple (== apple_product_id)
-  // and, on Google Play, the subscription id plus its base plan, e.g.
-  // "orodim.subscription.plus.monthly:monthly". So match plans.apple_product_id
-  // OR plans.google_subscription_product_id, and tolerate the Android base-plan
-  // suffix by also trying the id with everything after ':' stripped — the app
-  // never depends on Apple ids to credit an Android purchase.
-  const productIdCandidates = Array.from(new Set([event.productId, baseStoreProductId(event.productId)]));
-  const planMatchFilter = productIdCandidates
-    .flatMap((id) => [`apple_product_id.eq.${id}`, `google_subscription_product_id.eq.${id}`])
-    .join(',');
-  const { data: planRow, error: planError } = await supabase
-    .from('plans')
-    .select('id')
-    .or(planMatchFilter)
-    .maybeSingle();
-  if (planError) throw new Error(`plans lookup failed: ${planError.message}`);
-  if (!planRow) {
+  // Resolve the plan by DATA, never by plan name (see FASE 10) — shared with
+  // the REST reconcile via resolvePlanIdByStoreProductId.
+  const planId = await resolvePlanIdByStoreProductId(supabase, event.productId);
+  if (!planId) {
     return { ok: false, reason: 'unknown_product' };
   }
 
@@ -148,7 +155,7 @@ export async function syncSubscriptionFromEvent(
 
   const row: Record<string, unknown> = {
     user_id: targetUserId,
-    plan_id: (planRow as { id: string }).id,
+    plan_id: planId,
     version_policy: 'follow_current_published',
     origin: 'subscription',
     starts_at: startsAtIso,
@@ -175,4 +182,138 @@ export async function syncSubscriptionFromEvent(
   if (upsertError) throw new Error(`user_plan_assignments upsert failed: ${upsertError.message}`);
 
   return { ok: true, action: 'upserted_assignment' };
+}
+
+/** Current-state snapshot of ONE subscription from RevenueCat's REST
+ *  /v1/subscribers response (never a webhook event). Deliberately has NO
+ *  original_transaction_id — the REST subscriber response does not provide one.
+ *  store_transaction_id is the LAST observed transaction and CHANGES on every
+ *  renewal (confirmed empirically), so it is reference/debug only, NEVER an
+ *  identity key. */
+export interface RevenueCatRestSubscriptionState {
+  appUserId: string;
+  environment: string;
+  /** Store product id as keyed in `subscriber.subscriptions` (bare on Apple;
+   *  may carry ':basePlanId' on Google). */
+  productId: string;
+  purchaseDateMs: number | null;
+  expiresDateMs: number | null;
+  /** RevenueCat's unsubscribe_detected_at — a graceful cancellation still keeps
+   *  access until expires_date (mirrors the webhook CANCELLATION contract). */
+  unsubscribeDetectedAtMs: number | null;
+  /** Last observed store transaction — reference only, never identity. */
+  storeTransactionId: string | null;
+}
+
+export type ReconcileStateOutcome =
+  | { ok: true; action: 'reconciled_active' | 'reconciled_expired' }
+  | { ok: false; reason: 'invalid_app_user_id' | 'unknown_product' | 'sandbox_blocked_in_production' };
+
+/**
+ * STATE reconciliation for POST /api/subscription/sync, from RevenueCat's REST
+ * subscriber snapshot — NOT event-driven, and the counterpart to the webhook's
+ * syncSubscriptionFromEvent. Because the REST subscriber response carries no
+ * original_transaction_id and its store_transaction_id changes on every renewal,
+ * identity here is the CURRENT STATE (user + plan), never a transaction:
+ *
+ *  - Exactly ONE commercial subscription assignment per (user, plan).
+ *  - Renewal → the SAME row's starts_at/ends_at advance (never a new row).
+ *  - Essential<->Plus → each product reconciles its own (user, plan) row; the
+ *    now-expired plan's row falls out of admin_resolve_effective_plan_v1 by its
+ *    past ends_at, and the active plan's row (latest starts_at) wins.
+ *  - Idempotent by state: a repeated /sync with the same snapshot is a no-op
+ *    (same values re-written), never a duplicate.
+ *  - Coexists with the webhook: if an assignment already exists for
+ *    (user, plan, origin='subscription') — including one the webhook created
+ *    keyed by original_transaction_id — this UPDATES that same row instead of
+ *    inserting a second one. Only when none exists does it INSERT, keyed by a
+ *    STABLE per-(user, plan) idempotency key so two racing /sync calls can't
+ *    double-insert.
+ *
+ * Never writes anything for a sandbox event on production unless the user is on
+ * the REVENUECAT_SANDBOX_TEST_USER_IDS allowlist (same central policy as the
+ * webhook, via isSandboxBlockedHere).
+ */
+export async function reconcileSubscriptionStateFromRest(
+  state: RevenueCatRestSubscriptionState,
+  deps?: { supabase?: SupabaseClient; now?: Date },
+): Promise<ReconcileStateOutcome> {
+  const supabase = deps?.supabase ?? getSharedServiceClient();
+  const now = deps?.now ?? new Date();
+
+  if (!isValidUuid(state.appUserId)) {
+    return { ok: false, reason: 'invalid_app_user_id' };
+  }
+  if (isSandboxBlockedHere(state.environment, state.appUserId)) {
+    return { ok: false, reason: 'sandbox_blocked_in_production' };
+  }
+
+  const planId = await resolvePlanIdByStoreProductId(supabase, state.productId);
+  if (!planId) {
+    return { ok: false, reason: 'unknown_product' };
+  }
+
+  const startsAtIso = state.purchaseDateMs ? new Date(state.purchaseDateMs).toISOString() : now.toISOString();
+  const endsAtIso = state.expiresDateMs ? new Date(state.expiresDateMs).toISOString() : null;
+  const isExpiredNow = endsAtIso !== null && new Date(endsAtIso).getTime() <= now.getTime();
+  const cancelledAtIso = state.unsubscribeDetectedAtMs ? new Date(state.unsubscribeDetectedAtMs).toISOString() : null;
+
+  // Only the observed current-state columns — never user_id/plan_id (the state
+  // identity + match key) and never idempotency_key (leave whatever created the
+  // row, e.g. the webhook's original_transaction_id key, untouched).
+  const stateFields: Record<string, unknown> = {
+    version_policy: 'follow_current_published',
+    origin: 'subscription',
+    starts_at: startsAtIso,
+    ends_at: endsAtIso,
+    status: isExpiredNow ? 'expired' : 'active',
+    // store_transaction_id kept only as a human-readable "last observed
+    // transaction" reference — never an identity key.
+    reason: `RevenueCat REST reconcile (${state.environment})${state.storeTransactionId ? ` [last_txn=${state.storeTransactionId}]` : ''}`,
+    // Graceful cancellation: keep access until ends_at, only flag cancelled_at —
+    // exactly the webhook CANCELLATION contract.
+    cancelled_at: cancelledAtIso,
+    cancel_reason: cancelledAtIso ? 'revenuecat_unsubscribe_detected' : null,
+  };
+
+  // Reconcile the SAME (user, plan) subscription row the effective-plan RPC
+  // would resolve (latest starts_at) — this is what makes renewals update in
+  // place and lets a webhook-created row be reused instead of duplicated.
+  const { data: existing, error: findError } = await supabase
+    .from('user_plan_assignments')
+    .select('id')
+    .eq('user_id', state.appUserId)
+    .eq('plan_id', planId)
+    .eq('origin', 'subscription')
+    .order('starts_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (findError) throw new Error(`user_plan_assignments lookup failed: ${findError.message}`);
+
+  if (existing) {
+    const { error: updateError } = await supabase
+      .from('user_plan_assignments')
+      .update(stateFields)
+      .eq('id', (existing as { id: string }).id);
+    if (updateError) throw new Error(`user_plan_assignments update failed: ${updateError.message}`);
+    return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
+  }
+
+  const idempotencyKey = `revenuecat:subscription:reconcile:${state.appUserId}:${baseStoreProductId(state.productId)}`;
+  const insertRow = { ...stateFields, user_id: state.appUserId, plan_id: planId, created_by: state.appUserId, idempotency_key: idempotencyKey };
+  const { error: insertError } = await supabase.from('user_plan_assignments').insert(insertRow);
+  if (insertError) {
+    // 23505 = a concurrent /sync inserted the same stable-keyed row first;
+    // update it instead of failing (state reconciliation stays idempotent).
+    if ((insertError as { code?: string }).code === '23505') {
+      const { error: updErr } = await supabase
+        .from('user_plan_assignments')
+        .update(stateFields)
+        .eq('idempotency_key', idempotencyKey);
+      if (updErr) throw new Error(`user_plan_assignments update-after-conflict failed: ${updErr.message}`);
+      return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
+    }
+    throw new Error(`user_plan_assignments insert failed: ${insertError.message}`);
+  }
+  return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
 }
