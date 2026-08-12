@@ -30,7 +30,6 @@
 
 import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { waitUntil } from '@vercel/functions';
 import { getSharedServiceClient, SupabaseUsageRepository } from './usage-repository';
 import type { AiFeatureKey } from './feature-catalog';
 import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail } from '../_env';
@@ -375,16 +374,32 @@ export async function runRecoverySweep(
  * always-caught background promise. Safe to call unconditionally: it builds its
  * own dependencies and never throws.
  */
+// Vercel's waitUntil, loaded LAZILY at module init via a runtime dynamic import
+// so `@vercel/functions` is NOT pulled into the eager (statically-transformed)
+// module graph of every gateway caller — that eager import measurably slowed
+// unrelated handlers' cold import cost. The package is small and resolves long
+// before any real provider failure, so by dispatch time `_waitUntil` is set and
+// is called SYNCHRONOUSLY within the request scope (preserving the exact
+// behavior of a static import). If it somehow isn't loaded yet, or we're outside
+// a Vercel request scope (local/tests), we fall back to a self-contained,
+// always-caught background promise (Fluid Compute keeps the instance alive).
+let _waitUntil: ((p: Promise<unknown>) => void) | null = null;
+void import('@vercel/functions')
+  .then((m) => { _waitUntil = m.waitUntil; })
+  .catch(() => { _waitUntil = null; });
+
+function scheduleBackground(task: Promise<unknown>): void {
+  const safe = task.catch(() => undefined);
+  if (_waitUntil) {
+    try { _waitUntil(safe); return; } catch { /* not in a request scope — fall through */ }
+  }
+  void safe;
+}
+
 export function dispatchProviderIncident(signal: IncidentSignal, logger: AlertLogger): void {
   try {
     const deps = getProductionAlertDeps();
-    const task = evaluateProviderIncident(signal, deps);
-    try {
-      waitUntil(task);
-    } catch {
-      // Not in a Vercel request scope — keep it running, always caught.
-      void task.catch(() => undefined);
-    }
+    scheduleBackground(evaluateProviderIncident(signal, deps));
   } catch (err) {
     try {
       logger('alerts.dispatch.failed', { message: err instanceof Error ? err.message : String(err) });
