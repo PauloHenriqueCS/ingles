@@ -32,7 +32,7 @@ import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient, SupabaseUsageRepository } from './usage-repository';
 import type { AiFeatureKey } from './feature-catalog';
-import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail } from '../_env';
+import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail, getAlertEnvironmentOverride } from '../_env';
 import { isProductionDeployment } from '../_billing/revenuecat-environment';
 
 export type ProviderErrorClass = 'auth' | 'rate_limit' | 'server' | 'connectivity';
@@ -90,6 +90,17 @@ export interface AlertEnvironment {
 }
 
 export function resolveAlertEnvironment(): AlertEnvironment {
+  // Explicit ALERT_ENVIRONMENT wins — it is the ONLY reliable way to tell the
+  // homologation project (which also runs with VERCEL_ENV='production', because
+  // it deploys via `vercel deploy --prod`) apart from the real production
+  // project. 'production'/'prod' → PRODUCTION; any other explicit value →
+  // HOMOLOG. Falls back to the VERCEL_ENV mapping only when unset.
+  const override = getAlertEnvironmentOverride();
+  if (override) {
+    return override === 'production' || override === 'prod'
+      ? { dbValue: 'production', label: 'PRODUCTION' }
+      : { dbValue: 'staging', label: 'HOMOLOG' };
+  }
   return isProductionDeployment()
     ? { dbValue: 'production', label: 'PRODUCTION' }
     : { dbValue: 'staging', label: 'HOMOLOG' };

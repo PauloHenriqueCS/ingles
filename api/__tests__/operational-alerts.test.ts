@@ -321,6 +321,28 @@ describe('providerLabel', () => {
   });
 });
 
+// ── 8b. Environment resolution (homolog must never read as production) ─────────
+
+describe('resolveAlertEnvironment', () => {
+  it('CRITICAL: ALERT_ENVIRONMENT=homolog wins even when VERCEL_ENV=production', () => {
+    vi.stubEnv('VERCEL_ENV', 'production');       // homolog project deploys with --prod
+    vi.stubEnv('ALERT_ENVIRONMENT', 'homolog');
+    expect(resolveAlertEnvironment()).toEqual({ dbValue: 'staging', label: 'HOMOLOG' });
+  });
+  it('ALERT_ENVIRONMENT=production maps to PRODUCTION', () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
+    expect(resolveAlertEnvironment()).toEqual({ dbValue: 'production', label: 'PRODUCTION' });
+  });
+  it('falls back to VERCEL_ENV when the override is unset', () => {
+    vi.stubEnv('VERCEL_ENV', 'production');
+    expect(resolveAlertEnvironment()).toEqual({ dbValue: 'production', label: 'PRODUCTION' });
+  });
+  it('defaults to HOMOLOG/staging when neither is production', () => {
+    vi.stubEnv('VERCEL_ENV', 'preview');
+    expect(resolveAlertEnvironment()).toEqual({ dbValue: 'staging', label: 'HOMOLOG' });
+  });
+});
+
 // ── 9. Static migration assertions (SQL-bound decisions) ───────────────────────
 
 const MIGRATION = readFileSync(
