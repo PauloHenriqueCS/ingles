@@ -324,7 +324,7 @@ describe('providerLabel', () => {
 // ── 9. Static migration assertions (SQL-bound decisions) ───────────────────────
 
 const MIGRATION = readFileSync(
-  resolve(__dirname, '..', '..', 'supabase', 'migrations', '20260812170000_operational_alerts.sql'),
+  resolve(__dirname, '..', '..', 'supabase', 'migrations', '20260812220000_operational_alerts.sql'),
   'utf8',
 );
 
