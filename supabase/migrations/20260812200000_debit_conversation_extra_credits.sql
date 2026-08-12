@@ -1,0 +1,23 @@
+-- =============================================================================
+-- MARCADOR (não é uma migration deste repositório) — NENHUM DDL/DML/GRANT/REVOKE.
+--
+-- version: 20260812200000_debit_conversation_extra_credits
+--
+-- Esta versão foi aplicada aos bancos COMPARTILHADOS (produção
+-- jiuurvheeuwmayrfnqgm e homologação ahszqexfzpbirdlkmdci) pelo OUTRO
+-- repositório dono do domínio de billing/créditos de conversação
+-- (ingles-dashboad), não por este repositório (ingles). Ela aparece em
+-- supabase_migrations.schema_migrations dos dois bancos sem um arquivo local
+-- correspondente aqui, o que faz `supabase db push` (homologation.yml) abortar
+-- com "Remote migration versions not found in local migrations directory".
+--
+-- Conforme supabase/MIGRATIONS.md ("Coordenação com ingles-dashboad", ponto 5):
+-- este repositório recebe um ARQUIVO MARCADOR com o mesmo timestamp e nome,
+-- contendo APENAS comentários — nunca uma cópia do SQL real, que continua
+-- propriedade exclusiva do ingles-dashboad. O marcador só alinha o histórico
+-- local ao remoto para o CLI parar de bloquear os pushes deste repositório.
+--
+-- NÃO usar `apply_migration` (MCP) nem `supabase migration repair` para isto —
+-- essas rotas geram/alteram histórico fora do fluxo versionado por arquivo.
+-- Intencionalmente vazio de qualquer efeito de schema/dado.
+-- =============================================================================
