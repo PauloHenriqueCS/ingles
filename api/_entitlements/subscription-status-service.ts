@@ -285,15 +285,21 @@ export async function resolveSubscriptionStatus(
     // treat null as "renewing" (the historical default), never as a problem.
     const autoRenew = row?.auto_renew !== false;
     const pendingPlanId = row?.pending_plan_id ?? null;
-    const effectiveChangeAt = pendingPlanId ? row?.pending_effective_at ?? null : null;
+    // A DEFERRED change takes effect at the CURRENT period end. Use plan.ends_at
+    // (the LIVE period end, kept fresh by every reconcile/renewal) as the
+    // effective date — NOT the PRODUCT_CHANGE event's stored pending_effective_at,
+    // which goes stale when the current subscription renews before the change
+    // effects. The sandbox's compressed billing cycle made pending_effective_at
+    // land in the past while Plus was still active, which wrongly collapsed
+    // pending_downgrade to not_renewing. This assignment IS the effective plan
+    // (admin_resolve_effective_plan_v1 returned it for `now`), so a
+    // pending_plan_id here always means "scheduled, not yet effective" — no
+    // separate future-date guard is needed.
+    const pendingChangeAt = plan.ends_at ?? row?.pending_effective_at ?? null;
 
-    // Resolve the pending plan's code/name only when one is scheduled AND it is
-    // still in the future (a past effective date means the change already ran
-    // and this row is stale — treat it as no pending change).
     let pendingPlanCode: string | null = null;
     let pendingPlanName: string | null = null;
-    const pendingInFuture = effectiveChangeAt != null && new Date(effectiveChangeAt).getTime() > now.getTime();
-    if (pendingPlanId && pendingInFuture) {
+    if (pendingPlanId) {
       const { data: pendingPlan } = await supabase
         .from('plans')
         .select('code, name')
@@ -333,7 +339,7 @@ export async function resolveSubscriptionStatus(
       planName: plan.plan_name,
       pendingPlanCode,
       pendingPlanName,
-      effectiveChangeAt: hasPendingChange ? effectiveChangeAt : null,
+      effectiveChangeAt: hasPendingChange ? pendingChangeAt : null,
       autoRenew,
       trialEndsAt: null,
       trialDaysRemaining: null,
