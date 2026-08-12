@@ -235,6 +235,15 @@ export async function syncSubscriptionFromEvent(
     row.pending_effective_at = null;
   }
 
+  // Any event that leaves this product EXPIRED clears a scheduled change — a
+  // pending change on an ended product is moot (prevents the orphan-pending
+  // residue). A DEFERRED-downgrade PRODUCT_CHANGE has a FUTURE expiration
+  // (isExpiredNow=false), so its pending set just above is preserved.
+  if (isExpiredNow) {
+    row.pending_plan_id = null;
+    row.pending_effective_at = null;
+  }
+
   const { error: upsertError } = await supabase
     .from('user_plan_assignments')
     .upsert(row, { onConflict: 'idempotency_key' });
@@ -352,6 +361,15 @@ export async function reconcileSubscriptionStateFromRest(
   if (!willNotRenew) {
     stateFields.cancelled_at = null;
     stateFields.cancel_reason = null;
+    stateFields.pending_plan_id = null;
+    stateFields.pending_effective_at = null;
+  }
+
+  // A change scheduled on a product whose period has ALREADY ended is moot — an
+  // expired row must never carry a pending change (this is what left the orphan
+  // pending_plan_id on the old Plus row after its period lapsed). status is
+  // already 'expired' here.
+  if (isExpiredNow) {
     stateFields.pending_plan_id = null;
     stateFields.pending_effective_at = null;
   }

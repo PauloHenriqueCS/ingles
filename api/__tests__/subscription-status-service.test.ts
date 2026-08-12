@@ -325,6 +325,27 @@ describe('resolveSubscriptionStatus — accessType', () => {
     expect(snapshot.subscriptionState).not.toBe('not_renewing');
   });
 
+  it('linha comercial com ends_at NO PASSADO (status stale=active, cancelled/pending residuais) → NUNCA active/pending/cancelled: resolve expired', async () => {
+    // Defense-in-depth: even if a stale row resolves here, an already-ended
+    // period must classify as expired — never active/cancelled_active/pending.
+    const supabase = makeMockSupabase({
+      planRow: {
+        access_allowed: true, plan_id: 'p-plus', plan_code: 'plus', plan_name: 'Plus',
+        assignment_id: 'assign-stale', starts_at: '2026-07-01T00:00:00Z', ends_at: '2026-07-20T00:00:00Z', // BEFORE NOW (07-27)
+        is_suspended: false,
+      },
+      // Stale residue that must be ignored because the window already ended.
+      assignmentRow: { cancelled_at: '2026-06-15T00:00:00Z', auto_renew: false, pending_plan_id: 'p-essencial', pending_effective_at: '2026-07-05T00:00:00Z' },
+      pendingPlanRow: { code: 'essencial', name: 'Essencial' },
+    });
+    const snapshot = await resolveSubscriptionStatus('u1', { supabase, now: NOW });
+    expect(snapshot.subscriptionState).toBe('expired');
+    expect(snapshot.status).toBe('expired');
+    expect(snapshot.accessType).toBe('none');
+    expect(snapshot.pendingPlanCode).toBeNull();
+    expect(snapshot.effectiveChangeAt).toBeNull();
+  });
+
   it('Plus + auto_renew false SEM pending_plan_id → not_renewing (fallback honesto, nunca cancelada)', async () => {
     const supabase = makeMockSupabase({
       planRow: {
