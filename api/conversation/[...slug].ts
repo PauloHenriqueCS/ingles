@@ -23,6 +23,7 @@ import {
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { settleConversationExtraCreditsDebit } from '../_entitlements/conversation-extra-credits-debit';
 import { listPublishedMinutePackages } from '../_entitlements/minute-packages-service';
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import {
@@ -939,6 +940,16 @@ async function handleSessionComplete(req: any, res: any) {
       }
     }
 
+    // Debit purchased extra-minute credits for the OVER-PLAN portion of this
+    // session (plan-included minutes first, credits second). Best-effort +
+    // idempotent per authorization — a failure here must NEVER fail finalize
+    // (the quota is already recorded above).
+    try {
+      await settleConversationExtraCreditsDebit(userId, row.id, durationSeconds, { supabase: client });
+    } catch (debitErr) {
+      console.error('[conversation/session-complete] extra-credits debit failed', debitErr instanceof Error ? debitErr.message : 'unknown');
+    }
+
     return res.status(200).json({ status: 'completed', durationSeconds });
   } catch (e) {
     console.error('[conversation/session-complete] failed', e instanceof Error ? e.message : 'unknown');
@@ -1834,6 +1845,22 @@ async function handleMinutePackages(req: any, res: any) {
   const isTrial = entitlements.planCode === 'trial';
   const purchaseAvailable = !isTrial && entitlements.conversation.extraPurchaseEnabled === true;
 
+  // Conversation minute balance — server-authoritative, so the packages screen
+  // never invents numbers. Splits plan-included remaining from purchased
+  // (extra) remaining. Unlimited (internal) plans report unlimited=true.
+  const monthly = entitlements.conversation.monthlyTime;
+  const extraRemainingSeconds = entitlements.conversation.extraSecondsAvailable ?? 0;
+  const planIncludedRemainingSeconds = monthly.unlimited ? null : Math.max(0, monthly.limit - monthly.consumed);
+  const balance = {
+    unlimited: monthly.unlimited,
+    monthlyLimitSeconds: monthly.limit,
+    monthlyConsumedSeconds: monthly.consumed,
+    planIncludedRemainingSeconds,
+    extraRemainingSeconds,
+    totalRemainingSeconds: monthly.unlimited ? null : (planIncludedRemainingSeconds ?? 0) + extraRemainingSeconds,
+    period: monthly.period, // 'month' (commercial) | 'lifetime' (trial)
+  };
+
   let packages: Awaited<ReturnType<typeof listPublishedMinutePackages>> = [];
   if (purchaseAvailable) {
     try {
@@ -1845,7 +1872,7 @@ async function handleMinutePackages(req: any, res: any) {
   }
 
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(200).json({ purchaseAvailable, packages });
+  return res.status(200).json({ purchaseAvailable, packages, balance });
 }
 
 // ─── dispatcher ───────────────────────────────────────────────────────────────

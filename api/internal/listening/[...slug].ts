@@ -23,6 +23,7 @@ import {
   releaseExpiredPendingReservations,
 } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
+import { settleConversationExtraCreditsDebit } from '../../_entitlements/conversation-extra-credits-debit';
 import {
   WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS,
   REALTIME_HEARTBEAT_STALE_SECONDS, AUTHORIZATION_SWEEP_GRACE_SECONDS,
@@ -526,6 +527,15 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
         } catch (e) {
           safeLog('internal/listening/conversation-sweep', 'budget_reconcile_failed', 200, { error: e instanceof Error ? e.message : String(e) });
         }
+      }
+
+      // Debit purchased extra-minute credits for the OVER-PLAN portion of this
+      // abandoned session too — same idempotent RPC as /session-complete, so a
+      // session finalized by the sweep still burns credits exactly once.
+      try {
+        await settleConversationExtraCreditsDebit(row.user_id, row.id, durationSeconds, { supabase });
+      } catch (e) {
+        safeLog('internal/listening/conversation-sweep', 'extra_credits_debit_failed', 200, { error: e instanceof Error ? e.message : String(e) });
       }
     }
 

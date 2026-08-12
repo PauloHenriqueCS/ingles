@@ -29,6 +29,7 @@ import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
 import SettingsView from './components/SettingsView';
 import SubscriptionView from './components/SubscriptionView';
+import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
 import AuthCallback from './components/AuthCallback';
@@ -44,6 +45,10 @@ export default function App() {
   const today = getTodaySP();
   const [view, setView] = useState<View>('home');
   const [prevView, setPrevView] = useState<View>('home');
+  // Where "Minutos adicionais" returns to (it's reachable from both the
+  // subscription screen and the conversation area — one screen, two entries).
+  const [minutesReturnView, setMinutesReturnView] = useState<View>('home');
+  const openMinutePackages = (from: View) => { setMinutesReturnView(from); setView('minute-packages'); };
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [currentMonth, setCurrentMonth] = useState(getSpMonth());
   const [currentYear, setCurrentYear] = useState(getSpYear());
@@ -258,6 +263,7 @@ export default function App() {
           <ConversationView
             onComplete={() => setConversationRefreshKey((k) => k + 1)}
             onNavigateToSubscription={() => setView('subscription')}
+            onNavigateToMinutePackages={() => openMinutePackages('conversation')}
           />
         )}
         {view === 'listening' && (
@@ -281,7 +287,16 @@ export default function App() {
           <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
         )}
         {view === 'subscription' && (
-          <SubscriptionView onBack={() => setView('home')} />
+          <SubscriptionView
+            onBack={() => setView('home')}
+            onNavigateToMinutePackages={() => openMinutePackages('subscription')}
+          />
+        )}
+        {view === 'minute-packages' && (
+          <MinutePackagesView
+            onBack={() => setView(minutesReturnView)}
+            onNavigateToSubscription={() => setView('subscription')}
+          />
         )}
       </main>
     </div>

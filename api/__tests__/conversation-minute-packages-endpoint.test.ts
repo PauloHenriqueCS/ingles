@@ -189,7 +189,7 @@ describe('GET /api/conversation/minute-packages', () => {
     await handler(makeReq(), res);
 
     expect(res._status()).toBe(200);
-    expect(res._body()).toEqual({ purchaseAvailable: false, packages: [] });
+    expect(res._body()).toMatchObject({ purchaseAvailable: false, packages: [] });
     expect(mockPackagesFrom).not.toHaveBeenCalled();
   });
 
@@ -216,7 +216,7 @@ describe('GET /api/conversation/minute-packages', () => {
     await handler(makeReq(), res);
 
     expect(res._status()).toBe(200);
-    expect(res._body()).toEqual({ purchaseAvailable: false, packages: [] });
+    expect(res._body()).toMatchObject({ purchaseAvailable: false, packages: [] });
     expect(mockPackagesFrom).not.toHaveBeenCalled();
   });
 
@@ -296,5 +296,43 @@ describe('GET /api/conversation/minute-packages', () => {
 
     expect(res._status()).toBe(500);
     expect((res._body() as { code: string }).code).toBe('INTERNAL_ERROR');
+  });
+
+  it('returns a server-authoritative balance split (plan-included / extra / total)', async () => {
+    // Commercial plan: 1800s monthly limit, 1200s consumed, 600s purchased extra.
+    const bounded: FeatureLimit = {
+      enabled: true, unlimited: false, limit: 1800, consumed: 1200, remaining: 600,
+      period: 'month', state: 'available', canStart: true,
+    };
+    const ent = entitlementsFor('plus', true);
+    ent.conversation.monthlyTime = bounded;
+    ent.conversation.extraSecondsAvailable = 600;
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(ent);
+    setCatalog([packageRow({ id: 'p1', code: 'pacote-300-min', minutes: 300 })]);
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    const body = res._body() as { purchaseAvailable: boolean; balance: any };
+    expect(body.purchaseAvailable).toBe(true);
+    expect(body.balance.unlimited).toBe(false);
+    expect(body.balance.monthlyLimitSeconds).toBe(1800);
+    expect(body.balance.monthlyConsumedSeconds).toBe(1200);
+    expect(body.balance.planIncludedRemainingSeconds).toBe(600); // 1800-1200
+    expect(body.balance.extraRemainingSeconds).toBe(600);
+    expect(body.balance.totalRemainingSeconds).toBe(1200);       // 600 + 600
+  });
+
+  it('unlimited (internal) plan → balance.unlimited true, null remaining, no purchase', async () => {
+    const ent = entitlementsFor('24317180', false); // internal, extra purchase off
+    // permissiveLimit already unlimited; keep it.
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(ent);
+    const res = makeRes();
+    await handler(makeReq(), res);
+    const body = res._body() as { purchaseAvailable: boolean; balance: any };
+    expect(body.balance.unlimited).toBe(true);
+    expect(body.balance.planIncludedRemainingSeconds).toBeNull();
+    expect(body.balance.totalRemainingSeconds).toBeNull();
+    expect(body.purchaseAvailable).toBe(false);
   });
 });

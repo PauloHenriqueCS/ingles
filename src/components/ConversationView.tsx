@@ -17,6 +17,7 @@ import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 import type { ConversationEntitlements } from '../domain/entitlements/entitlement-types';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { MINUTE_PACKAGES_MESSAGES } from '../domain/conversation/minute-packages-copy';
 import { formatMonthlyRemaining, formatExtraMinutesRemaining, formatTrialRemaining } from '../domain/entitlements/entitlement-formatting';
 
 function formatTime(ms: number) {
@@ -66,7 +67,7 @@ function GoalProgress({ todayTotalSec, goalMinutes }: { todayTotalSec: number; g
 
 // ── Monthly conversation balance indicator (commercial plan, not the daily goal) ──
 
-function ConversationBalanceIndicator({ conversation }: { conversation: ConversationEntitlements }) {
+function ConversationBalanceIndicator({ conversation, onBuyMinutes }: { conversation: ConversationEntitlements; onBuyMinutes?: () => void }) {
   if (!conversation.enabled) {
     return (
       <p className="text-xs text-amber-400 flex items-center gap-1.5 justify-center">
@@ -78,19 +79,44 @@ function ConversationBalanceIndicator({ conversation }: { conversation: Conversa
   if (conversation.monthlyTime.unlimited) {
     return <p className="text-xs text-teal-400 font-medium text-center">{ENTITLEMENT_MESSAGES.conversationUnlimitedLabel}</p>;
   }
-  if (conversation.monthlyTime.state === 'monthly_limit_reached') {
-    return <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>;
-  }
-  if (conversation.monthlyTime.state === 'trial_balance_exhausted') {
-    return <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted}</p>;
-  }
-  if (conversation.monthlyTime.state === 'available_with_extra_credits') {
-    return <p className="text-xs text-amber-300 text-center">{formatExtraMinutesRemaining(conversation.monthlyTime.remaining)}</p>;
-  }
-  if (conversation.monthlyTime.period === 'lifetime') {
-    return <p className="text-xs text-slate-400 text-center">{formatTrialRemaining(conversation.monthlyTime.remaining)}</p>;
-  }
-  return <p className="text-xs text-slate-400 text-center">{formatMonthlyRemaining(conversation.monthlyTime.remaining)}</p>;
+
+  const time = conversation.monthlyTime;
+  // Contextual "buy extra minutes" entry (path B) — only for a COMMERCIAL plan
+  // (monthly period, never trial), and only when it's relevant: plan minutes
+  // exhausted, already spending purchased credits, or running low (<= 5 min).
+  const isCommercialMonthly = time.period === 'month' && conversation.extraPurchaseEnabled === true;
+  const showBuy =
+    onBuyMinutes != null && isCommercialMonthly &&
+    (time.state === 'monthly_limit_reached' || time.state === 'available_with_extra_credits' ||
+      (time.state === 'available' && time.remaining <= 300));
+  const buyCta = showBuy ? (
+    <button
+      type="button"
+      onClick={onBuyMinutes}
+      className="mt-1 text-xs font-semibold text-blue-400 hover:text-blue-300 underline underline-offset-2"
+      data-testid="conversation-buy-minutes-cta"
+    >
+      {MINUTE_PACKAGES_MESSAGES.entryCtaTitle}
+    </button>
+  ) : null;
+
+  let line: string;
+  if (time.state === 'monthly_limit_reached') line = ENTITLEMENT_MESSAGES.conversationMinutesExhausted;
+  else if (time.state === 'trial_balance_exhausted') line = ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted;
+  else if (time.state === 'available_with_extra_credits') line = formatExtraMinutesRemaining(time.remaining);
+  else if (time.period === 'lifetime') line = formatTrialRemaining(time.remaining);
+  else line = formatMonthlyRemaining(time.remaining);
+
+  const lineColor =
+    time.state === 'monthly_limit_reached' || time.state === 'trial_balance_exhausted' ? 'text-amber-400'
+    : time.state === 'available_with_extra_credits' ? 'text-amber-300' : 'text-slate-400';
+
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <p className={`text-xs text-center ${lineColor}`}>{line}</p>
+      {buyCta}
+    </div>
+  );
 }
 
 // ── Summary chips ─────────────────────────────────────────────────────────────
@@ -153,9 +179,12 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 interface Props {
   onComplete?: () => void;
   onNavigateToSubscription: () => void;
+  /** Opens the shared "Minutos adicionais" screen (path B). Optional so
+   *  existing mounts/tests stay valid. */
+  onNavigateToMinutePackages?: () => void;
 }
 
-export default function ConversationView({ onComplete, onNavigateToSubscription }: Props) {
+export default function ConversationView({ onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
   const session      = useRealtimeSession(playbackRate);
@@ -312,7 +341,7 @@ export default function ConversationView({ onComplete, onNavigateToSubscription 
 
             {/* ── Monthly conversation balance (commercial plan) ──────────── */}
             {!conversationLoading && conversation && (
-              <ConversationBalanceIndicator conversation={conversation} />
+              <ConversationBalanceIndicator conversation={conversation} onBuyMinutes={onNavigateToMinutePackages} />
             )}
 
             {/* ── Daily goal card ────────────────────────────────────────── */}

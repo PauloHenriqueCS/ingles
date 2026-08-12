@@ -5,6 +5,7 @@ import SubscriptionPlanCard from './SubscriptionPlanCard';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
 import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '../domain/subscription/subscription-plans';
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
+import { MINUTE_PACKAGES_MESSAGES } from '../domain/conversation/minute-packages-copy';
 import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscription/subscription-mock-data';
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
 import { formatDatePtBr, computeDaysRemaining, formatTrialDaysRemainingLabel } from '../domain/subscription/subscription-formatting';
@@ -17,6 +18,9 @@ import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from 
 
 interface Props {
   onBack: () => void;
+  /** Opens the shared "Minutos adicionais" screen (also reachable from the
+   *  conversation area). Optional so existing tests/mounts stay valid. */
+  onNavigateToMinutePackages?: () => void;
   /** Testing/dev only — which mock state to render initially. When set, this
    *  overrides the real fetched status for the whole session (see the DEV
    *  switcher below); leave unset in production. */
@@ -63,7 +67,7 @@ const RECONCILE_MAX_ATTEMPTS = 3;
 const RECONCILE_RETRY_MS = 800;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export default function SubscriptionView({ onBack, initialStatus }: Props) {
+export default function SubscriptionView({ onBack, onNavigateToMinutePackages, initialStatus }: Props) {
   const [mockOverride, setMockOverride] = useState<SubscriptionAccessStatus | null>(initialStatus ?? null);
   const { state: fetchedState, error, refetch } = useSubscriptionStatus();
   const state = mockOverride ? getMockSubscriptionState(mockOverride) : fetchedState;
@@ -402,6 +406,27 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
             </div>
           )}
         </section>
+
+        {/* Minutos adicionais — entry point (path A). Shown to commercial plan
+            holders (eligibility is re-checked server-side on the packages
+            screen). Placed after the status summary and BEFORE the plan cards. */}
+        {onNavigateToMinutePackages && resolved && resolved.currentPlan !== null && (
+          <button
+            type="button"
+            onClick={onNavigateToMinutePackages}
+            className="w-full flex items-center gap-3 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-xl p-4 text-left transition-colors"
+            data-testid="buy-minute-packages-cta"
+          >
+            <span className="w-9 h-9 shrink-0 rounded-lg bg-blue-600/20 flex items-center justify-center">
+              <AppIcon icon={Clock} className="w-5 h-5 text-blue-400" />
+            </span>
+            <span className="flex-1">
+              <span className="block text-sm font-semibold text-slate-100">{MINUTE_PACKAGES_MESSAGES.entryCtaTitle}</span>
+              <span className="block text-xs text-slate-400">{MINUTE_PACKAGES_MESSAGES.entrySubtitle}</span>
+            </span>
+            <AppIcon icon={ExternalLink} className="w-4 h-4 text-slate-500 shrink-0" />
+          </button>
+        )}
 
         {/* Plans are the focus — right below the short status, never hidden
             once the user subscribed. An existing plan is badged "Plano atual"
