@@ -110,3 +110,15 @@ export function getAlertRecipientEmail(): string {
 export function getAlertFromEmail(): string {
   return readEnv('ALERT_FROM_EMAIL') || 'alerts@orodim.com.br';
 }
+
+/**
+ * Authoritative environment label for alerts, lowercased. REQUIRED on the
+ * homologation Vercel project (set ALERT_ENVIRONMENT=homolog), because that
+ * project is deployed with `vercel deploy --prod` (see .github/workflows/
+ * homologation.yml) and therefore runs with VERCEL_ENV='production' too —
+ * VERCEL_ENV alone cannot tell homologation apart from the real production
+ * project. When set it wins; when empty, alerts fall back to the VERCEL_ENV
+ * mapping (production → production, everything else → staging/HOMOLOG). */
+export function getAlertEnvironmentOverride(): string {
+  return readEnv('ALERT_ENVIRONMENT').toLowerCase();
+}
