@@ -168,6 +168,27 @@ export interface PurchaseDecision {
   sourcePlan: CommercialPlan | null;
 }
 
+/**
+ * The EXACT extra-disable rule for a plan CTA (the "current"/"next" cases are
+ * decided by the card action itself). A change/subscribe button is disabled
+ * ONLY when: reconciling is in flight, a purchase/change is in flight, or the
+ * FIRST offerings load hasn't produced anything yet. A BACKGROUND offerings
+ * refresh (offerings already loaded) must NOT disable — that was the audited
+ * "Mudar para Essencial fica desabilitado" bug.
+ */
+export function isPlanCtaDisabled(input: {
+  reconciling: boolean;
+  purchaseInFlight: boolean;
+  supported: boolean;
+  offeringsLoading: boolean;
+  offeringsLoaded: boolean;
+}): boolean {
+  if (input.reconciling) return true;
+  if (input.purchaseInFlight) return true;
+  if (input.supported && input.offeringsLoading && !input.offeringsLoaded) return true;
+  return false;
+}
+
 export function resolvePurchaseMode(
   targetPlan: CommercialPlan,
   storeActiveEntitlementIds: readonly string[],

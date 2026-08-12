@@ -44,6 +44,9 @@ export interface NativeSubscriptionPurchaseState {
   /** Re-read offerings AND CustomerInfo from the store — call after a backend
    *  /sync so the store ownership shown reflects the reconciled state. */
   refreshStore: () => void;
+  /** Read CustomerInfo now and resolve to the fresh active entitlement ids
+   *  (also applies them to state). For an in-flow convergence check. */
+  reloadStore: () => Promise<string[]>;
 }
 
 /**
@@ -115,8 +118,12 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
         setOfferings([]);
       })
       .finally(() => {
-        if (cancelled || !mountedRef.current) return;
-        setOfferingsLoading(false);
+        // Clear the loading flag whenever THIS load settles, guarded only by
+        // unmount — NOT by `cancelled`. Previously a refetchToken bump (e.g.
+        // refreshStore after a purchase) cancelled the in-flight load and its
+        // finally skipped clearing, so offeringsLoading could strand `true` and
+        // keep every plan CTA disabled (the audited downgrade-button bug).
+        if (mountedRef.current) setOfferingsLoading(false);
       });
     return () => { cancelled = true; };
   }, [supported, refetchToken, applyCustomerInfo]);
@@ -188,6 +195,16 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
   const refetchOfferings = useCallback(() => setRefetchToken((t) => t + 1), []);
   const refreshStore = refetchOfferings; // one token re-reads offerings + CustomerInfo
 
+  // Read CustomerInfo NOW and RESOLVE to the fresh active entitlement ids —
+  // lets a caller (the reconcile loop) check store↔backend convergence within
+  // the same async flow, instead of waiting for the refetchToken re-render.
+  const reloadStore = useCallback(async (): Promise<string[]> => {
+    if (!supported) return [];
+    const info = await getCustomerInfo();
+    if (mountedRef.current) applyCustomerInfo(info);
+    return info?.activeEntitlementIds ?? [];
+  }, [supported, applyCustomerInfo]);
+
   return {
     supported,
     offerings,
@@ -203,5 +220,6 @@ export function useNativeSubscriptionPurchase(): NativeSubscriptionPurchaseState
     restore,
     refetchOfferings,
     refreshStore,
+    reloadStore,
   };
 }

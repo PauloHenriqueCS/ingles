@@ -15,8 +15,10 @@ export interface UseSubscriptionStatusResult {
   /** Re-fetches. sync=true calls POST /api/subscription/sync instead (same
    *  response shape — api/_billing/subscription-sync-route-handler.ts —
    *  proactively reconciles with RevenueCat first) — call this right after
-   *  a native purchase/restore, before the webhook necessarily arrives. */
-  refetch: (options?: { sync?: boolean }) => Promise<void>;
+   *  a native purchase/restore, before the webhook necessarily arrives.
+   *  RESOLVES to the fresh state (or null on error) so a caller can check
+   *  convergence without waiting for the next render. */
+  refetch: (options?: { sync?: boolean }) => Promise<SubscriptionScreenState | null>;
 }
 
 interface SubscriptionStatusResponse {
@@ -61,7 +63,7 @@ export function useSubscriptionStatus(): UseSubscriptionStatusResult {
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  const refetch = useCallback(async (options?: { sync?: boolean }) => {
+  const refetch = useCallback(async (options?: { sync?: boolean }): Promise<SubscriptionScreenState | null> => {
     try {
       const headers = await getAuthHeader();
       const res = options?.sync
@@ -69,12 +71,14 @@ export function useSubscriptionStatus(): UseSubscriptionStatusResult {
         : await fetch('/api/subscription/status', { headers });
       if (!res.ok) throw new Error(`status ${res.status}`);
       const data = (await res.json()) as SubscriptionStatusResponse;
-      if (!mountedRef.current) return;
-      setState(toScreenState(data));
+      const next = toScreenState(data);
+      if (!mountedRef.current) return next;
+      setState(next);
       setError(false);
+      return next;
     } catch {
-      if (!mountedRef.current) return;
-      setError(true);
+      if (mountedRef.current) setError(true);
+      return null;
     }
   }, []);
 

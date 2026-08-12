@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2, ExternalLink, RefreshCw } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
@@ -9,7 +9,7 @@ import { getMockSubscriptionState, MOCK_STATUS_OPTIONS } from '../domain/subscri
 import { buildSubscriptionViewModel } from '../domain/subscription/subscription-view-model';
 import { formatDatePtBr, computeDaysRemaining, formatTrialDaysRemainingLabel } from '../domain/subscription/subscription-formatting';
 import { type PlanCardAction } from '../domain/subscription/subscription-plan-actions';
-import { resolveSubscriptionUiState, resolvePurchaseMode, type StoreSubscriptionSnapshot, type SubscriptionUiState } from '../domain/subscription/resolve-subscription-ui-state';
+import { resolveSubscriptionUiState, resolvePurchaseMode, isPlanCtaDisabled, type StoreSubscriptionSnapshot, type SubscriptionUiState } from '../domain/subscription/resolve-subscription-ui-state';
 import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
 import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
@@ -56,6 +56,13 @@ const DISPLAY_CODE_TO_DB_PLAN_CODE: Record<CommercialPlanDisplay['code'], Orodim
   plus: 'plus',
 };
 
+/** Bounded reconciliation retry (store↔backend eventual consistency after a
+ *  purchase/change). Small, finite — never a polling loop. Reconciling ALWAYS
+ *  ends after at most this many attempts, converged or not. */
+const RECONCILE_MAX_ATTEMPTS = 3;
+const RECONCILE_RETRY_MS = 800;
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const [mockOverride, setMockOverride] = useState<SubscriptionAccessStatus | null>(initialStatus ?? null);
   const { state: fetchedState, error, refetch } = useSubscriptionStatus();
@@ -63,11 +70,49 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
   const vm = state ? buildSubscriptionViewModel(state) : null;
   const nativePurchase = useNativeSubscriptionPurchase();
 
-  // A one-shot backend↔store reconciliation is in flight (the neutral
-  // "Atualizando sua assinatura…" state). UI-only; the ref makes it fire at
-  // most once per screen entry — never a loop, even if /sync fails to converge.
+  // A backend↔store reconciliation is in flight (the neutral "Atualizando sua
+  // assinatura…" state).
   const [reconciling, setReconciling] = useState(false);
-  const reconcileAttempted = useRef(false);
+  const reconcileAttempted = useRef(false); // auto-reconcile fires at most once per entry
+  const reconcileRunningRef = useRef(false); // prevents overlapping runs
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  const { supported: rcSupported, reloadStore } = nativePurchase;
+
+  // The ONE reconciliation runner. Used both by the auto-reconcile effect and
+  // right after a successful purchase/change. Guarantees termination:
+  //   - a bounded retry loop (RECONCILE_MAX_ATTEMPTS) for eventual consistency,
+  //   - reconciling is ALWAYS cleared in `finally` (guarded only by unmount) —
+  //     never stranded true by a dependency change (the audited infinite
+  //     "Atualizando…" spinner),
+  //   - an overlap guard so the effect + the post-purchase call never double-run.
+  const reconcile = useCallback(async () => {
+    if (reconcileRunningRef.current) return;
+    reconcileRunningRef.current = true;
+    setReconciling(true);
+    try {
+      for (let attempt = 0; attempt < RECONCILE_MAX_ATTEMPTS; attempt++) {
+        const backendState = await refetch({ sync: true }); // POST /sync then re-resolve
+        const entitlements = await reloadStore();           // fresh CustomerInfo
+        if (!backendState) break; // /status failed — keep last safe state, stop
+        const snapshot: StoreSubscriptionSnapshot = {
+          supported: rcSupported,
+          loaded: true,
+          activeEntitlementIds: entitlements,
+          managementUrl: null, // irrelevant to convergence
+        };
+        if (!resolveSubscriptionUiState(backendState, snapshot, false).needsReconciliation) break; // converged
+        if (attempt < RECONCILE_MAX_ATTEMPTS - 1) await delay(RECONCILE_RETRY_MS);
+      }
+    } catch (err) {
+      // Best-effort — never leave the screen stuck. Diagnostic only.
+      console.warn('[subscription] reconcile failed', err instanceof Error ? err.message : err);
+    } finally {
+      if (mountedRef.current) setReconciling(false);
+      reconcileRunningRef.current = false;
+    }
+  }, [refetch, reloadStore, rcSupported]);
 
   // The single coherent state — backend (access truth) folded with RevenueCat
   // CustomerInfo (ownership truth). Every CTA/badge below reads from here, so
@@ -118,23 +163,8 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
     if (!nativePurchase.customerInfoLoaded) return;
     if (!needsReconciliation || reconcileAttempted.current) return;
     reconcileAttempted.current = true;
-    let cancelled = false;
-    setReconciling(true);
-    (async () => {
-      try {
-        await refetch({ sync: true });
-        nativePurchase.refreshStore();
-      } catch {
-        // Reconciliation is best-effort — a /sync failure must never break the
-        // screen or retry in a loop. The resolved state still stays coherent
-        // via the union of backend + store, so no bad "subscribe" is offered.
-      } finally {
-        if (!cancelled) setReconciling(false);
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsReconciliation, nativePurchase.customerInfoLoaded, mockOverride]);
+    void reconcile(); // owns the spinner + bounded retry + guaranteed clear
+  }, [needsReconciliation, nativePurchase.customerInfoLoaded, mockOverride, reconcile]);
 
   // FASE 3/4: never offered to the internal plan or during trial — only a
   // real commercial assignment (active/canceled/billing_issue) or no
@@ -164,15 +194,8 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
 
     // Already owns the target — never re-call the store; reconcile + reassure.
     if (decision.mode === 'blocked_owned_target') {
-      setReconciling(true);
-      try {
-        await refetch({ sync: true });
-        nativePurchase.refreshStore();
-      } catch {
-        // best-effort — never break the screen on a sync failure
-      } finally {
-        setReconciling(false);
-      }
+      reconcileAttempted.current = true; // claim it so the auto-effect won't double-fire
+      await reconcile();                 // shared runner: spinner + bounded retry + guaranteed clear
       window.alert(SUBSCRIPTION_MESSAGES.alreadyActiveNote);
       return;
     }
@@ -196,8 +219,11 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
       }
     }
     if (done) {
-      await refetch({ sync: true }); // reconcile with the backend for real, never optimistic-only
-      nativePurchase.refreshStore();
+      // Converge IN-SESSION via the shared runner — bounded retry, and the
+      // "Atualizando…" spinner ALWAYS ends (no infinite spinner after upgrade).
+      // The screen updates without needing the user to leave and re-enter.
+      reconcileAttempted.current = true;
+      await reconcile();
     } else if (nativePurchase.lastError && nativePurchase.lastError.code !== 'user_cancelled') {
       // user_cancelled is never presented as an alarming error (FASE 6).
       window.alert(nativePurchase.lastError.message);
@@ -402,7 +428,13 @@ export default function SubscriptionView({ onBack, initialStatus }: Props) {
                   onCta={handlePlanCta}
                   priceLabel={realOffering?.priceFormatted}
                   ctaLoading={nativePurchase.purchasing === packageId}
-                  ctaDisabled={resolved.cardsDisabled || nativePurchase.purchasing !== null || (nativePurchase.supported && nativePurchase.offeringsLoading)}
+                  ctaDisabled={isPlanCtaDisabled({
+                    reconciling: resolved.cardsDisabled,
+                    purchaseInFlight: nativePurchase.purchasing !== null,
+                    supported: nativePurchase.supported,
+                    offeringsLoading: nativePurchase.offeringsLoading,
+                    offeringsLoaded: nativePurchase.offerings.length > 0,
+                  })}
                 />
               );
             })}

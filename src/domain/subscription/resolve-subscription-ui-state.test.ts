@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveSubscriptionUiState,
   resolvePurchaseMode,
+  isPlanCtaDisabled,
   storeOwnershipFromEntitlements,
   type StoreSubscriptionSnapshot,
 } from './resolve-subscription-ui-state';
@@ -361,5 +362,55 @@ describe('unified topo+cards — a single resolved state (C3)', () => {
     const r = resolveSubscriptionUiState(COMMERCIAL_ESSENTIAL, store({ activeEntitlementIds: OWNS_ESSENTIAL }));
     expect(r.subscriptionState).toBe('active');
     expect(r.currentPlanName).toBe('Essencial');
+  });
+});
+
+describe('isPlanCtaDisabled — the exact downgrade/upgrade enable rule (audited bug)', () => {
+  const base = { reconciling: false, purchaseInFlight: false, supported: true, offeringsLoading: false, offeringsLoaded: true };
+
+  // 8. Plus active + store Plus + pendingPlan=null + reconciling=false → ENABLED
+  it('[8] not reconciling, nothing in flight, offerings loaded → ENABLED (false)', () => {
+    expect(isPlanCtaDisabled(base)).toBe(false);
+  });
+
+  // The regression: a BACKGROUND offerings refresh (offerings already present)
+  // must NOT disable — this is exactly what stranded "Mudar para Essencial".
+  it('[8-bug] background offerings refresh with offerings already loaded → still ENABLED', () => {
+    expect(isPlanCtaDisabled({ ...base, offeringsLoading: true, offeringsLoaded: true })).toBe(false);
+  });
+
+  it('reconciling in flight → disabled', () => {
+    expect(isPlanCtaDisabled({ ...base, reconciling: true })).toBe(true);
+  });
+
+  it('a purchase/change in flight → disabled', () => {
+    expect(isPlanCtaDisabled({ ...base, purchaseInFlight: true })).toBe(true);
+  });
+
+  it('FIRST offerings load (nothing loaded yet) → disabled; web (unsupported) never disabled by loading', () => {
+    expect(isPlanCtaDisabled({ ...base, offeringsLoading: true, offeringsLoaded: false })).toBe(true);
+    expect(isPlanCtaDisabled({ ...base, supported: false, offeringsLoading: true, offeringsLoaded: false })).toBe(false);
+  });
+});
+
+describe('post-upgrade convergence (Essencial→Plus) — the resolver reads Plus, downgrade offered', () => {
+  // After a successful upgrade + /sync + store refresh: backend Plus, store Plus.
+  it('backend Plus + store Plus + no pending + not reconciling → Plus current, Essencial "downgrade" (enabled), converged', () => {
+    const r = resolveSubscriptionUiState(COMMERCIAL_PLUS, store({ activeEntitlementIds: OWNS_PLUS }), false);
+    expect(r.subscriptionState).toBe('active');
+    expect(r.currentPlan).toBe('plus');
+    expect(r.pendingPlan).toBeNull();
+    expect(r.plusCardAction).toBe('current');
+    expect(r.essentialCardAction).toBe('downgrade'); // offered, and NOT 'next'
+    expect(r.needsReconciliation).toBe(false);       // converged → reconcile loop stops
+  });
+
+  // Mid-upgrade divergence (backend still Essencial, store already Plus) → needs
+  // reconciliation (drives the bounded retry), NOT a terminal state.
+  it('mid-upgrade: backend Essencial + store Plus → needsReconciliation true (retry), Plus treated as current', () => {
+    const r = resolveSubscriptionUiState(COMMERCIAL_ESSENTIAL, store({ activeEntitlementIds: OWNS_PLUS }), false);
+    expect(r.needsReconciliation).toBe(true);
+    expect(r.currentPlan).toBe('plus');
+    expect(r.plusCardAction).toBe('current');
   });
 });
