@@ -217,6 +217,8 @@ export type StoryPart = {
 };
 
 export type ListeningStoryData = {
+  /** The shared story's id — needed to consume it on practice start. */
+  sharedStoryId: string;
   title: string;
   level: string;
   summary: string;
@@ -230,6 +232,28 @@ export function generateListeningStory(storyPackage?: string | null, theme?: str
   return apiFetch<ListeningStoryData>('/api/listening/generate', {
     method: 'POST',
     body: JSON.stringify(body),
+  });
+}
+
+export type StoryPracticeStartResult = {
+  action: 'consumed' | 'already_consumed';
+  consumed: number;
+  limit: number;
+  unlimited: boolean;
+  remaining: number | null;
+};
+
+/**
+ * Consumes ONE story from the daily quota at the first real practice action.
+ * Preparing/opening/refreshing never consumes — only this does, and only once
+ * per story (idempotent server-side). Call it when the user starts practicing
+ * ("Começar a ouvir"), then refetch entitlements so the counter reflects the
+ * backend-authoritative remaining.
+ */
+export function startStoryPractice(sharedStoryId: string): Promise<StoryPracticeStartResult> {
+  return apiFetch<StoryPracticeStartResult>('/api/listening/story/practice-start', {
+    method: 'POST',
+    body: JSON.stringify({ sharedStoryId }),
   });
 }
 

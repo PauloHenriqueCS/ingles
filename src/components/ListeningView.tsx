@@ -16,6 +16,7 @@ import {
   refreshAudioUrl,
   getTodayListening,
   generateListeningStory,
+  startStoryPractice,
   completeStoryListening,
   processNextGroupListeningStep,
   retryGroupListeningGeneration,
@@ -162,13 +163,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const listening = entitlementsState.data?.listening ?? null;
   const listeningLoading = entitlementsState.data === null;
   const listeningDisabledByPlan = listening ? !listening.enabled : false;
-  // "2 histórias restantes hoje" / "Ilimitado" — same source of truth (the
-  // plan entitlements snapshot) and visual pattern as DailyThemeCard /
-  // PronunciationRecorder. Never a hardcoded limit; the numbers are the plan's
-  // configured limit vs. the user's real per-open consumption. (How many
-  // distinct stories a user can actually reach per day is separately capped by
-  // the shared-story cache — one story per level per day — which is out of
-  // scope to change here.)
+  // "2 histórias restantes hoje" / "Ilimitado" — the plan's configured limit
+  // vs. the user's real consumption, where consumption counts ONLY stories
+  // actually PRACTICED (completed), never merely prepared/opened. Backend is
+  // the source of truth; preparing/refetching never changes this number.
   const storiesRemainingLabel =
     !listening || listeningDisabledByPlan
       ? null
@@ -206,6 +204,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const [replayActive, setReplayActive] = useState(false);
   const [replayPartIdx, setReplayPartIdx] = useState<0 | 1>(0);
   const [groupGenState, setGroupGenState] = useState<ListeningGroupGenerationSummary | null>(null);
+  // Guards "consume exactly once per prepared story" on the client (the backend
+  // is idempotent too). Reset whenever a new story is prepared.
+  const practiceStartedRef = useRef(false);
   const speedRef = useRef<Speed>(1.00);
 
   const player = useListeningAudioPlayer();
@@ -506,11 +507,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       base64ToBlobUrl(data.parts[1].audioBase64, data.parts[1].audioMimeType);
       setStoryData(data);
       setStoryPackage(null);
-      // Opening a story consumes one História from the daily quota (the server
-      // attached the per-user-open ledger row). Reconcile the counter with the
-      // server — idempotent on retry, since re-opening the same shared story is
-      // not double-counted.
-      entitlementsState.refetch();
+      // Preparing (or recovering) a story is NOT consumption — the counter must
+      // not change here. Consumption happens only when practice actually starts
+      // ("Começar a ouvir" → beginPractice). Arm the once-per-story guard.
+      practiceStartedRef.current = false;
       player.load(url0);
       player.setOnEnded(() => setPhase('question'));
       setPhase('intro');
@@ -532,6 +532,26 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       setPhase('error');
     } finally {
       setStoryGenerating(false);
+    }
+  }
+
+  // First unambiguous practice action ("Começar a ouvir"): consume exactly one
+  // story from the daily quota, then reconcile the counter from the backend
+  // (authoritative — never an optimistic decrement as the source of truth).
+  // Idempotent client-side (ref) and server-side (completed flag).
+  async function beginPractice() {
+    setPhase('ready_to_play');
+    const id = storyData?.sharedStoryId;
+    if (!id || practiceStartedRef.current) return;
+    practiceStartedRef.current = true;
+    try {
+      await startStoryPractice(id);
+      entitlementsState.refetch();
+    } catch (err) {
+      // Non-fatal: the already-prepared story still plays. Allow a retry to
+      // record the practice later — the backend consumes at most once.
+      console.error('[listening] practice-start failed', err);
+      practiceStartedRef.current = false;
     }
   }
 
@@ -761,6 +781,14 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
             {episodeData?.title ?? 'Listening'}
           </p>
         </div>
+        {/* Daily stories counter — persistent across EVERY phase (prepare, intro,
+            player, question, done), so it is always visible on the real screen
+            the user practices in. Reflects only PRACTICED (consumed) stories. */}
+        {storiesRemainingLabel && (
+          <span className="text-xs font-medium text-slate-400 shrink-0 whitespace-nowrap">
+            {storiesRemainingLabel}
+          </span>
+        )}
         {episodeData && (
           <span className="text-xs font-semibold text-purple-400 shrink-0 px-2 py-0.5 rounded-full bg-purple-600/15 border border-purple-500/20">
             {episodeData.cefrLevel}
@@ -822,9 +850,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
             <p className="text-sm text-slate-400 leading-relaxed">
               Uma nova história será criada especialmente para o seu nível.
             </p>
-            {storiesRemainingLabel && (
-              <p className="text-xs text-slate-500">{storiesRemainingLabel}</p>
-            )}
           </div>
           <button
             onClick={handleStartGeneration}
@@ -1072,7 +1097,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
             </div>
           </div>
           <button
-            onClick={() => setPhase('ready_to_play')}
+            onClick={beginPractice}
             className="w-full py-4 rounded-2xl bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white font-semibold text-base transition-colors shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2"
           >
             <Headphones className="w-5 h-5" />
@@ -1941,10 +1966,6 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
               <Headphones className="w-5 h-5" />
               Ouvir novamente com legenda
             </button>
-          )}
-
-          {storiesRemainingLabel && (
-            <p className="text-xs text-slate-500">{storiesRemainingLabel}</p>
           )}
 
           <button
