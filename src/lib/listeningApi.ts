@@ -244,17 +244,30 @@ export type StoryPracticeStartResult = {
 };
 
 /**
- * Consumes ONE story from the daily quota at the first real practice action.
- * Preparing/opening/refreshing never consumes — only this does, and only once
- * per story (idempotent server-side). Call it when the user starts practicing
- * ("Começar a ouvir"), then refetch entitlements so the counter reflects the
- * backend-authoritative remaining.
+ * Consumes ONE story from the daily quota at the FIRST real exercise interaction
+ * (the first answer submit). Preparing/opening/recovering/"Começar a ouvir"/
+ * playing/pausing/leaving/returning/refreshing never consumes — only this does,
+ * and only once per story (idempotent server-side). Call it on the first answer,
+ * then refetch entitlements so the counter reflects the backend-authoritative
+ * remaining.
  */
 export function startStoryPractice(sharedStoryId: string): Promise<StoryPracticeStartResult> {
   return apiFetch<StoryPracticeStartResult>('/api/listening/story/practice-start', {
     method: 'POST',
     body: JSON.stringify({ sharedStoryId }),
   });
+}
+
+/**
+ * READ-ONLY: fetches the user's already-prepared (pending) story for today (SP),
+ * if any, so entering Listening can auto-resume it. Never generates, selects,
+ * consumes, or changes the counter. Returns null when there is no ready pending.
+ * Backend-sourced, so it works after refresh/logout/on another device.
+ */
+export function getPendingListeningStory(): Promise<ListeningStoryData | null> {
+  return apiFetch<{ pending: ListeningStoryData | null }>('/api/listening/story/pending', {
+    method: 'GET',
+  }).then((r) => r.pending);
 }
 
 // ── Story session (simplified, no DB) ─────────────────────────────────────────

@@ -23,7 +23,7 @@ vi.mock('../story-session/generate-listening-story', async (importOriginal) => {
   return { ...actual, generateListeningStory: vi.fn() };
 });
 
-import { getOrCreateSharedListeningStory } from './get-or-create-shared-listening-story';
+import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } from './get-or-create-shared-listening-story';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
 import { resolveListeningActivityDate } from '../daily/resolve-listening-activity-date';
 import { generateListeningStory } from '../story-session/generate-listening-story';
@@ -523,5 +523,45 @@ describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ con
     const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
 
     expect(result.sharedStoryId).toBe('story-xyz');
+  });
+});
+
+describe('getPendingListeningStoryForToday — read-only auto-recovery (no generate/select/consume)', () => {
+  it('returns the ready pending story (with sharedStoryId), never calling the acquire RPC or generating', async () => {
+    // rpcRow would advance to a different story if the acquire RPC were called.
+    const db = makeMockDb(wonRow({ id: 'different-story' }), { pending: { storyId: 'pending-1', status: 'ready' } });
+
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+
+    expect(result).not.toBeNull();
+    expect(result!.title).toBe('Pending Story');
+    expect(result!.sharedStoryId).toBe('pending-1');
+    expect(db.rpcMock).not.toHaveBeenCalled();            // no acquire/selection
+    expect(generateListeningStory).not.toHaveBeenCalled(); // no AI
+    expect(db.upsertProgressMock).not.toHaveBeenCalled();  // no attach (never consumes/creates)
+    expect(db.deleteProgressMock).not.toHaveBeenCalled();  // no stale-drop side effects
+  });
+
+  it('returns null when there is no pending (client then shows the prompt)', async () => {
+    const db = makeMockDb(wonRow(), { pending: null });
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+    expect(result).toBeNull();
+    expect(db.rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null for a still-generating pending (not yet resumable, no side effects)', async () => {
+    const db = makeMockDb(wonRow(), { pending: { storyId: 'pending-1', status: 'generating' } });
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+    expect(result).toBeNull();
+    expect(db.rpcMock).not.toHaveBeenCalled();
+    expect(db.deleteProgressMock).not.toHaveBeenCalled(); // read-only: never drops here
+  });
+
+  it('returns null for a failed pending (read-only endpoint never drops/regenerates)', async () => {
+    const db = makeMockDb(wonRow(), { pending: { storyId: 'pending-1', status: 'failed' } });
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+    expect(result).toBeNull();
+    expect(db.deleteProgressMock).not.toHaveBeenCalled();
+    expect(generateListeningStory).not.toHaveBeenCalled();
   });
 });

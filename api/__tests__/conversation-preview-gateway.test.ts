@@ -12,12 +12,14 @@ import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
 import { estimateTtsCharacters, estimateProviderRequests } from '../_ai-gateway/estimators';
 
-const { mockRequireAuth, gw, capturedContexts } = vi.hoisted(() => {
+const { mockRequireAuth, gw, capturedContexts, mockDownload, mockUpload } = vi.hoisted(() => {
   const mockRequireAuth = vi.fn();
   return {
     mockRequireAuth,
     gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps>,
     capturedContexts: [] as any[],
+    mockDownload: vi.fn(),
+    mockUpload: vi.fn(),
   };
 });
 
@@ -26,6 +28,8 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
   return {
     ...actual,
     getProductionDeps: () => gw.mockDeps,
+    // Shared-cache storage stub for the voice-preview cache (download/upload).
+    getSharedServiceClient: () => ({ storage: { from: () => ({ download: mockDownload, upload: mockUpload }) } }),
     executeAiGatewayCall: (async (context: any, ...rest: any[]) => {
       capturedContexts.push(context);
       return (actual.executeAiGatewayCall as any)(context, ...rest);
@@ -81,6 +85,9 @@ beforeEach(() => {
   gw.resetDefaults();
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
   process.env.OPENAI_API_KEY = 'sk-test-key';
+  // Default: preview cache MISS → the generate path runs (as before this cache).
+  mockDownload.mockResolvedValue({ data: null, error: { message: 'not found' } });
+  mockUpload.mockResolvedValue({ error: null });
 });
 
 describe('LEGACY mode', () => {
@@ -99,7 +106,7 @@ describe('OBSERVE mode', () => {
     gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
   });
 
-  it('records exactly one physical call for conversation.preview_tts, provider openai, model tts-1', async () => {
+  it('records exactly one physical call for conversation.preview_tts, provider openai, model gpt-4o-mini-tts', async () => {
     vi.stubGlobal('fetch', mockOpenAiTtsFetch(200));
     await handler(makeReq(), makeRes());
     expect(gw.mockStartEvent).toHaveBeenCalledTimes(1);
@@ -108,7 +115,7 @@ describe('OBSERVE mode', () => {
         featureKey: 'conversation.preview_tts',
         provider: 'openai',
         service: 'audio.speech',
-        model: 'tts-1',
+        model: 'gpt-4o-mini-tts',
         userId: USER_ID,
         actorType: 'user',
         executionLocation: 'backend',
@@ -139,7 +146,7 @@ describe('OBSERVE mode', () => {
     const sentBody = JSON.parse(opts.body as string);
     expect(sentBody.voice).toBe('ash'); // REALTIME_VOICES['ash'].previewVoice === 'ash'
     expect(sentBody.speed).toBe(0.82);  // PREVIEW_SPEED.slow, unchanged by the gateway wrap
-    expect(sentBody.model).toBe('tts-1');
+    expect(sentBody.model).toBe('gpt-4o-mini-tts');
   });
 
   it('character count matches countTtsPlainTextCharacters of the actual phrase sent (accents/emoji-safe utility, reused not reimplemented)', async () => {
@@ -219,5 +226,47 @@ describe('OBSERVE mode', () => {
     await handler(makeReq({ body: { voice: 'not-a-real-voice' } }), res);
     expect(res._status()).toBe(400);
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('shared preview cache', () => {
+  it('CACHE HIT: serves the stored sample with NO OpenAI TTS call and NO gateway telemetry', async () => {
+    gw.mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    const globalFetch = mockOpenAiTtsFetch(200);
+    vi.stubGlobal('fetch', globalFetch);
+    // Cache HIT: download returns a non-empty blob.
+    mockDownload.mockResolvedValue({ data: { arrayBuffer: async () => new ArrayBuffer(64) }, error: null });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(200);
+    expect(res._sent()).toBeInstanceOf(Buffer);
+    expect((res._sent() as Buffer).length).toBe(64);
+    expect(globalFetch).not.toHaveBeenCalled();        // no paid TTS on a cache hit
+    expect(gw.mockStartEvent).not.toHaveBeenCalled();  // no provider call → no telemetry
+    expect(mockUpload).not.toHaveBeenCalled();          // nothing to write
+  });
+
+  it('CACHE MISS: generates once, then persists the sample to the shared cache', async () => {
+    vi.stubGlobal('fetch', mockOpenAiTtsFetch(200, 96));
+    // Default beforeEach already sets a cache miss.
+    const res = makeRes();
+    await handler(makeReq({ body: { voice: 'coral', pace: 'normal' } }), res);
+
+    expect(res._status()).toBe(200);
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    const [path, , opts] = mockUpload.mock.calls[0] as [string, unknown, { contentType: string; upsert: boolean }];
+    expect(path).toBe('voice-previews/gpt-4o-mini-tts/coral_normal.mp3'); // deterministic per (voice, pace)
+    expect(opts).toMatchObject({ contentType: 'audio/mpeg', upsert: true });
+  });
+
+  it('a storage hiccup on read never breaks the preview (degrades to generation)', async () => {
+    vi.stubGlobal('fetch', mockOpenAiTtsFetch(200));
+    mockDownload.mockRejectedValue(new Error('storage down'));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._sent()).toBeInstanceOf(Buffer);
   });
 });

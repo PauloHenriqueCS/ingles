@@ -43,7 +43,7 @@ import {
   decodeAnswerToken,
 } from '../../src/services/listening/story-session/generate-story-session';
 import { StoryTtsError } from '../../src/services/listening/story-session/generate-listening-story';
-import { getOrCreateSharedListeningStory } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
+import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
 import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
@@ -1058,6 +1058,37 @@ async function handleStoryPracticeStart(req: any, res: any) {
   });
 }
 
+// ─── GET /api/listening/story/pending ────────────────────────────────────────
+// READ-ONLY auto-recovery: returns the user's already-prepared (pending) story
+// for today (SP) so entering Listening can resume it automatically, WITHOUT
+// generating, selecting, attaching, or consuming anything. Backend is the source
+// of truth (survives refresh/logout/other device). Returns { pending: null }
+// when there is no ready pending — the client then falls back to the prompt.
+async function handleStoryGetPending(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  // Feature on/off only — NOT canStart. Reading a pending never consumes and
+  // must work even at the daily limit (resuming an already-prepared story).
+  const enabledDenial = await checkListeningEnabled(userId);
+  if (enabledDenial) return jsonError(res, enabledDenial.status, enabledDenial.code, enabledDenial.message);
+
+  const secret = readEnv('SUPABASE_SERVICE_ROLE_KEY');
+  if (!secret) return jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Serviço temporariamente indisponível.');
+
+  try {
+    const serviceClient = getListeningServiceClient();
+    const pending = await getPendingListeningStoryForToday(userId, serviceClient, secret);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.status(200).json({ pending });
+  } catch (err) {
+    safeLog('listening/story/pending', 'error', 500, { message: err instanceof Error ? err.message.slice(0, 120) : 'unknown' });
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível recuperar a história preparada.');
+  }
+}
+
 export default async function handler(req: any, res: any) {
   const slug = resolveSlug(req, '/api/listening');
   switch (slug) {
@@ -1074,6 +1105,7 @@ export default async function handler(req: any, res: any) {
     case 'assignment-result':          return handleAssignmentResult(req, res);
     case 'generate':                   return handleListeningGenerate(req, res);
     case 'story/complete':             return handleStoryComplete(req, res);
+    case 'story/pending':              return handleStoryGetPending(req, res);
     case 'story/practice-start':       return handleStoryPracticeStart(req, res);
     case 'story/generate':             return handleStoryGenerate(req, res);
     case 'story/verify':               return handleStoryVerify(req, res);
