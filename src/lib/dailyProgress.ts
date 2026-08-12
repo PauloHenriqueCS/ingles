@@ -14,15 +14,36 @@ export async function getPronunciationDatesForMonth(
   const nextYear = month === 12 ? year + 1 : year;
   const endUTC = `${nextYear}-${pad(nextMonth)}-02T05:00:00Z`;
 
-  const { data } = await supabase
-    .from('pronunciation_assessments')
-    .select('completed_at')
-    .eq('status', 'completed')
-    .gte('completed_at', startUTC)
-    .lt('completed_at', endUTC);
+  // Pronunciation has two independent completed-analysis sources, both of
+  // which must light up the calendar:
+  //   - pronunciation_assessments        → diary/writing pronunciation (Surface #1)
+  //   - pronunciation_training_sessions   → "Treinar pronúncia" card    (Surface #2)
+  // Only status='completed' counts (a real, successful audio analysis);
+  // 'text_generated' (text only loaded) and 'failed_retryable' (failed
+  // analysis) are excluded, per the rule. Multiple analyses on the same day
+  // collapse to a single active day because both feed the same Set.
+  const [assessmentsRes, trainingRes] = await Promise.all([
+    supabase
+      .from('pronunciation_assessments')
+      .select('completed_at')
+      .eq('status', 'completed')
+      .gte('completed_at', startUTC)
+      .lt('completed_at', endUTC),
+    supabase
+      .from('pronunciation_training_sessions')
+      .select('completed_at')
+      .eq('status', 'completed')
+      .gte('completed_at', startUTC)
+      .lt('completed_at', endUTC),
+  ]);
 
   const dates = new Set<string>();
-  for (const row of data ?? []) {
+  for (const row of assessmentsRes.data ?? []) {
+    if (row.completed_at) {
+      dates.add(toSpDate(row.completed_at as string));
+    }
+  }
+  for (const row of trainingRes.data ?? []) {
     if (row.completed_at) {
       dates.add(toSpDate(row.completed_at as string));
     }

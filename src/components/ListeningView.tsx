@@ -27,6 +27,8 @@ import {
   type ListeningGroupGenerationSummary,
 } from '../lib/listeningApi';
 import { isRecognizedTodayListeningStatus } from '../lib/listeningTodayStatus';
+import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
+import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import type { PublicSubtitleCue, SessionBlockInfo } from '../services/listening/execution/listening-execution-types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -160,6 +162,19 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   const listening = entitlementsState.data?.listening ?? null;
   const listeningLoading = entitlementsState.data === null;
   const listeningDisabledByPlan = listening ? !listening.enabled : false;
+  // "2 histórias restantes hoje" / "Ilimitado" — same source of truth (the
+  // plan entitlements snapshot) and visual pattern as DailyThemeCard /
+  // PronunciationRecorder. Never a hardcoded limit; the numbers are the plan's
+  // configured limit vs. the user's real per-open consumption. (How many
+  // distinct stories a user can actually reach per day is separately capped by
+  // the shared-story cache — one story per level per day — which is out of
+  // scope to change here.)
+  const storiesRemainingLabel =
+    !listening || listeningDisabledByPlan
+      ? null
+      : listening.stories.unlimited
+      ? ENTITLEMENT_MESSAGES.unlimitedLabel
+      : formatDailyRemaining(listening.stories.remaining, 'história', 'histórias');
 
   const [phase, setPhase] = useState<Phase>('loading');
   const [episodeId, setEpisodeId] = useState<string | null>(propEpisodeId ?? null);
@@ -491,6 +506,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
       base64ToBlobUrl(data.parts[1].audioBase64, data.parts[1].audioMimeType);
       setStoryData(data);
       setStoryPackage(null);
+      // Opening a story consumes one História from the daily quota (the server
+      // attached the per-user-open ledger row). Reconcile the counter with the
+      // server — idempotent on retry, since re-opening the same shared story is
+      // not double-counted.
+      entitlementsState.refetch();
       player.load(url0);
       player.setOnEnded(() => setPhase('question'));
       setPhase('intro');
@@ -802,6 +822,9 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
             <p className="text-sm text-slate-400 leading-relaxed">
               Uma nova história será criada especialmente para o seu nível.
             </p>
+            {storiesRemainingLabel && (
+              <p className="text-xs text-slate-500">{storiesRemainingLabel}</p>
+            )}
           </div>
           <button
             onClick={handleStartGeneration}
@@ -1918,6 +1941,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
               <Headphones className="w-5 h-5" />
               Ouvir novamente com legenda
             </button>
+          )}
+
+          {storiesRemainingLabel && (
+            <p className="text-xs text-slate-500">{storiesRemainingLabel}</p>
           )}
 
           <button

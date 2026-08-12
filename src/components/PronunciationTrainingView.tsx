@@ -27,6 +27,7 @@ import type { PronunciationNormalizedResult } from '../types';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
 import { apiUrl } from '../lib/apiUrl';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
 import { fetchWordPracticeToken, WordAttemptLimitError } from '../lib/wordPracticeToken';
 import {
@@ -669,6 +670,21 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
   const canStartAnotherRound = unlimitedTraining && isCompletedToday;
   const generateNewDisabled = sessionId !== null && !canStartAnotherRound;
 
+  // Daily analyses counter for the "Treinar pronúncia" surface. This surface
+  // structurally allows ONE completed audio analysis per São Paulo day
+  // (enforced server-side by reserve_pronunciation_training_assessment), or
+  // unlimited for accounts whose pronunciation entitlement is unlimited. This
+  // is deliberately NOT the per-plan pronunciation.evaluations number (that
+  // governs the diary pronunciation surface, a different feature). No hardcoded
+  // commercial limit: the only plan-derived input is the unlimited flag from
+  // the backend snapshot; "1/day" is this feature's fixed daily structure and
+  // "used" is simply whether today's analysis is already done. Shown only while
+  // today's evaluation isn't completed — the completed state has its own
+  // message (pronunciationTrainingDailyEvaluationCompleted) below.
+  const analysesRemainingLabel = unlimitedTraining
+    ? ENTITLEMENT_MESSAGES.unlimitedLabel
+    : formatDailyRemaining(isCompletedToday ? 0 : 1, 'análise', 'análises');
+
   const canSubmit =
     recorder.phase === 'done'    &&
     recorder.audioBlob !== null  &&
@@ -846,7 +862,10 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
           {/* Recording section — only while today's evaluation isn't completed yet */}
           {!isCompletedToday && (
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
-              <h2 className="text-sm font-semibold text-slate-200 mb-3">Sua leitura</h2>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-slate-200">Sua leitura</h2>
+                <span className="text-xs text-slate-500">{analysesRemainingLabel}</span>
+              </div>
 
               {isSubmitting ? (
                 <div className="flex items-center gap-3 py-3">

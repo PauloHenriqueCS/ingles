@@ -10,14 +10,26 @@ import { computeWeekdayStreak, computeMaxWeekdayStreak } from './metricsCore';
 export async function fetchAllActiveDates(): Promise<string[]> {
   const dates = new Set<string>();
 
-  const [writingRes, pronunciationRes, listeningRes, sessionsRes, goalRes] =
-    await Promise.all([
+  const [
+    writingRes,
+    pronunciationRes,
+    trainingRes,
+    listeningRes,
+    sessionsRes,
+    goalRes,
+  ] = await Promise.all([
       supabase
         .from('english_reviews')
         .select('entry_date, created_at')
         .order('created_at', { ascending: false }),
       supabase
         .from('pronunciation_assessments')
+        .select('completed_at')
+        .eq('status', 'completed'),
+      // "Treinar pronúncia" (Surface #2) — a completed analysis here is an
+      // active day just like a diary pronunciation assessment (Surface #1).
+      supabase
+        .from('pronunciation_training_sessions')
         .select('completed_at')
         .eq('status', 'completed'),
       supabase
@@ -41,8 +53,13 @@ export async function fetchAllActiveDates(): Promise<string[]> {
     if (d) dates.add(d);
   }
 
-  // Pronunciation: convert UTC timestamp to São Paulo date.
+  // Pronunciation: convert UTC timestamp to São Paulo date. Both the diary
+  // (pronunciation_assessments) and the "Treinar pronúncia" training sessions
+  // count — only status='completed' rows were fetched for each.
   for (const row of pronunciationRes.data ?? []) {
+    if (row.completed_at) dates.add(toSpDate(row.completed_at as string));
+  }
+  for (const row of trainingRes.data ?? []) {
     if (row.completed_at) dates.add(toSpDate(row.completed_at as string));
   }
 

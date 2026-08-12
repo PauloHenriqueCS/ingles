@@ -416,7 +416,7 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.writing.themeGenerations.canStart).toBe(false);
   });
 
-  it('counts distinct episode-based stories started today, not just whether any assignment exists', async () => {
+  it('counts distinct shared stories the user opened today from user_listening_shared_progress (cache reuse counts, not AI generation)', async () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,
       tableResults: {
@@ -428,8 +428,11 @@ describe('getCurrentUserPlanEntitlements', () => {
           ],
           error: null,
         },
-        // 2 distinct episodes already assigned today (multi-story day).
-        user_listening_assignments: { data: null, error: null, count: 2 },
+        // The user opened 2 distinct shared stories today — the per-user-open
+        // ledger attachUserProgress writes on BOTH the cache-hit and the
+        // just-generated branch. This is the user's quota usage, independent
+        // of how many (if any) AI generations happened.
+        user_listening_shared_progress: { data: null, error: null, count: 2 },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
@@ -452,7 +455,7 @@ describe('getCurrentUserPlanEntitlements', () => {
           ],
           error: null,
         },
-        user_listening_assignments: { data: null, error: null, count: 3 },
+        user_listening_shared_progress: { data: null, error: null, count: 3 },
       },
     });
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
@@ -460,6 +463,54 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.listening.stories.consumed).toBe(3);
     expect(snapshot.listening.stories.state).toBe('daily_limit_reached');
     expect(snapshot.listening.stories.canStart).toBe(false);
+  });
+
+  it('scopes História consumption to the user\'s São Paulo day, not the UTC day (regression for the 21:00–24:00 SP miscount)', async () => {
+    // now = 02:00 UTC on 2026-07-18 → 23:00 on 2026-07-17 America/Sao_Paulo.
+    // The listening count MUST filter listening_shared_stories.practice_date
+    // by the SP date (2026-07-17), never the UTC date (2026-07-18), and must
+    // read from user_listening_shared_progress — capture the query to prove it.
+    const eqCalls: unknown[][] = [];
+    let queriedTable: string | null = null;
+    const progressChain: Record<string, unknown> = {
+      select: () => progressChain,
+      eq: (...args: unknown[]) => { eqCalls.push(args); return progressChain; },
+      gte: () => progressChain,
+      lt: () => progressChain,
+      in: () => progressChain,
+      not: () => progressChain,
+      or: () => progressChain,
+      order: () => progressChain,
+      gt: () => progressChain,
+      lte: () => progressChain,
+      maybeSingle: () => Promise.resolve({ data: null }),
+      then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: null, count: 1 }),
+    };
+    const supabase = {
+      rpc: vi.fn().mockResolvedValue({ data: [RESOLVED_PLAN], error: null }),
+      from: vi.fn((table: string) => {
+        if (table === 'user_listening_shared_progress') { queriedTable = table; return progressChain; }
+        if (table === 'plan_capability_values') {
+          return makeChain({
+            data: [
+              { capability_key: 'listening.enabled', value: true },
+              { capability_key: 'listening.stories_per_day', value: 3 },
+              { capability_key: 'listening.stories_per_day.unlimited', value: false },
+            ],
+            error: null,
+          });
+        }
+        return makeChain({ data: [], error: null, count: 0 });
+      }),
+    } as any;
+
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T02:00:00Z') });
+
+    expect(queriedTable).toBe('user_listening_shared_progress');
+    expect(eqCalls).toContainEqual(['listening_shared_stories.practice_date', '2026-07-17']);
+    // Never falls back to the old episode-assignment source.
+    expect(supabase.from).not.toHaveBeenCalledWith('user_listening_assignments');
+    expect(snapshot.listening.stories.consumed).toBe(1);
   });
 
   it('never trusts a client-supplied plan id — always resolves via the authenticated userId only', async () => {

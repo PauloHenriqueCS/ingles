@@ -13,7 +13,7 @@
  *     (the generic entitlements tables from the plans migration).
  *   - user_conversation_credits (the extra-minutes ledger).
  *   - the existing domain tables (generated_themes, english_reviews,
- *     pronunciation_assessments, user_listening_assignments,
+ *     pronunciation_assessments, user_listening_shared_progress,
  *     conversation_session_authorizations) as the source of truth for
  *     consumption — no parallel counter table.
  *
@@ -204,8 +204,16 @@ export async function getCurrentUserPlanEntitlements(
   }
 
   const { startIso: todayStartIso, endIso: todayEndIso } = utcDayRange(now);
-  const todayDate = utcDateString(now);
   const { startDate: monthStartDate, endDate: monthEndDate, resetAtIso } = utcMonthRange(now);
+  // Listening (História) is scoped to the São Paulo calendar day, matching how
+  // the feature actually writes its rows: listening_shared_stories.practice_date
+  // and the daily story key are both resolved in America/Sao_Paulo (see
+  // src/services/listening/daily/resolve-listening-activity-date.ts). Counting
+  // it against a UTC day (like the other counters here) miscounts 21:00–24:00
+  // SP, so it gets its own SP date. Same en-CA + America/Sao_Paulo formatter as
+  // getTodaySP()/resolveListeningActivityDate — kept inline to avoid importing
+  // browser-side src/lib into the server bundle.
+  const todaySpDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(now);
 
   // Etapa 2A — the internal 'trial' plan's Conversation completeness is
   // satisfied by conversation.realtime.seconds.trial_total instead of the
@@ -254,7 +262,7 @@ export async function getCurrentUserPlanEntitlements(
     themeCountResult,
     reviewCountResult,
     pronunciationCountResult,
-    listeningAssignedResult,
+    listeningConsumedResult,
     conversationSecondsResult,
   ] = await Promise.all([
     plan.plan_version_id
@@ -286,7 +294,26 @@ export async function getCurrentUserPlanEntitlements(
     // its slot the instant it is taken, before the AI call even starts.
     supabase.from('writing_review_reservations').select('id', { count: 'exact', head: true }).eq('user_id', userId).in('status', ['reserved', 'completed']).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
     supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
-    supabase.from('user_listening_assignments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('activity_date', todayDate).not('episode_id', 'is', null),
+    // História = the live shared-story listening flow. A story is "consumed"
+    // the moment the user opens it (cached OR generated) — attachUserProgress
+    // upserts one user_listening_shared_progress row per (user, shared_story),
+    // in BOTH the reuse and the just-generated branches
+    // (src/services/listening/shared-story/get-or-create-shared-listening-story.ts).
+    // That per-user-open ledger — NOT the AI generation — is the user's quota
+    // usage, so cache reuse still counts. We count the user's progress rows
+    // whose shared story belongs to TODAY (SP), via the FK to
+    // listening_shared_stories.practice_date (already an SP date).
+    //
+    // Previously this counted user_listening_assignments where episode_id IS
+    // NOT NULL — but the shared-story flow writes assignments with episode_id
+    // NULL (and the episode_id path is unused in prod), so consumed was always
+    // 0 and História never decremented. The unique (user, shared_story) upsert
+    // also means re-opening the same story is not double-counted.
+    supabase
+      .from('user_listening_shared_progress')
+      .select('id, listening_shared_stories!inner(practice_date)', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('listening_shared_stories.practice_date', todaySpDate),
     (() => {
       let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId);
       if (trialWindow) {
@@ -328,7 +355,7 @@ export async function getCurrentUserPlanEntitlements(
   const themeGenerationsToday = themeCountResult.count ?? 0;
   const reviewsToday = reviewCountResult.count ?? 0;
   const pronunciationEvaluationsToday = pronunciationCountResult.count ?? 0;
-  const listeningStoriesToday = listeningAssignedResult.count ?? 0;
+  const listeningStoriesToday = listeningConsumedResult.count ?? 0;
 
   // Never trusts a stored duration_seconds for a row still 'authorized' —
   // that state means session-complete hasn't (yet, or ever) closed it, so
