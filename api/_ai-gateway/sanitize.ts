@@ -75,6 +75,28 @@ export function sanitizeMetadata(
   return result;
 }
 
+// ── OpenAI raw-body error code extraction ─────────────────────────────────────
+
+/**
+ * Safely pulls the STRUCTURED error code from an OpenAI REST error body
+ * (`{"error":{"code":"insufficient_quota","type":"insufficient_quota", …}}`).
+ * The raw-fetch OpenAI paths (create_session, preview TTS, writing-rewrite model
+ * evaluator) don't get the SDK's `.code` property automatically, so their error
+ * classes call this to expose a real structured code to sanitizeError() — which
+ * is what lets the operational-alert classifier recognise a billing/quota block
+ * (e.g. insufficient_quota) instead of mislabelling it as a transient rate limit.
+ * Returns only the short enum-like code/type token — never any message text.
+ */
+export function extractOpenAiErrorCode(body: string | null | undefined): string | undefined {
+  if (!body || typeof body !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown; type?: unknown } };
+    const raw = parsed?.error?.code ?? parsed?.error?.type;
+    if (typeof raw === 'string' && raw.trim()) return raw.trim().slice(0, 64);
+  } catch { /* non-JSON body → no structured code */ }
+  return undefined;
+}
+
 // ── Error sanitization ────────────────────────────────────────────────────────
 
 export interface SanitizedError {
@@ -111,19 +133,27 @@ export function sanitizeError(
     const e = err as Record<string, unknown>;
 
     // Prefer the standard `status` (OpenAI SDK, fetch Response wrappers), then
-    // fall back to `azureStatus` — a safety net so an Azure error class that
-    // exposes the numeric HTTP status only under that name still reaches
-    // telemetry (and therefore the operational alerts) with a real http_status
-    // instead of NULL. Error classes are additionally normalized to also carry
-    // `.status` (see api/_azure-speech.ts, api/tts.ts, listening synthesis);
-    // this fallback covers anything not yet normalized.
+    // fall back to `azureStatus` / `openaiStatus` — a safety net so a provider
+    // error class that exposes the numeric HTTP status only under a custom name
+    // still reaches telemetry (and therefore the operational alerts) with a real
+    // http_status instead of NULL. Error classes are additionally normalized to
+    // also carry `.status` (see api/_azure-speech.ts, api/tts.ts, listening
+    // synthesis, CreateSessionHttpError); these fallbacks cover anything not yet
+    // normalized (e.g. PreviewTtsHttpError.openaiStatus).
     if (typeof e['status'] === 'number') {
       result.httpStatus = e['status'] as number;
     } else if (typeof e['azureStatus'] === 'number') {
       result.httpStatus = e['azureStatus'] as number;
+    } else if (typeof e['openaiStatus'] === 'number') {
+      result.httpStatus = e['openaiStatus'] as number;
     }
-    if (typeof e['code'] === 'string') {
+    // Prefer the structured `code`; fall back to the OpenAI SDK's `type` (e.g.
+    // `insufficient_quota`) so the billing/quota classifier keys on a real
+    // structured signal instead of NULL.
+    if (typeof e['code'] === 'string' && e['code']) {
       result.code = (e['code'] as string).slice(0, 64);
+    } else if (typeof e['type'] === 'string' && e['type']) {
+      result.code = (e['type'] as string).slice(0, 64);
     }
     if (typeof e['name'] === 'string') {
       result.category = (e['name'] as string).slice(0, 64);

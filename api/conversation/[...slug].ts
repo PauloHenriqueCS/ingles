@@ -21,6 +21,7 @@ import {
   releaseSessionReservation,
 } from '../_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../_ai-gateway/index';
+import { extractOpenAiErrorCode } from '../_ai-gateway/sanitize';
 import { countTtsPlainTextCharacters } from '../_ai-gateway/tts-character-count';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { settleConversationExtraCreditsDebit } from '../_entitlements/conversation-extra-credits-debit';
@@ -333,6 +334,11 @@ class CreateSessionHttpError extends Error {
   // Read by api/_ai-gateway/sanitize.ts:sanitizeError() to populate the
   // failed event's http_status without needing to touch the raw body.
   get status(): number { return this.httpStatus; }
+  // Structured provider error code parsed from the OpenAI error body, so a
+  // billing/quota block returned by realtime/client_secrets (e.g. HTTP 429
+  // insufficient_quota) is classified as a critical `billing` incident rather
+  // than a transient rate limit. Never exposes any message text.
+  get code(): string | undefined { return extractOpenAiErrorCode(this.rawText); }
 }
 
 function buildCreateSessionMetrics(): GatewayUsageMetric[] {

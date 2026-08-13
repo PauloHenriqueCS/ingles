@@ -16,6 +16,7 @@ import { resolve } from 'path';
 
 import {
   classifyProviderError,
+  isBillingBlockSignal,
   evaluateProviderIncident,
   runRecoverySweep,
   buildOpenEmail,
@@ -27,7 +28,7 @@ import {
   type AlertDeps,
   type IncidentSignal,
 } from '../_ai-gateway/alerts';
-import { sanitizeError } from '../_ai-gateway/sanitize';
+import { sanitizeError, extractOpenAiErrorCode } from '../_ai-gateway/sanitize';
 import { AzureSpeechError } from '../_azure-speech';
 
 afterEach(() => {
@@ -83,11 +84,43 @@ describe('classifyProviderError', () => {
     expect(classifyProviderError({ httpStatus: null, code: 'AZURE_SPEECH_ServiceTimeout' })).toBe('connectivity');
     expect(classifyProviderError({ httpStatus: null, code: 'AZURE_SPEECH_ConnectionFailure' })).toBe('connectivity');
   });
-  it('does NOT classify ordinary client errors / success / unknown', () => {
-    expect(classifyProviderError({ httpStatus: 400 })).toBeNull();
-    expect(classifyProviderError({ httpStatus: 404 })).toBeNull();
-    expect(classifyProviderError({ httpStatus: 200 })).toBeNull();
-    expect(classifyProviderError({ httpStatus: null, code: 'SOMETHING_ELSE' })).toBeNull();
+  it('maps a billing/credit/quota/subscription block to billing — even without 401/403', () => {
+    // OpenAI credit exhaustion arrives as HTTP 429 with a structured code, NOT 401.
+    expect(classifyProviderError({ httpStatus: 429, code: 'insufficient_quota' })).toBe('billing');
+    expect(classifyProviderError({ httpStatus: 429, code: 'billing_hard_limit_reached' })).toBe('billing');
+    // 402 Payment Required is billing on its own.
+    expect(classifyProviderError({ httpStatus: 402 })).toBe('billing');
+    // A structured billing code wins even when there is no HTTP status at all.
+    expect(classifyProviderError({ httpStatus: null, code: 'account_deactivated' })).toBe('billing');
+    // access_terminated (often 403) is billing, more specific than plain auth.
+    expect(classifyProviderError({ httpStatus: 403, code: 'access_terminated' })).toBe('billing');
+  });
+  it('keeps a plain 429 (no billing code) as a transient rate_limit', () => {
+    expect(classifyProviderError({ httpStatus: 429 })).toBe('rate_limit');
+    expect(classifyProviderError({ httpStatus: 429, code: 'rate_limit_exceeded' })).toBe('rate_limit');
+  });
+  it('NEVER silently drops a genuine provider error: unknown shapes → provider_error', () => {
+    // Previously these returned null (silent). They are all genuine provider-origin
+    // failures (the classifier is only ever reached from the gateway invoke() catch
+    // or the browser provider-fail allowlist), so they must be monitored.
+    expect(classifyProviderError({ httpStatus: 402, code: null })).toBe('billing'); // 402 → billing
+    expect(classifyProviderError({ httpStatus: 404 })).toBe('provider_error');
+    expect(classifyProviderError({ httpStatus: 408 })).toBe('provider_error');
+    expect(classifyProviderError({ httpStatus: 409 })).toBe('provider_error');
+    expect(classifyProviderError({ httpStatus: 400 })).toBe('provider_error');
+    expect(classifyProviderError({ httpStatus: null, code: 'SOMETHING_ELSE' })).toBe('provider_error');
+    expect(classifyProviderError({ httpStatus: null, category: 'WeirdSdkError' })).toBe('provider_error');
+  });
+});
+
+describe('isBillingBlockSignal', () => {
+  it('is true for 402 and for curated structured billing codes only', () => {
+    expect(isBillingBlockSignal({ httpStatus: 402 })).toBe(true);
+    expect(isBillingBlockSignal({ httpStatus: 429, code: 'insufficient_quota' })).toBe(true);
+    expect(isBillingBlockSignal({ httpStatus: 429, code: 'INSUFFICIENT_QUOTA' })).toBe(true); // case-insensitive
+    expect(isBillingBlockSignal({ httpStatus: 429, code: 'rate_limit_exceeded' })).toBe(false);
+    expect(isBillingBlockSignal({ httpStatus: 500 })).toBe(false);
+    expect(isBillingBlockSignal({ httpStatus: null, code: null })).toBe(false);
   });
 });
 
@@ -111,6 +144,35 @@ describe('sanitizeError preserves normalized Azure status/code', () => {
     expect(info.requestId).toBe('req_openai_123');
     expect(info.sanitizedMessage).toBeUndefined(); // secret-looking message dropped
   });
+  it('falls back to .openaiStatus (PreviewTtsHttpError) so OpenAI HTTP errors classify', () => {
+    const info = sanitizeError({ openaiStatus: 429, name: 'PreviewTtsHttpError' } as any);
+    expect(info.httpStatus).toBe(429);
+    expect(classifyProviderError(info)).toBe('rate_limit');
+  });
+  it('falls back to the OpenAI SDK .type when .code is absent (billing detection)', () => {
+    const info = sanitizeError({ status: 429, type: 'insufficient_quota' } as any);
+    expect(info.code).toBe('insufficient_quota');
+    expect(classifyProviderError(info)).toBe('billing');
+  });
+});
+
+describe('extractOpenAiErrorCode', () => {
+  it('pulls a structured code/type from a raw OpenAI error body', () => {
+    expect(extractOpenAiErrorCode('{"error":{"code":"insufficient_quota","message":"secret"}}')).toBe('insufficient_quota');
+    expect(extractOpenAiErrorCode('{"error":{"type":"invalid_request_error"}}')).toBe('invalid_request_error');
+  });
+  it('returns undefined for a non-JSON or empty body (never throws)', () => {
+    expect(extractOpenAiErrorCode('not json')).toBeUndefined();
+    expect(extractOpenAiErrorCode('')).toBeUndefined();
+    expect(extractOpenAiErrorCode(null)).toBeUndefined();
+  });
+  it('a create_session HTTP 429 insufficient_quota body classifies as billing end-to-end', () => {
+    // Mirrors CreateSessionHttpError.status + .code getters feeding sanitizeError.
+    const rawText = '{"error":{"code":"insufficient_quota","type":"insufficient_quota"}}';
+    const info = sanitizeError({ status: 429, code: extractOpenAiErrorCode(rawText), name: 'CreateSessionHttpError' } as any);
+    expect(info.httpStatus).toBe(429);
+    expect(classifyProviderError(info)).toBe('billing');
+  });
 });
 
 // ── 3. Open path: RPC verdict gates the e-mail ─────────────────────────────────
@@ -121,11 +183,54 @@ describe('evaluateProviderIncident', () => {
     error: null,
   });
 
-  it('does nothing for a non-outage class (400)', async () => {
-    const { deps, emails, rpc } = makeDeps();
-    await evaluateProviderIncident({ ...authSignal, httpStatus: 400, errorCode: null }, deps);
-    expect(rpc).not.toHaveBeenCalled();
-    expect(emails).toHaveLength(0);
+  it('an unknown 4xx is no longer silent: it records a monitored provider_error', async () => {
+    const { deps, rpc } = makeDeps(async () => ({ data: { should_send_email: false, action: 'below_threshold' }, error: null }));
+    await evaluateProviderIncident({ ...authSignal, httpStatus: 404, errorCode: null }, deps);
+    expect(rpc).toHaveBeenCalledWith('record_provider_incident', expect.objectContaining({
+      p_error_class: 'provider_error',
+      p_dedup_key: 'staging:azure_speech:provider_error',
+    }));
+  });
+
+  it('provider_error below threshold sends NO e-mail; on open sends exactly one; increments never re-e-mail', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production'); // e-mail path is gated to production
+    // below threshold → suppressed
+    {
+      const { deps, emails } = makeDeps(async () => ({ data: { should_send_email: false, action: 'below_threshold', occurrence_count: 2 }, error: null }));
+      await evaluateProviderIncident({ ...authSignal, httpStatus: 404, errorCode: null }, deps);
+      expect(emails).toHaveLength(0);
+    }
+    // threshold reached → one ALERT
+    {
+      const { deps, emails } = makeDeps(async () => ({ data: { should_send_email: true, action: 'opened', occurrence_count: 3, severity: 'warning' }, error: null }));
+      await evaluateProviderIncident({ ...authSignal, httpStatus: 404, errorCode: null }, deps);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].subject).toBe('[ORODIM ALERT][PRODUCTION] Azure Speech — PROVIDER_ERROR');
+    }
+    // further occurrences → increment, no new e-mail (anti-spam preserved)
+    {
+      const { deps, emails } = makeDeps(async () => ({ data: { should_send_email: false, action: 'incremented' }, error: null }));
+      await evaluateProviderIncident({ ...authSignal, httpStatus: 404, errorCode: null }, deps);
+      expect(emails).toHaveLength(0);
+    }
+  });
+
+  it('a billing block opens a critical incident with a billing dedup key and one ALERT', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production'); // e-mail path is gated to production
+    const { deps, emails, rpc } = makeDeps(async () => ({
+      data: { should_send_email: true, occurrence_count: 1, severity: 'critical', action: 'opened' }, error: null,
+    }));
+    await evaluateProviderIncident(
+      { providerRaw: 'openai', featureKey: 'conversation.create_session', httpStatus: 429, errorCode: 'insufficient_quota', errorCategory: 'CreateSessionHttpError' },
+      deps,
+    );
+    expect(rpc).toHaveBeenCalledWith('record_provider_incident', expect.objectContaining({
+      p_provider_raw: 'openai',
+      p_error_class: 'billing',
+      p_dedup_key: 'production:openai:billing',
+    }));
+    expect(emails).toHaveLength(1);
+    expect(emails[0].subject).toBe('[ORODIM ALERT][PRODUCTION] OpenAI — BILLING');
   });
 
   it('PRODUCTION + open: records incident AND sends exactly 1 Resend e-mail', async () => {
@@ -416,5 +521,56 @@ describe('operational-alerts migration', () => {
     expect(MIGRATION).toMatch(/SECURITY DEFINER/);
     expect(MIGRATION).toMatch(/REVOKE ALL ON FUNCTION public\.record_provider_incident[^;]*FROM PUBLIC/);
     expect(MIGRATION).toMatch(/GRANT EXECUTE ON FUNCTION public\.record_provider_incident[^;]*TO service_role/);
+  });
+});
+
+// ── 10. Billing + provider_error coverage migration (the new, additive one) ────
+
+const MIGRATION_V2 = readFileSync(
+  resolve(__dirname, '..', '..', 'supabase', 'migrations', '20260813120000_operational_alerts_billing_and_fallback_classes.sql'),
+  'utf8',
+);
+
+describe('billing + provider_error coverage migration', () => {
+  it('is additive: no CREATE TABLE, no editing of applied objects', () => {
+    expect(MIGRATION_V2).not.toMatch(/CREATE TABLE/i);
+    expect(MIGRATION_V2).not.toMatch(/DROP (FUNCTION|TABLE)/i);
+  });
+
+  it('detects a billing block by structured code (mirrors isBillingBlockSignal)', () => {
+    expect(MIGRATION_V2).toMatch(/_ai_error_code_is_billing/);
+    expect(MIGRATION_V2).toMatch(/'insufficient_quota'/);
+    expect(MIGRATION_V2).toMatch(/'billing_hard_limit_reached'/);
+  });
+
+  it('makes the window count / recovery CODE-AWARE (4-arg matcher over error_code + error_category)', () => {
+    expect(MIGRATION_V2).toMatch(/_ai_alert_status_matches_class\(\s*e\.http_status,\s*p_error_class,\s*e\.error_code,\s*e\.error_category\s*\)/);
+    expect(MIGRATION_V2).toMatch(/_ai_alert_status_matches_class\(\s*e\.http_status,\s*v_alert\.error_class,\s*e\.error_code,\s*e\.error_category\s*\)/);
+    expect(MIGRATION_V2).toMatch(/CREATE OR REPLACE FUNCTION public\.record_provider_incident/);
+    expect(MIGRATION_V2).toMatch(/CREATE OR REPLACE FUNCTION public\.resolve_provider_incident_if_recovered/);
+  });
+
+  it('classifies event class with billing winning over auth/rate_limit and provider_error as the fallback', () => {
+    expect(MIGRATION_V2).toMatch(/_ai_alert_event_class/);
+    expect(MIGRATION_V2).toMatch(/402 OR public\._ai_error_code_is_billing\(p_error_code\) THEN 'billing'/);
+    expect(MIGRATION_V2).toMatch(/ELSE 'provider_error'/);
+  });
+
+  it('seeds billing (critical, min 1) and provider_error (warning, min 3) for production AND staging', () => {
+    expect(MIGRATION_V2).toMatch(/'production', 'error_rate', 'billing',\s+300, NULL::numeric, 1, 'critical'/);
+    expect(MIGRATION_V2).toMatch(/'production', 'error_rate', 'provider_error', 300, NULL::numeric, 3, 'warning'/);
+    expect(MIGRATION_V2).toMatch(/'staging',\s+'error_rate', 'billing'/);
+    expect(MIGRATION_V2).toMatch(/'staging',\s+'error_rate', 'provider_error'/);
+    expect(MIGRATION_V2).not.toMatch(/'homolog'/);
+  });
+
+  it('has built-in default rules for billing + provider_error so a missing seed cannot silence them', () => {
+    expect(MIGRATION_V2).toMatch(/WHEN 'billing'\s+THEN v_window_seconds := 300;\s+v_min_events := 1;\s+v_cooldown_secs := 21600; v_severity := 'critical'/);
+    expect(MIGRATION_V2).toMatch(/WHEN 'provider_error' THEN v_window_seconds := 300;\s+v_min_events := 3;\s+v_cooldown_secs := 1800;\s+v_severity := 'warning'/);
+  });
+
+  it('locks the new helper functions down to service_role (revokes anon/authenticated)', () => {
+    expect(MIGRATION_V2).toMatch(/REVOKE ALL ON FUNCTION public\._ai_alert_event_class\(integer, text, text\)\s+FROM PUBLIC, anon, authenticated/);
+    expect(MIGRATION_V2).toMatch(/GRANT EXECUTE ON FUNCTION public\._ai_error_code_is_billing\(text\)\s+TO service_role/);
   });
 });
