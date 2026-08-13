@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { consumeAccountSessionNotice } from '../lib/accountSessionCleanup';
+import { rememberAuthMethod } from '../lib/authMethodMemory';
+import GoogleSignInButton from './GoogleSignInButton';
+import { isGoogleSignInAvailable } from '../lib/googleAuth';
 
 type Mode = 'login' | 'signup' | 'forgot';
 type State = 'idle' | 'loading' | 'error' | 'signup_sent';
@@ -22,6 +25,10 @@ export default function LoginPage() {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotState, setForgotState] = useState<ForgotState>('idle');
   const [forgotError, setForgotError] = useState('');
+  // True while the Google button runs its async flow — disables the email form
+  // so the two auth paths can't fire at once.
+  const [socialBusy, setSocialBusy] = useState(false);
+  const [googleAvailable] = useState(() => isGoogleSignInAvailable());
   // Read once per mount so the message shows exactly once, right after the
   // redirect that follows a self-deletion, a mid-session block, or a
   // completed password reset.
@@ -50,6 +57,8 @@ export default function LoginPage() {
       if (error) {
         setErrorMsg(translateError(error.message));
         setState('error');
+      } else {
+        rememberAuthMethod('password');
       }
       // On success, useAuth picks up the session change automatically
     } else {
@@ -295,7 +304,7 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={state === 'loading'}
+            disabled={state === 'loading' || socialBusy}
             className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {state === 'loading'
@@ -303,6 +312,17 @@ export default function LoginPage() {
               : (mode === 'login' ? 'Entrar' : 'Criar conta')}
           </button>
         </form>
+
+        {googleAvailable && (
+          <>
+            <div className="flex items-center gap-3" aria-hidden="true">
+              <div className="h-px flex-1 bg-slate-700" />
+              <span className="text-xs text-slate-500">ou</span>
+              <div className="h-px flex-1 bg-slate-700" />
+            </div>
+            <GoogleSignInButton disabled={state === 'loading'} onBusyChange={setSocialBusy} />
+          </>
+        )}
 
         <div className="text-center">
           {mode === 'login' ? (
