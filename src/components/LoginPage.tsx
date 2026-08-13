@@ -5,6 +5,8 @@ import { consumeAccountSessionNotice } from '../lib/accountSessionCleanup';
 import { rememberAuthMethod } from '../lib/authMethodMemory';
 import GoogleSignInButton from './GoogleSignInButton';
 import { isGoogleSignInAvailable } from '../lib/googleAuth';
+import AppleSignInButton from './AppleSignInButton';
+import { isAppleSignInAvailable } from '../lib/appleAuth';
 
 type Mode = 'login' | 'signup' | 'forgot';
 // The screen leads with the method chooser; the traditional email/password
@@ -35,6 +37,7 @@ export default function LoginPage() {
   // completed password reset.
   const [sessionNotice] = useState(() => consumeAccountSessionNotice());
   const [googleAvailable] = useState(() => isGoogleSignInAvailable());
+  const [appleAvailable] = useState(() => isAppleSignInAvailable());
 
   useEffect(() => {
     if (window.location.search.includes('forgot=')) {
@@ -229,10 +232,11 @@ export default function LoginPage() {
         <Brand subtitle="Entre ou crie sua conta" />
 
         <div className="space-y-3">
+          {/* Order: Apple first when offered (App Store guideline 4.8 — present
+              Sign in with Apple as an equivalent, prominent option), then
+              Google, then e-mail. */}
+          {appleAvailable && <AppleSignInButton />}
           {googleAvailable && <GoogleSignInButton />}
-
-          {/* Additional social methods (e.g. "Continuar com Apple") go here —
-              same stacked shape, so adding one is a single line, no re-layout. */}
 
           <button
             type="button"
