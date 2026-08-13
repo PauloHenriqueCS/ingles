@@ -35,7 +35,13 @@ import type { AiFeatureKey } from './feature-catalog';
 import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail, getAlertEnvironmentOverride } from '../_env';
 import { isProductionDeployment } from '../_billing/revenuecat-environment';
 
-export type ProviderErrorClass = 'auth' | 'rate_limit' | 'server' | 'connectivity';
+export type ProviderErrorClass =
+  | 'auth'
+  | 'billing'
+  | 'rate_limit'
+  | 'server'
+  | 'connectivity'
+  | 'provider_error';
 
 export type AlertLogger = (event: string, data?: Record<string, unknown>) => void;
 
@@ -44,27 +50,75 @@ const RESEND_TIMEOUT_MS = 5_000;
 
 // ── Classification ────────────────────────────────────────────────────────────
 // Mirrors _ai_alert_status_matches_class() in the migration so the live
-// classification and the DB window-count can never disagree. Returns null for
-// anything that is NOT an operational outage (400/404/2xx, unknown) so ordinary
-// client errors never raise an alert.
+// classification and the DB window-count can never disagree.
+//
+// CRITICAL invariant: every input to this function is a GENUINE provider-origin
+// failure — it is only ever reached from the gateway invoke() catch
+// (dispatchProviderIncident) or the browser provider-fail allowlist
+// (recordAndAlertBrowserProviderFailure). Internal Orodim errors, user
+// validation, and expected functional errors happen BEFORE invoke() and never
+// arrive here. Therefore an unrecognized shape is a real-but-unclassified
+// PROVIDER error and must be MONITORED (provider_error), never silently dropped.
+// A provider outage caused by billing/credit/quota/subscription must ALSO never
+// be silent even when the provider does not use 401/403.
 
 const CONNECTIVITY_HINT =
   /timeout|timed out|abort|econnreset|econnrefused|enotfound|network|connection|fetch failed|socket|apiconnection|azure_speech_timeout|azure_speech_unavailable|azure_tts_timeout|azure_tts_network|azure_network/i;
+
+// Structured provider error codes/types meaning the account itself can no longer
+// be served — a billing / credit / quota / subscription block — regardless of the
+// HTTP status the provider chose to return (OpenAI insufficient_quota arrives as
+// HTTP 429, not 401/403). Matched ONLY against the sanitized, STRUCTURED error
+// `code` — never a fragile raw-message substring. Kept in sync with
+// public._ai_error_code_is_billing() in the operational-alerts migration.
+const BILLING_ERROR_CODES = new Set([
+  'insufficient_quota',         // OpenAI: credits exhausted / no active paid billing
+  'billing_hard_limit_reached', // OpenAI: monthly spending hard limit hit
+  'billing_not_active',         // OpenAI: billing disabled on the account
+  'account_deactivated',        // OpenAI: account deactivated
+  'access_terminated',          // OpenAI: account/org access terminated
+  'quota_exceeded',             // generic structured quota-exhaustion code
+  'quotaexceeded',              // Azure Cognitive Services style
+]);
+
+/**
+ * True when a STRUCTURED signal proves a billing/credit/quota/subscription block
+ * (never inferred from a raw message). HTTP 402 Payment Required is treated as
+ * billing on its own; otherwise a curated structured error code is required.
+ */
+export function isBillingBlockSignal(input: {
+  httpStatus?: number | null;
+  code?: string | null;
+}): boolean {
+  if (input.httpStatus === 402) return true; // Payment Required is definitionally billing
+  const code = (input.code ?? '').trim().toLowerCase();
+  return code !== '' && BILLING_ERROR_CODES.has(code);
+}
 
 export function classifyProviderError(input: {
   httpStatus?: number | null;
   code?: string | null;
   category?: string | null;
-}): ProviderErrorClass | null {
+}): ProviderErrorClass {
   const s = input.httpStatus;
+  // Billing/credit/quota/subscription block — critical & immediate, even when the
+  // provider does NOT use 401/403 (e.g. OpenAI insufficient_quota is HTTP 429).
+  // Checked FIRST so it wins over the generic auth/rate_limit buckets.
+  if (isBillingBlockSignal({ httpStatus: s, code: input.code })) return 'billing';
   if (s === 401 || s === 403) return 'auth';
   if (s === 429) return 'rate_limit';
   if (typeof s === 'number' && s >= 500 && s <= 599) return 'server';
   if (s === undefined || s === null) {
     const hay = `${input.code ?? ''} ${input.category ?? ''}`;
     if (CONNECTIVITY_HINT.test(hay)) return 'connectivity';
+    // No HTTP status and no connectivity signature, but still a genuine provider
+    // invoke() failure (e.g. an SDK-internal error) → monitored fallback.
+    return 'provider_error';
   }
-  return null;
+  // A real HTTP status the provider returned that is not one of the specific
+  // buckets above (400 / 404 / 408 / 409 / other 4xx) → monitored fallback.
+  // Never silent; the conservative provider_error threshold guards against noise.
+  return 'provider_error';
 }
 
 // ── Provider + environment labelling ──────────────────────────────────────────
@@ -273,12 +327,15 @@ async function dispatchEmail(deps: AlertDeps, subject: string, text: string): Pr
 
 export async function evaluateProviderIncident(signal: IncidentSignal, deps: AlertDeps): Promise<void> {
   try {
+    // classifyProviderError never returns null: every signal here is a genuine
+    // provider-origin failure (gateway invoke() catch or the browser provider-fail
+    // allowlist), so an unrecognized shape becomes the monitored provider_error
+    // class rather than being silently dropped.
     const errorClass = classifyProviderError({
       httpStatus: signal.httpStatus,
       code: signal.errorCode,
       category: signal.errorCategory,
     });
-    if (!errorClass) return; // not an operational outage class → no alert
 
     const env = resolveAlertEnvironment();
     const label = providerLabel(signal.providerRaw);

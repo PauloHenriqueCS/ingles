@@ -264,7 +264,24 @@ export async function callModelEvaluator(
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '(unreadable)');
-    throw new Error(`Model evaluator API error ${response.status}: ${errorBody.slice(0, 300)}`);
+    // Surface the numeric HTTP status and the STRUCTURED OpenAI error code on the
+    // thrown error (not just inside the message string) so the gateway's
+    // sanitizeError() records a real http_status/error_code and the operational-
+    // alert classifier can recognise auth (401/403), rate-limit (429), server
+    // (5xx), and — critically — a billing/quota block (e.g. insufficient_quota).
+    // Previously the status lived only in the message, so every OpenAI HTTP
+    // failure here classified as NULL and raised no alert.
+    const err = new Error(`Model evaluator API error ${response.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = response.status;
+    try {
+      const parsed = JSON.parse(errorBody) as { error?: { code?: unknown; type?: unknown } };
+      const rawCode = parsed?.error?.code ?? parsed?.error?.type;
+      if (typeof rawCode === 'string' && rawCode.trim()) err.code = rawCode.trim().slice(0, 64);
+    } catch { /* non-JSON body → no structured code */ }
+    throw err;
   }
 
   const body = (await response.json()) as {
