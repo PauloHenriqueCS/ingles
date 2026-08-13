@@ -254,6 +254,21 @@ export async function resendSendEmail(subject: string, text: string, logger: Ale
   }
 }
 
+// ── Central e-mail gate ───────────────────────────────────────────────────────
+// The ONE place a provider-alert e-mail is actually dispatched (both ALERT and
+// RECOVERED go through here). Production sends via Resend; every non-production
+// environment (homolog → 'staging') records the incident, dedup/occurrence_count,
+// recovery and history EXACTLY the same and only SUPPRESSES the e-mail here — the
+// single behavioral difference between environments. The skip log carries only
+// the environment label: never a recipient, API key, payload, or any secret.
+async function dispatchEmail(deps: AlertDeps, subject: string, text: string): Promise<void> {
+  if (resolveAlertEnvironment().dbValue !== 'production') {
+    deps.logger('alerts.email.skipped_non_production', { environment: resolveAlertEnvironment().label.toLowerCase() });
+    return;
+  }
+  await deps.sendEmail(subject, text);
+}
+
 // ── Open path: classify → atomic RPC → conditional e-mail ─────────────────────
 
 export async function evaluateProviderIncident(signal: IncidentSignal, deps: AlertDeps): Promise<void> {
@@ -319,7 +334,7 @@ export async function evaluateProviderIncident(signal: IncidentSignal, deps: Ale
       severity: verdict.severity ?? null,
       occurredAt,
     });
-    await deps.sendEmail(subject, text);
+    await dispatchEmail(deps, subject, text);
   } catch (err) {
     // Absolute isolation: nothing here may propagate to the caller.
     try {
@@ -362,7 +377,7 @@ export async function runRecoverySweep(
       if (v.resolved && v.recovered) {
         recovered++;
         const { subject, text } = buildRecoveredEmail(v, deps.now().toISOString());
-        await deps.sendEmail(subject, text); // best-effort; sendEmail never throws
+        await dispatchEmail(deps, subject, text); // gated to production; best-effort, never throws
       } else if (v.resolved && !v.recovered) {
         orphanClosed++;
       }
