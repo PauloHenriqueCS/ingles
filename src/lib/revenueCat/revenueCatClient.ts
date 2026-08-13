@@ -210,7 +210,7 @@ export async function getOfferings(): Promise<OrodimProductOffering[]> {
   if (!current) return [];
 
   packageCache.clear();
-  return current.availablePackages.map((pkg: (typeof current.availablePackages)[number]) => {
+  const mapped = current.availablePackages.map((pkg: (typeof current.availablePackages)[number]) => {
     packageCache.set(pkg.identifier, pkg);
     return {
       packageId: pkg.identifier,
@@ -220,6 +220,53 @@ export async function getOfferings(): Promise<OrodimProductOffering[]> {
       priceFormatted: pkg.product.priceString,
     };
   });
+  // Diagnostic-only (never gates or alters pricing): surface the StoreKit/Play
+  // storefront actually in effect plus each product's raw currency, so a
+  // "wrong currency" report (e.g. USD on a Brazil account in TestFlight) can be
+  // traced to the real storefront the store account resolved to — the UI still
+  // shows only the store-formatted priceString, never a recomputed value. Fired
+  // at most once per app session; failures are swallowed. Read it in Safari Web
+  // Inspector on the device: tag `[revenueCat][storefront-diag]`.
+  void logStorefrontDiagnosticsOnce(Purchases, current.availablePackages);
+  return mapped;
+}
+
+let storefrontDiagLogged = false;
+/** SERVER of truth for the price shown is always the store's priceString; this
+ *  only READS storefront + raw price fields for diagnostics, never influences
+ *  what getOfferings returns. */
+async function logStorefrontDiagnosticsOnce(
+  Purchases: { getStorefront?: () => Promise<{ countryCode?: string | null }> },
+  packages: ReadonlyArray<{ identifier: string; product: { identifier: string; priceString: string; currencyCode?: string; price?: number } }>,
+): Promise<void> {
+  if (storefrontDiagLogged) return;
+  storefrontDiagLogged = true;
+  try {
+    let storefrontCountryCode: string | null = null;
+    try {
+      const sf = await Purchases.getStorefront?.();
+      storefrontCountryCode = sf?.countryCode ?? null;
+    } catch (err) {
+      console.warn('[revenueCat][storefront-diag] getStorefront failed', err instanceof Error ? err.message : err);
+    }
+    const priced = packages.map((p) => ({
+      packageId: p.identifier,
+      productId: p.product.identifier,
+      priceString: p.product.priceString,
+      currencyCode: p.product.currencyCode ?? null,
+      price: p.product.price ?? null,
+    }));
+    console.info(
+      '[revenueCat][storefront-diag]',
+      JSON.stringify({
+        platform: isIOSApp ? 'ios' : isAndroidApp ? 'android' : 'web',
+        storefrontCountryCode,
+        packages: priced,
+      }),
+    );
+  } catch (err) {
+    console.warn('[revenueCat][storefront-diag] failed', err instanceof Error ? err.message : err);
+  }
 }
 
 function normalizePurchaseError(err: unknown, errorCodes: Record<string, string>): OrodimPurchaseError {
@@ -347,4 +394,5 @@ export function __resetRevenueCatClientForTests(): void {
   listenerRegistered = false;
   packageCache.clear();
   readyListeners.clear();
+  storefrontDiagLogged = false;
 }
