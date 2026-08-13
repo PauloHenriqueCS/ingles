@@ -15,11 +15,6 @@ import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
 import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
-import { getStoreDiagnostics, getIdentifiedUserId, type StoreDiagnostics } from '../lib/revenueCat/revenueCatClient';
-
-/** TEMPORARY diagnostic: only this tester UUID sees the on-screen storefront
- *  block (below). Never rendered for any other user. Remove after diagnosis. */
-const STOREFRONT_DIAG_TESTER_UUID = 'a1cf9df5-8a74-4e15-b993-72b1552d80b8';
 
 interface Props {
   onBack: () => void;
@@ -88,21 +83,6 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
   useEffect(() => () => { mountedRef.current = false; }, []);
 
   const { supported: rcSupported, reloadStore } = nativePurchase;
-
-  // TEMPORARY storefront diagnostic — visible ONLY to the tester UUID, so a
-  // wrong-currency report can be read straight off the device (no Mac/Web
-  // Inspector). Reads storefront + raw package currency; never touches pricing,
-  // checkout, or formatting. Re-runs once offerings arrive (cache warm).
-  const [storefrontDiag, setStorefrontDiag] = useState<StoreDiagnostics | null>(null);
-  useEffect(() => {
-    if (!nativePurchase.supported) return;
-    if (getIdentifiedUserId() !== STOREFRONT_DIAG_TESTER_UUID) return;
-    let active = true;
-    void getStoreDiagnostics().then((d) => {
-      if (active && mountedRef.current) setStorefrontDiag(d);
-    });
-    return () => { active = false; };
-  }, [nativePurchase.supported, nativePurchase.offerings]);
 
   // The ONE reconciliation runner. Used both by the auto-reconcile effect and
   // right after a successful purchase/change. Guarantees termination:
@@ -320,19 +300,6 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
       {header}
 
       <div className="flex-1 overflow-auto p-4 max-w-2xl mx-auto w-full space-y-5 pb-10">
-
-        {storefrontDiag && (
-          <section className="bg-slate-800 border border-blue-900/40 rounded-xl p-3 space-y-1 text-xs" data-testid="storefront-diag">
-            <p className="text-blue-300 font-medium uppercase tracking-wider">Diagnóstico storefront (tester)</p>
-            <p className="text-slate-300">STOREFRONT: <span className="text-slate-100 font-mono">{storefrontDiag.storefrontCountryCode ?? '—'}</span></p>
-            {storefrontDiag.packages.map((p) => (
-              <p key={p.packageId} className="text-slate-300 font-mono">
-                {p.packageId}: {p.priceString} <span className="text-slate-500">({p.currencyCode ?? '—'})</span>
-              </p>
-            ))}
-            {storefrontDiag.packages.length === 0 && <p className="text-slate-500">nenhum pacote carregado</p>}
-          </section>
-        )}
 
         {import.meta.env.DEV && (
           <section className="bg-amber-950/20 border border-amber-900/40 rounded-xl p-3 space-y-2" data-testid="dev-status-switcher">
