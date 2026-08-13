@@ -40,14 +40,15 @@ afterEach(() => {
 
 function makeDeps(rpcImpl?: (...args: any[]) => any) {
   const emails: Array<{ subject: string; text: string }> = [];
+  const logs: Array<{ event: string; data?: Record<string, unknown> }> = [];
   const rpc = vi.fn(rpcImpl ?? (async () => ({ data: {}, error: null })));
   const deps: AlertDeps = {
     supabase: { rpc } as any,
     sendEmail: async (subject, text) => { emails.push({ subject, text }); },
-    logger: () => {},
+    logger: (event, data) => { logs.push({ event, data }); },
     now: () => new Date('2026-08-12T12:00:00.000Z'),
   };
-  return { deps, emails, rpc };
+  return { deps, emails, rpc, logs };
 }
 
 const authSignal: IncidentSignal = {
@@ -115,6 +116,11 @@ describe('sanitizeError preserves normalized Azure status/code', () => {
 // ── 3. Open path: RPC verdict gates the e-mail ─────────────────────────────────
 
 describe('evaluateProviderIncident', () => {
+  const openedVerdict = async () => ({
+    data: { should_send_email: true, occurrence_count: 1, severity: 'critical', action: 'opened' },
+    error: null,
+  });
+
   it('does nothing for a non-outage class (400)', async () => {
     const { deps, emails, rpc } = makeDeps();
     await evaluateProviderIncident({ ...authSignal, httpStatus: 400, errorCode: null }, deps);
@@ -122,24 +128,40 @@ describe('evaluateProviderIncident', () => {
     expect(emails).toHaveLength(0);
   });
 
-  it('calls the RPC with the correct dedup key and sends one e-mail when opened', async () => {
-    const { deps, emails, rpc } = makeDeps(async () => ({
-      data: { should_send_email: true, occurrence_count: 1, severity: 'critical', action: 'opened' },
-      error: null,
-    }));
+  it('PRODUCTION + open: records incident AND sends exactly 1 Resend e-mail', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
+    const { deps, emails, rpc } = makeDeps(openedVerdict);
     await evaluateProviderIncident(authSignal, deps);
     expect(rpc).toHaveBeenCalledWith('record_provider_incident', expect.objectContaining({
-      p_environment: 'staging',
+      p_environment: 'production',
       p_provider_raw: 'azure',
       p_provider_label: 'azure_speech',
       p_error_class: 'auth',
-      p_dedup_key: 'staging:azure_speech:auth',
+      p_dedup_key: 'production:azure_speech:auth',
     }));
     expect(emails).toHaveLength(1);
-    expect(emails[0].subject).toBe('[ORODIM ALERT][HOMOLOG] Azure Speech — AUTH');
+    expect(emails[0].subject).toBe('[ORODIM ALERT][PRODUCTION] Azure Speech — AUTH');
+  });
+
+  it('HOMOLOG + open: records/processes incident identically but sends 0 e-mails (skipped_non_production)', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'homolog');
+    const { deps, emails, rpc, logs } = makeDeps(openedVerdict);
+    await evaluateProviderIncident(authSignal, deps);
+    // Incident is recorded exactly the same (same RPC call) — only the e-mail differs.
+    expect(rpc).toHaveBeenCalledWith('record_provider_incident', expect.objectContaining({
+      p_environment: 'staging',
+      p_error_class: 'auth',
+      p_dedup_key: 'staging:azure_speech:auth',
+    }));
+    expect(emails).toHaveLength(0);
+    expect(logs.some((l) => l.event === 'alerts.email.skipped_non_production')).toBe(true);
+    // Skip log must never carry a recipient/key/payload.
+    const skip = logs.find((l) => l.event === 'alerts.email.skipped_non_production');
+    expect(JSON.stringify(skip)).not.toMatch(/api[_-]?key|bearer|token|@/i);
   });
 
   it('does NOT send when the RPC suppresses (below threshold / already open / cooldown)', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
     for (const action of ['below_threshold', 'incremented', 'opened_cooldown_suppressed']) {
       const { deps, emails } = makeDeps(async () => ({ data: { should_send_email: false, action }, error: null }));
       await evaluateProviderIncident(authSignal, deps);
@@ -147,16 +169,16 @@ describe('evaluateProviderIncident', () => {
     }
   });
 
-  it('concurrent detections e-mail only when THIS instance won the open (dedup)', async () => {
-    // Instance A wins the atomic insert, instance B collapses to an increment.
+  it('PRODUCTION concurrent detections e-mail only when THIS instance won the open (dedup)', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
     const { deps: depsA, emails: emailsA } = makeDeps(async () => ({ data: { should_send_email: true, occurrence_count: 1, severity: 'critical' }, error: null }));
     const { deps: depsB, emails: emailsB } = makeDeps(async () => ({ data: { should_send_email: false, action: 'raced_increment' }, error: null }));
     await Promise.all([evaluateProviderIncident(authSignal, depsA), evaluateProviderIncident(authSignal, depsB)]);
     expect(emailsA.length + emailsB.length).toBe(1);
   });
 
-  it('is fully isolated: a sendEmail failure never throws', async () => {
-    const { rpc } = makeDeps();
+  it('is fully isolated: a sendEmail failure never throws (production)', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
     const throwingDeps: AlertDeps = {
       supabase: { rpc: vi.fn(async () => ({ data: { should_send_email: true }, error: null })) } as any,
       sendEmail: async () => { throw new Error('resend exploded'); },
@@ -164,21 +186,12 @@ describe('evaluateProviderIncident', () => {
       now: () => new Date(),
     };
     await expect(evaluateProviderIncident(authSignal, throwingDeps)).resolves.toBeUndefined();
-    void rpc;
   });
 
   it('swallows an RPC error without sending or throwing', async () => {
     const { deps, emails } = makeDeps(async () => ({ data: null, error: { message: 'db down' } }));
     await expect(evaluateProviderIncident(authSignal, deps)).resolves.toBeUndefined();
     expect(emails).toHaveLength(0);
-  });
-
-  it('labels PRODUCTION and uses a production dedup key when VERCEL_ENV=production', async () => {
-    vi.stubEnv('VERCEL_ENV', 'production');
-    const { deps, emails, rpc } = makeDeps(async () => ({ data: { should_send_email: true, occurrence_count: 2, severity: 'critical' }, error: null }));
-    await evaluateProviderIncident(authSignal, deps);
-    expect(rpc).toHaveBeenCalledWith('record_provider_incident', expect.objectContaining({ p_dedup_key: 'production:azure_speech:auth' }));
-    expect(emails[0].subject).toBe('[ORODIM ALERT][PRODUCTION] Azure Speech — AUTH');
   });
 });
 
@@ -187,6 +200,7 @@ describe('evaluateProviderIncident', () => {
 describe('runRecoverySweep', () => {
   function sweepDeps(openRows: Array<{ id: string }>, rpcResults: any[]) {
     const emails: Array<{ subject: string; text: string }> = [];
+    const logs: Array<{ event: string }> = [];
     let call = 0;
     const rpc = vi.fn(async () => ({ data: rpcResults[call++], error: null }));
     const supabase = {
@@ -196,26 +210,38 @@ describe('runRecoverySweep', () => {
     const deps: AlertDeps = {
       supabase: supabase as any,
       sendEmail: async (subject, text) => { emails.push({ subject, text }); },
-      logger: () => {},
+      logger: (event) => { logs.push({ event }); },
       now: () => new Date('2026-08-12T13:00:00.000Z'),
     };
-    return { deps, emails, rpc };
+    return { deps, emails, rpc, logs };
   }
 
-  it('sends exactly one RECOVERED e-mail per recovered incident and none for orphan closes', async () => {
-    const { deps, emails, rpc } = sweepDeps(
-      [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }],
-      [
-        { resolved: true, recovered: true, environment: 'production', provider: 'azure', error_class: 'auth', severity: 'critical', occurrence_count: 42, opened_at: '2026-08-12T12:00:00Z' },
-        { resolved: true, recovered: false, reason: 'orphan_closed' },
-        { resolved: false, reason: 'still_failing' },
-      ],
-    );
+  const RECOVERED = [
+    { resolved: true, recovered: true, environment: 'production', provider: 'azure', error_class: 'auth', severity: 'critical', occurrence_count: 42, opened_at: '2026-08-12T12:00:00Z' },
+    { resolved: true, recovered: false, reason: 'orphan_closed' },
+    { resolved: false, reason: 'still_failing' },
+  ];
+
+  it('PRODUCTION: resolves incidents AND sends exactly one RECOVERED e-mail (none for orphans)', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'production');
+    const { deps, emails, rpc } = sweepDeps([{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }], RECOVERED);
     const result = await runRecoverySweep(deps);
     expect(rpc).toHaveBeenCalledTimes(3);
     expect(result).toEqual({ open: 3, recovered: 1, orphanClosed: 1 });
     expect(emails).toHaveLength(1);
     expect(emails[0].subject).toBe('[ORODIM RECOVERED][PRODUCTION] Azure Speech');
+  });
+
+  it('HOMOLOG: resolves the incident identically but sends 0 RECOVERED e-mails', async () => {
+    vi.stubEnv('ALERT_ENVIRONMENT', 'homolog');
+    const { deps, emails, rpc, logs } = sweepDeps([{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }], RECOVERED);
+    const result = await runRecoverySweep(deps);
+    // Recovery is processed exactly the same (resolve RPC called per open row, same counts)…
+    expect(rpc).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ open: 3, recovered: 1, orphanClosed: 1 });
+    // …only the RECOVERED e-mail is suppressed.
+    expect(emails).toHaveLength(0);
+    expect(logs.some((l) => l.event === 'alerts.email.skipped_non_production')).toBe(true);
   });
 
   it('returns zeros and sends nothing when the query fails', async () => {
