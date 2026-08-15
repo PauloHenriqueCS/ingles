@@ -1,4 +1,12 @@
 /**
+ * @deprecated DISCONNECTED from the live path. The invisible writing-diagnostic
+ * flow (behind WRITING_DIAGNOSTIC_V1, default OFF) is being reworked into the
+ * placement test and is OUT OF SCOPE. api/generate-theme.ts no longer imports
+ * this module, so the normal path no longer depends on the hardcoded English
+ * diagnostic objectives and never reads/writes writing_diagnostic_missions
+ * (a table not applied to production). Left intact pending the placement-test
+ * rework; do not re-wire into generation without migrating its tables first.
+ *
  * SERVER-ONLY: Serviço de diagnóstico de escrita.
  * Nunca importar em código client-side (src/).
  *

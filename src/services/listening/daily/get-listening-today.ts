@@ -1,9 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildListeningEpisodeSession } from '../execution/build-listening-episode-session';
 import { resolveListeningActivityDate } from './resolve-listening-activity-date';
-import { resolveUserListeningLevel } from './resolve-user-listening-level';
-import { selectListeningEpisodeForUser } from './select-listening-episode-for-user';
-import { getOrCreateListeningAssignment } from './get-or-create-listening-assignment';
 import { updateListeningAssignmentStatus } from './update-listening-assignment-status';
 import type { TodayListeningResponse } from './listening-daily-types';
 
@@ -33,34 +30,23 @@ export async function getListeningToday(
     return { status: 'story_completed', assignmentId: storyModeRow.id, activityDate };
   }
 
-  let assignmentId: string;
-  let episodeId: string;
-  let currentStatus: string;
-
-  // Continue whatever story is still in progress before offering a new one.
+  // Data-driven cutover: the legacy pre-generated `listening_episodes` inventory
+  // (level-indexed, hardcoded-authored, and NOT recorte-aligned — it also never
+  // recorded curricular practice) is NO LONGER selected for NEW practice. The
+  // sole authority for a new listening practice is the data-driven curriculum
+  // Story path (api/listening/generate → shared-story → listening.two_part_
+  // generate, composed for the user's CURRENT recorte, which records curricular
+  // practice). Returning `empty_inventory` makes the client fall through to that
+  // path. In-progress legacy episodes are still resumed below purely as
+  // historical continuity (never a new hardcoded-pedagogy selection).
   const activeRow = rows.find((row: any) => row.status !== 'completed');
-
-  if (activeRow) {
-    assignmentId  = activeRow.id;
-    episodeId     = activeRow.episode_id;
-    currentStatus = activeRow.status;
-  } else {
-    // Nothing active today: entitlements already gated whether the caller
-    // is allowed to start another one (see api/listening/[...slug].ts).
-    const excludeEpisodeIds = rows
-      .map((row: any) => row.episode_id as string | null)
-      .filter((id: string | null): id is string => !!id);
-    const cefrLevel = await resolveUserListeningLevel(supabase, userId);
-    const selectedId = await selectListeningEpisodeForUser(supabase, userId, cefrLevel, excludeEpisodeIds);
-    if (!selectedId) return { status: 'empty_inventory' };
-
-    const { assignment } = await getOrCreateListeningAssignment(supabase, {
-      userId, episodeId: selectedId, activityDate,
-    });
-    assignmentId  = assignment.id;
-    episodeId     = assignment.episodeId;
-    currentStatus = assignment.status;
+  if (!activeRow) {
+    return { status: 'empty_inventory' };
   }
+
+  const assignmentId  = activeRow.id as string;
+  const episodeId     = activeRow.episode_id as string;
+  const currentStatus = activeRow.status as string;
 
   // Build session (handles completed episodes gracefully)
   const session = await buildListeningEpisodeSession(episodeId, userId, supabase);

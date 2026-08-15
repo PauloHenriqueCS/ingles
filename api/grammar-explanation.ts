@@ -15,6 +15,9 @@ import { handleConfigPublicRoute } from './_config/public-route-handler';
 import { handleSubscriptionStatusRoute } from './_entitlements/subscription-status-route-handler';
 import { handleRevenueCatWebhookRoute } from './_billing/revenuecat-webhook-route-handler';
 import { handleSubscriptionSyncRoute } from './_billing/subscription-sync-route-handler';
+import { handleCurriculumRoute } from './_curriculum/route-handler';
+import { getCurriculumServiceClient } from './_curriculum/service-client';
+import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 
 // Disables Vercel's automatic JSON body parsing for this ENTIRE file —
@@ -29,53 +32,10 @@ export const config = { api: { bodyParser: false } };
 
 const AI_MODEL = 'gpt-4o-mini';
 
-const SYSTEM_PROMPT = 'Você é um professor particular de inglês para brasileiros adultos. Suas explicações são claras, práticas e focadas nos erros típicos de falantes de português brasileiro.';
-
 // Only letters, digits, spaces, hyphens, and apostrophes — enough for any grammar name.
 // Prevents injection through the cache key.
 const GRAMMAR_NAME_RE = /^[\p{L}\p{N}\s'\-,.()]+$/u;
 const GRAMMAR_NAME_MAX = 100;
-
-function buildPrompt(grammarName: string): string {
-  return `Explique o tópico gramatical "${grammarName}" para brasileiros adultos aprendendo inglês.
-
-Retorne SOMENTE JSON válido. Sem markdown, sem texto antes ou depois.
-
-{
-  "name": "${grammarName}",
-  "summaryPt": "o que é e por que importa — 2 a 3 frases em português",
-  "whenToUse": [
-    "situação específica com exemplo entre parênteses",
-    "outra situação com exemplo"
-  ],
-  "structure": {
-    "affirmative": "Subject + ...",
-    "negative": "Subject + do/does not + ...",
-    "question": "Do/Does + Subject + ...?"
-  },
-  "examples": [
-    { "english": "frase completa em inglês", "portuguese": "tradução natural em português" }
-  ],
-  "commonMistakes": [
-    { "wrong": "frase incorreta", "correct": "frase correta", "explanationPt": "por que está errado e como corrigir" }
-  ],
-  "tips": [
-    "dica prática — começa com verbo no imperativo: Use, Lembre, Preste atenção em..."
-  ],
-  "traps": [
-    "armadilha típica de brasileiros — por que acontece (influência do português) e como evitar"
-  ],
-  "finalSummaryPt": "resumo em até 3 linhas do que é essencial saber sobre este tópico"
-}
-
-Requisitos obrigatórios:
-- whenToUse: mínimo 4 situações com exemplos entre parênteses
-- examples: mínimo 5 exemplos variados (afirmativa, negativa, pergunta, contextos diferentes)
-- commonMistakes: mínimo 5 erros típicos de brasileiros
-- tips: 3 a 5 dicas práticas e aplicáveis
-- traps: 3 a 5 armadilhas específicas de falantes de português
-- Todas as explicações em português; toda gramática e exemplos em inglês`;
-}
 
 function parseJson(raw: string): unknown {
   try {
@@ -179,6 +139,12 @@ export default async function handler(req: any, res: any) {
   if (req.query?.__lemonRoute === 'subscription-sync') {
     return handleSubscriptionSyncRoute(req, res);
   }
+  // Rewritten here from /api/curriculum/* (see vercel.json) — same
+  // function-budget reuse as the branches above, otherwise unrelated to grammar
+  // explanations. Data-driven curriculum plan/preferences/progress endpoints.
+  if (typeof req.query?.__lemonRoute === 'string' && req.query.__lemonRoute.startsWith('curriculum-')) {
+    return handleCurriculumRoute(req, res, req.query.__lemonRoute.slice('curriculum-'.length));
+  }
 
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.GRAMMAR)) return;
@@ -250,6 +216,30 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'O serviço de explicação não está configurado.');
 
+  // ── Data-driven prompt (DB-sourced; no hardcoded English fallback) ─────────
+  // Grammar explanations are NOT part of curricular progression, so no recorte
+  // is required (requireSubtopic:false) and NO practice is recorded. A missing
+  // template / empty required placeholder throws CurriculumConfigError, which
+  // surfaces as an explicit operational error — never a silent English prompt.
+  let systemPrompt: string;
+  let userPrompt: string;
+  try {
+    const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'writing.explain_grammar',
+      activityType: 'writing',
+      requireSubtopic: false,
+      userContext: { grammar_name: trimmed },
+    });
+    systemPrompt = resolved.system;
+    userPrompt = resolved.user ?? '';
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('grammar-explanation', 'curriculum_config_error', 500);
+      return jsonError(res, 500, 'CURRICULUM_CONFIG_ERROR', 'O serviço de explicação está temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
   // ── Gateway-wrapped OpenAI call ────────────────────────────────────────────
   const deps = getProductionDeps();
   const correlationId = deps.uuidGen();
@@ -271,7 +261,7 @@ export default async function handler(req: any, res: any) {
         attemptNumber: 1,
         callSequence: 1,
         resourceType: 'grammar_explanation',
-        estimatedMetrics: estimateTextTokens(SYSTEM_PROMPT.length + buildPrompt(trimmed).length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
+        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE),
       },
       () => openai.chat.completions.create({
         model: AI_MODEL,
@@ -279,9 +269,9 @@ export default async function handler(req: any, res: any) {
         messages: [
           {
             role: 'system',
-            content: SYSTEM_PROMPT,
+            content: systemPrompt,
           },
-          { role: 'user', content: buildPrompt(trimmed) },
+          { role: 'user', content: userPrompt },
         ],
       }),
       deps,

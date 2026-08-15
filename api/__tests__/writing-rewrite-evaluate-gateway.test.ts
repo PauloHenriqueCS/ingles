@@ -73,6 +73,33 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
   return { ...actual, getProductionDeps: () => mockDeps };
 });
 
+// Data-driven curriculum runtime — the model evaluator (writingRewriteModelEvaluator)
+// now resolves its prompt from the DB `writing.evaluate_rewrite` template via
+// resolveActivityPrompt(getCurriculumServiceClient(), userId, ...) instead of a
+// hardcoded English prompt. Stub it to a fixed composed prompt so the single
+// outbound OpenAI fetch() (which the Gateway wraps) and all telemetry/token
+// assertions below are exercised unchanged, without a real service-role client
+// or DB. importOriginal preserves the real CurriculumConfigError.
+vi.mock('../_curriculum/service-client', () => ({
+  getCurriculumServiceClient: () => ({}),
+}));
+vi.mock('../_curriculum/curriculum-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../_curriculum/curriculum-runtime')>();
+  return {
+    ...actual,
+    resolveActivityPrompt: vi.fn().mockResolvedValue({
+      system: 'REWRITE_EVAL_SYSTEM_PROMPT',
+      user: 'Avalie a reescrita do aluno agora.',
+      model: 'gpt-4o',
+      temperature: 0.2,
+      subtopicKey: null,
+      versionId: 'ver-1',
+      languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+    }),
+    recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  };
+});
+
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000001';

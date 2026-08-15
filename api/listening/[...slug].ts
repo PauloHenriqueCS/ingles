@@ -46,6 +46,8 @@ import { StoryTtsError } from '../../src/services/listening/story-session/genera
 import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
 import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
+import { recordCurricularPractice, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 
 const ALLOWED_STORY_THEMES = new Set([
   'travel', 'work_career', 'daily_life', 'movies_series', 'music',
@@ -676,6 +678,16 @@ async function handleListeningGenerate(req: any, res: any) {
     safeLog('listening/generate', 'generated', 200, { requestId, level: result.level });
     return res.status(200).json(result);
   } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      // The data-driven curriculum for this user/recorte is missing or
+      // misconfigured (no published curriculum, no listening.two_part_generate
+      // template, or an empty required placeholder). This is an explicit
+      // operational error — NEVER a silent fallback to a hardcoded English
+      // prompt. The shared-story slot this run may have claimed is already
+      // marked 'failed' by getOrCreateSharedListeningStory before re-throwing.
+      safeLog('listening/generate', 'curriculum_not_configured', 503, { requestId });
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
     if (err instanceof SharedStoryGeneratingError) {
       // Another request already holds the shared-story lock for this
       // group/day — never call OpenAI/Azure here. Reuses the frontend's
@@ -1048,6 +1060,20 @@ async function handleStoryPracticeStart(req: any, res: any) {
   }
 
   const consumed = rpc.consumed ?? 0;
+
+  // Data-driven curriculum: a successful consume is the ONE unambiguous "real
+  // practice" event for Listening (the "Começar a ouvir" action). Preparing,
+  // opening, refreshing, or auto-recovering a pending story never reaches this
+  // handler, so this is the correct single place to record curricular practice.
+  // Best-effort and idempotent (recordCurricularPractice de-dupes per
+  // user+subtopic+modality) — it must never affect the consume response, and a
+  // repeated practice of the same story never double-advances the recorte.
+  try {
+    await recordCurricularPractice(getCurriculumServiceClient(), userId, 'listening', sharedStoryId);
+  } catch {
+    safeLog('listening/story/practice-start', 'record_curricular_practice_failed', 200);
+  }
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     action: rpc.action,
@@ -1107,14 +1133,30 @@ export default async function handler(req: any, res: any) {
     case 'story/complete':             return handleStoryComplete(req, res);
     case 'story/pending':              return handleStoryGetPending(req, res);
     case 'story/practice-start':       return handleStoryPracticeStart(req, res);
-    case 'story/generate':             return handleStoryGenerate(req, res);
-    case 'story/verify':               return handleStoryVerify(req, res);
-    case 'on-demand/start':            return handleOnDemandStart(req, res);
-    case 'on-demand/status':           return handleOnDemandStatus(req, res);
-    case 'on-demand/process-next':     return handleOnDemandProcessNext(req, res);
-    case 'on-demand/retry':            return handleOnDemandRetry(req, res);
-    case 'group/process-next':         return handleGroupProcessNext(req, res);
-    case 'group/retry':                return handleGroupRetry(req, res);
+    // ── RETIRED: legacy hardcoded-pedagogy generation routes ──────────────────
+    // These generators composed their pedagogy from hardcoded English prompt/
+    // word-count catalogs (build-listening-story-prompt / build-listening-
+    // question-prompt) or the simplified hardcoded story-session builder
+    // (generate-story-session.ts buildPrompt) — NOT the data-driven curriculum.
+    // The SOLE authority for a listening practice is the curriculum Story path
+    // (`generate` → shared-story → listening.two_part_generate, composed for the
+    // user's CURRENT recorte, which records curricular practice and verifies
+    // answers with the recorte-aligned question). All of these are disabled so
+    // no active runtime path can serve hardcoded pedagogy. (All were already
+    // unreachable from the live client flow — ListeningView uses `generate`,
+    // `story/practice-start`, `story/pending` only.)
+    case 'story/generate':
+    case 'story/verify':
+    case 'on-demand/start':
+    case 'on-demand/status':
+    case 'on-demand/process-next':
+    case 'on-demand/retry':
+    case 'group/process-next':
+    case 'group/retry':
+      return res.status(410).json({
+        code: 'LISTENING_ROUTE_RETIRED',
+        message: 'Este fluxo de geração de listening foi descontinuado. A prática agora é gerada pelo currículo.',
+      });
     default:                           return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

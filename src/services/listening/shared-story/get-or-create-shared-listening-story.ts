@@ -1,9 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
+import type { CEFRLevel } from '../../../domain/curriculum/cefr';
 import { resolveListeningActivityDate } from '../daily/resolve-listening-activity-date';
 import { levelGroupForCefr, type ListeningLevelGroup } from '../listening-level-group';
 import { generateListeningStory, signToken, type ListeningStoryResult, type StoryPartResult } from '../story-session/generate-listening-story';
 import { SharedStoryGeneratingError, type AcquireSharedStoryResult, type SharedStoryContent } from './listening-shared-story-types';
+import { ensureUserCurriculum, CurriculumConfigError } from '../../../../api/_curriculum/curriculum-runtime';
+import { getLanguageSpeechConfig, type LanguageSpeechConfig } from '../../../../api/_curriculum/language-speech-config';
 
 // Long enough to cover a realistic OpenAI + Azure TTS run with margin; short
 // enough that a genuinely crashed/killed request doesn't block the group for
@@ -240,9 +242,35 @@ export async function getOrCreateSharedListeningStory(
   storyPackage?: string | null,
   theme?: string | null,
 ): Promise<ListeningStoryResult & { sharedStoryId: string }> {
-  const cefrLevel = await resolveUserListeningLevel(serviceClient, userId);
-  const levelGroup = levelGroupForCefr(cefrLevel);
   const practiceDate = resolveListeningActivityDate();
+
+  // ── P0 — curriculum is the SINGLE authority (level + content identity) ──────
+  // Resolve the user's CURRENT recorte FIRST and let it define BOTH the cache
+  // identity (learning_language + curriculum_version + subtopic) AND the level.
+  // If it cannot be resolved (no published curriculum, no current recorte, or
+  // ANY error), PROPAGATE an explicit CurriculumConfigError — we NEVER fall back
+  // to a legacy/level-only bucket. This guarantees two users on DIFFERENT
+  // recortes can never receive the same cached story via an error/fallback path,
+  // and removes the old level split-brain (learner_skill_profiles no longer
+  // decides curricular difficulty here).
+  const ensured = await ensureUserCurriculum(serviceClient, userId);
+  const currentSubtopicKey = ensured.currentSubtopicKey;
+  if (!currentSubtopicKey) {
+    throw new CurriculumConfigError(
+      `Listening: user ${userId} has no current recorte (status=${ensured.status}) — refusing to serve non-recorte content`,
+    );
+  }
+  const learningLanguage = ensured.languageContext.learningLanguage;
+  const curriculumVersionId: string = ensured.versionId;
+  const subtopicKey = currentSubtopicKey;
+  const cefrLevel = (ensured.ordered.find((s) => s.subtopicKey === currentSubtopicKey)?.levelCode ?? '') as CEFRLevel;
+  if (!cefrLevel) {
+    throw new CurriculumConfigError(`Listening: recorte ${currentSubtopicKey} has no level_code`);
+  }
+  const levelGroup = levelGroupForCefr(cefrLevel);
+  // Data-driven Speech config (TTS locale + default voice) for the target
+  // language — no en-US hardcode. Missing config is an explicit error.
+  const speechConfig: LanguageSpeechConfig = await getLanguageSpeechConfig(serviceClient, learningLanguage);
 
   // ── Step 0: RECOVER a PENDING story ────────────────────────────────────────
   // Preparing a story only creates a PENDING association (completed=false);
@@ -285,7 +313,10 @@ export async function getOrCreateSharedListeningStory(
   // slot to generate only when none is available.
   const { data, error } = await serviceClient.rpc('acquire_or_get_listening_shared_story', {
     p_user_id: userId,
+    p_learning_language: learningLanguage,
     p_level_group: levelGroup,
+    p_subtopic_key: subtopicKey,
+    p_curriculum_version_id: curriculumVersionId,
     p_target_level: cefrLevel,
     p_practice_date: practiceDate,
     p_lock_duration_seconds: SHARED_STORY_LOCK_DURATION_SECONDS,
@@ -312,7 +343,7 @@ export async function getOrCreateSharedListeningStory(
 
   if (result.won) {
     try {
-      const story = await generateListeningStory(userId, serviceClient, openaiKey, azureKey, azureRegion, secret, storyPackage, theme);
+      const story = await generateListeningStory(userId, serviceClient, openaiKey, azureKey, azureRegion, secret, storyPackage, theme, cefrLevel, speechConfig);
       await persistSharedStory(serviceClient, result.id, levelGroup, story);
       await attachUserProgress(serviceClient, userId, result.id, practiceDate, levelGroup);
       return { ...story, sharedStoryId: result.id };

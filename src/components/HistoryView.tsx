@@ -8,7 +8,6 @@ import {
   MainMistake, VocabularyItem, EntriesStore, Status, Difficulty,
 } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
-import { getScheduleForDate, ALL_VERB_TENSES } from '../data/calendar2026';
 import { deriveWritingEntryStatus } from '../domain/writing/entry-status';
 import { foldSmartQuotes } from '../domain/text/text-normalization';
 
@@ -35,7 +34,6 @@ interface UnifiedEntry {
   status: Status;
   wordCount: number;
   difficulty: Difficulty;
-  verbTense: string;
   latestReview: EnglishReviewSaved | null;
   allReviews: EnglishReviewSaved[];
   hasVersion2: boolean;
@@ -71,7 +69,6 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
   const [selected, setSelected] = useState<UnifiedEntry | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('todos');
-  const [verbTenseFilter, setVerbTenseFilter] = useState('todos');
   const [diffFilter, setDiffFilter] = useState<DiffFilter>('todos');
   const [showMoreFilters, setShowMoreFilters] = useState(false);
 
@@ -101,7 +98,6 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
       .reverse()
       .map((date) => {
         const entry = entries[date];
-        const schedule = getScheduleForDate(date);
         const dateReviews = reviewsByDate[date] ?? [];
         const hasFinalVersion = dateReviews.some((r) => !!r.version2FinalText);
         // Card status uses the SHARED derivation, reconciled against the actual
@@ -115,12 +111,11 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
         });
         return {
           date,
-          title: entry.title || schedule?.theme || '',
+          title: entry.title || '',
           originalText: entry.originalText,
           status,
           wordCount: entry.wordCount,
           difficulty: entry.difficulty,
-          verbTense: schedule?.verbTense ?? '',
           latestReview: dateReviews[0] ?? null,
           allReviews: dateReviews,
           hasVersion2: dateReviews.some((r) => !!r.version2Text),
@@ -144,7 +139,6 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
       // and nothing silently disappears from 'Todos'.
       if (statusFilter !== 'todos' && item.status !== statusFilter) return false;
 
-      if (verbTenseFilter !== 'todos' && item.verbTense !== verbTenseFilter) return false;
       if (diffFilter !== 'todos' && item.difficulty !== diffFilter) return false;
 
       if (q && !foldForSearch(item.title).includes(q) && !foldForSearch(item.originalText).includes(q)) {
@@ -153,7 +147,7 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
 
       return true;
     });
-  }, [unifiedList, statusFilter, verbTenseFilter, diffFilter, debouncedSearch]);
+  }, [unifiedList, statusFilter, diffFilter, debouncedSearch]);
 
   if (selected) {
     return (
@@ -165,7 +159,7 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
     );
   }
 
-  const hasExtraFilters = verbTenseFilter !== 'todos' || diffFilter !== 'todos';
+  const hasExtraFilters = diffFilter !== 'todos';
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
@@ -221,19 +215,6 @@ export default function HistoryView({ entries, onOpenDay }: Props) {
 
         {showMoreFilters && (
           <div className="space-y-3 pt-1 border-t border-slate-700">
-            <div>
-              <p className="text-xs text-slate-500 mb-1.5">Tempo verbal</p>
-              <select
-                value={verbTenseFilter}
-                onChange={(e) => setVerbTenseFilter(e.target.value)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-blue-500"
-              >
-                <option value="todos">Todos</option>
-                {ALL_VERB_TENSES.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-            </div>
             <div>
               <p className="text-xs text-slate-500 mb-1.5">Dificuldade</p>
               <div className="flex gap-2 flex-wrap">
@@ -342,9 +323,6 @@ function EntryCard({ item, onOpen }: { item: UnifiedEntry; onOpen: () => void })
         {item.wordCount > 0 && (
           <span className="text-xs text-slate-600">{item.wordCount} pal.</span>
         )}
-        {item.verbTense && (
-          <span className="text-xs text-blue-800">{item.verbTense}</span>
-        )}
         {item.difficulty && <EntryDiffBadge difficulty={item.difficulty} />}
         {item.hasVersion2 && (
           <span className="text-xs text-green-400 font-medium">V2</span>
@@ -402,11 +380,6 @@ function EntryDetail({
           {item.wordCount > 0 && (
             <span className="text-xs bg-slate-800 px-2 py-1 rounded-lg text-slate-400">
               {item.wordCount} palavras
-            </span>
-          )}
-          {item.verbTense && (
-            <span className="text-xs bg-slate-800 px-2 py-1 rounded-lg text-blue-400">
-              {item.verbTense}
             </span>
           )}
           {item.difficulty && <EntryDiffBadge difficulty={item.difficulty} />}

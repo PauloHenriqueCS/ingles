@@ -23,11 +23,41 @@ vi.mock('../story-session/generate-listening-story', async (importOriginal) => {
   return { ...actual, generateListeningStory: vi.fn() };
 });
 
+// Data-driven cutover: get-or-create now resolves the level + content identity
+// from the curriculum recorte (ensureUserCurriculum) and the target-language
+// Speech config (getLanguageSpeechConfig) — no longer from learner_skill_profiles.
+// A mutable holder lets each test set the recorte's level via setCurrentLevel().
+const curHolder = vi.hoisted(() => ({ level: 'A1' as string }));
+vi.mock('../../../../api/_curriculum/curriculum-runtime', () => ({
+  ensureUserCurriculum: vi.fn(async () => ({
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+    prefs: { writing: true, listening: true, pronunciation: true, conversation: false },
+    currentSubtopicKey: 'recorte-current',
+    currentSubtopicId: 'sub-current',
+    status: 'active',
+    ordered: [{ subtopicKey: 'recorte-current', levelCode: curHolder.level }],
+    keyToId: new Map(),
+    idToKey: new Map(),
+  })),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+vi.mock('../../../../api/_curriculum/language-speech-config', () => ({
+  getLanguageSpeechConfig: vi.fn(async () => ({
+    speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en',
+  })),
+  SpeechConfigError: class SpeechConfigError extends Error {},
+}));
+/** Sets the CURRENT recorte's level for the ensureUserCurriculum mock (replaces
+ *  the old resolveUserListeningLevel mock — level authority is now the recorte). */
+function setCurrentLevel(level: string): void { curHolder.level = level; }
+
 import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } from './get-or-create-shared-listening-story';
 import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
 import { resolveListeningActivityDate } from '../daily/resolve-listening-activity-date';
 import { generateListeningStory } from '../story-session/generate-listening-story';
 import type { ListeningStoryResult } from '../story-session/generate-listening-story';
+import { ensureUserCurriculum, CurriculumConfigError } from '../../../../api/_curriculum/curriculum-runtime';
 
 const OPENAI_KEY = 'oa-key';
 const AZURE_KEY = 'az-key';
@@ -168,7 +198,7 @@ describe('getOrCreateSharedListeningStory — level group mapping (1-3)', () => 
     ['B1', 'B1_B2'], ['B2', 'B1_B2'],
     ['C1', 'C1_C2'], ['C2', 'C1_C2'],
   ] as const)('%s maps to %s', async (cefrLevel, expectedGroup) => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue(cefrLevel);
+    setCurrentLevel(cefrLevel);
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult({ level: cefrLevel }));
     const db = makeMockDb(wonRow());
 
@@ -183,7 +213,7 @@ describe('getOrCreateSharedListeningStory — level group mapping (1-3)', () => 
 
 describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
   it('4. a ready shared story is reused instead of generating a new one', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -193,7 +223,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
   });
 
   it('5/6. reuse makes zero OpenAI and zero Azure calls (generateListeningStory, the only place either is called, is never invoked)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -208,7 +238,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
     // supabase/migrations/20260724070000_fix_listening_shared_story_reacquire_and_grants.sql)
     // keeps returning status='ready', won=false for both, so neither
     // request may call the old flow.
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     await getOrCreateSharedListeningStory('user-a', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -219,7 +249,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
   });
 
   it('16. a reused response keeps the exact ListeningStoryData contract the frontend expects', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -251,7 +281,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
   });
 
   it('7. downloads audio from Storage using the exact stored paths, base64-encoding it for the response — never re-uploads/overwrites existing audio', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -264,7 +294,7 @@ describe('getOrCreateSharedListeningStory — reuse (4, 5, 6, 16)', () => {
 
 describe('getOrCreateSharedListeningStory — absence of a ready story runs the old flow (7, 8, 9, 15)', () => {
   it('7. no shared story exists -> runs exactly the existing generateListeningStory flow, unmodified args', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -272,11 +302,12 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
 
     expect(generateListeningStory).toHaveBeenCalledWith(
       'user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET, 'pkg', 'travel',
+      'A1', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en' },
     );
   });
 
   it('8. the old flow\'s result is saved (status=ready, content, audio paths)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -295,7 +326,7 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
   });
 
   it('a successful persist clears lock_expires_at (defense in depth — a ready row should never carry a stale lock)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -308,7 +339,7 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
   });
 
   it('9. audio is uploaded exactly once per part (2 calls total), never on reuse', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -320,7 +351,7 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
   });
 
   it('15. the persisted shared content never contains user_id', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -332,7 +363,7 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
   });
 
   it('the audio path is deterministic — no user_id, playback rate, attempt, or timestamp segment', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -348,7 +379,7 @@ describe('getOrCreateSharedListeningStory — absence of a ready story runs the 
 
 describe('getOrCreateSharedListeningStory — concurrency (10, 11)', () => {
   it('10/11. a live lock held by another request never calls OpenAI/Azure and surfaces a simple, existing-contract error', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(generatingRow());
 
     await expect(
@@ -359,7 +390,7 @@ describe('getOrCreateSharedListeningStory — concurrency (10, 11)', () => {
   });
 
   it('the winner of the lock is the only one that calls generateListeningStory', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const winnerDb = makeMockDb(wonRow());
     const loserDb = makeMockDb(generatingRow());
@@ -379,7 +410,7 @@ describe('getOrCreateSharedListeningStory — expired-lock takeover (12)', () =>
     // lock" lives entirely in acquire_or_get_listening_shared_story's SQL
     // (see the migration) — from the orchestrator's perspective both cases
     // are indistinguishable and handled identically (won=true -> generate).
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow({ id: 'story-retaken' }));
 
@@ -393,7 +424,7 @@ describe('getOrCreateSharedListeningStory — expired-lock takeover (12)', () =>
 
 describe('getOrCreateSharedListeningStory — failure handling (13)', () => {
   it('13. a failure in the old flow marks the row failed and re-throws the original error', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const originalError = new Error('AI_INVALID_JSON');
     vi.mocked(generateListeningStory).mockRejectedValue(originalError);
     const db = makeMockDb(wonRow());
@@ -410,7 +441,7 @@ describe('getOrCreateSharedListeningStory — failure handling (13)', () => {
   });
 
   it('a persist (Storage upload) failure after a successful generation still marks the row failed', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
     db.uploadMock.mockResolvedValueOnce({ error: { message: 'storage down' } });
@@ -428,7 +459,7 @@ describe('getOrCreateSharedListeningStory — failure handling (13)', () => {
 
 describe('getOrCreateSharedListeningStory — per-user progress (14)', () => {
   it('14. two different users each get their own progress row against the same shared story', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow());
 
     await getOrCreateSharedListeningStory('user-a', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -446,7 +477,7 @@ describe('getOrCreateSharedListeningStory — per-user progress (14)', () => {
   });
 
   it('the winner of a fresh generation also gets a PENDING progress row (completed=false, tagged with activity_date)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow());
 
@@ -464,7 +495,7 @@ describe('getOrCreateSharedListeningStory — per-user progress (14)', () => {
 
 describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ consumed)', () => {
   it('a READY pending story is returned as-is: same story, no acquire RPC, no generation, no new attach', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     // rpcRow would advance to a different story if it were ever called.
     const db = makeMockDb(wonRow({ id: 'different-story' }), { pending: { storyId: 'pending-1', status: 'ready' } });
 
@@ -479,7 +510,7 @@ describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ con
   });
 
   it('a still-GENERATING pending (lock not expired) surfaces SharedStoryGeneratingError, never advances', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const future = new Date(Date.now() + 60_000).toISOString();
     const db = makeMockDb(wonRow(), { pending: { storyId: 'pending-1', status: 'generating', lockExpiresAt: future } });
 
@@ -491,7 +522,7 @@ describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ con
   });
 
   it('a FAILED pending is dropped, then a fresh story is prepared (falls through to acquire + generate)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const db = makeMockDb(wonRow({ id: 'fresh-1' }), { pending: { storyId: 'stale-1', status: 'failed' } });
 
@@ -504,7 +535,7 @@ describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ con
   });
 
   it('an EXPIRED generating pending is treated as stale (dropped, fresh prepared)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     vi.mocked(generateListeningStory).mockResolvedValue(makeStoryResult());
     const past = new Date(Date.now() - 60_000).toISOString();
     const db = makeMockDb(wonRow({ id: 'fresh-2' }), { pending: { storyId: 'stale-2', status: 'generating', lockExpiresAt: past } });
@@ -517,7 +548,7 @@ describe('getOrCreateSharedListeningStory — pending recovery (prepared ≠ con
   });
 
   it('a freshly prepared story exposes its sharedStoryId (needed to consume on practice)', async () => {
-    vi.mocked(resolveUserListeningLevel).mockResolvedValue('A1');
+    setCurrentLevel('A1');
     const db = makeMockDb(readyRow({ id: 'story-xyz' }));
 
     const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
@@ -562,6 +593,34 @@ describe('getPendingListeningStoryForToday — read-only auto-recovery (no gener
     const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
     expect(result).toBeNull();
     expect(db.deleteProgressMock).not.toHaveBeenCalled();
+    expect(generateListeningStory).not.toHaveBeenCalled();
+  });
+});
+
+describe('getOrCreateSharedListeningStory — P0: never crosses recortes on curriculum-resolution failure', () => {
+  it('propagates CurriculumConfigError and never reuses a bucket or generates when the recorte cannot be resolved', async () => {
+    vi.mocked(ensureUserCurriculum).mockRejectedValueOnce(new CurriculumConfigError('no published curriculum'));
+    const db = makeMockDb(wonRow());
+    await expect(
+      getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET),
+    ).rejects.toBeInstanceOf(CurriculumConfigError);
+    expect(db.rpcMock).not.toHaveBeenCalled();
+    expect(generateListeningStory).not.toHaveBeenCalled();
+  });
+
+  it('refuses to serve non-recorte content when there is no current recorte (never falls back to a legacy bucket)', async () => {
+    vi.mocked(ensureUserCurriculum).mockResolvedValueOnce({
+      versionId: 'ver-1',
+      languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+      prefs: { writing: true, listening: true, pronunciation: true, conversation: false },
+      currentSubtopicKey: null, currentSubtopicId: null, status: 'curriculum_completed',
+      ordered: [], keyToId: new Map(), idToKey: new Map(),
+    } as never);
+    const db = makeMockDb(wonRow());
+    await expect(
+      getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET),
+    ).rejects.toBeInstanceOf(CurriculumConfigError);
+    expect(db.rpcMock).not.toHaveBeenCalled();
     expect(generateListeningStory).not.toHaveBeenCalled();
   });
 });

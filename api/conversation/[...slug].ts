@@ -1,7 +1,16 @@
 import { createHash } from 'node:crypto';
 import { requireAuth } from '../_auth';
 import { ASSISTANT_NAME, REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
-import { buildTutorInstructionsWithContext, ConversationStartContext } from '../../src/lib/promptBuilder';
+import {
+  buildConversationPersonalization,
+  buildConversationContextSection,
+  conversationLanguageLabel,
+  type ConversationStartContext,
+} from '../../src/lib/promptBuilder';
+import { getLanguageSpeechConfig } from '../_curriculum/language-speech-config';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
+import { resolveActivityPrompt, recordCurricularPractice, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
 import { applyRateLimit } from '../_rateLimit';
@@ -494,6 +503,10 @@ async function handleSession(req: any, res: any) {
 
   let prefs: AIPreferences = { ...BASE_DEFAULTS };
   let cefrLevel = 'A1';
+  // FREE-mode conversation language directive is parameterized by the user's
+  // resolved curriculum language pair (falling back to the product bootstrap
+  // default), never the old hardcoded "sempre em inglês" literal.
+  let languageContext: { learningLanguage: string; interfaceLanguage: string } = { ...CURRICULUM_BOOTSTRAP_DEFAULT };
   let ctx: ConversationStartContext = {
     theme: null,
     missionTitle: null,
@@ -508,17 +521,26 @@ async function handleSession(req: any, res: any) {
   };
 
   try {
-    const [prefsResult, memoryResult, todayReviewResult, recentReviewsResult, convTotalResult] = await Promise.all([
+    const [prefsResult, memoryResult, todayReviewResult, recentReviewsResult, convTotalResult, langPrefsResult] = await Promise.all([
       supabase.from('ai_conversation_preferences').select('*').maybeSingle(),
       supabase.from('english_learning_memory').select('current_level').order('updated_at', { ascending: false }).limit(1),
       supabase.from('english_reviews').select('original_text,version_2_text,main_mistakes,mission_snapshot').eq('entry_date', today).order('created_at', { ascending: false }).limit(1).maybeSingle(),
       supabase.from('english_reviews').select('main_mistakes,objective,next_practice').order('created_at', { ascending: false }).limit(5),
       supabase.from('conversation_sessions').select('duration_sec').eq('session_date', today),
+      supabase.from('user_curriculum_preferences').select('learning_language, interface_language').maybeSingle(),
     ]);
 
     if (prefsResult.data) prefs = rowToPrefs(prefsResult.data as Record<string, unknown>);
     const memRow = memoryResult.data?.[0] as { current_level?: string } | undefined;
     if (memRow?.current_level) cefrLevel = memRow.current_level;
+
+    const langRow = langPrefsResult.data as { learning_language?: string; interface_language?: string } | null;
+    if (langRow) {
+      languageContext = {
+        learningLanguage:  langRow.learning_language?.trim()  || CURRICULUM_BOOTSTRAP_DEFAULT.learningLanguage,
+        interfaceLanguage: langRow.interface_language?.trim() || CURRICULUM_BOOTSTRAP_DEFAULT.interfaceLanguage,
+      };
+    }
 
     ctx.conversationGoalMinutes = prefs.dailyConversationGoalMinutes;
 
@@ -573,6 +595,63 @@ async function handleSession(req: any, res: any) {
   }
 
   if (!await applyRateLimit(res, userId, 'conversation-session')) return;
+
+  // ── Curriculum-GUIDED vs FREE mode ─────────────────────────────────────────
+  // 'guided' consumes the data-driven curriculum (the seeded conversation.tutor
+  // template composed for the user's CURRENT recorte) as the tutor instructions;
+  // 'free' keeps the personalized builder. Server-authoritative ("menu = regra"):
+  // guided is driven by whether the user SELECTED Conversation in their teaching
+  // plan (user_curriculum_preferences.practice_conversation) — NOT by a
+  // client-sent flag — so a guided session reliably counts toward the current
+  // recorte on completion, independent of the remotely-served frontend. A client
+  // MAY still force free (mode:'free') for a dedicated free-chat entry. Default
+  // prefs have conversation OFF, so users who never opted in stay free
+  // (backward-compatible). Resolved HERE — after the rate limiter, but strictly
+  // BEFORE the trial authorization and the $ budget reservation below — so a
+  // CurriculumConfigError returns an explicit operational error without ever
+  // having reserved a trial hold or budget capacity to release.
+  let conversationInPlan = false;
+  try {
+    const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+    conversationInPlan = ensured.prefs.conversation;
+  } catch (err) {
+    // Fail-SAFE to free: a curriculum-resolution problem (misconfig OR any
+    // transient infra error) must never block the paid conversation feature.
+    // Free mode is a first-class product mode (personalized, language-
+    // parameterized — NOT a hardcoded English pedagogical fallback), so this is
+    // not a silent pedagogical fallback. When the user IS in-plan and the
+    // curriculum is genuinely misconfigured, the guided branch below still
+    // surfaces it explicitly (resolveActivityPrompt → 503).
+    if (err instanceof CurriculumConfigError) {
+      safeLog('conversation/session', 'curriculum_pref_unavailable', 200);
+    } else {
+      safeLog('conversation/session', 'curriculum_pref_read_failed', 200, { message: String(err).slice(0, 150) });
+    }
+  }
+  const forceFree = (req.body ?? {}).mode === 'free';
+  const sessionMode: 'guided' | 'free' = (conversationInPlan && !forceFree) ? 'guided' : 'free';
+  let guidedInstructions: string | null = null;
+  if (sessionMode === 'guided') {
+    try {
+      const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+        templateKey: 'conversation.tutor',
+        activityType: 'conversation',
+      });
+      guidedInstructions = resolved.system;
+    } catch (err) {
+      // Explicit, observable operational failure — NEVER a silent fallback to a
+      // hardcoded English prompt. The guided student is told the curriculum is
+      // not configured rather than being quietly dropped into a generic tutor.
+      if (err instanceof CurriculumConfigError) {
+        safeLog('conversation/session', 'curriculum_not_configured', 503, { message: err.message });
+        return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O currículo guiado ainda não está configurado.');
+      }
+      throw err;
+    }
+    if (!guidedInstructions || !guidedInstructions.trim()) {
+      return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão guiada.' });
+    }
+  }
 
   // Etapa 2A — concurrency-safe authorization against the trial's lifetime
   // (never-renewed) balance. After the rate limiter (same reasoning as the
@@ -660,10 +739,54 @@ async function handleSession(req: any, res: any) {
     });
   }
 
-  const instructions = buildTutorInstructionsWithContext(prefs, cefrLevel, ctx);
+  // Both modes are data-driven. Guided uses the conversation.tutor template
+  // (resolved above) for the CURRENT recorte. FREE uses the conversation.free
+  // template, resolved by (learning_language, interface_language) — the STYLE
+  // personalization (pace/formality/etc.) and the session context are injected
+  // as userContext; NO hardcoded English pedagogy. A future Spanish learner gets
+  // Spanish free conversation from the same code, purely via the es template row.
+  let instructions: string;
+  if (sessionMode === 'guided') {
+    instructions = guidedInstructions as string;
+  } else {
+    try {
+      const freeResolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+        templateKey: 'conversation.free',
+        activityType: 'conversation',
+        requireSubtopic: false,
+        userContext: {
+          level: cefrLevel,
+          learning_label: conversationLanguageLabel(languageContext.learningLanguage),
+          interface_label: conversationLanguageLabel(languageContext.interfaceLanguage),
+          personalization: buildConversationPersonalization(prefs),
+          session_context: buildConversationContextSection(ctx),
+        },
+      });
+      instructions = freeResolved.system;
+    } catch (err) {
+      if (err instanceof CurriculumConfigError) {
+        safeLog('conversation/session', 'free_curriculum_not_configured', 503, { message: err.message });
+        return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O modo de conversa livre ainda não está configurado.');
+      }
+      throw err;
+    }
+  }
   if (!instructions) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
+
+  // STT language is data-driven (public.languages.stt_language) — never a
+  // hardcoded 'en'. If unavailable, omit it so the provider auto-detects rather
+  // than forcing English.
+  let sttLanguage: string | null = null;
+  try {
+    sttLanguage = (await getLanguageSpeechConfig(getCurriculumServiceClient(), languageContext.learningLanguage)).sttLanguage;
+  } catch {
+    sttLanguage = null;
+  }
+  const transcriptionConfig = sttLanguage
+    ? { model: 'gpt-4o-mini-transcribe', language: sttLanguage }
+    : { model: 'gpt-4o-mini-transcribe' };
 
   const sessionConfig = {
     expires_after: { anchor: 'created_at', seconds: 120 },
@@ -674,7 +797,7 @@ async function handleSession(req: any, res: any) {
       audio: {
         input: {
           noise_reduction: { type: 'near_field' },
-          transcription: { model: 'gpt-4o-mini-transcribe', language: 'en' },
+          transcription: transcriptionConfig,
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
@@ -922,6 +1045,9 @@ async function handleSessionComplete(req: any, res: any) {
   if (!isValidUuid(recordingAuthorizationId)) {
     return jsonError(res, 400, 'INVALID_RECORDING_AUTHORIZATION_ID', 'recordingAuthorizationId inválido.');
   }
+  // Whether this completed session counts as curricular practice is decided
+  // server-side from the user's teaching plan ("menu = regra"), resolved just
+  // before recording below — never from a client-sent flag.
 
   try {
     const gatewayDeps = getProductionDeps();
@@ -998,6 +1124,30 @@ async function handleSessionComplete(req: any, res: any) {
       await settleConversationExtraCreditsDebit(userId, row.id, durationSeconds, { supabase: client });
     } catch (debitErr) {
       console.error('[conversation/session-complete] extra-credits debit failed', debitErr instanceof Error ? debitErr.message : 'unknown');
+    }
+
+    // Curricular practice — a session that actually happened (won the atomic
+    // UPDATE above AND has a real server-computed duration > 0, the same "valid
+    // session" gate the conversation_sessions mirror uses) counts as ONE
+    // practice of the 'conversation' modality for the user's current recorte,
+    // BUT ONLY when the user selected Conversation in their teaching plan
+    // ("menu = regra", resolved server-side here — never a client flag). Merely
+    // opening and immediately closing a session yields durationSeconds === 0 and
+    // records nothing. Best-effort + idempotent (recordCurricularPractice
+    // upserts per user+subtopic+modality) — a failure here must NEVER fail
+    // finalize. No invented mastery: a valid completed session simply counts as
+    // "practised".
+    if (durationSeconds > 0) {
+      try {
+        const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+        if (ensured.prefs.conversation) {
+          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'conversation', row.id);
+        }
+      } catch (practiceErr) {
+        if (!(practiceErr instanceof CurriculumConfigError)) {
+          console.error('[conversation/session-complete] curricular practice record failed', practiceErr instanceof Error ? practiceErr.message : 'unknown');
+        }
+      }
     }
 
     return res.status(200).json({ status: 'completed', durationSeconds });

@@ -11,11 +11,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps, aiOk } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw } = vi.hoisted(() => {
+const { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw } = vi.hoisted(() => {
   const mockCreate = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockGetCurrentUserPlanEntitlements = vi.fn();
-  return { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const mockResolveActivityPrompt = vi.fn();
+  const mockRecordCurricularPractice = vi.fn();
+  return { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -37,8 +39,17 @@ vi.mock('../_azure-speech', () => ({
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
+vi.mock('../_curriculum/service-client', () => ({
+  getCurriculumServiceClient: vi.fn(() => ({})),
+}));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: mockResolveActivityPrompt,
+  recordCurricularPractice: mockRecordCurricularPractice,
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
 
 import handler from '../pronunciation-training/[...slug]';
+import { CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000002';
 
@@ -125,6 +136,18 @@ beforeEach(() => {
   mockCreate.mockImplementation(() => aiOk('A short pronunciation practice text.'));
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSupabase() });
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
+  // Data-driven curriculum: the prompt is composed for the user's recorte. Model
+  // null → the handler falls back to AI_MODEL ('gpt-4o-mini').
+  mockResolveActivityPrompt.mockResolvedValue({
+    system: 'Curriculum-composed system prompt.',
+    user: 'Write the text now.',
+    model: null,
+    temperature: 0.9,
+    subtopicKey: 'a1.greetings',
+    versionId: 'version-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  });
+  mockRecordCurricularPractice.mockResolvedValue({ recorded: true });
   process.env.OPENAI_API_KEY = 'test-key';
 });
 
@@ -250,6 +273,28 @@ describe('OBSERVE mode', () => {
     const res = makeRes();
     await handler(makeReq(), res);
     expect(res._status()).toBe(200);
+  });
+});
+
+describe('data-driven curriculum', () => {
+  it('composes the prompt for the user recorte and sends it to OpenAI', async () => {
+    await handler(makeReq(), makeRes());
+    expect(mockResolveActivityPrompt).toHaveBeenCalledWith(
+      expect.anything(),
+      USER_ID,
+      expect.objectContaining({ templateKey: 'pronunciation.generate_text', activityType: 'pronunciation' }),
+    );
+    const call = mockCreate.mock.calls[0][0] as { messages: Array<{ role: string; content: string }> };
+    expect(call.messages[0]).toEqual({ role: 'system', content: 'Curriculum-composed system prompt.' });
+  });
+
+  it('returns 503 CURRICULUM_NOT_CONFIGURED and never calls OpenAI on a curriculum config error', async () => {
+    mockResolveActivityPrompt.mockRejectedValue(new CurriculumConfigError('no published curriculum'));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(503);
+    expect((res._body() as any).code).toBe('CURRICULUM_NOT_CONFIGURED');
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });
 

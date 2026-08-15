@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
 import { DayEntry, EntriesStore, AIFeedback, CefrLevel, MainMistake, VocabularyItem } from '../types';
-import { getScheduleForDate } from '../data/calendar2026';
 
 interface DBRow {
   entry_date: string;
@@ -83,7 +82,6 @@ function rowToEntry(row: DBRow): DayEntry {
 }
 
 function entryToRow(entry: DayEntry, userId: string): Omit<DBRow, 'updated_at'> & { updated_at: string } {
-  const schedule = getScheduleForDate(entry.date);
   const d = new Date(entry.date + 'T12:00:00');
   const r = entry.aiReview;
   return {
@@ -91,9 +89,14 @@ function entryToRow(entry: DayEntry, userId: string): Omit<DBRow, 'updated_at'> 
     user_id: userId,
     month: d.getMonth() + 1,
     year: d.getFullYear(),
-    theme: schedule?.theme ?? '',
-    grammar_goal: schedule?.grammarObjective ?? null,
-    main_tense: schedule?.verbTense ?? null,
+    // Pedagogy metadata is NO LONGER derived from the legacy calendar. The
+    // authoritative pedagogy for an entry comes from the curriculum-driven
+    // mission/review (mission_snapshot + english_reviews), not from a bundled
+    // per-month grammar schedule. `theme` keeps the entry's own title for
+    // display continuity; grammar_goal/main_tense are left unset here.
+    theme: entry.title ?? '',
+    grammar_goal: null,
+    main_tense: null,
     title: entry.title || null,
     original_text: entry.originalText || null,
     corrected_text: entry.correctedText || null,

@@ -192,15 +192,19 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
         body: JSON.stringify({
           entryId: date,
           originalText,
-          theme: dailyTheme?.themeEn || schedule?.theme || '',
-          grammarGoal: dailyTheme?.objective || schedule?.grammarObjective || '',
-          mainTense: schedule?.verbTense ?? '',
+          // Pedagogy (theme/objective/tense/level) comes ONLY from the
+          // curriculum-driven mission (dailyTheme) — never from the legacy
+          // calendar schedule. These are contextual hints; review-text resolves
+          // the authoritative pedagogy from the user's CURRENT recorte server-side.
+          theme: dailyTheme?.themeEn ?? '',
+          grammarGoal: dailyTheme?.objective ?? '',
+          mainTense: dailyTheme?.verbTense ?? '',
           mode: dailyTheme?.mode ?? 'normal',
           reviewGroupId: dailyTheme?.reviewGroupId ?? null,
           missionTitle: dailyTheme?.title ?? '',
           studentLevel: dailyTheme?.level ?? '',
           attemptId,
-          reviewCategory: dailyTheme?.category || schedule?.theme || null,
+          reviewCategory: dailyTheme?.category ?? null,
           reviewDifficulty: difficulty ?? dailyTheme?.difficulty ?? null,
           missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : null,
         }),
@@ -243,7 +247,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
             reviewId: data.reviewId,
             mistakes: feedback.mainMistakes,
             entryDate: date,
-            theme: dailyTheme?.themeEn || schedule?.theme || undefined,
+            theme: dailyTheme?.themeEn || undefined,
             activeWeekdays,
           }).catch((err) => console.error('Review group creation failed:', err));
         }
@@ -314,7 +318,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
         <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-slate-100 capitalize truncate">{dateLabel}</p>
-          <p className="text-xs text-slate-400 truncate">{schedule?.theme ?? '—'}</p>
+          <p className="text-xs text-slate-400 truncate">{dailyTheme?.title ?? '—'}</p>
         </div>
         <StatusBadgePill status={status} />
       </header>
@@ -496,7 +500,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
             <CollapsibleBlock title="Relatório do Professor" defaultOpen={true}>
               <TeacherReport
                 review={aiReview}
-                grammarObjective={schedule?.grammarObjective ?? ''}
+                grammarObjective={dailyTheme?.objective ?? ''}
                 onReviewAgain={handleReview}
                 reviewing={isReviewing}
               />
@@ -877,11 +881,13 @@ function InactiveDayCard({ schedule, onActivate }: { schedule: DaySchedule | nul
       </div>
       <div>
         <p className="font-medium text-slate-300">
-          {isWeekend ? schedule?.theme : 'Dia inativo'}
+          {isWeekend ? (isDescanso ? 'Dia de descanso' : 'Dia de revisão') : 'Dia inativo'}
         </p>
         <p className="text-sm text-slate-400 mt-1">
           {isWeekend
-            ? schedule?.grammarObjective
+            ? (isDescanso
+                ? 'Aproveite para descansar. Você pode praticar mesmo assim se quiser.'
+                : 'Um bom dia para revisar. Você pode praticar mesmo assim se quiser.')
             : 'Este dia não está nos seus dias de prática. Configure os dias ativos em Memória → Dias de prática.'}
         </p>
       </div>

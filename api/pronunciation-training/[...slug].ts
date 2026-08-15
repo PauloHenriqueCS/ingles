@@ -7,6 +7,8 @@ import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedS
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
+import { resolveActivityPrompt, recordCurricularPractice, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { checkFeatureConfigError, checkRecordingDuration } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { evaluateSkillPromotion } from '../../src/lib/promotionService';
@@ -74,40 +76,6 @@ function dailyPronunciationTrainingAllowedByPlan(entitlements: PlanEntitlementsS
 
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
-
-const WORD_TARGETS: Record<string, { min: number; max: number }> = {
-  A1: { min: 50, max: 80  }, A2: { min: 50, max: 80  },
-  B1: { min: 80, max: 120 }, B2: { min: 80, max: 120 },
-  C1: { min: 120, max: 160 }, C2: { min: 120, max: 160 },
-};
-
-const LEVEL_GUIDE: Record<string, string> = {
-  A1: 'A1 (beginner): simple present tense, common everyday words, very short sentences',
-  A2: 'A2 (elementary): simple past and present, everyday vocabulary, short connected sentences',
-  B1: 'B1 (intermediate): varied tenses, compound sentences, everyday and some idiomatic expressions',
-  B2: 'B2 (upper-intermediate): complex structures, nuanced vocabulary, subordinate clauses',
-  C1: 'C1 (advanced): sophisticated grammar, wide vocabulary, complex ideas expressed naturally',
-  C2: 'C2 (proficient): native-like fluency, subtle distinctions, rich idiomatic language',
-};
-
-function buildSystemPrompt(level: string): string {
-  const { min, max } = WORD_TARGETS[level] ?? { min: 80, max: 120 };
-  return `You write short English texts for pronunciation practice.
-
-Level: ${LEVEL_GUIDE[level] ?? LEVEL_GUIDE.B1}
-Word count target: ${min}–${max} words (count carefully before submitting)
-
-Rules:
-- Write a vivid, specific scenario featuring a real decision, small conflict, or unexpected turn
-- Use concrete names, specific places, and a moment of tension or surprise
-- Avoid: daily-routine lists, hobby catalogues, generic "I woke up and…" intros
-- Sentences should be short to medium length and flow naturally when read aloud
-- No bullet points, no headings, no titles — just a continuous narrative paragraph
-- Write in third person or second person; no first-person "I" narrator
-- Vocabulary must be natural for ${level} — do not inflate difficulty to "test" pronunciation
-
-Output only the text. Nothing else.`;
-}
 
 // ── Metric extractor — reads from SDK response, never invents values ──────────
 
@@ -295,6 +263,30 @@ async function handleGenerateText(req: any, res: any) {
   const apiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Serviço de IA não configurado.');
 
+  // Data-driven curriculum: the pedagogy (system/user prompt, model, temperature)
+  // is composed for the user's CURRENT recorte from the seeded
+  // `pronunciation.generate_text` template — no hardcoded level-only English
+  // pedagogy. A misconfigured curriculum is an explicit operational error, never
+  // a silent English fallback.
+  let resolvedPrompt;
+  try {
+    resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'pronunciation.generate_text',
+      activityType: 'pronunciation',
+    });
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('pronunciation-training/generate-text', 'curriculum_not_configured', 503);
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
+    throw err;
+  }
+
+  const systemPrompt = resolvedPrompt.system;
+  const userPrompt = resolvedPrompt.user ?? 'Write the text now.';
+  const model = resolvedPrompt.model ?? AI_MODEL;
+  const temperature = resolvedPrompt.temperature ?? 0.9;
+
   const openai = new OpenAI({ apiKey, timeout: GENERATE_TIMEOUT_MS });
   const gatewayDeps = getProductionDeps();
   try {
@@ -303,7 +295,7 @@ async function handleGenerateText(req: any, res: any) {
         featureKey: 'pronunciation.generate_text',
         provider: 'openai',
         service: 'chat.completions',
-        model: AI_MODEL,
+        model,
         userId,
         initiatedByUserId: userId,
         actorType: 'user',
@@ -315,12 +307,12 @@ async function handleGenerateText(req: any, res: any) {
           endpoint: 'pronunciation-training/generate-text',
           flowType: 'generate_text',
         },
-        estimatedMetrics: estimateTextTokens(buildSystemPrompt(userLevel).length + 'Write the text now.'.length, 400),
+        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, 400),
       },
       () => openai.chat.completions.create({
-        model: AI_MODEL,
-        messages: [{ role: 'system', content: buildSystemPrompt(userLevel) }, { role: 'user', content: 'Write the text now.' }],
-        temperature: 0.9,
+        model,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        temperature,
         max_tokens: 400,
       }),
       gatewayDeps,
@@ -742,6 +734,15 @@ async function handleTrainingComplete(req: any, res: any) {
   if (rpc.error) {
     safeLog('pronunciation-training/complete', 'rpc_unexpected', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao salvar o resultado.');
+  }
+
+  // Data-driven curriculum: a successfully completed assessment is one valid
+  // pronunciation practice for the user's current recorte. Best-effort — a
+  // recording failure must never affect the assessment response the user gets.
+  try {
+    await recordCurricularPractice(getCurriculumServiceClient(), userId, 'pronunciation', sessionId);
+  } catch {
+    safeLog('pronunciation-training/complete', 'record_curricular_practice_failed', 200);
   }
 
   res.setHeader('Cache-Control', 'no-store');

@@ -1,6 +1,6 @@
 import {
   House, CalendarDays,
-  History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X,
+  History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X, GraduationCap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -14,6 +14,7 @@ interface MenuItem {
 
 const MENU_ITEMS: MenuItem[] = [
   { view: 'home',           label: 'Página inicial',          icon: House },
+  { view: 'curriculum-plan', label: 'Plano de ensino',         icon: GraduationCap },
   { view: 'month',          label: 'Calendário',              icon: CalendarDays },
   { view: 'history',        label: 'Histórico',                icon: History },
   { view: 'evolution',      label: 'Evolução',                 icon: TrendingUp },

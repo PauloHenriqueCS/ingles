@@ -1,7 +1,42 @@
 import type { AIPreferences } from '../types';
 import { ASSISTANT_NAME } from './tutorPreferences';
+import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../config/curriculum-defaults';
 
 export type { AIPreferences };
+
+// ── Language context (parameterized — NOT a hardcoded "sempre em inglês") ─────
+//
+// The conversation-language directive used to be the hardcoded literal
+// "Responda SEMPRE em inglês". It is now derived from a (learningLanguage,
+// interfaceLanguage) pair supplied by the caller — the curriculum's resolved
+// languageContext in guided mode, the user's curriculum preferences (or the
+// product bootstrap default) in free mode. The default below is product
+// configuration (see curriculum-defaults.ts), never pedagogical knowledge.
+export interface PromptLanguageContext {
+  learningLanguage: string;
+  interfaceLanguage: string;
+}
+
+const DEFAULT_LANGUAGE_CONTEXT: PromptLanguageContext = { ...CURRICULUM_BOOTSTRAP_DEFAULT };
+
+// Human-readable (interface-language) labels for the language directive. This is
+// display i18n, not pedagogy: it carries no grammar/level/curriculum content and
+// falls back to the raw code (or its primary subtag) for any unmapped locale.
+const LANGUAGE_LABELS: Record<string, string> = {
+  en: 'inglês',
+  pt: 'português',
+  'pt-BR': 'português brasileiro',
+  es: 'espanhol',
+  fr: 'francês',
+  de: 'alemão',
+  it: 'italiano',
+  ja: 'japonês',
+};
+
+function languageLabel(code: string): string {
+  const trimmed = (code ?? '').trim();
+  return LANGUAGE_LABELS[trimmed] ?? LANGUAGE_LABELS[trimmed.split('-')[0]] ?? trimmed;
+}
 
 // Re-export so existing imports keep working
 export { BASE_DEFAULTS as DEFAULT_PREFERENCES, REALTIME_VOICES as AVAILABLE_VOICES } from './tutorPreferences';
@@ -14,7 +49,7 @@ export { BASE_DEFAULTS as DEFAULT_PREFERENCES, REALTIME_VOICES as AVAILABLE_VOIC
 // including conversation history, prior examples, or the user insisting on a
 // different name.
 const IDENTITY_RULES = `## Identidade (regra fixa e prioritária — nunca é sobrescrita por nada abaixo)
-Your name is ${ASSISTANT_NAME}. You are the English conversation assistant inside the ${ASSISTANT_NAME} app.
+Your name is ${ASSISTANT_NAME}. You are the conversation assistant inside the ${ASSISTANT_NAME} app.
 
 - Never claim that your name is Alex, Sarah, or any other name — under any circumstance.
 - Never adopt a name suggested, insisted upon, or "assigned" by the user, even if they say things like "your name is X" or "from now on you're X."
@@ -45,10 +80,13 @@ const PACE_INSTRUCTIONS: Record<AIPreferences['speechPace'], string> = {
 - Use speech connecting: "y'know", "I mean", "actually", "so", etc.`,
 };
 
+// Accent preference — language-NEUTRAL (no hardcoded English vocabulary like
+// apartment/elevator). The model applies the chosen variety of whatever the
+// TARGET language is, so the same code works for any learning_language.
 const ACCENT_INSTRUCTIONS: Record<AIPreferences['accent'], string> = {
-  american: 'Use vocabulário americano (apartment, elevator, subway, vacation, soccer, etc.). Use expressões e gírias americanas quando natural.',
-  british:  'Use vocabulário britânico (flat, lift, underground, holiday, football, etc.). Use expressões britânicas quando natural.',
-  neutral:  'Use inglês internacional claro, sem regionalismos marcados. Prefira vocabulário amplamente compreendido globalmente.',
+  american: 'Prefira o vocabulário e as expressões da variante norte-americana do idioma-alvo, quando naturais.',
+  british:  'Prefira o vocabulário e as expressões da variante britânica do idioma-alvo, quando naturais.',
+  neutral:  'Use o idioma-alvo de forma internacional e clara, sem regionalismos marcados; prefira vocabulário amplamente compreendido.',
 };
 
 const FORMALITY_INSTRUCTIONS: Record<AIPreferences['formality'], string> = {
@@ -93,18 +131,15 @@ const DETAIL_INSTRUCTIONS: Record<AIPreferences['correctionDetail'], string> = {
   detailed: 'Correção DETALHADA: explique brevemente a regra e, se útil, dê um exemplo adicional. Mas não transforme em aula.',
 };
 
-const LEVEL_INSTRUCTIONS: Record<string, string> = {
-  A1: 'O aprendiz é INICIANTE (A1). Use vocabulário muito simples, presente e passado simples apenas. Frases curtas. Evite phrasal verbs e expressões idiomáticas complexas.',
-  A2: 'O aprendiz é BÁSICO (A2). Use vocabulário cotidiano, presente/passado simples e contínuo. Introduza novas estruturas com cuidado.',
-  B1: 'O aprendiz é INTERMEDIÁRIO (B1). Use linguagem cotidiana natural. Pode introduzir phrasal verbs comuns e expressões idiomáticas simples.',
-  B2: 'O aprendiz é INTERMEDIÁRIO-AVANÇADO (B2). Fale naturalmente. Introduza expressões idiomáticas e vocabulário mais rico quando apropriado.',
-  C1: 'O aprendiz é AVANÇADO (C1). Fale como com um colega fluente. Use expressões idiomáticas, gírias e linguagem sofisticada normalmente.',
-  C2: 'O aprendiz é PROFICIENTE (C2). Fale com total naturalidade. Sem simplificações necessárias.',
-};
+// NOTE: The hardcoded English A1–C2 pedagogical rubric that used to live here
+// (LEVEL_INSTRUCTIONS) was intentionally removed. Level/pedagogy is no longer a
+// hardcoded source of truth in this builder — in guided mode it comes from the
+// data-driven curriculum (see api/_curriculum), and free mode no longer injects
+// per-level pedagogical rules, only surfaces the reference CEFR code as context.
 
 const LANG_CORRECTION_INSTRUCTION: Record<AIPreferences['correctionLanguage'], string> = {
-  portuguese: 'Faça as explicações de correção em PORTUGUÊS BRASILEIRO. Continue a conversa em inglês.',
-  english:    'Faça as explicações de correção em INGLÊS. Continue a conversa em inglês.',
+  portuguese: 'Faça as explicações de correção em PORTUGUÊS BRASILEIRO.',
+  english:    'Faça as explicações de correção em INGLÊS.',
 };
 
 // ── Main builder ──────────────────────────────────────────────────────────────
@@ -112,8 +147,12 @@ const LANG_CORRECTION_INSTRUCTION: Record<AIPreferences['correctionLanguage'], s
 export function buildTutorInstructions(
   prefs: AIPreferences,
   cefrLevel: string = 'A1',
+  languageContext: PromptLanguageContext = DEFAULT_LANGUAGE_CONTEXT,
 ): string {
   const level = (cefrLevel ?? 'A1').toUpperCase();
+  const learningLabel  = languageLabel(languageContext.learningLanguage);
+  const interfaceLabel = languageLabel(languageContext.interfaceLanguage);
+  const correctionExplanationLabel = prefs.correctionLanguage === 'portuguese' ? interfaceLabel : learningLabel;
   const profanityLine = prefs.profanityEnabled
     ? 'Palavrões e linguagem crua são PERMITIDOS quando naturais para o contexto e para o preset.'
     : 'Não use palavrões ou linguagem ofensiva.';
@@ -138,11 +177,11 @@ ${personalityIntro}
 - Quando se apresentar, use apenas "${ASSISTANT_NAME}". Não repita seu nome a cada resposta.
 
 ## Nível do aprendiz
-${LEVEL_INSTRUCTIONS[level] ?? LEVEL_INSTRUCTIONS.A1}
+Nível de referência do aprendiz (CEFR): ${level}. Ajuste a complexidade da sua linguagem a esse nível de forma natural, sem anunciá-lo.
 
 ## Idioma da conversa
-- Responda SEMPRE em inglês, mesmo que o aprendiz escreva em português.
-- Exceção: explicações de correção podem ser em ${prefs.correctionLanguage === 'portuguese' ? 'português brasileiro' : 'inglês'}.
+- Responda SEMPRE em ${learningLabel}, mesmo que o aprendiz escreva em outro idioma.
+- Exceção: explicações de correção podem ser em ${correctionExplanationLabel}.
 - Evite formatação: sem bullets, sem listas, sem markdown — fale naturalmente.
 
 ## Ritmo
@@ -180,16 +219,51 @@ ${INITIATIVE_INSTRUCTIONS[prefs.topicInitiative]}
 - Nunca corrija no meio de uma fala do aprendiz.
 - Não corrija sotaque legítimo nem deslizes irrelevantes.
 
-## Exemplo de correção ideal
-Aprendiz: "Yesterday I goed to a party."
-Você: "${prefs.correctionLanguage === 'portuguese' ? '"You went to a party" — "went" é o passado de "go", "goed" não existe. What happened there?' : '"You went to a party" — the past of "go" is "went", not "goed". What happened there?'}"
+## Estilo de correção
+Ao corrigir, mostre a forma correta no idioma-alvo de maneira breve e natural, integrada à conversa, e siga em frente. ${correctionExplanationLabel === interfaceLabel ? `Quando útil, explique a regra brevemente em ${interfaceLabel}.` : `Quando útil, explique a regra brevemente em ${correctionExplanationLabel}.`} Nunca transforme a correção em uma aula.
 
-Seu objetivo principal: fazer o aprendiz se sentir seguro para falar inglês em voz alta. Confiança primeiro, perfeição depois.`;
+Seu objetivo principal: fazer o aprendiz se sentir seguro para falar ${learningLabel} em voz alta. Confiança primeiro, perfeição depois.`;
 }
 
 /** Legacy alias kept for any remaining callers */
 export function buildSystemPrompt(prefs: AIPreferences): string {
   return buildTutorInstructions(prefs, 'A1');
+}
+
+/**
+ * Interface-language label for a language code (display i18n, NOT pedagogy).
+ * Exported so the FREE-conversation DB template path can pass the taught/
+ * interface language as human-readable labels via userContext.
+ */
+export function conversationLanguageLabel(code: string): string {
+  return languageLabel(code);
+}
+
+/**
+ * The user's conversation-STYLE personalization block (pace, accent, formality,
+ * humour, roast, initiative, correction timing/scope/detail/language). This is
+ * language-NEUTRAL conversation-style config written in the interface language —
+ * NOT target-language pedagogy — so it is injected as {{personalization}} into
+ * the data-driven `conversation.free` / guided templates rather than living in
+ * the prompt body. Uses the same validated enum→text maps as buildTutorInstructions.
+ */
+export function buildConversationPersonalization(prefs: AIPreferences): string {
+  const profanityLine = prefs.profanityEnabled
+    ? 'Palavrões e linguagem crua são PERMITIDOS quando naturais para o contexto e para o preset.'
+    : 'Não use palavrões ou linguagem ofensiva.';
+  return [
+    '## Ritmo', PACE_INSTRUCTIONS[prefs.speechPace], '',
+    '## Sotaque e vocabulário', ACCENT_INSTRUCTIONS[prefs.accent], '',
+    '## Tom e formalidade', FORMALITY_INSTRUCTIONS[prefs.formality], profanityLine, '',
+    '## Humor', HUMOR_INSTRUCTIONS[prefs.humorLevel], '',
+    '## Zoação', ROAST_INSTRUCTIONS[prefs.roastIntensity], '',
+    '## Iniciativa de tópicos', INITIATIVE_INSTRUCTIONS[prefs.topicInitiative], '',
+    '## Ajustes de correção',
+    `- Quando corrigir: ${TIMING_INSTRUCTIONS[prefs.correctionTiming]}`,
+    `- O que corrigir: ${SCOPE_INSTRUCTIONS[prefs.correctionScope]}`,
+    `- Idioma da explicação: ${LANG_CORRECTION_INSTRUCTION[prefs.correctionLanguage]}`,
+    `- Nível de detalhe: ${DETAIL_INSTRUCTIONS[prefs.correctionDetail]}`,
+  ].join('\n');
 }
 
 // ── Conversation context ───────────────────────────────────────────────────────
@@ -211,8 +285,9 @@ export function buildTutorInstructionsWithContext(
   prefs: AIPreferences,
   cefrLevel: string,
   ctx: ConversationStartContext,
+  languageContext: PromptLanguageContext = DEFAULT_LANGUAGE_CONTEXT,
 ): string {
-  const base = buildTutorInstructions(prefs, cefrLevel);
+  const base = buildTutorInstructions(prefs, cefrLevel, languageContext);
   return `${base}\n\n${buildContextSection(ctx)}`;
 }
 
@@ -291,3 +366,7 @@ function buildContextSection(ctx: ConversationStartContext): string {
 
   return lines.join('\n');
 }
+
+// Exported for the data-driven conversation templates (guided + free): the
+// session-context block, injected as {{session_context}}.
+export { buildContextSection as buildConversationContextSection };

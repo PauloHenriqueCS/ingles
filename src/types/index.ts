@@ -1,6 +1,6 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'settings' | 'subscription' | 'minute-packages';
+export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'settings' | 'subscription' | 'minute-packages' | 'curriculum-plan';
 
 export interface AIPreferences {
   // Identity
@@ -122,12 +122,15 @@ export interface EnglishReviewSaved {
 
 export interface DaySchedule {
   date: string;
-  theme: string;
-  grammarObjective: string;
-  verbTense: string;
   isWeekend: boolean;
   isPracticeDay: boolean;
   weekendActivity?: 'revisao' | 'descanso';
+  // Legacy pedagogy fields — the old per-month grammar calendar no longer
+  // governs level/grammar/tense/theme (the persisted curriculum is the sole
+  // authority). Kept optional only for backward type-compat; not populated.
+  theme?: string;
+  grammarObjective?: string;
+  verbTense?: string;
   level?: string;
   estimatedTime?: number;
 }

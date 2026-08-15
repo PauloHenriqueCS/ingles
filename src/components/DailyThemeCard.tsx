@@ -130,9 +130,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
         learningContext: context,
         previousThemeId: currentThemeId,
         excludedTheme,
-        // Raw technical value (e.g. 'football_sports'), or null for "Tema
-        // aleatório" — the backend converts this to a label using the same
-        // canonical WRITING_THEMES catalog, never a second divergent list.
+        // Optional SURFACE topic the user picked (raw technical value from the
+        // canonical writing-themes select). The backend hands it to the
+        // curriculum engine as non-authoritative context (userContext.
+        // selected_theme); the user's current recorte remains authoritative.
         selectedTheme,
       });
       const res = await fetch(apiUrl('/api/generate-theme'), {
@@ -185,7 +186,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
             </p>
           ) : (
             <p className="text-xs text-slate-400">
-              A IA cria uma missão personalizada baseada no seu histórico. Cada missão é uma situação real para resolver.
+              A IA cria uma missão do seu plano de ensino, focada no recorte atual do currículo. Cada missão é uma situação real para resolver.
             </p>
           )}
           <select

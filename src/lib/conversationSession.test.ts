@@ -94,6 +94,35 @@ vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
   };
 });
 
+// Data-driven cutover: FREE conversation resolves the conversation.free template
+// (identity + language + correction frame) and STT resolves the language's speech
+// config. Mock both so the handler runs without a live curriculum/DB. The mocked
+// FREE system carries the fixed "Your name is Orodim" identity (as the real
+// template does), so the identity assertions still hold.
+vi.mock('../../api/_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../../api/_curriculum/curriculum-runtime', () => ({
+  ensureUserCurriculum: vi.fn().mockResolvedValue({
+    versionId: 'v1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+    prefs: { writing: true, listening: true, pronunciation: true, conversation: false },
+    currentSubtopicKey: 'r1', currentSubtopicId: 's1', status: 'active',
+    ordered: [], keyToId: new Map(), idToKey: new Map(),
+  }),
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: '## Identidade\nYour name is Orodim. You are the conversation assistant inside the Orodim app.\nFREE_CONVERSATION_SYSTEM',
+    user: null, model: null, temperature: null, subtopicKey: null, versionId: 'v1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+vi.mock('../../api/_curriculum/language-speech-config', () => ({
+  getLanguageSpeechConfig: vi.fn().mockResolvedValue({
+    speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en',
+  }),
+  SpeechConfigError: class SpeechConfigError extends Error {},
+}));
+
 import { requireAuth } from '../../api/_auth';
 import handler from '../../api/conversation/[...slug]';
 

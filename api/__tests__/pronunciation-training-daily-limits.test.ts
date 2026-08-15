@@ -44,6 +44,30 @@ vi.mock('openai', () => ({
 }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 
+// Data-driven curriculum seam — generate-text composes its prompt from the DB
+// curriculum (resolveActivityPrompt) instead of the removed hardcoded
+// WORD_TARGETS/LEVEL_GUIDE/buildSystemPrompt. This suite asserts daily-limit /
+// quota / RPC behavior, so the seam is stubbed to a fixed composed prompt
+// (model null → handler falls back to AI_MODEL) and recordCurricularPractice is
+// a best-effort no-op. Prompt composition is covered by
+// api/__tests__/pronunciation-generate-text-gateway.test.ts.
+vi.mock('../_curriculum/service-client', () => ({
+  getCurriculumServiceClient: vi.fn(() => ({})),
+}));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'Curriculum-composed system prompt.',
+    user: 'Write the text now.',
+    model: null,
+    temperature: 0.9,
+    subtopicKey: 'a1.greetings',
+    versionId: 'version-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+
 import handler from '../pronunciation-training/[...slug]';
 
 const USER_ID = 'bbbbbbbb-0000-0000-0000-000000000001';

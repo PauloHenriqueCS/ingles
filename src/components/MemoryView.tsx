@@ -3,7 +3,8 @@ import { BookOpen, RefreshCw, Loader2, Search } from 'lucide-react';
 import { EnglishLearningMemory, RecurringMistake, VocabularyItem, View } from '../types';
 import { fetchLearningMemory, updateLearningMemory } from '../lib/learningMemory';
 import type { LearningSettings } from '../lib/learningSettings';
-import GrammarTopicSheet from './GrammarTopicSheet';
+import GrammarHelpModal from './GrammarHelpModal';
+import { findMistakeForTopic } from '../domain/writing/grammar-focus-topics';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -260,6 +261,19 @@ function MistakeCard({ mistake }: { mistake: RecurringMistake }) {
 
 // ── Grammar tab ───────────────────────────────────────────────────────────────
 
+/**
+ * "Why this topic" context, derived from the learner's own PERSISTED recurring
+ * mistakes (not bundled pedagogy). Passed to the data-driven GrammarHelpModal as
+ * its contextual tip. The grammar EXPLANATION itself comes from the DB-sourced
+ * /api/grammar-explanation endpoint — never a bundled English catalog.
+ */
+function buildTopicRecommendationTip(topicLabel: string, mistakes: RecurringMistake[]): string | undefined {
+  const context = findMistakeForTopic(topicLabel, mistakes);
+  if (!context) return undefined;
+  const base = `Recomendado porque você escreveu "${context.original}" em vez de "${context.correct}".`;
+  return context.explanation ? `${base} ${context.explanation}` : base;
+}
+
 function GrammarTab({ topics, mistakes }: { topics: string[]; mistakes: RecurringMistake[] }) {
   const [openTopic, setOpenTopic] = useState<string | null>(null);
 
@@ -292,9 +306,9 @@ function GrammarTab({ topics, mistakes }: { topics: string[]; mistakes: Recurrin
       </div>
 
       {openTopic && (
-        <GrammarTopicSheet
-          topicLabel={openTopic}
-          mistakes={mistakes}
+        <GrammarHelpModal
+          grammarName={openTopic}
+          missionTip={buildTopicRecommendationTip(openTopic, mistakes)}
           onClose={() => setOpenTopic(null)}
         />
       )}

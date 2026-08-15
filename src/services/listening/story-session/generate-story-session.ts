@@ -1,3 +1,13 @@
+/**
+ * @deprecated RETIRED from runtime. This is the LEGACY simplified story-session
+ * generator whose pedagogy came from a hardcoded English prompt (buildPrompt),
+ * NOT the data-driven curriculum. Its routes POST /api/listening/story/generate
+ * and /story/verify now return 410 (see api/listening/[...slug].ts). The sole
+ * authority for a listening practice is the curriculum Story path
+ * (generate-listening-story.ts → listening.two_part_generate, per current
+ * recorte). Kept only so its existing unit tests still compile; never re-wire
+ * into a runtime request path.
+ */
 import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
