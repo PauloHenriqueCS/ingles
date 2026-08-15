@@ -101,6 +101,13 @@ function makeFakeClient() {
     }
     function applyWrite(): { data: any; error: any } {
       if (mode === 'insert') {
+        // Enforce the real uq_placement_answer_once (attempt_id, question_id) so
+        // a double-tap surfaces as Postgres unique_violation (23505), exactly
+        // like production — the runtime must absorb it as a no-op.
+        if (table === 'placement_attempt_answers') {
+          const dup = db[table].find((r) => r.attempt_id === payload.attempt_id && r.question_id === payload.question_id);
+          if (dup) return { data: null, error: { code: '23505', message: 'duplicate key' } };
+        }
         const row = { id: `row-${++idSeq}`, ...payload };
         db[table].push(row);
         return { data: row, error: null };
@@ -220,6 +227,44 @@ describe('placement runtime — adaptive flow + monotonic apply', () => {
     // No second open attempt was created.
     const open = client.__db.placement_attempts.filter((a: any) => a.status === 'in_progress');
     expect(open.length).toBe(0);
+  });
+
+  it("reproduces the reported path: B1 PASS (had already left / had) → B2, then B2 FAIL → result B1", async () => {
+    let s = await startPlacement(client, USER);
+    const id = s.attemptId!;
+    // B1.1 + B1.2 correct → B1 PASS → B2.
+    s = await submitAnswer(client, USER, id, 'B1.1', 'A');
+    s = await submitAnswer(client, USER, id, 'B1.2', 'A');
+    expect(s.question?.checkpointKey).toBe('B2');
+    expect(s.question?.questionKey).toBe('B2.1');
+    // B2.1 wrong, then B2.2 wrong (the balanced-argument question) → 0/2 FAIL → B1.
+    s = await submitAnswer(client, USER, id, 'B2.1', 'B');
+    expect(s.question?.questionKey).toBe('B2.2');
+    s = await submitAnswer(client, USER, id, 'B2.2', 'B');
+    expect(s.screen).toBe('result');
+    expect(s.result?.effectiveLevel).toBe('B1');
+    const applyCall = client.__rpcCalls.find((c: any) => c.name === 'placement_apply_result_v1');
+    expect(applyCall?.args.p_target_level_code).toBe('B1');
+  });
+
+  it('is idempotent under a double-tap: a repeated Confirmar never records twice nor advances twice', async () => {
+    let s = await startPlacement(client, USER);
+    const id = s.attemptId!;
+    // Two concurrent submits of the SAME first question.
+    const [a, b] = await Promise.all([
+      submitAnswer(client, USER, id, 'B1.1', 'A'),
+      submitAnswer(client, USER, id, 'B1.1', 'A'),
+    ]);
+    // Exactly ONE answer row exists for that question.
+    const rows = client.__db.placement_attempt_answers.filter((r: any) => r.attempt_id === id);
+    expect(rows.length).toBe(1);
+    // Both calls resolve to a consistent next state (still B1, awaiting B1.2).
+    for (const st of [a, b]) {
+      expect(st.screen).toBe('question');
+      expect(st.question?.checkpointKey).toBe('B1');
+    }
+    s = await submitAnswer(client, USER, id, 'B1.2', 'A');
+    expect(s.question?.checkpointKey).toBe('B2');
   });
 
   it('skip records a skipped attempt and leaves the user not-completed', async () => {

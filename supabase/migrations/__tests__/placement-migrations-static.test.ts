@@ -98,3 +98,18 @@ describe('20260815130100 — English Placement V1 seed', () => {
     expect(sql).toMatch(/'onboarding_title',\s*'Descubra seu nível de \{language\}'/);
   });
 });
+
+describe('20260815140000 — resync ambiguous current_level_code fix (bug 42702)', () => {
+  const sql = read('20260815140000_fix_resync_ambiguous_level_code.sql');
+
+  it('replaces resync_curriculum_progress', () => {
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION public\.resync_curriculum_progress/);
+  });
+
+  it('qualifies the RHS level reference so it is NOT ambiguous with the OUT column', () => {
+    // The fix: COALESCE(v_next_level, user_curriculum_progress.current_level_code)
+    expect(sql).toMatch(/current_level_code\s*=\s*COALESCE\(v_next_level,\s*user_curriculum_progress\.current_level_code\)/);
+    // The old, ambiguous bare form must be gone.
+    expect(sql).not.toMatch(/COALESCE\(v_next_level,\s*current_level_code\)/);
+  });
+});
