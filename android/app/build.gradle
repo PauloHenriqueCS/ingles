@@ -51,6 +51,17 @@ repositories {
     }
 }
 
+// Orodim does not use OneSignal's Location feature (see docs/onesignal-push.md).
+// Dropping the transitive location module keeps ACCESS_*_LOCATION out of the
+// merged manifest permanently and reproducibly — no build depends on the
+// ONESIGNAL_DISABLE_LOCATION env var being exported. The OneSignal umbrella
+// artifact (com.onesignal:OneSignal) only *aggregates* core/notifications/
+// in-app-messages/location, so excluding the location module yields exactly the
+// same set the SDK's own ONESIGNAL_DISABLE_LOCATION=true path produces.
+configurations.all {
+    exclude group: 'com.onesignal', module: 'location'
+}
+
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Release entitlements: production APNs environment (TestFlight / App
+	     Store). Same App Group as App.entitlements and the NSE. -->
+	<key>aps-environment</key>
+	<string>production</string>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.app.lemonenglish.lemon.onesignal</string>
+	</array>
+</dict>
+</plist>
