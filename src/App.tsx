@@ -30,6 +30,8 @@ import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
 import SettingsView from './components/SettingsView';
 import CurriculumPlanView from './components/CurriculumPlanView';
+import PlacementOnboarding from './components/placement/PlacementOnboarding';
+import { usePlacementStatus } from './hooks/usePlacementStatus';
 import SubscriptionView from './components/SubscriptionView';
 import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
@@ -64,6 +66,7 @@ export default function App() {
   useRevenueCatIdentitySync(user?.id);
   useOneSignalIdentitySync(user?.id);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
+  const { status: placementStatus, loading: placementLoading, refresh: refreshPlacement } = usePlacementStatus(user?.id);
 
   useEffect(() => {
     if (!user) return;
@@ -166,6 +169,32 @@ export default function App() {
     );
   }
 
+  // Post-signup onboarding GATE: a brand-new user (server-persisted
+  // placement_status = not_started, never localStorage) sees the level test
+  // BEFORE Home. Skipping or finishing refreshes the status and releases the
+  // app. While the status is still loading we hold on the spinner so Home never
+  // flashes before the gate; if placement is unavailable the status resolves to
+  // a non-"not_started" value and the app opens normally (never blocked).
+  if (user && placementLoading && placementStatus === null) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+  if (user && placementStatus === 'not_started') {
+    return <PlacementOnboarding onFinished={refreshPlacement} />;
+  }
+  // "Teste de nível" opened from the menu (placement not yet completed).
+  if (view === 'placement') {
+    return (
+      <PlacementOnboarding
+        onFinished={() => { refreshPlacement(); setView('home'); }}
+        onExit={() => setView('home')}
+      />
+    );
+  }
+
   if (view === 'day') {
     return (
       <DayView
@@ -190,6 +219,7 @@ export default function App() {
           onNavigate={setView}
           onClose={() => setMenuOpen(false)}
           onLogout={handleLogout}
+          showPlacement={placementStatus !== null && placementStatus !== 'completed'}
         />
       )}
 

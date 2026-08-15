@@ -19,6 +19,7 @@
     { "source": "/api/curriculum/plan", "destination": "/api/grammar-explanation?__lemonRoute=curriculum-plan" },
     { "source": "/api/curriculum/preferences", "destination": "/api/grammar-explanation?__lemonRoute=curriculum-preferences" },
     { "source": "/api/curriculum/progress", "destination": "/api/grammar-explanation?__lemonRoute=curriculum-progress" },
+    { "source": "/api/placement/(.*)", "destination": "/api/grammar-explanation?__lemonRoute=placement-$1" },
     { "source": "/api/billing/revenuecat/webhook", "destination": "/api/grammar-explanation?__lemonRoute=revenuecat-webhook" },
     { "source": "/api/listening/(.*)", "destination": "/api/listening/[...slug]?slug=$1" },
     { "source": "/api/internal/listening/(.*)", "destination": "/api/internal/listening/[...slug]?slug=$1" },

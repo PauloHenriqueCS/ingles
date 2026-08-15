@@ -1,6 +1,6 @@
 import {
   House, CalendarDays,
-  History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X, GraduationCap,
+  History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X, GraduationCap, Award,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { AppIcon } from './AppIcon';
@@ -29,9 +29,23 @@ interface Props {
   onNavigate: (v: View) => void;
   onClose: () => void;
   onLogout: () => void;
+  /** Show "Teste de nível" while placement is not completed (from server state). */
+  showPlacement?: boolean;
 }
 
-export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }: Props) {
+export default function HamburgerMenu({ current, onNavigate, onClose, onLogout, showPlacement }: Props) {
+  // "Teste de nível" appears right below "Plano de ensino" only while the
+  // placement is not completed (not_started / in_progress / skipped /
+  // pending_evaluation). Once completed it disappears — driven by persisted
+  // server state, never localStorage.
+  const items: MenuItem[] = showPlacement
+    ? [
+        MENU_ITEMS[0],
+        { view: 'placement', label: 'Teste de nível', icon: Award },
+        ...MENU_ITEMS.slice(1),
+      ]
+    : MENU_ITEMS;
+
   function handleItemClick(item: MenuItem) {
     onNavigate(item.view);
     onClose();
@@ -69,7 +83,7 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
         </div>
 
         <div className="flex-1 overflow-y-auto py-2">
-          {MENU_ITEMS.map((item) => (
+          {items.map((item) => (
             <button
               key={item.view}
               onClick={() => handleItemClick(item)}
