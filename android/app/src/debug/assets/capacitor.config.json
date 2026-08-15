@@ -1,0 +1,13 @@
+{
+	"appId": "com.lemon.app",
+	"appName": "Orodim",
+	"webDir": "dist",
+	"server": {
+		"url": "https://orodim-homolog.vercel.app",
+		"cleartext": false,
+		"allowNavigation": [
+			"orodim-homolog.vercel.app"
+		],
+		"errorPath": "mobile-fallback.html"
+	}
+}

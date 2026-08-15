@@ -1,20 +1,30 @@
 import { useEffect, useState } from 'react';
-import { Mail } from 'lucide-react';
+import { Mail, ArrowLeft } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { consumeAccountSessionNotice } from '../lib/accountSessionCleanup';
+import { rememberAuthMethod } from '../lib/authMethodMemory';
+import GoogleSignInButton from './GoogleSignInButton';
+import { isGoogleSignInAvailable } from '../lib/googleAuth';
+import AppleSignInButton from './AppleSignInButton';
+import { isAppleSignInAvailable } from '../lib/appleAuth';
 
 type Mode = 'login' | 'signup' | 'forgot';
+// The screen leads with the method chooser; the traditional email/password
+// form is only shown once the user picks "Continuar com e-mail". New social
+// methods (e.g. Apple) slot into the chooser without touching this hierarchy.
+type AuthView = 'chooser' | 'email';
 type State = 'idle' | 'loading' | 'error' | 'signup_sent';
 type ForgotState = 'idle' | 'loading' | 'sent';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function LoginPage() {
-  // ResetPasswordPage sends users back here with ?forgot=1 when their link
-  // has expired, so they land straight back on the request form.
-  const [mode, setMode] = useState<Mode>(() => (
-    new URLSearchParams(window.location.search).get('forgot') === '1' ? 'forgot' : 'login'
-  ));
+  // ResetPasswordPage sends users back here with ?forgot=1 when their link has
+  // expired — land straight on the email form's recovery view, skipping the
+  // chooser.
+  const startForgot = new URLSearchParams(window.location.search).get('forgot') === '1';
+  const [authView, setAuthView] = useState<AuthView>(startForgot ? 'email' : 'chooser');
+  const [mode, setMode] = useState<Mode>(startForgot ? 'forgot' : 'login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [state, setState] = useState<State>('idle');
@@ -26,6 +36,8 @@ export default function LoginPage() {
   // redirect that follows a self-deletion, a mid-session block, or a
   // completed password reset.
   const [sessionNotice] = useState(() => consumeAccountSessionNotice());
+  const [googleAvailable] = useState(() => isGoogleSignInAvailable());
+  const [appleAvailable] = useState(() => isAppleSignInAvailable());
 
   useEffect(() => {
     if (window.location.search.includes('forgot=')) {
@@ -50,6 +62,8 @@ export default function LoginPage() {
       if (error) {
         setErrorMsg(translateError(error.message));
         setState('error');
+      } else {
+        rememberAuthMethod('password');
       }
       // On success, useAuth picks up the session change automatically
     } else {
@@ -62,6 +76,7 @@ export default function LoginPage() {
         setState('error');
       } else if (data.session) {
         // Auto-confirmed — useAuth will update and App.tsx will render the main view
+        rememberAuthMethod('password');
       } else {
         setState('signup_sent');
       }
@@ -71,6 +86,22 @@ export default function LoginPage() {
   function switchMode(next: Mode) {
     if (next === 'forgot') setForgotEmail(email.trim());
     setMode(next);
+    setState('idle');
+    setErrorMsg('');
+    setForgotState('idle');
+    setForgotError('');
+  }
+
+  function enterEmail() {
+    setAuthView('email');
+    setMode('login');
+    setState('idle');
+    setErrorMsg('');
+  }
+
+  function backToChooser() {
+    setAuthView('chooser');
+    setMode('login');
     setState('idle');
     setErrorMsg('');
     setForgotState('idle');
@@ -109,13 +140,12 @@ export default function LoginPage() {
     }
   }
 
+  // ── Terminal screens ───────────────────────────────────────────────────────
   if (state === 'signup_sent') {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="max-w-sm w-full text-center space-y-4">
-          <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-900/40 mx-auto">
-            <Mail className="w-7 h-7 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-          </div>
+      <Shell>
+        <div className="text-center space-y-4">
+          <IconBadge />
           <h1 className="text-xl font-bold text-slate-100">Confirme seu email</h1>
           <p className="text-slate-400 text-sm leading-relaxed">
             Enviamos um link de confirmação para{' '}
@@ -123,23 +153,21 @@ export default function LoginPage() {
             Clique no link para ativar sua conta.
           </p>
           <button
-            onClick={() => switchMode('login')}
+            onClick={() => { setState('idle'); switchMode('login'); }}
             className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
             Já confirmei → Fazer login
           </button>
         </div>
-      </div>
+      </Shell>
     );
   }
 
   if (mode === 'forgot' && forgotState === 'sent') {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="max-w-sm w-full text-center space-y-4">
-          <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-900/40 mx-auto">
-            <Mail className="w-7 h-7 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-          </div>
+      <Shell>
+        <div className="text-center space-y-4">
+          <IconBadge />
           <h1 className="text-xl font-bold text-slate-100">Verifique seu email</h1>
           <p className="text-slate-400 text-sm leading-relaxed">
             Se esse email estiver cadastrado, você receberá um link para redefinir sua senha.
@@ -151,110 +179,21 @@ export default function LoginPage() {
             Voltar para o login
           </button>
         </div>
-      </div>
+      </Shell>
     );
   }
 
   if (mode === 'forgot') {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="max-w-sm w-full space-y-6">
-          <div className="text-center space-y-1">
-            <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
-              <img
-                src="/brand/lemon-header.png"
-                alt=""
-                className="w-7 h-7 object-cover object-left shrink-0"
-                draggable={false}
-              />
-            </div>
-            <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
-            <p className="text-slate-400 text-sm">Recuperar senha</p>
-          </div>
-
-          <form onSubmit={handleForgotSubmit} className="space-y-4">
-            <div>
-              <label className="text-xs text-slate-400 block mb-1.5">Email</label>
-              <input
-                type="email"
-                value={forgotEmail}
-                onChange={(e) => { setForgotEmail(e.target.value); setForgotError(''); }}
-                placeholder="seu@email.com"
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
-                autoFocus
-                required
-              />
-            </div>
-
-            {forgotError && <p className="text-xs text-red-400">{forgotError}</p>}
-
-            <button
-              type="submit"
-              disabled={forgotState === 'loading'}
-              className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              {forgotState === 'loading' ? 'Enviando...' : 'Enviar link de recuperação'}
-            </button>
-          </form>
-
-          <div className="text-center">
-            <button
-              onClick={() => switchMode('login')}
-              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              Voltar para o login
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="max-w-sm w-full space-y-6">
-        {sessionNotice === 'deleted' && (
-          <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
-            <p className="text-sm text-slate-200 font-medium">Sua conta foi excluída.</p>
-            <p className="text-xs text-slate-400 mt-1">
-              Seu acesso foi encerrado e você não receberá novas comunicações pelo Orodim.
-            </p>
-          </div>
-        )}
-        {sessionNotice === 'blocked' && (
-          <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
-            <p className="text-sm text-slate-300">Esta conta não está mais disponível.</p>
-          </div>
-        )}
-        {sessionNotice === 'password_changed' && (
-          <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
-            <p className="text-sm text-slate-200 font-medium">Senha alterada com sucesso.</p>
-            <p className="text-xs text-slate-400 mt-1">Faça login com sua nova senha.</p>
-          </div>
-        )}
-
-        <div className="text-center space-y-1">
-          <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
-            <img
-              src="/brand/lemon-header.png"
-              alt=""
-              className="w-7 h-7 object-cover object-left shrink-0"
-              draggable={false}
-            />
-          </div>
-          <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
-          <p className="text-slate-400 text-sm">
-            {mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
+      <Shell>
+        <Brand subtitle="Recuperar senha" />
+        <form onSubmit={handleForgotSubmit} className="space-y-4">
           <div>
             <label className="text-xs text-slate-400 block mb-1.5">Email</label>
             <input
               type="email"
-              value={email}
-              onChange={(e) => { setEmail(e.target.value); if (state === 'error') setState('idle'); }}
+              value={forgotEmail}
+              onChange={(e) => { setForgotEmail(e.target.value); setForgotError(''); }}
               placeholder="seu@email.com"
               className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
               autoFocus
@@ -262,72 +201,212 @@ export default function LoginPage() {
             />
           </div>
 
-          <div>
-            <label className="text-xs text-slate-400 block mb-1.5">Senha</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => { setPassword(e.target.value); if (state === 'error') setState('idle'); }}
-              placeholder="••••••••"
-              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
-              required
-              minLength={6}
-            />
-            {mode === 'signup' && (
-              <p className="text-xs text-slate-600 mt-1">Mínimo 6 caracteres</p>
-            )}
-            {mode === 'login' && (
-              <div className="text-right mt-1.5">
-                <button
-                  type="button"
-                  onClick={() => switchMode('forgot')}
-                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-                >
-                  Esqueci minha senha?
-                </button>
-              </div>
-            )}
-          </div>
-
-          {state === 'error' && (
-            <p className="text-xs text-red-400">{errorMsg || 'Erro ao entrar. Tente novamente.'}</p>
-          )}
+          {forgotError && <p className="text-xs text-red-400">{forgotError}</p>}
 
           <button
             type="submit"
-            disabled={state === 'loading'}
+            disabled={forgotState === 'loading'}
             className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {state === 'loading'
-              ? (mode === 'login' ? 'Entrando...' : 'Criando conta...')
-              : (mode === 'login' ? 'Entrar' : 'Criar conta')}
+            {forgotState === 'loading' ? 'Enviando...' : 'Enviar link de recuperação'}
           </button>
         </form>
 
         <div className="text-center">
-          {mode === 'login' ? (
-            <p className="text-xs text-slate-500">
-              Não tem conta?{' '}
+          <button
+            onClick={() => switchMode('login')}
+            className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+          >
+            Voltar para o login
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Method chooser (initial screen) ─────────────────────────────────────────
+  if (authView === 'chooser') {
+    return (
+      <Shell>
+        <SessionNotice notice={sessionNotice} />
+        <Brand subtitle="Entre ou crie sua conta" />
+
+        <div className="space-y-3">
+          {/* Order: Apple first when offered (App Store guideline 4.8 — present
+              Sign in with Apple as an equivalent, prominent option), then
+              Google, then e-mail. */}
+          {appleAvailable && <AppleSignInButton />}
+          {googleAvailable && <GoogleSignInButton />}
+
+          <button
+            type="button"
+            onClick={enterEmail}
+            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium bg-slate-800 border border-slate-700 text-slate-100 hover:bg-slate-700/70 transition-colors"
+          >
+            <Mail className="w-[18px] h-[18px] shrink-0" strokeWidth={1.75} aria-hidden="true" />
+            Continuar com e-mail
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Email/password form (shown only after "Continuar com e-mail") ────────────
+  return (
+    <Shell>
+      <button
+        type="button"
+        onClick={backToChooser}
+        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors -mb-2"
+      >
+        <ArrowLeft className="w-4 h-4 shrink-0" aria-hidden="true" />
+        Outras opções
+      </button>
+
+      <SessionNotice notice={sessionNotice} />
+      <Brand subtitle={mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'} />
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="text-xs text-slate-400 block mb-1.5">Email</label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => { setEmail(e.target.value); if (state === 'error') setState('idle'); }}
+            placeholder="seu@email.com"
+            className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
+            autoFocus
+            required
+          />
+        </div>
+
+        <div>
+          <label className="text-xs text-slate-400 block mb-1.5">Senha</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => { setPassword(e.target.value); if (state === 'error') setState('idle'); }}
+            placeholder="••••••••"
+            className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
+            required
+            minLength={6}
+          />
+          {mode === 'signup' && (
+            <p className="text-xs text-slate-600 mt-1">Mínimo 6 caracteres</p>
+          )}
+          {mode === 'login' && (
+            <div className="text-right mt-1.5">
               <button
-                onClick={() => switchMode('signup')}
-                className="text-blue-400 hover:text-blue-300 transition-colors"
+                type="button"
+                onClick={() => switchMode('forgot')}
+                className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
               >
-                Criar conta
+                Esqueci minha senha?
               </button>
-            </p>
-          ) : (
-            <p className="text-xs text-slate-500">
-              Já tem conta?{' '}
-              <button
-                onClick={() => switchMode('login')}
-                className="text-blue-400 hover:text-blue-300 transition-colors"
-              >
-                Fazer login
-              </button>
-            </p>
+            </div>
           )}
         </div>
+
+        {state === 'error' && (
+          <p className="text-xs text-red-400">{errorMsg || 'Erro ao entrar. Tente novamente.'}</p>
+        )}
+
+        <button
+          type="submit"
+          disabled={state === 'loading'}
+          className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {state === 'loading'
+            ? (mode === 'login' ? 'Entrando...' : 'Criando conta...')
+            : (mode === 'login' ? 'Entrar' : 'Criar conta')}
+        </button>
+      </form>
+
+      <div className="text-center">
+        {mode === 'login' ? (
+          <p className="text-xs text-slate-500">
+            Não tem conta?{' '}
+            <button
+              onClick={() => switchMode('signup')}
+              className="text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              Criar conta
+            </button>
+          </p>
+        ) : (
+          <p className="text-xs text-slate-500">
+            Já tem conta?{' '}
+            <button
+              onClick={() => switchMode('login')}
+              className="text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              Fazer login
+            </button>
+          </p>
+        )}
       </div>
+    </Shell>
+  );
+}
+
+// ── Shared presentational pieces (unchanged Orodim visual language) ────────────
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="max-w-sm w-full space-y-6">{children}</div>
+    </div>
+  );
+}
+
+function Brand({ subtitle }: { subtitle: string }) {
+  return (
+    <div className="text-center space-y-1">
+      <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
+        <img
+          src="/brand/lemon-header.png"
+          alt=""
+          className="w-7 h-7 object-cover object-left shrink-0"
+          draggable={false}
+        />
+      </div>
+      <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
+      <p className="text-slate-400 text-sm">{subtitle}</p>
+    </div>
+  );
+}
+
+function IconBadge() {
+  return (
+    <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-900/40 mx-auto">
+      <Mail className="w-7 h-7 text-blue-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+    </div>
+  );
+}
+
+function SessionNotice({ notice }: { notice: ReturnType<typeof consumeAccountSessionNotice> }) {
+  if (!notice) return null;
+  if (notice === 'deleted') {
+    return (
+      <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
+        <p className="text-sm text-slate-200 font-medium">Sua conta foi excluída.</p>
+        <p className="text-xs text-slate-400 mt-1">
+          Seu acesso foi encerrado e você não receberá novas comunicações pelo Orodim.
+        </p>
+      </div>
+    );
+  }
+  if (notice === 'blocked') {
+    return (
+      <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
+        <p className="text-sm text-slate-300">Esta conta não está mais disponível.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-center">
+      <p className="text-sm text-slate-200 font-medium">Senha alterada com sucesso.</p>
+      <p className="text-xs text-slate-400 mt-1">Faça login com sua nova senha.</p>
     </div>
   );
 }

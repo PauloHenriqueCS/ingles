@@ -1,22 +1,104 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
+/**
+ * Post-login landing at /auth/callback. Originally written for the password
+ * PKCE `?code=` case, which broke Google OAuth: this project runs Supabase's
+ * default *implicit* flow, so signInWithOAuth returns to /auth/callback with the
+ * session in the URL *hash* (#access_token=…), not `?code=`. detectSessionInUrl
+ * establishes the session asynchronously; the old code only read `?code=` from
+ * the query string, found nothing, and rendered "Link de acesso inválido" even
+ * though the session was (about to be) valid.
+ *
+ * This version is flow-agnostic and never navigates until a session actually
+ * exists: real provider errors (query OR hash) surface as errors; an existing
+ * session goes Home; a `?code=` is exchanged (PKCE fallback); otherwise it waits
+ * for detectSessionInUrl to finish (with a timeout backstop) instead of guessing.
+ */
+
+const SESSION_WAIT_TIMEOUT_MS = 8000;
+
+export type CallbackDecision =
+  | { kind: 'error'; message: string }
+  | { kind: 'exchange'; code: string }
+  | { kind: 'wait' }
+  | { kind: 'done' };
+
+/** Pure decision so the branching is unit-testable without a browser. */
+export function decideCallback(input: {
+  search: string;
+  hash: string;
+  hasSession: boolean;
+}): CallbackDecision {
+  const q = new URLSearchParams(input.search);
+  const h = new URLSearchParams(input.hash.replace(/^#/, ''));
+  const err =
+    q.get('error_description') ||
+    h.get('error_description') ||
+    q.get('error') ||
+    h.get('error');
+  if (err) return { kind: 'error', message: err };
+  if (input.hasSession) return { kind: 'done' };
+  const code = q.get('code');
+  if (code) return { kind: 'exchange', code };
+  return { kind: 'wait' };
+}
+
 export default function AuthCallback() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get('code');
-    if (!code) {
-      setError('Link de acesso inválido.');
-      return;
-    }
-    supabase.auth.exchangeCodeForSession(code).then(({ error: err }) => {
-      if (err) {
-        setError(err.message);
-      } else {
-        window.location.replace('/');
+    let settled = false;
+    let unsubscribe: (() => void) | undefined;
+    let timer: number | undefined;
+
+    const goHome = () => {
+      if (settled) return;
+      settled = true;
+      window.location.replace('/');
+    };
+    const fail = (raw: string) => {
+      if (settled) return;
+      settled = true;
+      setError(translateCallbackError(raw));
+    };
+
+    async function run() {
+      const { data } = await supabase.auth.getSession();
+      const decision = decideCallback({
+        search: window.location.search,
+        hash: window.location.hash,
+        hasSession: Boolean(data.session),
+      });
+
+      if (decision.kind === 'done') return goHome();
+      if (decision.kind === 'error') return fail(decision.message);
+      if (decision.kind === 'exchange') {
+        const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(decision.code);
+        if (exchangeError) return fail(exchangeError.message);
+        return goHome();
       }
-    });
+
+      // 'wait': implicit flow — detectSessionInUrl parses the hash asynchronously.
+      // Navigate the moment a session appears; only fail if none arrives in time.
+      const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session) goHome();
+      });
+      unsubscribe = () => sub.subscription.unsubscribe();
+      timer = window.setTimeout(async () => {
+        const { data: retry } = await supabase.auth.getSession();
+        if (retry.session) goHome();
+        else fail('session_not_established');
+      }, SESSION_WAIT_TIMEOUT_MS);
+    }
+
+    void run();
+
+    return () => {
+      settled = true;
+      unsubscribe?.();
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   if (error) {
@@ -43,4 +125,10 @@ export default function AuthCallback() {
       </div>
     </div>
   );
+}
+
+function translateCallbackError(raw: string): string {
+  if (/access_denied|cancell?ed|cancelou/i.test(raw)) return 'Login cancelado. Tente novamente.';
+  if (/expired|otp_expired/i.test(raw)) return 'Este link expirou. Tente entrar novamente.';
+  return 'Não foi possível concluir o login. Tente novamente.';
 }
