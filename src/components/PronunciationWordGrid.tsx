@@ -290,10 +290,10 @@ function PracticeWordRow({
     try {
       const tokenResult = await fetchWordPracticeToken(cleanWord, 'writing', reviewId);
       setAttemptsUsed(tokenResult.attemptsUsed);
-      const { token, region } = tokenResult;
+      const { token, region, language } = tokenResult;
 
       const wavFile = await convertToWavPcm(audioBlob);
-      const session = createRecognitionSession({ token, region, referenceText: cleanWord, wavFile, audioDurationMs });
+      const session = createRecognitionSession({ token, region, language, referenceText: cleanWord, wavFile, audioDurationMs });
       cancelRef.current = session.cancel;
       const result: PronunciationNormalizedResult = await session.run();
       cancelRef.current = null;

@@ -1,9 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
+import type { CEFRLevel } from '../../../domain/curriculum/cefr';
 import { resolveListeningActivityDate } from '../daily/resolve-listening-activity-date';
 import { levelGroupForCefr, type ListeningLevelGroup } from '../listening-level-group';
 import { generateListeningStory, signToken, type ListeningStoryResult, type StoryPartResult } from '../story-session/generate-listening-story';
 import { SharedStoryGeneratingError, type AcquireSharedStoryResult, type SharedStoryContent } from './listening-shared-story-types';
+import { ensureUserCurriculum, CurriculumConfigError } from '../../../../api/_curriculum/curriculum-runtime';
+import { getLanguageSpeechConfig, type LanguageSpeechConfig } from '../../../../api/_curriculum/language-speech-config';
 
 // Long enough to cover a realistic OpenAI + Azure TTS run with margin; short
 // enough that a genuinely crashed/killed request doesn't block the group for
@@ -126,15 +128,20 @@ async function attachUserProgress(
 // one exists (uq_ulsp_one_pending_per_day). Returns the shared story row so the
 // caller can decide: 'ready' → recover it; 'generating' → still preparing;
 // 'failed'/expired → stale, drop the pending and prepare fresh.
+interface PendingStoryRow {
+  id: string; status: string; content: SharedStoryContent | null;
+  part1_audio_path: string | null; part2_audio_path: string | null;
+  audio_mime_type: string | null; lock_expires_at: string | null;
+  // Curricular identity — used to reject a pending that belongs to a different
+  // language / curriculum version / recorte than the user's CURRENT one.
+  learning_language: string | null; curriculum_version_id: string | null; subtopic_key: string | null;
+}
+
 async function findPendingStory(
   serviceClient: SupabaseClient,
   userId: string,
   practiceDate: string,
-): Promise<{
-  id: string; status: string; content: SharedStoryContent | null;
-  part1_audio_path: string | null; part2_audio_path: string | null;
-  audio_mime_type: string | null; lock_expires_at: string | null;
-} | null> {
+): Promise<PendingStoryRow | null> {
   const { data: pending, error: pErr } = await serviceClient
     .from('user_listening_shared_progress')
     .select('shared_story_id')
@@ -147,11 +154,31 @@ async function findPendingStory(
 
   const { data: story, error: sErr } = await serviceClient
     .from('listening_shared_stories')
-    .select('id, status, content, part1_audio_path, part2_audio_path, audio_mime_type, lock_expires_at')
+    .select('id, status, content, part1_audio_path, part2_audio_path, audio_mime_type, lock_expires_at, learning_language, curriculum_version_id, subtopic_key')
     .eq('id', pending.shared_story_id as string)
     .maybeSingle();
   if (sErr) throw new Error(`SHARED_STORY_PENDING_STORY_LOOKUP_FAILED: ${sErr.message}`);
-  return (story as never) ?? null;
+  return (story as PendingStoryRow) ?? null;
+}
+
+/**
+ * A pending story is only valid for the user's CURRENT curricular identity. If
+ * the recorte/version/language moved on (the user progressed by another path),
+ * the old pending must NOT be served as the current recorte's practice — it is
+ * stale and gets dropped so a fresh, recorte-aligned story is prepared. See
+ * blocker 6.
+ */
+function pendingMatchesCurriculum(
+  pending: PendingStoryRow,
+  learningLanguage: string,
+  curriculumVersionId: string,
+  subtopicKey: string,
+): boolean {
+  return (
+    (pending.learning_language ?? '') === learningLanguage &&
+    (pending.curriculum_version_id ?? '') === curriculumVersionId &&
+    (pending.subtopic_key ?? '') === subtopicKey
+  );
 }
 
 async function dropStalePending(serviceClient: SupabaseClient, userId: string, sharedStoryId: string): Promise<void> {
@@ -214,6 +241,16 @@ export async function getPendingListeningStoryForToday(
   if (pending.status !== 'ready' || !pending.content || !pending.part1_audio_path || !pending.part2_audio_path) {
     return null;
   }
+  // Only auto-recover a pending that still matches the user's CURRENT recorte —
+  // never resume a story prepared for a recorte the user has since moved past
+  // (blocker 6). Resolving the curriculum here also removes any legacy split-
+  // brain: the pending is validated against the SAME progression authority that
+  // preparation uses. Read-only: it neither drops nor consumes anything.
+  const ensured = await ensureUserCurriculum(serviceClient, userId);
+  if (!ensured.currentSubtopicKey) return null;
+  if (!pendingMatchesCurriculum(pending, ensured.languageContext.learningLanguage, ensured.versionId, ensured.currentSubtopicKey)) {
+    return null;
+  }
   const [a1, a2] = await Promise.all([
     downloadPartAudioBase64(serviceClient, pending.part1_audio_path),
     downloadPartAudioBase64(serviceClient, pending.part2_audio_path),
@@ -240,9 +277,35 @@ export async function getOrCreateSharedListeningStory(
   storyPackage?: string | null,
   theme?: string | null,
 ): Promise<ListeningStoryResult & { sharedStoryId: string }> {
-  const cefrLevel = await resolveUserListeningLevel(serviceClient, userId);
-  const levelGroup = levelGroupForCefr(cefrLevel);
   const practiceDate = resolveListeningActivityDate();
+
+  // ── P0 — curriculum is the SINGLE authority (level + content identity) ──────
+  // Resolve the user's CURRENT recorte FIRST and let it define BOTH the cache
+  // identity (learning_language + curriculum_version + subtopic) AND the level.
+  // If it cannot be resolved (no published curriculum, no current recorte, or
+  // ANY error), PROPAGATE an explicit CurriculumConfigError — we NEVER fall back
+  // to a legacy/level-only bucket. This guarantees two users on DIFFERENT
+  // recortes can never receive the same cached story via an error/fallback path,
+  // and removes the old level split-brain (learner_skill_profiles no longer
+  // decides curricular difficulty here).
+  const ensured = await ensureUserCurriculum(serviceClient, userId);
+  const currentSubtopicKey = ensured.currentSubtopicKey;
+  if (!currentSubtopicKey) {
+    throw new CurriculumConfigError(
+      `Listening: user ${userId} has no current recorte (status=${ensured.status}) — refusing to serve non-recorte content`,
+    );
+  }
+  const learningLanguage = ensured.languageContext.learningLanguage;
+  const curriculumVersionId: string = ensured.versionId;
+  const subtopicKey = currentSubtopicKey;
+  const cefrLevel = (ensured.ordered.find((s) => s.subtopicKey === currentSubtopicKey)?.levelCode ?? '') as CEFRLevel;
+  if (!cefrLevel) {
+    throw new CurriculumConfigError(`Listening: recorte ${currentSubtopicKey} has no level_code`);
+  }
+  const levelGroup = levelGroupForCefr(cefrLevel);
+  // Data-driven Speech config (TTS locale + default voice) for the target
+  // language — no en-US hardcode. Missing config is an explicit error.
+  const speechConfig: LanguageSpeechConfig = await getLanguageSpeechConfig(serviceClient, learningLanguage);
 
   // ── Step 0: RECOVER a PENDING story ────────────────────────────────────────
   // Preparing a story only creates a PENDING association (completed=false);
@@ -251,7 +314,14 @@ export async function getOrCreateSharedListeningStory(
   // the sequence. Because the pending lives in the DB (not local cache), this
   // is device-independent. At most one pending per user/day (unique index).
   const pending = await findPendingStory(serviceClient, userId, practiceDate);
-  if (pending) {
+  if (pending && !pendingMatchesCurriculum(pending, learningLanguage, curriculumVersionId, subtopicKey)) {
+    // Pending belongs to a DIFFERENT recorte/version/language than the user's
+    // current one (they progressed by another path). Never serve it as the
+    // current recorte's practice — drop the stale association so a fresh,
+    // recorte-aligned story is prepared. The user never practised it, so no
+    // quota was consumed. (blocker 6)
+    await dropStalePending(serviceClient, userId, pending.id);
+  } else if (pending) {
     const lockExpired = pending.lock_expires_at
       ? new Date(pending.lock_expires_at).getTime() < Date.now()
       : false;
@@ -285,7 +355,10 @@ export async function getOrCreateSharedListeningStory(
   // slot to generate only when none is available.
   const { data, error } = await serviceClient.rpc('acquire_or_get_listening_shared_story', {
     p_user_id: userId,
+    p_learning_language: learningLanguage,
     p_level_group: levelGroup,
+    p_subtopic_key: subtopicKey,
+    p_curriculum_version_id: curriculumVersionId,
     p_target_level: cefrLevel,
     p_practice_date: practiceDate,
     p_lock_duration_seconds: SHARED_STORY_LOCK_DURATION_SECONDS,
@@ -312,7 +385,7 @@ export async function getOrCreateSharedListeningStory(
 
   if (result.won) {
     try {
-      const story = await generateListeningStory(userId, serviceClient, openaiKey, azureKey, azureRegion, secret, storyPackage, theme);
+      const story = await generateListeningStory(userId, serviceClient, openaiKey, azureKey, azureRegion, secret, storyPackage, theme, cefrLevel, speechConfig);
       await persistSharedStory(serviceClient, result.id, levelGroup, story);
       await attachUserProgress(serviceClient, userId, result.id, practiceDate, levelGroup);
       return { ...story, sharedStoryId: result.id };

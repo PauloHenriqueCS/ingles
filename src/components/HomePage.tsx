@@ -1,4 +1,4 @@
-import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock } from 'lucide-react';
+import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock, GraduationCap, ChevronRight } from 'lucide-react';
 import type { View } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
@@ -69,6 +69,24 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           Escolha uma atividade e continue sua evolução no inglês.
         </p>
       </div>
+
+      {/* Plano de ensino — entry point to the data-driven curriculum */}
+      <button
+        type="button"
+        onClick={() => onNavigate('curriculum-plan')}
+        className="group w-full text-left bg-slate-800 border border-slate-700 rounded-2xl p-4 mb-4 flex items-center gap-4 transition-all duration-200 hover:bg-slate-700/60 hover:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+      >
+        <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 shadow-lg shadow-blue-900/40 shrink-0">
+          <GraduationCap className="w-6 h-6 text-white shrink-0" strokeWidth={2} aria-hidden="true" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-base font-semibold text-slate-100">Plano de ensino</h2>
+          <p className="text-sm text-slate-400 leading-relaxed">
+            Acompanhe seu progresso por nível e escolha as práticas do seu plano.
+          </p>
+        </div>
+        <ChevronRight className="w-5 h-5 text-slate-500 group-hover:text-slate-300 shrink-0 transition-colors" aria-hidden="true" />
+      </button>
 
       {/* Activity cards — always all four, regardless of plan */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

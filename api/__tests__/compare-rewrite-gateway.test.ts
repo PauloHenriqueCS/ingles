@@ -44,6 +44,7 @@ const {
   mockRequireAuth,
   mockApplyRateLimit,
   mockGetCurrentUserPlanEntitlements,
+  mockResolveActivityPrompt,
   mockDeps,
 } = vi.hoisted(() => {
   const mockCreate = vi.fn();
@@ -63,6 +64,7 @@ const {
   const mockRequireAuth = vi.fn();
   const mockApplyRateLimit = vi.fn();
   const mockGetCurrentUserPlanEntitlements = vi.fn();
+  const mockResolveActivityPrompt = vi.fn();
 
   const mockDeps = {
     policyResolver: { resolvePolicy: mockPolicyResolvePolicy, invalidate: vi.fn() },
@@ -119,6 +121,7 @@ const {
     mockRequireAuth,
     mockApplyRateLimit,
     mockGetCurrentUserPlanEntitlements,
+    mockResolveActivityPrompt,
     mockDeps,
   };
 });
@@ -142,6 +145,16 @@ vi.mock('../_rateLimit', () => ({ applyRateLimit: mockApplyRateLimit }));
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
+
+// Data-driven prompt seam: the handler now resolves both the comparison and the
+// final-correction prompts from the DB via resolveActivityPrompt. Keep the real
+// CurriculumConfigError class (the handler branches on `instanceof`); only the
+// resolver is mocked so no real DB / service-role credentials are needed.
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../_curriculum/curriculum-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../_curriculum/curriculum-runtime')>();
+  return { ...actual, resolveActivityPrompt: mockResolveActivityPrompt };
+});
 
 // ── Handler import ────────────────────────────────────────────────────────────
 
@@ -315,6 +328,15 @@ beforeEach(() => {
   mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
   mockApplyRateLimit.mockResolvedValue(true);
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
+  mockResolveActivityPrompt.mockResolvedValue({
+    system: 'SYSTEM PROMPT',
+    user: 'USER PROMPT',
+    model: null,
+    temperature: null,
+    subtopicKey: null,
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  });
   const dedupe = makeStatefulDedupeStore();
   mockDeps.dedupeStore = dedupe.store;
   expireDedupeLocks = dedupe.expireAllLocks;

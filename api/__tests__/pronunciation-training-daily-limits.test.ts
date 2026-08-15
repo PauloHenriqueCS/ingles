@@ -14,6 +14,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
 const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockIssueAzureSpeechToken, mockCreate, gw } = vi.hoisted(() => ({
@@ -43,6 +44,34 @@ vi.mock('openai', () => ({
   default: vi.fn().mockImplementation(function () { return { chat: { completions: { create: mockCreate } } }; }),
 }));
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
+
+// Data-driven curriculum seam — generate-text composes its prompt from the DB
+// curriculum (resolveActivityPrompt) instead of the removed hardcoded
+// WORD_TARGETS/LEVEL_GUIDE/buildSystemPrompt. This suite asserts daily-limit /
+// quota / RPC behavior, so the seam is stubbed to a fixed composed prompt
+// (model null → handler falls back to AI_MODEL) and recordCurricularPractice is
+// a best-effort no-op. Prompt composition is covered by
+// api/__tests__/pronunciation-generate-text-gateway.test.ts.
+vi.mock('../_curriculum/service-client', () => ({
+  // Speech config resolves via the service client (active-path authority).
+  getCurriculumServiceClient: vi.fn(() => ({ from: makeSpeechConfigFrom() })),
+}));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'Curriculum-composed system prompt.',
+    user: 'Write the text now.',
+    model: null,
+    temperature: 0.9,
+    subtopicKey: 'a1.greetings',
+    versionId: 'version-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  // Active-path helpers used by the Speech resolver + the userLevel resolution.
+  resolveActiveLearningLanguage: vi.fn(async () => 'en'),
+  ensureUserCurriculum: vi.fn(async () => ({ currentLevelCode: 'B1', languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' }, versionId: 'version-1' })),
+  recordCurricularPracticeFromIdentity: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
 
 import handler from '../pronunciation-training/[...slug]';
 
@@ -131,6 +160,10 @@ function makeSupabase(overrides: {
         };
         return chain;
       }
+      // Data-driven Speech config resolution (token/start handlers) reads these.
+      if (table === 'languages' || table === 'user_curriculum_preferences') {
+        return speechFrom(table);
+      }
       return {
         select: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
@@ -142,6 +175,7 @@ function makeSupabase(overrides: {
     rpc,
   };
 }
+const speechFrom = makeSpeechConfigFrom();
 
 const activeTextRow = (o: Record<string, unknown> = {}) => ({
   id: 's1', level: 'B1', generated_text: 'Text.', status: 'text_generated',

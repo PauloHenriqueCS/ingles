@@ -1,4 +1,8 @@
 /**
+ * @deprecated DISCONNECTED from the live path. The pedagogical planner is
+ * retired (see api/_mission-plan-service.ts). Writing generation is now
+ * data-driven via the curriculum engine. Nothing in the live path reads these.
+ *
  * SERVER-ONLY: Feature flags for the pedagogical planner.
  *
  * When LEARNING_ENGINE_VERSION=v2 (default), planner is always 'enabled'.

@@ -17,6 +17,8 @@ import {
 export interface WordPracticeTokenResult {
   token: string;
   region: string;
+  /** Data-driven Azure recognition locale for the learning language (e.g. 'en-US'). */
+  language: string;
   attemptsUsed: number;
   maxAttempts: number;
   maxDurationSeconds: number;
@@ -57,6 +59,10 @@ export async function fetchWordPracticeToken(
   return {
     token: String(data.token ?? ''),
     region: String(data.region ?? ''),
+    // Recognition locale resolved server-side from the learning language. Absent
+    // only for an older server; the session helper then lets Azure auto-detect
+    // rather than forcing English (no hardcoded en-US client fallback).
+    language: typeof data.language === 'string' && data.language ? data.language : '',
     attemptsUsed: typeof data.attemptsUsed === 'number' ? data.attemptsUsed : 1,
     maxAttempts: typeof data.maxAttempts === 'number' ? data.maxAttempts : WORD_PRACTICE_MAX_ATTEMPTS,
     maxDurationSeconds: typeof data.maxDurationSeconds === 'number' ? data.maxDurationSeconds : 5,

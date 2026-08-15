@@ -5,8 +5,18 @@
 
 import type { RewriteCorrectionOutcomeStatus, NewIssueCategory } from '../domain/writing-rewrite/rewrite-types';
 import type { DeterministicComparisonResult } from './writingRewriteDeterministicComparison';
+import { getCurriculumServiceClient } from '../../api/_curriculum/service-client';
+import { resolveActivityPrompt, CurriculumConfigError } from '../../api/_curriculum/curriculum-runtime';
 
 export interface ModelEvaluationInput {
+  /**
+   * The authenticated learner id. Required to resolve the DB-sourced
+   * `writing.evaluate_rewrite` prompt (per learning/interface language). Kept
+   * optional in the type only so the orchestrator's existing input literal
+   * keeps compiling — callModelEvaluator throws an explicit
+   * CurriculumConfigError (never a silent English fallback) when it is absent.
+   */
+  userId?: string;
   originalText: string;
   correctedText: string;
   rewriteText: string;
@@ -52,96 +62,57 @@ const DEFAULT_CONFIG: ModelEvaluatorConfig = {
 
 const EVALUATION_SCHEMA_VERSION = 'v1';
 
-/** Build the evaluation prompt for the AI model. */
-export function buildRewriteEvaluationPrompt(input: ModelEvaluationInput): string {
-  const mistakesList = input.mainMistakes
+const EVALUATE_REWRITE_TEMPLATE_KEY = 'writing.evaluate_rewrite';
+
+/**
+ * Formats the identified-mistakes list fed to the evaluation prompt via
+ * {{main_mistakes}}. 0-indexed so `correctionId` maps back to the mistake by
+ * array position (see writingRewriteOrchestrator.ts). Pedagogical framing lives
+ * in the DB template; this only shapes the caller-supplied data.
+ */
+function formatMainMistakes(mainMistakes: ModelEvaluationInput['mainMistakes']): string {
+  const list = mainMistakes
     .map((m, i) => {
       const explanation = m.explanation ? `\n   Explanation: ${m.explanation}` : '';
       return `  ${i}. Original mistake: "${m.mistake}"\n     Correct form: "${m.correct}"${explanation}`;
     })
     .join('\n');
-
-  const deterministicSummary = [
-    `Meaning preservation estimate: ${input.deterministicResult.layerA.meaningPreservationEstimate}%`,
-    `Structural similarity to corrected text: ${Math.round(input.deterministicResult.layerB.structuralSimilarity * 100)}%`,
-    `Copy detection assessment: ${input.deterministicResult.layerB.copyDetection.assessment}`,
-    `Estimated correction resolution: ${input.deterministicResult.estimatedCorrectionResolutionScore}%`,
-  ].join('\n');
-
-  return `You are an expert English language teacher evaluating a learner's rewrite attempt.
-
-The learner's CEFR level is: ${input.effectiveLevel}
-
-## ORIGINAL TEXT (learner's initial production)
-${input.originalText}
-
-## CORRECTED TEXT (AI-generated correction)
-${input.correctedText}
-
-## LEARNER'S REWRITE (new attempt after seeing the correction)
-${input.rewriteText}
-
-## MISTAKES THAT WERE IDENTIFIED (from the original)
-${mistakesList || '  (none listed)'}
-
-## DETERMINISTIC ANALYSIS (pre-computed signals)
-${deterministicSummary}
-
-## INSTRUCTIONS
-
-Evaluate the learner's rewrite and return a valid JSON object with exactly this structure:
-
-{
-  "correctionOutcomes": [
-    {
-      "correctionId": "0",
-      "status": "<corrected|partially_corrected|unchanged|valid_alternative|worsened|not_applicable>",
-      "rewriteExcerpt": "<relevant excerpt from rewrite, or omit>",
-      "explanationPtBR": "<explanation in Portuguese, 1–2 sentences>",
-      "confidence": <0.0 to 1.0>,
-      "shouldAffectRewriteScore": <true|false>
-    }
-  ],
-  "newIssues": [
-    {
-      "category": "<regression|new_grammar_error|new_vocabulary_error|new_word_order_error|new_clarity_problem|meaning_changed|task_deviation>",
-      "excerpt": "<relevant excerpt, or omit>",
-      "explanationPtBR": "<explanation in Portuguese>"
-    }
-  ],
-  "meaningPreservationScore": <0–100>,
-  "clarityImprovementScore": <0–100>,
-  "cohesionImprovementScore": <0–100>,
-  "summaryPtBR": "<2–3 sentence summary in Portuguese>",
-  "schemaVersion": "v1"
+  return list || '  (none listed)';
 }
 
-## EVALUATION RULES
+/** Formats the pre-computed deterministic signals fed via {{deterministic_summary}}. */
+function formatDeterministicSummary(deterministicResult: DeterministicComparisonResult): string {
+  return [
+    `Meaning preservation estimate: ${deterministicResult.layerA.meaningPreservationEstimate}%`,
+    `Structural similarity to corrected text: ${Math.round(deterministicResult.layerB.structuralSimilarity * 100)}%`,
+    `Copy detection assessment: ${deterministicResult.layerB.copyDetection.assessment}`,
+    `Estimated correction resolution: ${deterministicResult.estimatedCorrectionResolutionScore}%`,
+  ].join('\n');
+}
 
-For each mistake listed (indexed 0, 1, 2, ...):
-- "corrected": The learner clearly fixed this issue independently.
-- "partially_corrected": The learner made progress but the fix is incomplete.
-- "unchanged": The same error appears in the rewrite.
-- "valid_alternative": The learner used a different but grammatically valid expression.
-- "worsened": The learner's attempt made the original error worse.
-- "not_applicable": The rewrite restructured the sentence so the correction is irrelevant.
+/** The userContext fed to the DB-sourced `writing.evaluate_rewrite` template. */
+function buildEvaluationUserContext(input: ModelEvaluationInput): Record<string, string> {
+  return {
+    effective_level: input.effectiveLevel,
+    original_text: input.originalText,
+    corrected_text: input.correctedText,
+    rewrite_text: input.rewriteText,
+    main_mistakes: formatMainMistakes(input.mainMistakes),
+    deterministic_summary: formatDeterministicSummary(input.deterministicResult),
+  };
+}
 
-IMPORTANT:
-- Do NOT penalize valid contractions (it's, don't, I'm) — they are equally correct.
-- Do NOT penalize legitimate word order changes that preserve meaning.
-- Do NOT penalize synonyms or paraphrases that preserve meaning and are grammatically correct.
-- Accept valid reformulations and alternative phrasings as "valid_alternative".
-- List only NEW issues (errors not present in the original) in "newIssues".
-- If there are no new issues, return an empty array.
-
-For scores:
-- meaningPreservationScore (0–100): How well does the rewrite preserve the original meaning?
-- clarityImprovementScore (0–100): Is the rewrite clearer than the original? (50 = same, 0–49 = worse, 51–100 = better)
-- cohesionImprovementScore (0–100): Is the rewrite more cohesive? (50 = same)
-
-Write the summaryPtBR in Brazilian Portuguese in 2–3 sentences, focusing on what the learner did well and what still needs work.
-
-Return ONLY valid JSON. No markdown, no explanation outside the JSON.`;
+/**
+ * Rough token-estimation proxy for the evaluation call (used by the gateway
+ * reservation estimator in writingRewriteOrchestrator.ts). Deliberately holds
+ * NO pedagogical taxonomy — that now lives entirely in the DB template. It
+ * concatenates the same data that fills the template's placeholders so the
+ * estimated size tracks the real input size. The authoritative prompt is
+ * resolved from the database inside callModelEvaluator.
+ */
+export function buildRewriteEvaluationPrompt(input: ModelEvaluationInput): string {
+  const ctx = buildEvaluationUserContext(input);
+  return Object.values(ctx).join('\n');
 }
 
 const VALID_STATUSES: ReadonlySet<string> = new Set([
@@ -224,6 +195,14 @@ export function parseModelEvaluationOutput(raw: string): ModelEvaluationOutput {
  * Call the AI model for semantic evaluation.
  * Uses OpenAI API with response_format: json_object.
  * Timeout: 45 seconds.
+ *
+ * The prompt is DB-sourced (writing.evaluate_rewrite template, per learning/
+ * interface language) — there is NO hardcoded English fallback. Rewrite
+ * evaluation is NOT part of curricular progression, so the template is resolved
+ * with requireSubtopic:false and NO practice is recorded. A missing template,
+ * an empty required placeholder, or a missing userId throws
+ * CurriculumConfigError, which the orchestrator surfaces as an explicit
+ * evaluation failure.
  */
 export async function callModelEvaluator(
   input: ModelEvaluationInput,
@@ -231,7 +210,21 @@ export async function callModelEvaluator(
   config?: Partial<ModelEvaluatorConfig>,
 ): Promise<ModelEvaluationOutput> {
   const effectiveConfig: ModelEvaluatorConfig = { ...DEFAULT_CONFIG, ...config };
-  const prompt = buildRewriteEvaluationPrompt(input);
+
+  if (!input.userId) {
+    throw new CurriculumConfigError(
+      'callModelEvaluator requires input.userId to resolve the writing.evaluate_rewrite prompt',
+    );
+  }
+
+  const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), input.userId, {
+    templateKey: EVALUATE_REWRITE_TEMPLATE_KEY,
+    activityType: 'writing',
+    requireSubtopic: false,
+    userContext: buildEvaluationUserContext(input),
+  });
+  const systemPrompt = resolved.system;
+  const userPrompt = resolved.user ?? '';
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
@@ -249,8 +242,12 @@ export async function callModelEvaluator(
         response_format: { type: 'json_object' },
         messages: [
           {
+            role: 'system',
+            content: systemPrompt,
+          },
+          {
             role: 'user',
-            content: prompt,
+            content: userPrompt,
           },
         ],
         temperature: 0.2,

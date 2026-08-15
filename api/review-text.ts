@@ -10,19 +10,10 @@ import { checkTextLength, checkFeatureConfigError } from './_entitlements/requir
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { isValidUuid } from '../src/lib/pronunciationAssessment';
+import { getCurriculumServiceClient } from './_curriculum/service-client';
+import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 
 const AI_MODEL = 'gpt-4o-mini';
-
-/**
- * Shared guidance so each `mainMistakes` item explains the learner's REAL,
- * primary error precisely — not a secondary detail and not a generic rule.
- * Injected into both the normal and review system prompts.
- */
-const MAIN_MISTAKES_PRECISION_RULES = `- Cada item de mainMistakes deve identificar o ERRO PRINCIPAL e REAL daquela frase, não um detalhe secundário. Se houver mais de um problema, priorize o mais importante e não omita o erro central.
-- O campo "correct" deve ser a forma realmente correta e equivalente à ideia do aluno; a "explanation" deve descrever com precisão o que estava errado e a regra aplicável, no nível do aluno. Não substitua a explicação específica por uma regra genérica.
-- Contrações corretas (doesn't, don't, isn't, aren't, wasn't, weren't, can't, won't, etc.) são equivalentes à forma expandida (does not, do not, is not...). NUNCA trate uma contração correta como erro.
-- Concordância com auxiliares: depois de "do/does/did" — inclusive nas negativas "don't/doesn't/didn't" — o verbo principal volta à FORMA BASE (o -s da terceira pessoa já está no auxiliar). Ex.: "He doesn't likes" está errado; o correto é "He doesn't like". Ao apontar esse tipo de erro, explique exatamente isso, e não apenas que a negativa foi formada.
-- Garanta que a forma mostrada em "correct" seja de fato aceita como correta e coerente com o correctedText.`;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -65,6 +56,71 @@ interface EnglishReviewRow {
   created_at: string;
 }
 
+/**
+ * CONVERGENT curricular credit for a NORMAL writing review (blockers 2, 5, 6, 7).
+ * Idempotent: safe to call on first success AND on a later retry of an
+ * already-completed review. It binds the credit to the EXACT mission
+ * (generatedThemeId from the client, or the one persisted on the review),
+ * NEVER "the latest theme" and NEVER the current pointer. A missing identity
+ * marks the review 'pending' (recoverable by a later retry) and grants no credit;
+ * a landed credit marks it 'credited'. Never re-calls the AI provider.
+ */
+async function ensureWritingCurricularCredit(
+  supabase: any,
+  userId: string,
+  reviewId: string,
+  generatedThemeId: unknown,
+): Promise<void> {
+  // 1) Resolve the mission's persisted identity — prefer the client-supplied
+  //    resource id, else the one already persisted on the review.
+  let versionId: string | null = null;
+  let subtopicKey: string | null = null;
+  let themeId: string | null = isValidUuid(generatedThemeId) ? (generatedThemeId as string) : null;
+
+  const { data: reviewRow } = await supabase
+    .from('english_reviews')
+    .select('generated_theme_id, curriculum_version_id, curriculum_subtopic_key')
+    .eq('id', reviewId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  const rr = reviewRow as { generated_theme_id?: string | null; curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+  if (!themeId && rr?.generated_theme_id) themeId = rr.generated_theme_id;
+  if (rr?.curriculum_version_id && rr.curriculum_subtopic_key) {
+    versionId = rr.curriculum_version_id;
+    subtopicKey = rr.curriculum_subtopic_key;
+  } else if (themeId) {
+    const { data: theme } = await supabase
+      .from('generated_themes')
+      .select('curriculum_version_id, curriculum_subtopic_key')
+      .eq('id', themeId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    const t = theme as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+    if (t?.curriculum_version_id && t.curriculum_subtopic_key) {
+      versionId = t.curriculum_version_id;
+      subtopicKey = t.curriculum_subtopic_key;
+    }
+  }
+
+  const identity = versionId && subtopicKey ? { versionId, subtopicKey } : null;
+  const rec = identity
+    ? await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'writing', reviewId, identity)
+    : null;
+
+  // 2) Persist the mission link + resolved identity + credit status (marker
+  //    only — the source of truth is user_subtopic_modality_progress).
+  await supabase
+    .from('english_reviews')
+    .update({
+      ...(themeId ? { generated_theme_id: themeId } : {}),
+      ...(rec?.recorded && rec.subtopicKey ? { curriculum_version_id: rec.versionId, curriculum_subtopic_key: rec.subtopicKey } : {}),
+      curriculum_credit_status: rec?.recorded ? 'credited' : 'pending',
+    })
+    .eq('id', reviewId)
+    .eq('user_id', userId);
+  if (!rec?.recorded) safeLog('review-text', 'no_curricular_identity', 200);
+}
+
 /** Rebuilds the `feedback` response shape from a stored english_reviews row — used for an idempotent retry of an already-completed attempt (never re-calls the AI provider). */
 function feedbackFromReviewRow(row: EnglishReviewRow): Record<string, unknown> {
   return {
@@ -82,137 +138,6 @@ function feedbackFromReviewRow(row: EnglishReviewRow): Record<string, unknown> {
     nextPractice: row.next_practice,
   };
 }
-
-// ── Normal mode system prompt ─────────────────────────────────────────────────
-
-const NORMAL_SYSTEM_PROMPT = `Você é um professor de inglês para brasileiros adultos iniciantes.
-
-Avalie o texto em inglês escrito pelo usuário.
-
-Responda sempre em português do Brasil, exceto nos campos de texto corrigido, exemplos e palavras em inglês.
-
-Você deve ser didático, direto e encorajador. Não seja agressivo. O objetivo é ensinar, não humilhar.
-
-Analise:
-- gramática
-- vocabulário
-- naturalidade
-- fluência
-- cumprimento do objetivo do dia
-
-Retorne somente JSON válido. Não use markdown. Não escreva nada antes ou depois do JSON.
-
-Formato obrigatório:
-
-{
-  "score": number,
-  "level": "A1" | "A2" | "B1" | "B2" | "C1" | "C2",
-  "grammar": number,
-  "vocabulary": number,
-  "naturalness": number,
-  "fluency": number,
-  "summary": string,
-  "correctedText": string,
-  "mainMistakes": [
-    {
-      "original": string,
-      "correct": string,
-      "explanation": string
-    }
-  ],
-  "newVocabulary": [
-    {
-      "word": string,
-      "meaningPtBr": string,
-      "example": string
-    }
-  ],
-  "objectiveFeedback": string,
-  "nextPractice": string
-}
-
-Regras:
-- score deve ir de 0 a 100.
-- grammar, vocabulary, naturalness e fluency devem ir de 0 a 100.
-- level deve ser A1, A2, B1, B2, C1 ou C2.
-- correctedText deve corrigir o texto mantendo a ideia original do aluno, em inglês.
-- mainMistakes deve conter no máximo 5 erros principais.
-${MAIN_MISTAKES_PRECISION_RULES}
-- newVocabulary deve conter de 3 a 5 itens.
-- objectiveFeedback deve explicar se o objetivo gramatical do dia foi cumprido.
-- nextPractice deve ser uma tarefa curta e prática para o próximo treino.
-- Se o texto for muito curto, avalie mesmo assim e explique no summary que a nota ficou baixa por falta de conteúdo.
-- Se o texto estiver vazio ou quase vazio, retorne score 0 e peça para o usuário escrever pelo menos 3 frases.`;
-
-// ── Review mode system prompt ─────────────────────────────────────────────────
-
-const REVIEW_SYSTEM_PROMPT = `Você é um professor de inglês para brasileiros adultos iniciantes.
-
-Este texto foi submetido como parte de uma ATIVIDADE DE REVISÃO ESPAÇADA.
-O aluno está praticando palavras e estruturas que apresentaram erros em atividades anteriores.
-
-Avalie o texto completamente. Além da correção padrão, avalie cada palavra obrigatória individualmente.
-
-Para cada palavra obrigatória, siga estes passos:
-1. Localize a palavra ou expressão no texto do aluno.
-2. Verifique a ortografia.
-3. Verifique o significado e uso contextual.
-4. Verifique a gramática e naturalidade.
-5. Classifique com exatamente um dos status abaixo.
-
-Status permitidos:
-- correct: escrita corretamente e usada adequadamente no contexto.
-- incorrect_spelling: o aluno tentou usar a palavra mas a escreveu incorretamente.
-- incorrect_usage: escrita correta mas usada com sentido, preposição, tempo verbal ou estrutura inadequada.
-- missing: não aparece no texto.
-- forced_usage: aparece mas foi inserida artificialmente, desconectada ou sem sentido apenas para cumprir a obrigação.
-
-Responda sempre em português do Brasil, exceto nos campos correctedText, usedExcerpt e suggestedCorrection (sempre em inglês).
-
-Retorne somente JSON válido. Não use markdown. Não escreva nada antes ou depois do JSON.
-
-Formato obrigatório:
-
-{
-  "score": number,
-  "level": "A1" | "A2" | "B1" | "B2" | "C1" | "C2",
-  "grammar": number,
-  "vocabulary": number,
-  "naturalness": number,
-  "fluency": number,
-  "summary": string,
-  "correctedText": string,
-  "mainMistakes": [{"original": string, "correct": string, "explanation": string}],
-  "newVocabulary": [{"word": string, "meaningPtBr": string, "example": string}],
-  "objectiveFeedback": string,
-  "nextPractice": string,
-  "requiredWordEvaluation": [
-    {
-      "requiredWord": string,
-      "status": "correct" | "incorrect_spelling" | "incorrect_usage" | "missing" | "forced_usage",
-      "usedExcerpt": string | null,
-      "explanation": string,
-      "suggestedCorrection": string | null
-    }
-  ]
-}
-
-Regras para os campos principais:
-- score, grammar, vocabulary, naturalness, fluency: 0 a 100.
-- level: A1, A2, B1, B2, C1 ou C2.
-- correctedText: corrigir mantendo a ideia original, em inglês.
-- mainMistakes: no máximo 5 erros.
-${MAIN_MISTAKES_PRECISION_RULES}
-- newVocabulary: 3 a 5 itens.
-- objectiveFeedback: se o objetivo gramatical foi cumprido.
-- nextPractice: tarefa curta para o próximo treino.
-
-Regras para requiredWordEvaluation:
-- Retornar exatamente um item para cada palavra obrigatória recebida, na mesma ordem.
-- requiredWord: manter a grafia exata da palavra recebida, sem qualquer alteração.
-- usedExcerpt: trecho curto do texto onde a palavra foi usada; null se status="missing".
-- explanation: sempre em português do Brasil.
-- suggestedCorrection: null apenas quando status="correct"; para todos os outros status, sempre fornecer um exemplo correto em inglês.`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -362,6 +287,7 @@ export default async function handler(req: any, res: any) {
     reviewCategory,
     reviewDifficulty,
     missionSnapshot,
+    generatedThemeId,
   } = req.body ?? {};
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
@@ -448,6 +374,16 @@ export default async function handler(req: any, res: any) {
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível recuperar a revisão já concluída.');
     }
     const row = existingReview as unknown as EnglishReviewRow;
+    // CONVERGENT credit (blocker 6.A): a retry after a first-attempt curricular
+    // credit failure must still land the credit — idempotently, without calling
+    // the AI provider or consuming quota again. NORMAL mode only.
+    if (mode !== 'review') {
+      try {
+        await ensureWritingCurricularCredit(supabase, userId, reservation.reviewId as string, generatedThemeId);
+      } catch (e) {
+        safeLog('review-text', 'credit_reconcile_failed', 200, { detail: String(e).slice(0, 120) });
+      }
+    }
     return res.json({
       feedback: feedbackFromReviewRow(row),
       reviewedAt: row.created_at,
@@ -514,43 +450,55 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // ── Build AI messages ─────────────────────────────────────────────────────
+  // ── Build AI messages (data-driven — prompts live in the DB) ──────────────
+  // The correction system + user prompts come from the curriculum templates
+  // `writing.correct` / `writing.correct_review`. The student text, theme and
+  // error context are passed as userContext values the template interpolates.
+  // requireSubtopic:false — correction only needs the level/language context,
+  // not the user's current recorte. There is NO hardcoded English fallback: a
+  // misconfigured curriculum is an explicit operational error.
+  const errorsContext = groupItems
+    .map((item) => {
+      let line = `- "${item.original_value}" → "${item.corrected_value}"`;
+      if (item.explanation) line += `: ${item.explanation}`;
+      if (item.original_sentence) line += ` (contexto: "${item.original_sentence}")`;
+      return line;
+    })
+    .join('\n');
 
-  const systemPrompt = isReviewMode ? REVIEW_SYSTEM_PROMPT : NORMAL_SYSTEM_PROMPT;
+  const templateKey = isReviewMode ? 'writing.correct_review' : 'writing.correct';
+  const userContext: Record<string, string> = {
+    student_text: originalText.trim(),
+    theme: typeof theme === 'string' && theme ? theme : '—',
+    grammar_goal: typeof grammarGoal === 'string' && grammarGoal ? grammarGoal : '—',
+    main_tense: typeof mainTense === 'string' && mainTense ? mainTense : '—',
+    mission_title: typeof missionTitle === 'string' && missionTitle ? missionTitle : '—',
+    student_level: typeof studentLevel === 'string' && studentLevel ? studentLevel : '—',
+    errors_context: errorsContext || '—',
+    required_words: authorizedRequiredWords.join(', ') || '—',
+  };
 
-  const userMessage = isReviewMode
-    ? [
-        'Atividade de revisão espaçada.',
-        '',
-        `Missão: ${missionTitle || '—'}`,
-        `Objetivo gramatical: ${grammarGoal || '—'}`,
-        `Nível do aluno: ${studentLevel || '—'}`,
-        '',
-        'Contexto dos erros que o aluno está praticando:',
-        ...groupItems.map((item) => {
-          let line = `- "${item.original_value}" → "${item.corrected_value}"`;
-          if (item.explanation) line += `: ${item.explanation}`;
-          if (item.original_sentence) line += ` (contexto: "${item.original_sentence}")`;
-          return line;
-        }),
-        '',
-        `Palavras obrigatórias: ${authorizedRequiredWords.join(', ')}`,
-        '',
-        'Texto do aluno:',
-        '"""',
-        originalText.trim(),
-        '"""',
-      ].join('\n')
-    : [
-        `Tema do dia: ${theme || '—'}`,
-        `Objetivo gramatical: ${grammarGoal || '—'}`,
-        `Tempo verbal esperado: ${mainTense || '—'}`,
-        '',
-        'Texto do aluno:',
-        '"""',
-        originalText.trim(),
-        '"""',
-      ].join('\n');
+  let resolvedPrompt;
+  try {
+    resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey,
+      activityType: 'writing',
+      requireSubtopic: false,
+      userContext,
+    });
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      await releaseReservation();
+      safeLog('review-text', 'curriculum_not_configured', 503, { detail: String(err.message).slice(0, 150) });
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'A correção de escrita ainda não está configurada. Tente novamente mais tarde.');
+    }
+    await releaseReservation();
+    throw err;
+  }
+
+  const systemPrompt = resolvedPrompt.system;
+  const userMessage = resolvedPrompt.user ?? '';
+  const resolvedModel = resolvedPrompt.model ?? AI_MODEL;
 
   // ── Call AI with retry (up to 3 attempts) ────────────────────────────────
 
@@ -576,7 +524,7 @@ export default async function handler(req: any, res: any) {
           featureKey,
           provider: 'openai',
           service: 'chat.completions',
-          model: AI_MODEL,
+          model: resolvedModel,
           userId,
           initiatedByUserId: userId,
           actorType: 'user',
@@ -602,7 +550,11 @@ export default async function handler(req: any, res: any) {
             DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
           ),
         },
-        () => openai.chat.completions.create({ model: AI_MODEL, messages }),
+        () => openai.chat.completions.create(
+          resolvedPrompt.temperature != null
+            ? { model: resolvedModel, messages, temperature: resolvedPrompt.temperature }
+            : { model: resolvedModel, messages },
+        ),
         deps,
         extractReviewMetrics,
       );
@@ -726,6 +678,21 @@ export default async function handler(req: any, res: any) {
     // never fail the request over a bookkeeping error on the reservation
     // ledger itself. Logged for investigation; does not affect the response.
     safeLog('review-text', 'complete_reservation_failed', 500);
+  }
+
+  // ── Record curricular practice (normal mode only) ─────────────────────────
+  // A successful NORMAL correction counts as the "writing" modality practised
+  // for the user's current recorte; when every selected modality is done the
+  // curriculum engine advances the recorte automatically. Spaced-repetition
+  // reviews (isReviewMode) exercise past errors, not the current recorte, so
+  // they never count as curricular practice. Best-effort: a curriculum error
+  // must never fail an already-completed, already-persisted review.
+  if (!isReviewMode) {
+    try {
+      await ensureWritingCurricularCredit(supabase, userId, reviewId, generatedThemeId);
+    } catch (e) {
+      safeLog('review-text', 'record_curricular_practice_failed', 500, { detail: String(e).slice(0, 150) });
+    }
   }
 
   // ── Save review attempt + apply schedule (review mode only) ─────────────

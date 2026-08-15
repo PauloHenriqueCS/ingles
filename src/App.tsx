@@ -29,6 +29,7 @@ import ListeningView from './components/ListeningView';
 import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
 import SettingsView from './components/SettingsView';
+import CurriculumPlanView from './components/CurriculumPlanView';
 import SubscriptionView from './components/SubscriptionView';
 import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
@@ -293,6 +294,9 @@ export default function App() {
         )}
         {view === 'settings' && (
           <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
+        )}
+        {view === 'curriculum-plan' && (
+          <CurriculumPlanView onBack={() => setView('home')} />
         )}
         {view === 'subscription' && (
           <SubscriptionView

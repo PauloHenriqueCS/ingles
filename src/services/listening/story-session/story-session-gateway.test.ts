@@ -44,6 +44,29 @@ vi.mock('../daily/resolve-user-listening-level', () => ({
   resolveUserListeningLevel: vi.fn().mockResolvedValue('B1'),
 }));
 
+// Data-driven curriculum seam: generateListeningStory now composes its prompt
+// from the user's current recorte via resolveActivityPrompt. The gateway wiring
+// under test (featureKey/metrics/telemetry) is unchanged by this, so the seam is
+// stubbed with a fixed composed prompt (model left null → the code's gpt-4o-mini
+// default, preserving the model assertions below). getCurriculumServiceClient is
+// stubbed so no real service client is constructed.
+vi.mock('../../../../api/_curriculum/service-client', () => ({
+  getCurriculumServiceClient: vi.fn(() => ({}) as any),
+}));
+
+vi.mock('../../../../api/_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'Curriculum system prompt for the current recorte.',
+    user: 'Generate the listening activity now.',
+    model: null,
+    temperature: 0.8,
+    subtopicKey: 'a1.mod1.sub1',
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+
 import { generateStorySession } from './generate-story-session';
 import { generateListeningStory } from './generate-listening-story';
 
@@ -172,7 +195,7 @@ describe('generateStorySession — OBSERVE mode', () => {
 describe('generateListeningStory (story-session) — LEGACY mode', () => {
   it('returns the two-part story and writes no telemetry', async () => {
     mockCreate.mockImplementation(() => aiOk(VALID_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
-    const result = await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    const result = await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     expect(result.title).toBe('A Longer Story');
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
@@ -185,7 +208,7 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
   });
 
   it('records exactly one event with featureKey listening.two_part_generate when generating fresh', async () => {
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     expect(mockCreate).toHaveBeenCalledTimes(1);
     expect(gw.mockStartEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -201,7 +224,7 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
   });
 
   it('records input/output tokens from the real usage field', async () => {
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     const metrics = gw.mockInsertMetrics.mock.calls[0][1] as Array<Record<string, unknown>>;
     expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'input_text_tokens', quantity: 200 }));
     expect(metrics).toContainEqual(expect.objectContaining({ metricKey: 'output_text_tokens', quantity: 100 }));
@@ -217,7 +240,7 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
     let storyPackage: string | undefined;
     global.fetch = vi.fn().mockRejectedValue(new Error('network down')) as any;
     try {
-      await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+      await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     } catch (err: any) {
       storyPackage = err.storyPackage;
     }
@@ -228,7 +251,7 @@ describe('generateListeningStory (story-session) — OBSERVE mode', () => {
     gw.mockStartEvent.mockClear();
     global.fetch = mockFetchOk() as any; // TTS succeeds this time
 
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', storyPackage);
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', storyPackage, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
 
     expect(mockCreate).not.toHaveBeenCalled();
     // storyPackage only skips OpenAI generation — the two TTS physical calls
@@ -302,7 +325,7 @@ describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => 
   });
 
   it('records two events (part1, part2) sharing one correlationId with deterministic attemptNumber 1 and 2', async () => {
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     const ttsCalls = gw.mockStartEvent.mock.calls
       .map((c: any) => c[0])
       .filter((c: any) => c.featureKey === 'listening.two_part_tts');
@@ -328,7 +351,7 @@ describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => 
       return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => bytes });
     }) as any;
 
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     const ttsCalls = gw.mockStartEvent.mock.calls
       .map((c: any) => c[0])
       .filter((c: any) => c.featureKey === 'listening.two_part_tts')
@@ -338,7 +361,7 @@ describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => 
   });
 
   it('each of the two physical TTS calls records its own independent tts_characters metric', async () => {
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     // Correlate by eventId (returned from startEvent, passed unchanged to
     // insertMetrics) rather than by array index, which is not guaranteed to
     // match startEvent's call order once two physical calls run concurrently.
@@ -364,7 +387,7 @@ describe('two_part synthesizeParts — OBSERVE mode, parallel TTS calls', () => 
       return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(10) });
     }) as any;
 
-    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret');
+    await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
 
     const ttsContexts = capturedContexts.filter((c) => c.featureKey === 'listening.two_part_tts');
     expect(ttsContexts).toHaveLength(2);

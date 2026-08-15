@@ -405,7 +405,14 @@ function makeReconcileMock(opts: { planIdForProduct?: string | null; seed?: Seed
                 const match = rows
                   .filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v))
                   .sort((a, b) => String(b.starts_at ?? '').localeCompare(String(a.starts_at ?? '')))[0];
-                return Promise.resolve({ data: match ? { id: match.id } : null, error: null });
+                // Mirrors the real select: id + the pending fields the reconcile
+                // reads to decide whether a scheduled change is LIVE.
+                return Promise.resolve({
+                  data: match
+                    ? { id: match.id, pending_plan_id: match.pending_plan_id ?? null, pending_effective_at: match.pending_effective_at ?? null }
+                    : null,
+                  error: null,
+                });
               },
             };
             return api;
@@ -530,6 +537,27 @@ describe('reconcileSubscriptionStateFromRest — state, not transaction', () => 
     await reconcileSubscriptionStateFromRest(restState({ unsubscribeDetectedAtMs: null }), { supabase: client, now: NOW });
     expect(rows[0].pending_plan_id).toBeNull();
     expect(rows[0].pending_effective_at).toBeNull();
+  });
+
+  it('Apple deferred downgrade: a LIVE future-dated pending change is PRESERVED even when the store reports NO unsubscribe (auto-renews into the lower tier)', async () => {
+    const { client, rows } = makeReconcileMock({
+      planIdForProduct: PLUS_PLAN_ID,
+      // Plus active with a pending downgrade to Essencial the PRODUCT_CHANGE
+      // webhook just wrote; effective at the (future) current period end.
+      seed: [{ user_id: VALID_USER_ID, plan_id: PLUS_PLAN_ID, origin: 'subscription', status: 'active', starts_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-09-01T00:00:00.000Z', pending_plan_id: ESSENCIAL_PLAN_ID, pending_effective_at: '2026-09-01T00:00:00.000Z', auto_renew: false, idempotency_key: `revenuecat:subscription:reconcile:${VALID_USER_ID}:${PLUS_PRODUCT}` }],
+    });
+    // Apple downgrade: the current Plus keeps auto-renewing into Essencial, so
+    // the REST snapshot reports NO unsubscribe_detected_at (unlike Google Play).
+    // The prior bug: this cleared the pending → /status never showed
+    // pending_downgrade on iOS.
+    await reconcileSubscriptionStateFromRest(
+      restState({ productId: PLUS_PRODUCT, unsubscribeDetectedAtMs: null, expiresDateMs: Date.parse('2026-09-01T00:00:00Z') }),
+      { supabase: client, now: NOW },
+    );
+    // The pending the webhook wrote MUST survive the REST reconcile.
+    expect(rows[0].pending_plan_id).toBe(ESSENCIAL_PLAN_ID);
+    expect(rows[0].pending_effective_at).toBe('2026-09-01T00:00:00.000Z');
+    expect(rows[0].status).toBe('active');
   });
 
   it('when the store DOES report unsubscribe, cancelled_at/pending set by the webhook are PRESERVED (REST never erases them)', async () => {

@@ -7,6 +7,9 @@ import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedS
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
+import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
 import { checkFeatureConfigError, checkRecordingDuration } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { evaluateSkillPromotion } from '../../src/lib/promotionService';
@@ -61,6 +64,33 @@ function isAccessDenial(v: AccessDenial | { entitlements: PlanEntitlementsSnapsh
 }
 
 /**
+ * CONVERGENT curricular credit for a completed pronunciation training session
+ * (blockers 5, 6.B). Idempotent: safe on first completion AND on a retry of an
+ * already-completed assessment. Records against the recorte the session was
+ * GENERATED for (persisted on the session) — never the current pointer, never a
+ * client value. A session without a persisted identity grants no credit.
+ */
+async function reconcilePronunciationCredit(userId: string, sessionId: string): Promise<void> {
+  const svc = getCurriculumServiceClient();
+  const { data: sessionRow } = await svc
+    .from('pronunciation_training_sessions')
+    .select('curriculum_version_id, curriculum_subtopic_key')
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  const sr = sessionRow as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+  const identity = sr?.curriculum_version_id && sr.curriculum_subtopic_key
+    ? { versionId: sr.curriculum_version_id, subtopicKey: sr.curriculum_subtopic_key }
+    : null;
+  const rec = await recordCurricularPracticeFromIdentity(svc, userId, 'pronunciation', sessionId, identity);
+  if (rec.recorded) {
+    await svc.from('pronunciation_training_sessions').update({ curriculum_credit_status: 'credited' }).eq('id', sessionId).eq('user_id', userId);
+  } else if (!identity) {
+    safeLog('pronunciation-training/complete', 'no_curricular_identity', 200, { sessionId });
+  }
+}
+
+/**
  * Defense-in-depth on top of pronunciation.enabled: a plan could in theory
  * be enabled but configured with a 0/day (non-unlimited) evaluations limit.
  * Every real plan today keeps these two flags together (see the
@@ -74,40 +104,6 @@ function dailyPronunciationTrainingAllowedByPlan(entitlements: PlanEntitlementsS
 
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
-
-const WORD_TARGETS: Record<string, { min: number; max: number }> = {
-  A1: { min: 50, max: 80  }, A2: { min: 50, max: 80  },
-  B1: { min: 80, max: 120 }, B2: { min: 80, max: 120 },
-  C1: { min: 120, max: 160 }, C2: { min: 120, max: 160 },
-};
-
-const LEVEL_GUIDE: Record<string, string> = {
-  A1: 'A1 (beginner): simple present tense, common everyday words, very short sentences',
-  A2: 'A2 (elementary): simple past and present, everyday vocabulary, short connected sentences',
-  B1: 'B1 (intermediate): varied tenses, compound sentences, everyday and some idiomatic expressions',
-  B2: 'B2 (upper-intermediate): complex structures, nuanced vocabulary, subordinate clauses',
-  C1: 'C1 (advanced): sophisticated grammar, wide vocabulary, complex ideas expressed naturally',
-  C2: 'C2 (proficient): native-like fluency, subtle distinctions, rich idiomatic language',
-};
-
-function buildSystemPrompt(level: string): string {
-  const { min, max } = WORD_TARGETS[level] ?? { min: 80, max: 120 };
-  return `You write short English texts for pronunciation practice.
-
-Level: ${LEVEL_GUIDE[level] ?? LEVEL_GUIDE.B1}
-Word count target: ${min}–${max} words (count carefully before submitting)
-
-Rules:
-- Write a vivid, specific scenario featuring a real decision, small conflict, or unexpected turn
-- Use concrete names, specific places, and a moment of tension or surprise
-- Avoid: daily-routine lists, hobby catalogues, generic "I woke up and…" intros
-- Sentences should be short to medium length and flow naturally when read aloud
-- No bullet points, no headings, no titles — just a continuous narrative paragraph
-- Write in third person or second person; no first-person "I" narrator
-- Vocabulary must be natural for ${level} — do not inflate difficulty to "test" pronunciation
-
-Output only the text. Nothing else.`;
-}
 
 // ── Metric extractor — reads from SDK response, never invents values ──────────
 
@@ -286,14 +282,57 @@ async function handleGenerateText(req: any, res: any) {
     return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted, dailyMeta);
   }
 
-  let userLevel = 'A2';
+  // Level is the CURRICULUM PATH's current level (per learning language), NOT a
+  // global english_learning_memory level, and NEVER an invented 'A2' fallback
+  // (blocker 8). A misconfigured curriculum is an explicit operational error.
+  let userLevel: string | null = null;
   try {
-    const { data } = await supabase.from('english_learning_memory').select('current_level').eq('user_id', userId).order('updated_at', { ascending: false }).limit(1).maybeSingle();
-    if (data?.current_level && typeof data.current_level === 'string') userLevel = data.current_level;
-  } catch { /* Use default */ }
+    const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+    userLevel = ensured.currentLevelCode;
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('pronunciation-training/generate-text', 'curriculum_not_configured', 503);
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
+    throw err;
+  }
+  if (!userLevel) {
+    safeLog('pronunciation-training/generate-text', 'no_curriculum_level', 503);
+    return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+  }
 
   const apiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Serviço de IA não configurado.');
+
+  // Data-driven curriculum: the pedagogy (system/user prompt, model, temperature)
+  // is composed for the user's CURRENT recorte from the seeded
+  // `pronunciation.generate_text` template — no hardcoded level-only English
+  // pedagogy. A misconfigured curriculum is an explicit operational error, never
+  // a silent English fallback.
+  let resolvedPrompt;
+  try {
+    resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'pronunciation.generate_text',
+      activityType: 'pronunciation',
+    });
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('pronunciation-training/generate-text', 'curriculum_not_configured', 503);
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
+    throw err;
+  }
+
+  const systemPrompt = resolvedPrompt.system;
+  // user_body is OPTIONAL: when the template has none, send only the system
+  // message — never invent a fixed-language trigger like "Write the text now."
+  // (blocker 8). All pedagogy lives in the system prompt.
+  const userPrompt = resolvedPrompt.user ?? '';
+  const chatMessages = userPrompt
+    ? [{ role: 'system' as const, content: systemPrompt }, { role: 'user' as const, content: userPrompt }]
+    : [{ role: 'system' as const, content: systemPrompt }];
+  const model = resolvedPrompt.model ?? AI_MODEL;
+  const temperature = resolvedPrompt.temperature ?? 0.9;
 
   const openai = new OpenAI({ apiKey, timeout: GENERATE_TIMEOUT_MS });
   const gatewayDeps = getProductionDeps();
@@ -303,7 +342,7 @@ async function handleGenerateText(req: any, res: any) {
         featureKey: 'pronunciation.generate_text',
         provider: 'openai',
         service: 'chat.completions',
-        model: AI_MODEL,
+        model,
         userId,
         initiatedByUserId: userId,
         actorType: 'user',
@@ -315,12 +354,12 @@ async function handleGenerateText(req: any, res: any) {
           endpoint: 'pronunciation-training/generate-text',
           flowType: 'generate_text',
         },
-        estimatedMetrics: estimateTextTokens(buildSystemPrompt(userLevel).length + 'Write the text now.'.length, 400),
+        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, 400),
       },
       () => openai.chat.completions.create({
-        model: AI_MODEL,
-        messages: [{ role: 'system', content: buildSystemPrompt(userLevel) }, { role: 'user', content: 'Write the text now.' }],
-        temperature: 0.9,
+        model,
+        messages: chatMessages,
+        temperature,
         max_tokens: 400,
       }),
       gatewayDeps,
@@ -332,12 +371,21 @@ async function handleGenerateText(req: any, res: any) {
     // Atomic get-or-create: if a concurrent request already created today's
     // row first, this returns THAT row and discards the text generated
     // here — never two sessions for the same user+day, even under a real
-    // race between two simultaneous requests.
+    // race between two simultaneous requests. The curricular identity
+    // (version + recorte) is persisted IN THE SAME atomic operation that creates
+    // the session (ROOT-1) — no best-effort post-RPC UPDATE. A NEW session can
+    // never be delivered without a durable identity; a reused row keeps its
+    // ORIGINAL identity (never the current pointer).
     const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
       p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
       p_start_new_round: forceNew, p_effective_limit: dailyLimit, p_unlimited: dailyUnlimited,
+      p_curriculum_version_id: resolvedPrompt.versionId,
+      p_curriculum_subtopic_key: resolvedPrompt.subtopicKey,
     });
     if (createError) {
+      // Critical write: the `{ error }` returned by Supabase is checked
+      // explicitly (never relied on a catch alone) — a persistence failure
+      // NEVER delivers a curricular session.
       safeLog('pronunciation-training/generate-text', 'persist_rpc_error', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
@@ -354,6 +402,7 @@ async function handleGenerateText(req: any, res: any) {
       safeLog('pronunciation-training/generate-text', 'persist_rejected', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
+
     safeLog('pronunciation-training/generate-text', 'success', 200);
     return res.status(200).json({
       sessionId: result.sessionId,
@@ -470,6 +519,21 @@ async function handleToken(req: any, res: any) {
     return jsonError(res, 400, 'INVALID_OWNER_ID', 'Identificador de contexto inválido.');
   }
 
+  // Resolve the recognition locale (data-driven, from the learning language)
+  // BEFORE registering a word-practice attempt (blocker 4A): a missing Speech
+  // config must never burn one of the user's 3 attempts. Explicit error, no
+  // en-US fallback, zero side effects.
+  let recognitionLocale: string;
+  try {
+    recognitionLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/token', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
   const { data: attemptData, error: attemptError } = await auth.supabase.rpc('register_word_practice_attempt', {
     p_owner_type: ownerType,
     p_owner_id: ownerId,
@@ -524,6 +588,7 @@ async function handleToken(req: any, res: any) {
     return res.status(200).json({
       token,
       region,
+      language: recognitionLocale,
       expiresInSeconds,
       attemptsUsed,
       maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
@@ -588,6 +653,20 @@ async function handleTrainingStart(req: any, res: any) {
   }
 
   if (!await applyRateLimit(res, userId, 'pronunciation-training-start')) return;
+
+  // Resolve the recognition locale BEFORE reserving the assessment or minting an
+  // Azure token (blocker 4B): a missing Speech config must never leave a
+  // reservation stuck. Explicit error, no en-US fallback, zero side effects.
+  let startLocale: string;
+  try {
+    startLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/start', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
 
   const practiceDate = getTodaySP();
   // The effective daily limit + unlimited flag come from the already-resolved
@@ -654,11 +733,10 @@ async function handleTrainingStart(req: any, res: any) {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao preparar a análise.');
   }
 
-  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     sessionId, attemptId, token: tokenResult.token, region: tokenResult.region,
-    language: audioDefaults.defaultLocale, referenceText,
+    language: startLocale, referenceText,
     dailyCompleted: reserved.dailyCompleted,
     dailyLimit: entitlements.pronunciation.evaluations.limit,
     dailyUnlimited: entitlements.pronunciation.evaluations.unlimited,
@@ -737,11 +815,26 @@ async function handleTrainingComplete(req: any, res: any) {
   const rpc = (rpcData ?? {}) as Record<string, unknown>;
   if (rpc.error === 'UNAUTHORIZED') return jsonError(res, 401, 'UNAUTHORIZED', 'Faça login para continuar.');
   if (rpc.error === 'NOT_FOUND') return jsonError(res, 404, 'NOT_FOUND', 'Avaliação não encontrada.');
-  if (rpc.error === 'ASSESSMENT_ALREADY_COMPLETED') return jsonError(res, 409, 'ASSESSMENT_ALREADY_COMPLETED', 'O texto de hoje já possui uma análise concluída.');
+  if (rpc.error === 'ASSESSMENT_ALREADY_COMPLETED') {
+    // CONVERGENT credit (blocker 6.B): a retry after a first-attempt credit
+    // failure still lands the credit, idempotently, WITHOUT re-running the
+    // provider (the assessment was already saved). Then keep the 409 idempotency
+    // signal the client already handles.
+    try { await reconcilePronunciationCredit(userId, sessionId); } catch { safeLog('pronunciation-training/complete', 'credit_reconcile_failed', 200); }
+    return jsonError(res, 409, 'ASSESSMENT_ALREADY_COMPLETED', 'O texto de hoje já possui uma análise concluída.');
+  }
   if (rpc.error === 'ATTEMPT_MISMATCH') return jsonError(res, 409, 'ATTEMPT_MISMATCH', 'Esta tentativa não corresponde à tentativa ativa.');
   if (rpc.error) {
     safeLog('pronunciation-training/complete', 'rpc_unexpected', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao salvar o resultado.');
+  }
+
+  // Data-driven curriculum: a successfully completed assessment is one valid
+  // pronunciation practice — recorded against the recorte the session was
+  // GENERATED for (blockers 5, 8, 10). Idempotent + convergent (blocker 6.B).
+  // Best-effort — a recording failure must never affect the assessment response.
+  try { await reconcilePronunciationCredit(userId, sessionId); } catch {
+    safeLog('pronunciation-training/complete', 'record_curricular_practice_failed', 200);
   }
 
   res.setHeader('Cache-Control', 'no-store');

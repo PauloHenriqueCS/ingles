@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import { estimateTtsCharacters, estimateProviderRequests } from '../_ai-gateway/estimators';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 
 const { mockFetch, mockRequireAuth, gw, capturedContexts } = vi.hoisted(() => {
   const mockFetch = vi.fn();
@@ -40,6 +41,8 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
 // the no-service-key test env before the gateway is ever reached.
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+// Speech config now resolves via the SERVICE client (active-path authority).
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom() }) }));
 
 // api/tts.ts now resolves the default voice/locale/output-format from the
 // product-config service (Central de Configuração — see
@@ -109,7 +112,7 @@ beforeEach(() => {
   gw.resetDefaults();
   mockFetch.mockImplementation(() => mockAzureOk());
   global.fetch = mockFetch as any;
-  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
+  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { from: makeSpeechConfigFrom() } });
   process.env.AZURE_SPEECH_KEY = 'test-azure-key';
   process.env.AZURE_SPEECH_REGION = 'eastus';
 });

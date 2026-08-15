@@ -47,6 +47,8 @@ import { StoryTtsError } from '../../src/services/listening/story-session/genera
 import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } from '../../src/services/listening/shared-story/get-or-create-shared-listening-story';
 import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
+import { recordCurricularPracticeFromIdentity, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 
 const ALLOWED_STORY_THEMES = new Set([
   'travel', 'work_career', 'daily_life', 'movies_series', 'music',
@@ -498,15 +500,22 @@ async function handleStoryComplete(req: any, res: any) {
     return;
   }
   const { userId } = auth;
-  console.log('[6] Usuário autenticado', { userId });
-  console.log('[7] Payload recebido', { body: req.body });
+  // The client sends the EXACT story it just finished (blocker 6). Absent/invalid
+  // (older bundle) → assignment still completes, but NO curricular credit (never
+  // guesses "the last consumed story"). Never trusts a client version/recorte.
+  const sharedStoryId = typeof req.body?.sharedStoryId === 'string' && UUID_RE.test(req.body.sharedStoryId)
+    ? req.body.sharedStoryId
+    : null;
   try {
     const serviceClient = getListeningServiceClient();
     const activityDate = resolveListeningActivityDate();
     const now = new Date().toISOString();
-    console.log('[8] Executando select em user_listening_assignments', { userId, activityDate });
 
-    const { data: existing, error: selectError } = await serviceClient
+    // (1) Mark today's assignment complete — IDEMPOTENT. An already-completed
+    //     assignment is NOT an early return: a retry (e.g. after a transient
+    //     curricular failure) must still reach the curricular reconciliation
+    //     below (blocker 6).
+    const { data: existing } = await serviceClient
       .from('user_listening_assignments')
       .select('id, status')
       .eq('user_id', userId)
@@ -514,47 +523,66 @@ async function handleStoryComplete(req: any, res: any) {
       .is('episode_id', null)
       .maybeSingle();
 
-    console.log('[9] Resultado do select', { existing, selectError });
-
     if (existing) {
-      if (existing.status === 'completed') {
-        console.log('[8] Já estava completed — retornando sem alterar');
-        safeLog('listening/story/complete', 'already_completed', 200, { userId, activityDate });
-        console.log('[11] Retorno enviado ao frontend → 200 already_completed');
-        return res.status(200).json({ activityDate, saved: true });
+      if (existing.status !== 'completed') {
+        const { error } = await serviceClient
+          .from('user_listening_assignments')
+          .update({ status: 'completed', completed_at: now, updated_at: now })
+          .eq('id', existing.id);
+        if (error) throw error;
       }
-      console.log('[8] Executando UPDATE em user_listening_assignments', { id: existing.id });
-      const { error } = await serviceClient
-        .from('user_listening_assignments')
-        .update({ status: 'completed', completed_at: now, updated_at: now })
-        .eq('id', existing.id);
-      console.log('[9] Resultado do UPDATE', { error });
-      if (error) throw error;
     } else {
-      console.log('[8] Executando INSERT em user_listening_assignments', {
-        user_id: userId,
-        episode_id: null,
-        activity_date: activityDate,
-        status: 'completed',
-      });
       const { error } = await serviceClient
         .from('user_listening_assignments')
         .insert({
-          user_id: userId,
-          episode_id: null,
-          activity_date: activityDate,
-          status: 'completed',
-          assigned_at: now,
-          completed_at: now,
-          created_at: now,
-          updated_at: now,
+          user_id: userId, episode_id: null, activity_date: activityDate, status: 'completed',
+          assigned_at: now, completed_at: now, created_at: now, updated_at: now,
         });
-      console.log('[9] Resultado do INSERT', { error });
       if (error) throw error;
     }
 
+    // (2) Curricular reconciliation — ALWAYS attempted (idempotent), keyed to the
+    //     EXACT story the user finished. Server-validated: the story must be
+    //     THIS user's association, actually consumed (completed=true), for the
+    //     SAME activity_date, and carry a real curricular identity. Recorded via
+    //     the identity-required path (no current-pointer fallback — blocker 5),
+    //     so story A finished after story B still credits A's recorte, never B.
+    if (sharedStoryId) {
+      try {
+        const { data: assoc } = await serviceClient
+          .from('user_listening_shared_progress')
+          .select('completed, activity_date')
+          .eq('user_id', userId)
+          .eq('shared_story_id', sharedStoryId)
+          .maybeSingle();
+        const a = assoc as { completed?: boolean; activity_date?: string } | null;
+        if (a && a.completed === true && a.activity_date === activityDate) {
+          const { data: story } = await serviceClient
+            .from('listening_shared_stories')
+            .select('curriculum_version_id, subtopic_key')
+            .eq('id', sharedStoryId)
+            .maybeSingle();
+          const s = story as { curriculum_version_id?: string | null; subtopic_key?: string | null } | null;
+          if (s?.curriculum_version_id && s.subtopic_key) {
+            await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'listening', sharedStoryId, {
+              versionId: s.curriculum_version_id,
+              subtopicKey: s.subtopic_key,
+            });
+          } else {
+            safeLog('listening/story/complete', 'no_curricular_identity', 200, { userId });
+          }
+        } else {
+          // Foreign story, not consumed, or a different day → never credited.
+          safeLog('listening/story/complete', 'story_not_creditable', 200, { userId });
+        }
+      } catch {
+        safeLog('listening/story/complete', 'record_curricular_practice_failed', 200, { userId });
+      }
+    } else {
+      safeLog('listening/story/complete', 'no_shared_story_id', 200, { userId });
+    }
+
     safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
-    console.log('[11] Retorno enviado ao frontend → 200 saved');
     return res.status(200).json({ activityDate, saved: true });
   } catch (err) {
     console.error('[10] Erro completo', err);
@@ -684,6 +712,16 @@ async function handleListeningGenerate(req: any, res: any) {
     safeLog('listening/generate', 'generated', 200, { requestId, level: result.level });
     return res.status(200).json(result);
   } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      // The data-driven curriculum for this user/recorte is missing or
+      // misconfigured (no published curriculum, no listening.two_part_generate
+      // template, or an empty required placeholder). This is an explicit
+      // operational error — NEVER a silent fallback to a hardcoded English
+      // prompt. The shared-story slot this run may have claimed is already
+      // marked 'failed' by getOrCreateSharedListeningStory before re-throwing.
+      safeLog('listening/generate', 'curriculum_not_configured', 503, { requestId });
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
     if (err instanceof SharedStoryGeneratingError) {
       // Another request already holds the shared-story lock for this
       // group/day — never call OpenAI/Azure here. Reuses the frontend's
@@ -1060,6 +1098,14 @@ async function handleStoryPracticeStart(req: any, res: any) {
   }
 
   const consumed = rpc.consumed ?? 0;
+
+  // NOTE: "Começar a ouvir" (consume) debits the COMMERCIAL listening quota, but
+  // it is NOT curricular completion — the user has only STARTED. Curriculum
+  // credit for Listening is recorded exclusively at the REAL completion event
+  // (POST /api/listening/story/complete → handleStoryComplete), so opening,
+  // preparing, recovering a pending, or merely starting never advances a recorte
+  // (blocker 9). Commercial quota and curricular progression are independent.
+
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     action: rpc.action,

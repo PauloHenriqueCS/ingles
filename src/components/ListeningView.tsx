@@ -620,7 +620,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         // Part 2 correct — persist completion, then show done.
         setPhase('submitting');
         try {
-          await completeStoryListening();
+          await completeStoryListening(storyData?.sharedStoryId ?? null);
           setCompletionSaveError(false);
           onComplete?.();
         } catch {
@@ -1657,7 +1657,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         if (isLastPart) {
           setPhase('submitting');
           try {
-            await completeStoryListening();
+            await completeStoryListening(storyData?.sharedStoryId ?? null);
             setCompletionSaveError(false);
             onComplete?.();
           } catch {
@@ -1791,7 +1791,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   // ── Completion save retry (works for both story and episode mode) ─────────────
   async function handleCompletionRetry() {
     try {
-      await completeStoryListening();
+      await completeStoryListening(storyData?.sharedStoryId ?? null);
       setCompletionSaveError(false);
       setCompletionSaved(true);
     } catch {

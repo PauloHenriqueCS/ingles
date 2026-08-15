@@ -77,7 +77,42 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
+// Data-driven cutover: FREE conversation resolves the conversation.free template
+// and STT resolves the language's speech config. Mock both so free-mode session
+// start works without a live curriculum/DB (conversation:false → free mode).
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../_curriculum/presentation-i18n', () => ({
+  getLanguageDisplayName: vi.fn(async (_c: unknown, code: string) => (code === 'en' ? 'inglês' : code === 'pt-BR' ? 'português' : code)),
+  getBandLabelMap: vi.fn(async () => new Map<string, string>()),
+}));
+vi.mock('../_curriculum/conversation-personalization', () => ({
+  buildConversationPersonalizationFromData: vi.fn(async () => 'PERSONALIZATION_FROM_DATA'),
+}));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  ensureUserCurriculum: vi.fn().mockResolvedValue({
+    versionId: 'v1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+    prefs: { writing: true, listening: true, pronunciation: true, conversation: false },
+    currentSubtopicKey: 'r1', currentSubtopicId: 's1', status: 'active',
+    ordered: [], keyToId: new Map(), idToKey: new Map(),
+  }),
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'FREE_CONVERSATION_SYSTEM', user: null, model: null, temperature: null,
+    subtopicKey: null, versionId: 'v1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+vi.mock('../_curriculum/language-speech-config', () => ({
+  getLanguageSpeechConfig: vi.fn().mockResolvedValue({
+    speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en',
+  }),
+  SpeechConfigError: class SpeechConfigError extends Error {},
+}));
+
 import handler from '../conversation/[...slug]';
+import { ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { DuplicateUsageEventError } from '../_ai-gateway/usage-repository';
 
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000031';
@@ -1678,25 +1713,40 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
     vi.stubGlobal('fetch', mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } }));
     // handleSession's best-effort conversation_session_authorizations
     // insert: .insert({...}).select('id').single()
+    const identityUpdateEq2 = vi.fn().mockResolvedValue({ data: null, error: null });
     mockSessionsFrom.mockReturnValue({
       insert: vi.fn().mockReturnValue({
         select: vi.fn().mockReturnValue({
           single: vi.fn().mockResolvedValue({ data: { id: 'eeeeeeee-0000-0000-0000-000000000099' }, error: null }),
         }),
       }),
+      // Best-effort UPDATE that persists the start-time curricular identity on
+      // the authorization row (recorte the conversation practices toward).
+      update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: identityUpdateEq2 }) }),
     });
     const res = makeRes();
     await handler(vercelReq('session'), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('tok');
-    // Touches conversation_session_authorizations (the quota-bypass fix's
-    // best-effort authorization row, opened here and closed by
-    // /session-complete) but never the webrtc bridge tables
-    // (ai_provider_sessions/ai_usage_events) — those stay untouched unless
-    // conversation.webrtc_connect is in observe mode, which this test never
-    // configures.
-    expect(mockSessionsFrom).toHaveBeenCalledTimes(1);
+    // Touches conversation_session_authorizations twice — the best-effort
+    // authorization-row INSERT (opened here, closed by /session-complete) AND
+    // the best-effort curricular-identity UPDATE — but never the webrtc bridge
+    // tables (ai_provider_sessions/ai_usage_events), which stay untouched unless
+    // conversation.webrtc_connect is in observe mode (never configured here).
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(2);
     expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
+  });
+
+  it('active-path resolution failure → 503 with NO default FREE session and NO OpenAI cost (blocker 3)', async () => {
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
+    const fetchSpy = mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } });
+    vi.stubGlobal('fetch', fetchSpy);
+    // The ACTIVE learning path can't be resolved (transient/misconfig).
+    vi.mocked(ensureUserCurriculum).mockRejectedValueOnce(new CurriculumConfigError('no active path'));
+    const res = makeRes();
+    await handler(vercelReq('session'), res);
+    expect(res._status()).toBe(503);            // explicit operational error
+    expect(fetchSpy).not.toHaveBeenCalled();     // never reached the OpenAI client_secret (no cost)
   });
 
   it('routes "session-active" (string) to handleSessionActive', async () => {

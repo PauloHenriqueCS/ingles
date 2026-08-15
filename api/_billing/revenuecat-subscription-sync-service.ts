@@ -333,6 +333,37 @@ export async function reconcileSubscriptionStateFromRest(
   // cancellation solely by the CANCELLATION webhook.
   const willNotRenew = state.unsubscribeDetectedAtMs != null;
 
+  // Reconcile the SAME (user, plan) subscription row the effective-plan RPC
+  // would resolve (latest starts_at) — this is what makes renewals update in
+  // place and lets a webhook-created row be reused instead of duplicated. Read
+  // the existing pending change up front: whether REST may clear it (below)
+  // depends on whether it is a LIVE, future-dated scheduled change.
+  const { data: existing, error: findError } = await supabase
+    .from('user_plan_assignments')
+    .select('id, pending_plan_id, pending_effective_at')
+    .eq('user_id', state.appUserId)
+    .eq('plan_id', planId)
+    .eq('origin', 'subscription')
+    .order('starts_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (findError) throw new Error(`user_plan_assignments lookup failed: ${findError.message}`);
+  const existingRow = existing as { id: string; pending_plan_id: string | null; pending_effective_at: string | null } | null;
+
+  // A LIVE scheduled change = a pending plan whose effective date is still in
+  // the future. It is owned solely by the PRODUCT_CHANGE webhook and REST must
+  // never erase it. This is the Apple deferred-downgrade case: the current
+  // (higher) product keeps AUTO-RENEWING into the lower tier at period end, so
+  // the store reports NO unsubscribe_detected_at (unlike Google Play, which
+  // flags a deferred downgrade as unsubscribe). Without this guard, the app's
+  // post-purchase POST /subscription/sync wiped the pending_plan_id the
+  // PRODUCT_CHANGE webhook had just written, so /status never returned
+  // pending_downgrade on iOS (Android was unaffected — it hits willNotRenew).
+  const hasLivePendingChange =
+    existingRow?.pending_plan_id != null &&
+    existingRow.pending_effective_at != null &&
+    new Date(existingRow.pending_effective_at).getTime() > now.getTime();
+
   // Only the observed current-state columns — never user_id/plan_id (the state
   // identity + match key) and never idempotency_key (leave whatever created the
   // row, e.g. the webhook's original_transaction_id key, untouched).
@@ -349,44 +380,33 @@ export async function reconcileSubscriptionStateFromRest(
   };
 
   // A healthy, auto-renewing subscription (the store reports NO
-  // unsubscribe_detected_at) has, by definition, no cancellation and no
-  // scheduled change. Because this reconcile REUSES the same (user, plan) row
-  // across renewals AND re-subscriptions, a row can carry stale terminal state
-  // from a PAST life (e.g. an Essencial row cancelled at 14:30, re-subscribed at
-  // 16:33) — the bug the audit found. So on a healthy active reconcile, clear
-  // that residue explicitly. When the store DOES report unsubscribe (a real
-  // cancellation OR a DEFERRED downgrade), leave cancelled_at/pending_* exactly
-  // as the CANCELLATION/PRODUCT_CHANGE webhooks set them — REST must never
-  // fabricate OR erase those.
+  // unsubscribe_detected_at) has, by definition, no cancellation. Because this
+  // reconcile REUSES the same (user, plan) row across renewals AND
+  // re-subscriptions, a row can carry stale terminal state from a PAST life
+  // (e.g. an Essencial row cancelled at 14:30, re-subscribed at 16:33) — the
+  // bug the audit found. So on a healthy active reconcile, clear the
+  // cancellation residue explicitly. A scheduled change is DIFFERENT: it is
+  // owned by the PRODUCT_CHANGE webhook, so REST only clears STALE pending
+  // residue (past-dated / absent) and NEVER a live, future-dated change (the
+  // Apple deferred-downgrade case above).
   if (!willNotRenew) {
     stateFields.cancelled_at = null;
     stateFields.cancel_reason = null;
-    stateFields.pending_plan_id = null;
-    stateFields.pending_effective_at = null;
+    if (!hasLivePendingChange) {
+      stateFields.pending_plan_id = null;
+      stateFields.pending_effective_at = null;
+    }
   }
 
   // A change scheduled on a product whose period has ALREADY ended is moot — an
   // expired row must never carry a pending change (this is what left the orphan
   // pending_plan_id on the old Plus row after its period lapsed). status is
-  // already 'expired' here.
+  // already 'expired' here. This wins over the live-pending guard above:
+  // isExpiredNow means the scheduled change is effecting now, not pending.
   if (isExpiredNow) {
     stateFields.pending_plan_id = null;
     stateFields.pending_effective_at = null;
   }
-
-  // Reconcile the SAME (user, plan) subscription row the effective-plan RPC
-  // would resolve (latest starts_at) — this is what makes renewals update in
-  // place and lets a webhook-created row be reused instead of duplicated.
-  const { data: existing, error: findError } = await supabase
-    .from('user_plan_assignments')
-    .select('id')
-    .eq('user_id', state.appUserId)
-    .eq('plan_id', planId)
-    .eq('origin', 'subscription')
-    .order('starts_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (findError) throw new Error(`user_plan_assignments lookup failed: ${findError.message}`);
 
   if (existing) {
     const { error: updateError } = await supabase

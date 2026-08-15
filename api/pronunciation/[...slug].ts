@@ -24,6 +24,8 @@ import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlemen
 import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
+import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -453,6 +455,21 @@ async function handleStart(req: any, res: any) {
   // key that until now was defined but never wired to this endpoint.
   if (!await applyRateLimit(res, auth.userId, 'pronunciation-start')) return;
 
+  // Resolve the recognition locale (data-driven) BEFORE any side effect — the
+  // quota reservation, the AI-Gateway budget reservation, the Azure token, and
+  // the ai_provider_session all come after this (blocker 4C). A missing Speech
+  // config → explicit 503 with ZERO side effects; never an en-US fallback.
+  let assessLocale: string;
+  try {
+    assessLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation/assess-text-start', 'speech_config_missing', 503);
+      return res.status(503).json({ code: 'AZURE_SPEECH_UNAVAILABLE', message: AZURE_ERROR_MESSAGES.AZURE_SPEECH_UNAVAILABLE });
+    }
+    throw err;
+  }
+
   const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_assessment', {
     p_text_version_id: textVersionId, p_azure_region: azureRegion, p_attempt_id: attemptId,
   });
@@ -555,11 +572,10 @@ async function handleStart(req: any, res: any) {
     gatewayBudgetReservationId,
   );
 
-  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     assessmentId, attemptId, token: tokenResult.token, region: tokenResult.region,
-    language: audioDefaults.defaultLocale, referenceText,
+    language: assessLocale, referenceText,
     ...(gatewaySessionId ? { gatewaySessionId } : {}),
   });
 }

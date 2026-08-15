@@ -17,9 +17,12 @@ export const AZURE_VOICES: AzureVoiceEntry[] = [
 
 export const AUDIO_PREVIEW_TEXT = "Hello! I'm your English tutor. Let's practice together.";
 
+// NOTE: audio playback settings intentionally have NO accent field. Accent /
+// language variant is a CONVERSATION concept (AIPreferences.accent), resolved
+// from the data-driven per-language catalog conversation_language_variants — it
+// must not be duplicated here as a second, hardcoded English authority (ROOT-2).
 export interface AudioSettings {
   voice: string;
-  accent: 'american' | 'british' | 'australian';
   playbackRate: 0.75 | 0.9 | 1;
   autoPlayShadowing: boolean;
   showTranslation: boolean;
@@ -27,7 +30,6 @@ export interface AudioSettings {
 
 export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   voice: 'en-US-AvaMultilingualNeural',
-  accent: 'american',
   playbackRate: 1,
   autoPlayShadowing: true,
   showTranslation: false,
