@@ -50,6 +50,10 @@ vi.mock('openai', () => ({
 // getProductionDeps() try to build a real Supabase client and throw. Force
 // legacy mode (the gateway's own zero-DB-dependency no-op path) so these
 // tests exercise generate-theme.ts's own logic without any gateway/DB I/O.
+// Rate limiting is orthogonal to the handler logic under test. Paid keys are
+// now failClosed, so the real applyRateLimit 503s in a no-service-key env
+// (CI/tests) before the handler runs — mock it through, like the gateway tests.
+vi.mock('../../api/_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
   return { ...actual, getProductionDeps: () => gw.mockDeps };

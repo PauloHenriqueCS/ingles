@@ -33,6 +33,10 @@ function makeSessionsChain(result: { data: { id: string; metadata?: Record<strin
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
   return chain;
 }
+// Rate limiting is orthogonal to the handler logic under test. 'pronunciation-
+// start' is now failClosed, so the real applyRateLimit 503s in a no-service-key
+// env (CI/tests) before the handler runs — mock it through, like the gateway tests.
+vi.mock('../../api/_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/_ai-gateway/index')>();
   return { ...actual, getProductionDeps: () => gw.mockDeps, getSharedServiceClient: () => sessionsClient };
