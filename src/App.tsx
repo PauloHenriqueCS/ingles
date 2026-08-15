@@ -5,6 +5,7 @@ import { View } from './types';
 import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
+import { useOneSignalIdentitySync } from './hooks/useOneSignalIdentitySync';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
 import { endSessionAfterAccountDeletion } from './lib/accountSessionCleanup';
@@ -60,6 +61,7 @@ export default function App() {
   const [conversationRefreshKey, setConversationRefreshKey] = useState(0);
   const { user, loading: authLoading } = useAuth();
   useRevenueCatIdentitySync(user?.id);
+  useOneSignalIdentitySync(user?.id);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
 
   useEffect(() => {

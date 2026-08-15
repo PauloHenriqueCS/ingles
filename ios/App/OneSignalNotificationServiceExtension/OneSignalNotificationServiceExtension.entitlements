@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Must exactly match the App Group declared by the main app target
+	     (App.entitlements / AppRelease.entitlements). OneSignal uses the
+	     shared container for confirmed delivery and badge coordination. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.app.lemonenglish.lemon.onesignal</string>
+	</array>
+</dict>
+</plist>
