@@ -129,6 +129,26 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
+// Data-driven curriculum runtime — correction prompts now come from the DB
+// templates (writing.correct / writing.correct_review). resolveActivityPrompt is
+// stubbed to a fixed prompt (model null → handler falls back to AI_MODEL) so the
+// gateway / telemetry / billing path is exercised exactly as before.
+// recordCurricularPractice is a best-effort no-op stub.
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'CURRICULUM_CORRECTION_SYSTEM',
+    user: 'CURRICULUM_CORRECTION_USER',
+    model: null,
+    temperature: null,
+    subtopicKey: null,
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+
 // ── Handler import ────────────────────────────────────────────────────────────
 
 import handler from '../review-text';

@@ -166,22 +166,47 @@ describe('buildTutorInstructions — personality', () => {
   });
 });
 
-// ── 6. CEFR level instructions ────────────────────────────────────────────────
+// ── 6. CEFR level (reference code only — hardcoded A1–C2 rubric removed) ───────
+//
+// The hardcoded English A1–C2 pedagogical rubric (LEVEL_INSTRUCTIONS) was
+// removed from promptBuilder: level/pedagogy now comes from the data-driven
+// curriculum (guided mode), and free mode only surfaces the reference CEFR code
+// as context, never a per-level pedagogical script.
 
-describe('buildTutorInstructions — CEFR level', () => {
-  it('A1 mentions INICIANTE', () => {
+describe('buildTutorInstructions — CEFR level (reference only)', () => {
+  it('surfaces the A1 reference code without the old rubric', () => {
     const p = buildTutorInstructions(BASE_DEFAULTS, 'A1');
-    expect(p).toContain('INICIANTE');
+    expect(p).toContain('## Nível do aprendiz');
+    expect(p).toContain('A1');
+    // The removed pedagogical rubric must no longer be a hardcoded source of truth.
+    expect(p).not.toContain('INICIANTE');
   });
 
-  it('C2 mentions PROFICIENTE', () => {
+  it('surfaces the C2 reference code without the old rubric', () => {
     const p = buildTutorInstructions(BASE_DEFAULTS, 'C2');
-    expect(p).toContain('PROFICIENTE');
+    expect(p).toContain('C2');
+    expect(p).not.toContain('PROFICIENTE');
   });
 
-  it('unknown level falls back to A1 instructions', () => {
+  it('renders the level section for an unknown level without crashing', () => {
     const p = buildTutorInstructions(BASE_DEFAULTS, 'XX');
-    expect(p).toContain('INICIANTE');
+    expect(p).toContain('## Nível do aprendiz');
+    expect(p).toContain('XX');
+  });
+});
+
+// ── 6b. Conversation-language directive is parameterized (not hardcoded EN) ────
+
+describe('buildTutorInstructions — language directive', () => {
+  it('defaults to the product bootstrap language (inglês) when no context given', () => {
+    const p = buildTutorInstructions(BASE_DEFAULTS, 'B1');
+    expect(p).toContain('Responda SEMPRE em inglês');
+  });
+
+  it('honors a supplied languageContext for the conversation language', () => {
+    const p = buildTutorInstructions(BASE_DEFAULTS, 'B1', { learningLanguage: 'es', interfaceLanguage: 'pt-BR' });
+    expect(p).toContain('Responda SEMPRE em espanhol');
+    expect(p).not.toContain('Responda SEMPRE em inglês');
   });
 });
 

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { X, XCircle, CheckCircle2, Lightbulb, AlertTriangle } from 'lucide-react';
-import { findGrammarContent, GrammarContent } from '../lib/grammarContent';
+import type { GrammarContent } from '../lib/grammarContent';
 import { apiUrl } from '../lib/apiUrl';
+import { getAuthHeader } from '../lib/apiAuth';
 
 interface Props {
   grammarName: string;
@@ -9,13 +10,16 @@ interface Props {
   onClose: () => void;
 }
 
-type Status = 'static' | 'loading' | 'ready' | 'error';
+type Status = 'loading' | 'ready' | 'error';
 
 export default function GrammarHelpModal({ grammarName, missionTip, onClose }: Props) {
-  const staticContent = findGrammarContent(grammarName);
-
-  const [content, setContent] = useState<GrammarContent | null>(staticContent);
-  const [status, setStatus] = useState<Status>(staticContent ? 'static' : 'loading');
+  // Data-driven cutover: grammar explanations come exclusively from the
+  // DB-sourced /api/grammar-explanation endpoint (per learning/interface
+  // language, template `writing.explain_grammar`). The old bundled English
+  // `grammarContent` catalog is no longer an authoritative content source —
+  // only its TYPE shape is reused for the response.
+  const [content, setContent] = useState<GrammarContent | null>(null);
+  const [status, setStatus] = useState<Status>('loading');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -25,37 +29,37 @@ export default function GrammarHelpModal({ grammarName, missionTip, onClose }: P
   }, [onClose]);
 
   useEffect(() => {
-    if (staticContent) return; // Have local content, skip API
-
     let cancelled = false;
     setStatus('loading');
     setErrorMsg(null);
 
-    fetch(apiUrl('/api/grammar-explanation'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grammarName }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
+    (async () => {
+      try {
+        const authHeader = await getAuthHeader();
+        const r = await fetch(apiUrl('/api/grammar-explanation'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ grammarName }),
+        });
+        const data = await r.json();
         if (cancelled) return;
-        if (data?.content) {
+        if (r.ok && data?.content) {
           setContent(data.content as GrammarContent);
           setStatus('ready');
         } else {
-          setErrorMsg(data?.error ?? 'Erro ao gerar explicação.');
+          setErrorMsg(data?.message ?? data?.error ?? 'Erro ao gerar explicação.');
           setStatus('error');
         }
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) {
           setErrorMsg('Não foi possível conectar ao servidor.');
           setStatus('error');
         }
-      });
+      }
+    })();
 
     return () => { cancelled = true; };
-  }, [grammarName, staticContent]);
+  }, [grammarName]);
 
   const displayName = content?.name ?? grammarName;
 
@@ -91,7 +95,7 @@ export default function GrammarHelpModal({ grammarName, missionTip, onClose }: P
         <div className="overflow-y-auto px-5 py-4 space-y-5">
           {status === 'loading' && <LoadingState />}
           {status === 'error' && <ErrorState msg={errorMsg} grammarName={grammarName} missionTip={missionTip} />}
-          {(status === 'static' || status === 'ready') && content && (
+          {status === 'ready' && content && (
             <GrammarBody content={content} missionTip={missionTip} />
           )}
           <div className="h-4" />

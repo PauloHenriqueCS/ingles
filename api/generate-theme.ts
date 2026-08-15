@@ -5,30 +5,10 @@ import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, s
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokensFromMessages, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
-import {
-  getDiagnosticGenerationContext,
-  saveDiagnosticMission,
-  logDiagnosticEvent,
-  validateGeneratedDiagnosticMission,
-} from './_diagnostic-service';
-import { toPublicMissionDTO } from './_diagnostic-dto';
-import { DIAGNOSTIC_SYSTEM_PROMPT_EXTENSION, buildDiagnosticUserMessageSection } from './_diagnostic-prompt';
-import type { DiagnosticRejectionLogEntry } from '../src/domain/diagnostic/writing-diagnostic-types';
-import { generatePedagogicalPlan } from './_mission-plan-service';
-import {
-  isGeneratorIntegrationEnabled,
-  isGeneratorIntegrationFullyActive,
-  isMissionValidatorActive,
-  isMissionValidatorEnforcing,
-} from './_mission-generator-feature-flags';
-import { buildPlanConstraintsSection, buildRepairSection } from './_mission-prompt-builder';
-import { validateMissionAgainstPedagogicalPlan } from '../src/domain/missions/mission-validator';
-import { selectFallbackTemplate, buildFallbackCandidate } from '../src/domain/missions/mission-fallback';
-import type { MissionPedagogicalPlan } from '../src/domain/pedagogy/planner/planner-types';
+import { getCurriculumServiceClient } from './_curriculum/service-client';
+import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { resolveWritingThemeLabel } from '../src/domain/writing/writing-themes';
 import {
-  GRAMMAR_GUIDE_JSON_FIELDS,
-  GRAMMAR_GUIDE_FILL_RULES,
   normalizeGrammarGuide,
   normalizeOptionalExercises,
 } from './_mission-grammar-guide';
@@ -40,258 +20,19 @@ import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } 
 
 const AI_MODEL = 'gpt-4o-mini';
 
-/** Máximo de tentativas para geração diagnóstica. Baixo e controlado. */
-const MAX_DIAGNOSTIC_GENERATION_ATTEMPTS = 2;
+// ── NORMAL-MODE writing generation is now data-driven ──────────────────────────
+// The hardcoded English SYSTEM_PROMPT + format/conflict/objective/context
+// libraries were removed. The normal-mode prompt is composed from the DB
+// curriculum template `writing.generate_topic` for the user's CURRENT recorte
+// via resolveActivityPrompt(). There is NO hardcoded English fallback: a
+// misconfigured curriculum returns an explicit 503 CURRICULUM_NOT_CONFIGURED.
 
-// ── Catalogs ──────────────────────────────────────────────────────────────────
-
-const FORMATS = [
-  'e-mail', 'diário', 'mensagem', 'conversa', 'entrevista',
-  'relatório', 'review', 'história', 'carta', 'postagem',
-  'comentário', 'apresentação', 'explicação', 'tutorial', 'debate', 'opinião',
-];
-
-const CONFLICTS = [
-  'perdeu o voo', 'perdeu o trem', 'esqueceu a carteira', 'recebeu o pedido errado',
-  'encontrou um velho amigo', 'precisou pedir ajuda', 'cliente reclamou', 'apareceu um bug',
-  'prazo acabou', 'reunião foi cancelada', 'mudou de ideia', 'recebeu um elogio',
-  'recebeu uma crítica', 'precisava convencer alguém', 'tomou uma decisão importante',
-  'teve que pedir desculpas', 'fez uma descoberta', 'precisou explicar um erro',
-  'precisou ensinar alguém', 'precisou agradecer alguém',
-];
-
-const OBJECTIVES = [
-  'convencer', 'explicar', 'agradecer', 'pedir ajuda', 'reclamar', 'recomendar',
-  'descrever', 'comparar', 'justificar', 'contar uma história', 'responder um e-mail',
-  'escrever uma mensagem', 'registrar um acontecimento', 'dar instruções',
-  'vender uma ideia', 'pedir desculpas', 'organizar um plano',
-];
-
-const CONTEXTS = [
-  'trabalho', 'tecnologia', 'software', 'inteligencia_artificial', 'startup',
-  'viagens', 'restaurante', 'academia', 'familia', 'amigos', 'filmes',
-  'series', 'musica', 'saude', 'compras', 'eventos', 'financas', 'rotina',
-  'estudos', 'ferias', 'natureza', 'culinaria', 'esportes', 'arte', 'jogos',
-];
-
-// ── System prompt ─────────────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = `Você é um professor particular de inglês para brasileiros adultos.
-
-Sua tarefa é criar uma MISSÃO de escrita envolvente. Não crie "temas para escrever". Crie situações reais que obrigam o aluno a escrever com propósito.
-
-═══ BIBLIOTECA DE FORMATOS ═══
-
-${FORMATS.join(' | ')}
-
-═══ BIBLIOTECA DE CONFLITOS ═══
-
-${CONFLICTS.join(' | ')}
-
-═══ BIBLIOTECA DE OBJETIVOS ═══
-
-${OBJECTIVES.join(' | ')}
-
-═══ BIBLIOTECA DE CONTEXTOS ═══
-
-${CONTEXTS.join(' | ')}
-
-═══ A DIFERENÇA ENTRE ERRADO E CERTO ═══
-
-ERRADO: "Escreva um e-mail sobre um projeto."
-CERTO: "Seu gerente pediu uma ideia para melhorar o produto. Escreva um e-mail explicando sua proposta e conte como você chegou nessa ideia."
-
-ERRADO: "Escreva sobre sua viagem."
-CERTO: "Você perdeu um trem durante uma viagem para Londres. Escreva um diário contando o que aconteceu e como resolveu o problema."
-
-ERRADO: "Descreva um restaurante."
-CERTO: "O garçom trouxe o prato errado. Explique o que aconteceu e como a situação terminou."
-
-ERRADO: "Conte sobre um filme."
-CERTO: "Seu amigo quer assistir um filme. Escreva uma recomendação explicando por que ele deveria assistir esse filme."
-
-ERRADO: "Escreva sobre seu trabalho."
-CERTO: "Seu colega está com dificuldades em um projeto. Escreva uma mensagem explicando como você resolveu um problema parecido."
-
-A diferença é simples: o CERTO dá ao aluno um MOTIVO para escrever. O aluno sabe PARA QUEM está escrevendo e POR QUÊ.
-
-═══ PROCESSO OBRIGATÓRIO — SIGA ESTA ORDEM ═══
-
-PASSO 0 — VERIFICAR TEMA OBRIGATÓRIO
-Se a mensagem do usuário contiver um "TEMA OBRIGATÓRIO", toda a missão (título, situação, tarefa de escrita e vocabulário sugerido) deve girar em torno desse tema. Isso tem prioridade sobre a biblioteca de contextos abaixo — use a biblioteca apenas para escolher formato/conflito/objetivo, nunca para substituir o tema. Se não houver tema obrigatório, escolha livremente.
-
-PASSO 1 — ANALISAR O HISTÓRICO
-Leia o histórico completo. Identifique: formatos usados, conflitos usados, objetivos usados, contextos usados nos últimos temas.
-
-PASSO 2 — IDENTIFICAR O QUE ESTÁ PROIBIDO
-Liste mentalmente: último formato usado (PROIBIDO repetir), últimos 5 conflitos (PROIBIDO repetir), últimos 3 objetivos (PROIBIDO repetir), últimos 5 contextos (EVITAR repetir).
-
-PASSO 3 — ESCOLHER FORMATO DIFERENTE
-Escolha um formato da biblioteca que NÃO seja o mesmo do tema anterior. Atenção: "e-mail" e "mensagem" são diferentes. "review" e "opinião" são diferentes.
-
-PASSO 4 — ESCOLHER CONFLITO DIFERENTE
-Escolha um conflito da biblioteca que NÃO apareceu nos últimos 5 temas.
-
-PASSO 5 — CONSTRUIR A SITUAÇÃO
-Monte a missão com 2 partes:
-- missionSetup: 1-2 frases descrevendo a situação e o conflito. Nunca comece com "Escreva" ou "Conte". Comece com "Você...", "Seu...", "Um cliente...", etc.
-- missionTask: 1-2 frases dizendo EXATAMENTE o que o aluno deve escrever e por quê.
-
-PASSO 6 — GERAR O JSON COMPLETO
-Somente após construir a situação, preencha todos os campos.
-
-═══ REGRAS ABSOLUTAS ═══
-
-1. NUNCA comece missionSetup com "Escreva", "Conte", "Descreva", "Fale sobre". Comece com a SITUAÇÃO.
-2. NUNCA repita o mesmo formato do tema imediatamente anterior.
-3. NUNCA repita o mesmo conflito nos últimos 5 temas.
-4. NUNCA repita o mesmo objetivo nos últimos 3 temas.
-5. A missão deve dar ao aluno um motivo para escrever. O aluno deve pensar "preciso resolver isso" — não "sobre o que escrever".
-6. Cada missão deve ter: um PERSONAGEM (você, seu chefe, um cliente…), uma SITUAÇÃO, e um FORMATO específico.
-7. Se houver um TEMA OBRIGATÓRIO na mensagem do usuário, ele tem prioridade máxima sobre qualquer sugestão baseada no histórico do aluno. O histórico pode ajustar dificuldade e contexto específico, mas nunca pode substituir ou remover o tema.
-
-═══ FORMATO DE RESPOSTA ═══
-
-Retorne somente JSON válido. Sem markdown. Sem texto antes ou depois do JSON.
-
-{
-  "title": string,
-  "missionSetup": string,
-  "missionTask": string,
-  "mission": string,
-  "themePtBr": string,
-  "themeEn": string,
-  "format": string,
-  "context": string,
-  "conflict": string,
-  "objective": string,
-  "activityType": string,
-  "semanticSummary": string,
-  "whyThisActivity": string,
-  "level": "A1"|"A2"|"B1"|"B2"|"C1"|"C2",
-  "difficulty": "easy"|"medium"|"hard",
-  "estimatedTimeMinutes": number,
-  "requiredGrammar": string[],
-  "suggestedVocabulary": [{"word": string, "meaningPtBr": string, "example": string}],
-  "useTheseWords": string[],
-  "instructions": string[],
-  "exampleSentence": string,
-  "successCriteria": string[],
-  "extraChallenge": string,
-  "category": string,
-  "grammarTips": {"GrammarName": "dica em português relacionada à missão atual"},
-  "responseExamples": [
-    { "level": "A1", "text": "texto curto em inglês (~3 frases)", "note": "observação curta em português" },
-    { "level": "A2", "text": "texto médio em inglês (~5 frases, mais natural)", "note": "observação curta em português" },
-    { "level": "B1", "text": "texto longo em inglês (7-10 frases, com conectores)", "note": "observação curta em português" }
-  ],
-${GRAMMAR_GUIDE_JSON_FIELDS}
-}
-
-Regras de preenchimento:
-- title: nome curto e específico (ex: "Proposta ao gerente", "Trem perdido em Londres", "Review do Oppenheimer")
-- missionSetup: a situação e o conflito em português (ex: "Seu gerente pediu uma ideia para melhorar o produto.")
-- missionTask: o que escrever e por quê em português (ex: "Escreva um e-mail explicando sua proposta e como chegou nessa ideia.")
-- mission: missionSetup + " " + missionTask (campo combinado para exibição)
-- themePtBr: mesmo valor de mission
-- themeEn: o comando em inglês (ex: "Write an email to your manager explaining your product improvement idea.")
-- format: escolha da biblioteca de formatos
-- context: escolha da biblioteca de contextos
-- conflict: escolha da biblioteca de conflitos (string vazia se genuinamente não houver conflito)
-- objective: escolha da biblioteca de objetivos
-- activityType: mesmo valor de format (para compatibilidade)
-- semanticSummary: "Formato: {format} | Conflito: {conflict} | Objetivo: {objective} | {1 frase descrevendo o cenário único}"
-- whyThisActivity: 1-2 frases em português sobre o valor pedagógico desta missão agora
-- estimatedTimeMinutes: entre 10 e 20
-- instructions: 3-5 itens práticos dizendo como escrever
-- requiredGrammar: 1-3 estruturas gramaticais
-- suggestedVocabulary: 3-6 itens
-- useTheseWords: 4-8 palavras úteis para a missão
-- successCriteria: 3-5 critérios mensuráveis
-- extraChallenge: desafio extra opcional (string vazia se não houver)
-- category: work/travel/entertainment/opinion/personal/technical/social
-- grammarTips: objeto com uma dica por estrutura gramatical em requiredGrammar. Chave = nome exato da gramática. Valor = 1-2 frases em português dizendo como usar aquela estrutura especificamente nesta missão. Exemplo: {"Present Perfect": "Use o Present Perfect para descrever mudanças no seu projeto sem dizer exatamente quando aconteceram."}
-- responseExamples: 2 a 3 exemplos em inglês que INSPIREM o aluno a escrever, mas NÃO sejam a resposta da missão.
-  OBRIGATÓRIO: use personagens diferentes, outra situação, outro contexto — mas o mesmo objetivo, gramática e tipo de vocabulário da missão.
-  level A1: ~3 frases simples e diretas.
-  level A2: ~5 frases, mais natural, com um conector.
-  level B1: 7-10 frases, fluente, com conectores variados (however, although, therefore, in addition).
-  note: observação curta em português sobre o que torna o exemplo bom (ex: "Observe o uso de 'however' para contraste.")
-  Nunca use o mesmo personagem, empresa, situação ou cidade da missão original.
-${GRAMMAR_GUIDE_FILL_RULES}`;
-
-// ── Review mode ───────────────────────────────────────────────────────────────
-
-const REVIEW_ACTIVITY_TYPES = [
-  'narrative', 'opinion', 'comparison', 'hypothetical', 'problem_solution',
-  'email', 'dialogue', 'planning', 'personal_experience', 'future_plan',
-  'explaining_a_process', 'decision_making',
-];
-
-const REVIEW_SYSTEM_PROMPT = `Você é um professor de inglês especializado em revisão espaçada para alunos brasileiros.
-
-TAREFA: Criar uma atividade de escrita nova e natural que obrigue o aluno a usar corretamente as palavras e expressões que ele errou em um texto anterior.
-
-FORMATOS DISPONÍVEIS (activityType):
-${REVIEW_ACTIVITY_TYPES.join(' | ')}
-
-PROCESSO OBRIGATÓRIO (interno — não expor):
-PASSO 0: Verificar se a mensagem do usuário contém um "TEMA OBRIGATÓRIO". Se contiver, a nova situação (PASSO 2) deve girar em torno desse tema — isso tem prioridade sobre o tema original do grupo de revisão. Se não houver, escolha livremente (pode inclusive reaproveitar o contexto do tema original).
-PASSO 1: Ler todos os erros e entender o contexto original.
-PASSO 2: Identificar uma nova situação em que TODAS as palavras corrigidas caibam naturalmente.
-PASSO 3: Escolher um activityType DIFERENTE do último utilizado.
-PASSO 4: Criar a missão — situação clara + tarefa específica.
-PASSO 5: Verificar se TODAS as requiredWords combinam organicamente com a missão.
-PASSO 6: Gerar o JSON completo.
-
-REGRAS ABSOLUTAS:
-1. requiredWords deve conter EXATAMENTE os corrected_value do grupo — sem adicionar, remover ou substituir.
-2. Preservar expressões compostas (ex: "from 8 a.m. to 6 p.m.") como uma única entrada — nunca separar.
-3. Não pedir ao aluno para reescrever o mesmo texto original.
-4. Todas as requiredWords devem caber naturalmente na nova situação.
-5. suggestedVocabulary não deve repetir nenhuma palavra já presente em requiredWords.
-6. Não expor raciocínio — apenas o JSON final.
-7. activityType deve ser da lista de formatos disponíveis.
-8. O campo reviewGroupId deve ser copiado exatamente como recebido.
-9. Se houver um TEMA OBRIGATÓRIO na mensagem do usuário, ele tem prioridade máxima sobre o tema original do grupo de revisão — a situação e a missão devem girar em torno do tema obrigatório, nunca do tema original. Isso NUNCA afeta requiredWords, que continua vindo exclusivamente dos erros do aluno.
-
-FORMATO DE RESPOSTA — somente JSON válido, sem markdown:
-
-{
-  "title": "string (nome curto e específico)",
-  "missionSetup": "string (a situação em português — comece com 'Você...', 'Seu...', etc.)",
-  "missionTask": "string (o que escrever e por quê em português)",
-  "mission": "string (missionSetup + ' ' + missionTask)",
-  "themePtBr": "string (mesmo valor de mission)",
-  "themeEn": "string (comando em inglês)",
-  "objective": "string",
-  "pedagogicalReason": "string (1-2 frases sobre por que esta atividade reforça esses erros)",
-  "activityType": "string (da lista de formatos)",
-  "format": "string (mesmo valor de activityType)",
-  "context": "string",
-  "conflict": "",
-  "semanticSummary": "string (Formato: X | Objetivo: Y | 1 frase do cenário)",
-  "level": "A1|A2|B1|B2|C1|C2",
-  "difficulty": "easy|medium|hard",
-  "estimatedTimeMinutes": 15,
-  "requiredGrammar": ["string"],
-  "requiredWords": ["string"],
-  "suggestedVocabulary": [{"word": "string", "meaningPtBr": "string", "example": "string"}],
-  "useTheseWords": [],
-  "instructions": ["string"],
-  "exampleSentence": "string",
-  "successCriteria": ["string"],
-  "extraChallenge": "",
-  "category": "string",
-  "grammarTips": {},
-  "responseExamples": [],
-  "mode": "review",
-  "reviewGroupId": "string",
-${GRAMMAR_GUIDE_JSON_FIELDS}
-}
-
-REGRAS PARA verbTense/grammarGuide/optionalExercises (mesmos campos da missão normal, sempre preenchidos):
-${GRAMMAR_GUIDE_FILL_RULES}`;
+// ── Review mode (spaced repetition — driven by the student's own errors) ───────
+// The review-activity system prompt is now DATA-DRIVEN: it lives in the DB
+// template `writing.generate_review_activity` and is composed via
+// resolveActivityPrompt(), exactly like normal mode. There is NO hardcoded
+// PT/EN prompt or fallback here — a misconfigured curriculum returns an
+// explicit 503 CURRICULUM_NOT_CONFIGURED.
 
 interface ReviewItemPayload {
   originalValue: string;
@@ -504,125 +245,6 @@ function extractField(summary: string | null, field: string): string {
   if (!summary) return '';
   const match = summary.match(new RegExp(`${field}:\\s*([^|\\n]+)`));
   return match ? match[1].trim() : '';
-}
-
-function buildUserMessage(
-  ctx: Record<string, unknown>,
-  recentThemes: RecentThemeRow[],
-  excludedTheme: ExcludedTheme | null,
-  retryAttempt: number,
-  selectedTheme: string | null = null,
-): string {
-  const lines: string[] = [];
-
-  // Student profile
-  lines.push('═══ PERFIL DO ALUNO ═══');
-  lines.push(`Nível atual: ${ctx.currentLevel || 'A1'}`);
-  lines.push(`Média de nota: ${ctx.averageScore ?? 0}/100`);
-  lines.push(`Habilidade mais fraca: ${ctx.weakestSkill || 'desconhecida'}`);
-
-  const grammarFocus = Array.isArray(ctx.grammarFocus) ? (ctx.grammarFocus as string[]) : [];
-  if (grammarFocus.length > 0) {
-    lines.push(`Gramática para reforçar: ${grammarFocus.join(', ')}`);
-  }
-
-  const mistakes = Array.isArray(ctx.recentMistakes) ? (ctx.recentMistakes as string[]) : [];
-  if (mistakes.length > 0) {
-    lines.push('Erros recentes:');
-    mistakes.slice(0, 5).forEach((m) => lines.push(`  - ${m}`));
-  }
-
-  const vocab = Array.isArray(ctx.recentVocabulary) ? (ctx.recentVocabulary as string[]) : [];
-  if (vocab.length > 0) {
-    lines.push(`Vocabulário estudado: ${vocab.slice(0, 8).join(', ')}`);
-  }
-
-  // User-requested theme — placed immediately after the student profile,
-  // ahead of history/restrictions, so it reads as the highest-priority
-  // constraint rather than a suggestion buried at the end of the prompt.
-  if (selectedTheme) {
-    lines.push('');
-    lines.push('═══ TEMA OBRIGATÓRIO ═══');
-    lines.push(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${selectedTheme}.`);
-    lines.push('Crie a missão de escrita centralizada nesse assunto. O título, a situação e o que o usuário deve escrever precisam estar claramente relacionados ao tema.');
-    lines.push('Se houver vocabulário sugerido (suggestedVocabulary), ele também deve estar relacionado ao tema.');
-    lines.push('O histórico do usuário pode personalizar a dificuldade e o contexto, mas não pode substituir ou ignorar o tema escolhido.');
-    lines.push('Este tema tem prioridade sobre a biblioteca de contextos e sobre qualquer sugestão baseada no histórico.');
-  }
-
-  // Theme history
-  lines.push('');
-  lines.push('═══ HISTÓRICO DE MISSÕES GERADAS (mais recente primeiro) ═══');
-
-  if (recentThemes.length === 0) {
-    lines.push('Nenhuma missão gerada ainda. Comece com algo variado e envolvente.');
-  } else {
-    recentThemes.forEach((t, i) => {
-      const fmt = extractField(t.semantic_summary, 'Formato') || t.activity_type || '—';
-      const cfl = extractField(t.semantic_summary, 'Conflito') || '—';
-      const obj = extractField(t.semantic_summary, 'Objetivo') || '—';
-      lines.push(
-        `[${i + 1}] Formato: ${fmt} | Conflito: ${cfl} | Objetivo: ${obj} | Contexto: ${t.context || '—'} | "${t.title}"`
-      );
-    });
-
-    // Quick reference — what's restricted
-    const recentFormats = recentThemes.slice(0, 5)
-      .map((t) => extractField(t.semantic_summary, 'Formato') || t.activity_type || '')
-      .filter(Boolean);
-
-    const recentConflicts = recentThemes.slice(0, 5)
-      .map((t) => extractField(t.semantic_summary, 'Conflito'))
-      .filter((c) => c && c !== '—');
-
-    const recentObjectives = recentThemes.slice(0, 3)
-      .map((t) => extractField(t.semantic_summary, 'Objetivo'))
-      .filter((o) => o && o !== '—');
-
-    lines.push('');
-    lines.push('═══ RESTRIÇÕES ATIVAS ═══');
-    if (recentFormats.length > 0) {
-      lines.push(`❌ FORMATO PROIBIDO (último usado): ${recentFormats[0]}`);
-      if (recentFormats.length > 1) {
-        lines.push(`⚠️  Formatos recentes (evitar): ${recentFormats.slice(1).join(', ')}`);
-      }
-    }
-    if (recentConflicts.length > 0) {
-      lines.push(`❌ CONFLITOS PROIBIDOS (últimos 5): ${recentConflicts.join(', ')}`);
-    }
-    if (recentObjectives.length > 0) {
-      lines.push(`❌ OBJETIVOS PROIBIDOS (últimos 3): ${recentObjectives.join(', ')}`);
-    }
-  }
-
-  // Excluded theme (user clicked "Gerar outro tema")
-  if (excludedTheme) {
-    lines.push('');
-    lines.push('═══ MISSÃO RECUSADA PELO USUÁRIO — COMPLETAMENTE PROIBIDA ═══');
-    lines.push(`Título: "${excludedTheme.title}"`);
-    lines.push(`Formato: ${excludedTheme.format || excludedTheme.activityType || '—'}`);
-    lines.push(`Conflito: ${excludedTheme.conflict || '—'}`);
-    lines.push(`Contexto: ${excludedTheme.context || '—'}`);
-    lines.push(`Resumo: ${excludedTheme.semanticSummary || '—'}`);
-    lines.push('Esta missão e qualquer variação semântica dela estão PROIBIDAS.');
-  }
-
-  // Retry warning
-  if (retryAttempt > 1) {
-    lines.push('');
-    lines.push(`⚠️ TENTATIVA ${retryAttempt}: As tentativas anteriores foram rejeitadas por semelhança com o histórico.`);
-    lines.push('Você DEVE escolher um formato, conflito e contexto completamente diferentes.');
-    lines.push('Pense em algo inesperado: uma entrevista, uma carta de reclamação, um tutorial, um debate, um review.');
-  }
-
-  lines.push('');
-  if (selectedTheme) {
-    lines.push(`Siga os 6 passos obrigatórios. Mantenha a diversidade de formato/conflito/objetivo em relação ao histórico, mas o TEMA OBRIGATÓRIO acima não é negociável — a missão inteira deve girar em torno dele.`);
-  } else {
-    lines.push('Siga os 6 passos obrigatórios e crie uma missão envolvente que seja genuinamente diferente de tudo no histórico.');
-  }
-
-  return lines.join('\n');
 }
 
 // ── Semantic deduplication ────────────────────────────────────────────────────
@@ -884,11 +506,12 @@ export default async function handler(req: any, res: any) {
 
   const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
   // The client sends the raw technical value from the theme select (e.g.
-  // 'football_sports'), never a pre-translated label — the label used in the
-  // AI prompt is resolved here from the same canonical catalog the select
-  // is built from, so there is only ever one source of truth for theme
-  // options. An unrecognized/empty value is treated exactly like "no theme
-  // selected" (random) — never invented.
+  // 'football_sports'); it is resolved to a display label from the single
+  // canonical writing-themes list (a UI option list of SURFACE topics — never
+  // authoritative pedagogy) and handed to the curriculum engine as OPTIONAL
+  // context (userContext.selected_theme). The DB curriculum template decides how
+  // (or whether) to use it; the user's CURRENT recorte remains the sole
+  // authority over what is taught. An unrecognized/empty value => no theme.
   const normalizedThemeValue = typeof rawTheme === 'string' && rawTheme.trim() ? rawTheme.trim() : null;
   const selectedTheme = resolveWritingThemeLabel(normalizedThemeValue);
 
@@ -929,7 +552,7 @@ export default async function handler(req: any, res: any) {
   let physicalAttempt = 0;
 
   async function callTheme(
-    phase: 'diagnostic' | 'review' | 'normal',
+    phase: 'review' | 'normal',
     phaseAttempt: number,
     maxPhysicalAttempts: number,
     params: ChatCompletionCreateParamsNonStreaming,
@@ -940,7 +563,7 @@ export default async function handler(req: any, res: any) {
         featureKey: 'writing.generate_topic',
         provider: 'openai',
         service: 'chat.completions',
-        model: AI_MODEL,
+        model: typeof params.model === 'string' ? params.model : AI_MODEL,
         userId,
         initiatedByUserId: userId,
         actorType: 'user',
@@ -967,253 +590,6 @@ export default async function handler(req: any, res: any) {
     );
   }
 
-  // ── DIAGNOSTIC MODE (auto-detection, invisible to user) ──────────────────────
-  // Ativado automaticamente quando mode='normal', feature flag habilitada e
-  // usuário elegível (writing status = unknown). Transparente para o frontend.
-
-  if (mode !== 'review') {
-    let diagnosticCtx: Awaited<ReturnType<typeof getDiagnosticGenerationContext>> | null = null;
-    try {
-      diagnosticCtx = await getDiagnosticGenerationContext(supabase, userId, previousThemeId ?? null);
-    } catch (e) {
-      console.error('Diagnostic context check failed, falling back to normal mode:', e);
-    }
-
-    if (diagnosticCtx?.shouldUseDiagnostic) {
-      const diagnosticSequence = diagnosticCtx.diagnosticSequence!;
-
-      // Idempotência: retornar missão existente se já foi gerada (double-click, refresh).
-      // Só é seguro reutilizar quando nenhum tema foi solicitado nesta chamada —
-      // a missão salva não tem como ser verificada contra um tema diferente do
-      // que ela foi gerada com, então um novo tema sempre força geração fresca.
-      if (diagnosticCtx.existingActiveMission && !selectedTheme) {
-        const existing = diagnosticCtx.existingActiveMission;
-        if (existing.theme_id) {
-          try {
-            const { data: themeData } = await supabase
-              .from('generated_themes')
-              .select('*')
-              .eq('id', existing.theme_id)
-              .eq('user_id', userId)
-              .maybeSingle();
-
-            if (themeData) {
-              const existingThemeObj: Record<string, unknown> = {
-                title: themeData.title,
-                mission: themeData.description,
-                missionSetup: themeData.description,
-                missionTask: '',
-                themePtBr: themeData.description,
-                format: themeData.activity_type,
-                activityType: themeData.activity_type,
-                context: themeData.context,
-                semanticSummary: themeData.semantic_summary,
-                difficulty: themeData.difficulty,
-                useTheseWords: themeData.vocabulary ?? [],
-                requiredGrammar: themeData.grammar_focus ?? [],
-                level: 'A1',
-                estimatedTimeMinutes: 15,
-                instructions: [],
-                suggestedVocabulary: [],
-                successCriteria: [],
-                extraChallenge: '',
-                category: 'daily-life',
-                grammarTips: {},
-                responseExamples: [],
-              };
-
-              logDiagnosticEvent('diagnostic_mission_returned_existing', userId, {
-                diagnostic_sequence: diagnosticSequence,
-                theme_id: existing.theme_id,
-              });
-
-              return res.json({
-                theme: toPublicMissionDTO(existingThemeObj),
-                themeId: existing.theme_id,
-                mode: 'normal',
-              });
-            }
-          } catch (e) {
-            console.error('Failed to fetch existing diagnostic theme:', e);
-          }
-        }
-      }
-
-      // Gerar nova missão diagnóstica
-      const diagnosticGenerationBlock = blockedByGenerationLimit();
-      if (diagnosticGenerationBlock) {
-        return jsonError(res, 403, diagnosticGenerationBlock.code, diagnosticGenerationBlock.message);
-      }
-
-      const diagnosticPlan = diagnosticCtx.diagnosticPlan!;
-      const diagnosticSystemPrompt = SYSTEM_PROMPT + DIAGNOSTIC_SYSTEM_PROMPT_EXTENSION;
-      const recentDiagnosticTitles = recentThemes.slice(0, 5)
-        .map(t => t.title)
-        .filter(Boolean) as string[];
-      const diagnosticSection = buildDiagnosticUserMessageSection(diagnosticPlan, recentDiagnosticTitles);
-
-      let diagnosticTheme: Record<string, unknown> | null = null;
-      const diagnosticRejectionLog: DiagnosticRejectionLogEntry[] = [];
-
-      logDiagnosticEvent('diagnostic_generation_started', userId, {
-        diagnostic_sequence: diagnosticSequence,
-      });
-
-      for (let attempt = 1; attempt <= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS; attempt++) {
-        let raw: string;
-        try {
-          const completion = await callTheme('diagnostic', attempt, MAX_DIAGNOSTIC_GENERATION_ATTEMPTS, {
-            model: AI_MODEL,
-            temperature: 0.88 + (attempt - 1) * 0.07,
-            messages: [
-              { role: 'system', content: diagnosticSystemPrompt },
-              {
-                role: 'user',
-                content: buildUserMessage(
-                  learningContext ?? {},
-                  recentThemes,
-                  excludedTheme ?? null,
-                  attempt,
-                  selectedTheme,
-                ) + diagnosticSection,
-              },
-            ],
-          });
-          raw = completion.choices[0]?.message?.content ?? '';
-        } catch (err) {
-          const { code, status } = sanitizeProviderError(err);
-          if (code === 'AI_TIMEOUT' || code === 'AI_UNAVAILABLE') {
-            safeLog('generate-theme', 'diagnostic_provider_error', status, { mode: 'diagnostic' });
-            break; // Fall through to normal mode
-          }
-          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) break;
-          continue;
-        }
-
-        const parsed = parseRawContent(raw);
-        if (!parsed) {
-          diagnosticRejectionLog.push({
-            attempt,
-            rejectionCode: 'INVALID_RESPONSE_SCHEMA',
-            rejectionDetail: 'JSON inválido ou ausente',
-            timestamp: new Date().toISOString(),
-          });
-          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) break;
-          continue;
-        }
-
-        const candidate = normalizeTheme(parsed);
-        candidate.internalCoverage = Array.isArray(parsed.internalCoverage)
-          ? parsed.internalCoverage
-          : [];
-
-        const { valid, updatedLog } = validateGeneratedDiagnosticMission(
-          diagnosticPlan,
-          candidate,
-          recentThemes.map(t => ({ title: t.title, semantic_summary: t.semantic_summary })),
-          attempt,
-          diagnosticRejectionLog,
-        );
-
-        // Sync rejection log
-        if (updatedLog.length > diagnosticRejectionLog.length) {
-          const newEntries = updatedLog.slice(diagnosticRejectionLog.length);
-          diagnosticRejectionLog.push(...newEntries);
-        }
-
-        if (!valid) {
-          const lastRej = diagnosticRejectionLog[diagnosticRejectionLog.length - 1];
-          logDiagnosticEvent('diagnostic_generation_rejected', userId, {
-            diagnostic_sequence: diagnosticSequence,
-            attempt,
-            rejection_code: lastRej?.rejectionCode ?? 'UNKNOWN',
-          });
-
-          if (attempt >= MAX_DIAGNOSTIC_GENERATION_ATTEMPTS) {
-            // Último fallback: usar candidato mesmo com validação falha
-            diagnosticTheme = candidate;
-            logDiagnosticEvent('diagnostic_generation_fallback', userId, {
-              diagnostic_sequence: diagnosticSequence,
-            });
-          }
-          continue;
-        }
-
-        diagnosticTheme = candidate;
-        logDiagnosticEvent('diagnostic_generation_succeeded', userId, {
-          diagnostic_sequence: diagnosticSequence,
-          attempt,
-        });
-        break;
-      }
-
-      if (diagnosticTheme) {
-        applySelectedTopicOverride(diagnosticTheme, selectedTheme);
-        // Salvar em generated_themes
-        let diagnosticThemeId: string | null = null;
-        try {
-          const { data: themeData, error: themeError } = await supabase
-            .from('generated_themes')
-            .insert({
-              user_id: userId,
-              title: diagnosticTheme.title,
-              description: diagnosticTheme.mission,
-              grammar_focus: diagnosticTheme.requiredGrammar,
-              activity_type: diagnosticTheme.format,
-              context: diagnosticTheme.context,
-              semantic_summary: diagnosticTheme.semanticSummary,
-              difficulty: diagnosticTheme.difficulty,
-              vocabulary: diagnosticTheme.useTheseWords,
-              status: 'generated',
-            })
-            .select('id')
-            .single();
-
-          if (!themeError && themeData) {
-            diagnosticThemeId = (themeData as { id: string }).id;
-          }
-        } catch (e) {
-          console.error('Failed to save diagnostic theme:', e);
-        }
-
-        // Salvar em writing_diagnostic_missions (apenas se theme foi salvo)
-        if (diagnosticThemeId) {
-          try {
-            await saveDiagnosticMission(
-              {
-                userId,
-                themeId: diagnosticThemeId,
-                diagnosticSequence,
-                plan: diagnosticPlan,
-                rejectionLog: diagnosticRejectionLog,
-                objectiveIds: diagnosticPlan.objectives.map(o => o.id),
-              },
-              previousThemeId ?? null,
-            );
-
-            logDiagnosticEvent('diagnostic_mission_saved', userId, {
-              diagnostic_sequence: diagnosticSequence,
-              theme_id: diagnosticThemeId,
-            });
-          } catch (e) {
-            console.error('Failed to save diagnostic mission record:', e);
-          }
-        }
-
-        return res.json({
-          theme: toPublicMissionDTO(diagnosticTheme),
-          themeId: diagnosticThemeId,
-          mode: 'normal',
-        });
-      }
-
-      // Geração diagnóstica falhou completamente — continuar para modo normal
-      logDiagnosticEvent('diagnostic_generation_failed_fallback_to_normal', userId, {
-        diagnostic_sequence: diagnosticSequence,
-      });
-    }
-  }
-
   // ── REVIEW MODE ──────────────────────────────────────────────────────────────
   if (mode === 'review' && reviewGroup) {
     const rg = reviewGroup as ReviewGroupPayload;
@@ -1232,6 +608,54 @@ export default async function handler(req: any, res: any) {
       return jsonError(res, 403, reviewGenerationBlock.code, reviewGenerationBlock.message);
     }
 
+    // ── DATA-DRIVEN REVIEW PROMPT ───────────────────────────────────────────
+    // The spaced-repetition review activity prompt is composed from the DB
+    // template `writing.generate_review_activity` for the user's learning +
+    // interface language. The dynamically-built review context (student errors,
+    // required words, recent-format history, and any user-selected theme) is
+    // handed over as OPTIONAL userContext (review_context); the template owns
+    // ALL pedagogy. requireSubtopic=false — review is not part of the curricular
+    // progression. There is NO hardcoded PT/EN fallback: a misconfigured
+    // curriculum is an explicit 503 CURRICULUM_NOT_CONFIGURED.
+    const reviewContext = buildReviewUserMessage(
+      { group, items },
+      recentThemes,
+      level,
+      1,
+      selectedTheme,
+    );
+    let resolvedReviewPrompt;
+    try {
+      resolvedReviewPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+        templateKey: 'writing.generate_review_activity',
+        activityType: 'writing',
+        requireSubtopic: false,
+        userContext: { review_context: reviewContext },
+      });
+    } catch (err) {
+      if (err instanceof CurriculumConfigError) {
+        safeLog('generate-theme', 'curriculum_not_configured', 503, {
+          detail: String(err.message).slice(0, 150),
+        });
+        return jsonError(
+          res,
+          503,
+          'CURRICULUM_NOT_CONFIGURED',
+          'O currículo de escrita ainda não está configurado. Tente novamente mais tarde.',
+        );
+      }
+      throw err;
+    }
+
+    const reviewModel = resolvedReviewPrompt.model ?? AI_MODEL;
+    const reviewSystem = resolvedReviewPrompt.system;
+    // user_body optional → system-only when absent, never a fixed-language
+    // trigger (blocker 8).
+    const reviewUser = resolvedReviewPrompt.user ?? '';
+    const reviewMessages = reviewUser
+      ? [{ role: 'system' as const, content: reviewSystem }, { role: 'user' as const, content: reviewUser }]
+      : [{ role: 'system' as const, content: reviewSystem }];
+
     const MAX_REVIEW_ATTEMPTS = 3;
     let reviewTheme: Record<string, unknown> | null = null;
     let lastValidationError: string | null = null;
@@ -1240,21 +664,9 @@ export default async function handler(req: any, res: any) {
       let raw: string;
       try {
         const completion = await callTheme('review', attempt, MAX_REVIEW_ATTEMPTS, {
-          model: AI_MODEL,
-          temperature: 0.85 + (attempt - 1) * 0.08,
-          messages: [
-            { role: 'system', content: REVIEW_SYSTEM_PROMPT },
-            {
-              role: 'user',
-              content: buildReviewUserMessage(
-                { group, items },
-                recentThemes,
-                level,
-                attempt,
-                selectedTheme,
-              ),
-            },
-          ],
+          model: reviewModel,
+          temperature: resolvedReviewPrompt.temperature ?? (0.85 + (attempt - 1) * 0.08),
+          messages: reviewMessages,
         });
         raw = completion.choices[0]?.message?.content ?? '';
       } catch (err) {
@@ -1347,43 +759,44 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // ── PEDAGOGICAL PLANNER INTEGRATION ─────────────────────────────────────────
-  // Activated when PEDAGOGICAL_GENERATOR_INTEGRATION_V1=shadow|enabled.
-  // shadow  → plan built + persisted; prompt unchanged; validator skipped.
-  // enabled → plan constraints injected into prompt; output validated.
-  // Graceful degradation: any failure here falls through to the normal generation.
-
-  let activePlan: MissionPedagogicalPlan | null = null;
-  let planConstraintsSection = '';
-  let lastValidationRejection: string | null = null;
-
-  if (isGeneratorIntegrationEnabled()) {
-    try {
-      const planSeed = `${userId.slice(0, 12)}-${Date.now()}`;
-      const planResult = await generatePedagogicalPlan(supabase, {
-        userId,
-        mode: 'normal',
-        seed: planSeed,
+  // ── DATA-DRIVEN CURRICULUM PROMPT ───────────────────────────────────────────
+  // The normal-mode writing mission is composed from the DB template
+  // `writing.generate_topic` for the user's CURRENT recorte. The generic
+  // curriculum engine owns ALL pedagogy — this endpoint only runs the AI
+  // Gateway call, parses, dedups and persists. There is NO hardcoded English
+  // fallback: a misconfigured curriculum is an explicit operational error.
+  let resolvedPrompt;
+  try {
+    resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'writing.generate_topic',
+      activityType: 'writing',
+      // Dynamic bits the template MAY consume (unreferenced keys are harmless).
+      userContext: selectedTheme ? { selected_theme: selectedTheme } : undefined,
+    });
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('generate-theme', 'curriculum_not_configured', 503, {
+        detail: String(err.message).slice(0, 150),
       });
-      // Only set activePlan when generator integration is fully active (not shadow).
-      // isGeneratorIntegrationFullyActive reads PEDAGOGICAL_GENERATOR_INTEGRATION_V1,
-      // distinct from planResult.shadowMode which tracks PEDAGOGICAL_PLANNER_V1.
-      if (planResult.plan && isGeneratorIntegrationFullyActive()) {
-        activePlan = planResult.plan;
-        planConstraintsSection = buildPlanConstraintsSection(planResult.plan);
-      }
-      safeLog('generate-theme', 'planner_integration_run', 200, {
-        has_plan: !!planResult.plan,
-        planner_shadow: planResult.shadowMode,
-        integration_shadow: !isGeneratorIntegrationFullyActive(),
-        skipped: planResult.skipped,
-      });
-    } catch (e) {
-      safeLog('generate-theme', 'planner_integration_error', 500, {
-        error: String(e).slice(0, 150),
-      });
+      return jsonError(
+        res,
+        503,
+        'CURRICULUM_NOT_CONFIGURED',
+        'O currículo de escrita ainda não está configurado. Tente novamente mais tarde.',
+      );
     }
+    throw err;
   }
+
+  const normalModel = resolvedPrompt.model ?? AI_MODEL;
+  const normalSystem = resolvedPrompt.system;
+  // user_body is OPTIONAL: when absent, send only the system message — never a
+  // fixed-language trigger like "Gere a missão…" (blocker 8).
+  const normalUser = resolvedPrompt.user ?? '';
+  const normalMessages = normalUser
+    ? [{ role: 'system' as const, content: normalSystem }, { role: 'user' as const, content: normalUser }]
+    : [{ role: 'system' as const, content: normalSystem }];
+  const baseTemperature = resolvedPrompt.temperature ?? 0.88;
 
   const MAX_ATTEMPTS = 3;
   let theme: Record<string, unknown> | null = null;
@@ -1391,22 +804,13 @@ export default async function handler(req: any, res: any) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     let raw: string;
 
-    // Build user message — append plan constraints when integration is fully active
-    let userContent = buildUserMessage(learningContext ?? {}, recentThemes, excludedTheme ?? null, attempt, selectedTheme);
-    if (activePlan) {
-      userContent += lastValidationRejection
-        ? buildRepairSection(activePlan, lastValidationRejection)
-        : planConstraintsSection;
-    }
-
     try {
       const completion = await callTheme('normal', attempt, MAX_ATTEMPTS, {
-        model: AI_MODEL,
-        temperature: 0.88 + (attempt - 1) * 0.06,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
-        ],
+        model: normalModel,
+        // Bump temperature per attempt to diversify retries against the
+        // history-based similarity guard below.
+        temperature: baseTemperature + (attempt - 1) * 0.06,
+        messages: normalMessages,
       });
       raw = completion.choices[0]?.message?.content ?? '';
     } catch (err) {
@@ -1433,23 +837,6 @@ export default async function handler(req: any, res: any) {
 
     const candidate = normalizeTheme(parsed);
 
-    // Pedagogical validation — only when plan is active and validator is configured
-    if (activePlan && isMissionValidatorActive()) {
-      const validation = validateMissionAgainstPedagogicalPlan(
-        candidate as unknown as Parameters<typeof validateMissionAgainstPedagogicalPlan>[0],
-        activePlan,
-      );
-      if (!validation.valid && isMissionValidatorEnforcing() && attempt < MAX_ATTEMPTS) {
-        lastValidationRejection = validation.rejectionDetail ?? validation.rejectionCode ?? 'UNKNOWN';
-        safeLog('generate-theme', 'mission_validation_rejected', 200, {
-          attempt,
-          rejection_code: validation.rejectionCode ?? 'UNKNOWN',
-        });
-        continue;
-      }
-      lastValidationRejection = null;
-    }
-
     // Skip similarity check on last attempt to guarantee a response
     if (attempt < MAX_ATTEMPTS && isTooSimilar(candidate, recentThemes)) {
       console.log(`Attempt ${attempt}: too similar to history, retrying…`);
@@ -1458,17 +845,6 @@ export default async function handler(req: any, res: any) {
 
     theme = candidate;
     break;
-  }
-
-  // Deterministic fallback: if all AI attempts failed and we have a plan, use a template
-  if (!theme && activePlan) {
-    try {
-      const template = selectFallbackTemplate(activePlan.effectiveLevel, activePlan.difficulty);
-      theme = buildFallbackCandidate(template, activePlan.effectiveLevel);
-      safeLog('generate-theme', 'fallback_template_used', 200, { template_id: template.id });
-    } catch (e) {
-      safeLog('generate-theme', 'fallback_template_error', 500, {});
-    }
   }
 
   if (!theme) {
@@ -1493,6 +869,11 @@ export default async function handler(req: any, res: any) {
         difficulty: theme.difficulty,
         vocabulary: theme.useTheseWords,
         status: 'generated',
+        // Curricular identity the writing mission was GENERATED for — read at
+        // review time so the writing practice binds to THIS recorte, never the
+        // current pointer if it advanced meanwhile (blocker 7).
+        curriculum_version_id: resolvedPrompt.versionId,
+        curriculum_subtopic_key: resolvedPrompt.subtopicKey,
       })
       .select('id')
       .single();

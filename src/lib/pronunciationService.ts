@@ -16,8 +16,9 @@ export interface PronunciationServiceOptions {
   referenceText: string;
   wavFile: File;
   audioDurationMs: number;
-  // Server-resolved from audio.azure.defaultLocale (see /start endpoints);
-  // optional so existing callers that don't yet forward it keep working.
+  // Data-driven Azure recognition locale resolved server-side from the user's
+  // learning language (public.languages.speech_locale). Optional: when absent
+  // the SDK auto-detects rather than forcing a hardcoded English locale.
   language?: string;
 }
 
@@ -191,7 +192,12 @@ export function createRecognitionSession(options: PronunciationServiceOptions): 
     } = sdk;
 
     const speechConfig = SpeechConfig.fromAuthorizationToken(options.token, options.region);
-    speechConfig.speechRecognitionLanguage = options.language ?? 'en-US';
+    // Recognition locale is data-driven (server resolves it from the learning
+    // language). Set it only when provided; if absent (older server), let Azure
+    // auto-detect rather than forcing a hardcoded English locale.
+    if (options.language) {
+      speechConfig.speechRecognitionLanguage = options.language;
+    }
 
     const paCfg = new PronunciationAssessmentConfig(
       options.referenceText,

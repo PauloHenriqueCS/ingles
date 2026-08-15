@@ -92,12 +92,6 @@ export default function AudioSettingsView({ onBack }: Props) {
     }
   }
 
-  const ACCENTS: { value: AudioSettings['accent']; label: string; note?: string }[] = [
-    { value: 'american',   label: 'Americano' },
-    { value: 'british',    label: 'Britânico',   note: 'em breve' },
-    { value: 'australian', label: 'Australiano', note: 'em breve' },
-  ];
-
   const SPEEDS: AudioSettings['playbackRate'][] = [0.75, 0.9, 1];
 
   if (loadState === 'loading') {
@@ -208,34 +202,6 @@ export default function AudioSettingsView({ onBack }: Props) {
           {previewingId && previewStatus === 'error' && (
             <p className="text-xs text-red-400">Não foi possível reproduzir o áudio de prévia.</p>
           )}
-        </section>
-
-        {/* Accent */}
-        <section className="bg-slate-800 rounded-xl p-5 space-y-3">
-          <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Sotaque</p>
-          <div className="flex gap-2 flex-wrap">
-            {ACCENTS.map(({ value, label, note }) => {
-              const isSelected = settings.accent === value;
-              const disabled = !!note;
-              return (
-                <button
-                  key={value}
-                  onClick={() => { if (!disabled) setSettings((s) => ({ ...s, accent: value })); }}
-                  disabled={disabled}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors
-                    ${isSelected && !disabled
-                      ? 'bg-blue-600 text-white'
-                      : disabled
-                      ? 'bg-slate-700/50 text-slate-600 cursor-not-allowed'
-                      : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                >
-                  {label}
-                  {note && <span className="text-xs text-slate-600 font-normal">({note})</span>}
-                </button>
-              );
-            })}
-          </div>
         </section>
 
         {/* Speed */}

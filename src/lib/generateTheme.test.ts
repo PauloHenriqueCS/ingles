@@ -4,12 +4,12 @@ import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitleme
 
 // ── Hoist mock refs before vi.mock factory runs ───────────────────────────────
 
-const { mockCreate, gw, mockGetDiagnosticContext } = vi.hoisted(() => {
+const { mockCreate, gw, mockResolveActivityPrompt } = vi.hoisted(() => {
   const mockCreate = vi.fn();
-  const mockGetDiagnosticContext = vi.fn();
+  const mockResolveActivityPrompt = vi.fn();
   return {
     mockCreate,
-    mockGetDiagnosticContext,
+    mockResolveActivityPrompt,
     gw: {} as ReturnType<typeof import('../../api/__tests__/_ai-gateway-test-helpers').createMockGatewayDeps>,
   };
 });
@@ -25,18 +25,24 @@ vi.mock('../../api/_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
-// Diagnostic mode is feature-flagged off in every test below (the real
-// getDiagnosticGenerationContext already returns a no-op context when
-// WRITING_DIAGNOSTIC_V1 is unset, which it is here) — only the one test that
-// specifically targets the diagnostic idempotency/theme-cache fix overrides
-// this mock.
-vi.mock('../../api/_diagnostic-service', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../api/_diagnostic-service')>();
-  // Default passthrough to the real implementation (returns the no-op
-  // context since WRITING_DIAGNOSTIC_V1 is unset in tests) — individual
-  // tests may override with mockGetDiagnosticContext.mockResolvedValueOnce(...).
-  mockGetDiagnosticContext.mockImplementation(actual.getDiagnosticGenerationContext);
-  return { ...actual, getDiagnosticGenerationContext: mockGetDiagnosticContext };
+// Data-driven curriculum runtime — normal-mode writing prompts are now composed
+// from the DB curriculum template `writing.generate_topic` (the hardcoded
+// English SYSTEM_PROMPT + selected-theme prompt blocks were removed from the
+// normal path). resolveActivityPrompt is stubbed to a fixed composed prompt
+// (model null → handler falls back to AI_MODEL) so the parse/dedup/persist path
+// is exercised exactly as before. importOriginal preserves the real
+// CurriculumConfigError so the handler's `err instanceof CurriculumConfigError`
+// 503 branch keeps working.
+vi.mock('../../api/_curriculum/service-client', () => ({
+  getCurriculumServiceClient: () => ({}),
+}));
+vi.mock('../../api/_curriculum/curriculum-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/_curriculum/curriculum-runtime')>();
+  return {
+    ...actual,
+    resolveActivityPrompt: mockResolveActivityPrompt,
+    recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  };
 });
 
 vi.mock('openai', () => ({
@@ -61,7 +67,7 @@ vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
 
 import { requireAuth } from '../../api/_auth';
 import { WRITING_THEMES } from '../domain/writing/writing-themes';
-import { createDiagnosticPlan } from '../domain/diagnostic/writing-diagnostic-planner';
+import { CurriculumConfigError } from '../../api/_curriculum/curriculum-runtime';
 import handler, {
   normalizeTheme,
   parseRawContent,
@@ -196,6 +202,20 @@ beforeEach(() => {
 
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   mockCreate.mockImplementation(() => aiResponse(VALID_THEME_JSON));
+
+  // Fixed data-driven composed prompt for normal-mode generation. The handler
+  // now sends `system`/`user` verbatim from this and falls back to AI_MODEL
+  // when `model` is null. Tests that need to assert theme injection read the
+  // opts passed to this mock (userContext.selected_theme).
+  mockResolveActivityPrompt.mockResolvedValue({
+    system: 'CURRICULUM_SYSTEM_PROMPT',
+    user: 'Gere a missão de escrita agora.',
+    model: null,
+    temperature: 0.88,
+    subtopicKey: 'recorte-1',
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  });
 });
 
 afterEach(() => {
@@ -697,77 +717,56 @@ describe('handler — modo normal', () => {
   });
 });
 
-// ── handler — tema selecionado (correção "Missão do dia" ignora tema) ────────
+// ── handler — tema selecionado (Missão do dia) via currículo data-driven ─────
 //
-// Estas provam a cadeia completa sem chamar a IA real: o endpoint recebe o
-// valor técnico do select (ex: 'football_sports'), converte para o label
-// canônico usando src/domain/writing/writing-themes.ts (nunca uma segunda
-// lista), e o prompt final enviado à IA contém o tema como requisito
-// obrigatório — nunca como sugestão solta.
+// O bloco de "tema obrigatório" hardcoded no prompt (texto em PT injetado
+// direto na mensagem do usuário) foi REMOVIDO do caminho normal. O endpoint
+// ainda recebe o valor técnico do select (ex: 'football_sports') e o converte
+// para o label canônico via src/domain/writing/writing-themes.ts (nunca uma
+// segunda lista) — mas agora esse label é entregue ao motor de currículo
+// através de `userContext.selected_theme`, e é o template do banco que decide
+// como usá-lo. Estas provas verificam o contrato data-driven (o que o handler
+// passa para resolveActivityPrompt), não mais o texto interno do prompt.
 
-describe('handler — tema selecionado (Missão do dia)', () => {
-  it('endpoint aceita o campo theme e o converte para o label canônico no prompt', async () => {
+describe('handler — tema selecionado (Missão do dia) via currículo', () => {
+  it('converte o valor técnico do select para o label canônico e o injeta em userContext.selected_theme', async () => {
     const req = makeReq({ body: { theme: 'football_sports' } });
     await handler(req, makeRes());
 
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('Futebol e esportes');
-  });
-
-  it('o tema aparece como requisito obrigatório, não como sugestão solta', async () => {
-    const req = makeReq({ body: { theme: 'football_sports' } });
-    await handler(req, makeRes());
-
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Futebol e esportes.');
-    expect(userMessage).toContain('não pode substituir ou ignorar o tema escolhido');
-    // The old, weak, easily-ignored wording must be gone.
-    expect(userMessage).not.toContain('TEMA SOLICITADO PELO USUÁRIO');
-  });
-
-  it('instrui explicitamente que título, situação, tarefa e vocabulário devem se relacionar ao tema', async () => {
-    const req = makeReq({ body: { theme: 'football_sports' } });
-    await handler(req, makeRes());
-
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('título, a situação e o que o usuário deve escrever');
-    expect(userMessage).toContain('suggestedVocabulary');
-  });
-
-  it('o tema tem prioridade explícita sobre o histórico do usuário no prompt', async () => {
-    const req = makeReq({ body: { theme: 'football_sports' } });
-    await handler(req, makeRes());
-
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('histórico do usuário pode personalizar a dificuldade e o contexto, mas não pode substituir ou ignorar o tema escolhido');
+    expect(mockResolveActivityPrompt).toHaveBeenCalledWith(
+      expect.anything(),
+      USER_ID,
+      expect.objectContaining({
+        templateKey: 'writing.generate_topic',
+        activityType: 'writing',
+        userContext: { selected_theme: 'Futebol e esportes' },
+      }),
+    );
   });
 
   it('funciona para cada valor técnico do catálogo canônico (mesma lista do select)', async () => {
     for (const t of WRITING_THEMES) {
-      mockCreate.mockClear();
+      mockResolveActivityPrompt.mockClear();
       const req = makeReq({ body: { theme: t.value } });
       await handler(req, makeRes());
-      const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-      expect(userMessage).toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
+      const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, unknown> };
+      expect(opts.userContext).toEqual({ selected_theme: t.label });
     }
   });
 
-  it('"tema aleatório" (campo ausente) mantém o comportamento anterior — nenhum bloco de tema obrigatório', async () => {
+  it('"tema aleatório" (campo ausente) não injeta selected_theme algum no currículo', async () => {
     const req = makeReq({ body: {} });
     await handler(req, makeRes());
-
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
-    expect(userMessage).not.toContain('TEMA SOLICITADO');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
+    expect(opts.userContext).toBeUndefined();
   });
 
-  it('"tema aleatório" (theme: null explícito) também mantém o comportamento anterior', async () => {
+  it('"tema aleatório" (theme: null explícito) também não injeta selected_theme', async () => {
     const req = makeReq({ body: { theme: null } });
     await handler(req, makeRes());
-
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
+    expect(opts.userContext).toBeUndefined();
   });
 
   it('valor de theme desconhecido/inválido é tratado como aleatório, sem quebrar', async () => {
@@ -776,8 +775,8 @@ describe('handler — tema selecionado (Missão do dia)', () => {
     await handler(req, res);
 
     expect(res._status).toBe(200);
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
+    expect(opts.userContext).toBeUndefined();
   });
 
   it('não faz nenhuma chamada de IA extra além da que já existia (1 tentativa quando a primeira é válida)', async () => {
@@ -786,11 +785,14 @@ describe('handler — tema selecionado (Missão do dia)', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 
-  it('o tema selecionado nunca aparece na resposta HTTP como texto de debug (não vaza estrutura interna do prompt)', async () => {
+  it('o prompt composto (system/user) nunca vaza na resposta HTTP como texto de debug', async () => {
     const req = makeReq({ body: { theme: 'football_sports' } });
     const res = makeRes();
     await handler(req, res);
     expect(res._status).toBe(200);
+    const serialized = JSON.stringify(res._body);
+    expect(serialized).not.toContain('CURRICULUM_SYSTEM_PROMPT');
+    expect(serialized).not.toContain('Gere a missão de escrita agora.');
   });
 
   it('a tag/context final reflete o tema selecionado mesmo que a IA retorne um context diferente', async () => {
@@ -813,85 +815,24 @@ describe('handler — tema selecionado (Missão do dia)', () => {
   });
 });
 
-// ── handler — cache diagnóstico não pode ignorar um novo tema selecionado ────
+// ── handler — currículo mal configurado → 503 CURRICULUM_NOT_CONFIGURED ───────
 //
-// Bug real encontrado na investigação: quando o modo diagnóstico (feature
-// flag WRITING_DIAGNOSTIC_V1, desligada por padrão) está ativo e já existe
-// uma missão diagnóstica gerada, o endpoint reaproveitava essa missão salva
-// no banco incondicionalmente — mesmo que o usuário tivesse acabado de
-// selecionar um tema novo. Corrigido: a reutilização só é permitida quando
-// nenhum tema foi solicitado nesta chamada.
+// Substitui a antiga suíte de "cache diagnóstico" (o caminho diagnóstico e o
+// cache de missão foram REMOVIDOS do endpoint). O novo contrato data-driven:
+// um currículo ausente/mal configurado é um erro operacional explícito, nunca
+// um fallback silencioso para um prompt hardcoded em inglês.
 
-describe('handler — cache diagnóstico e tema selecionado', () => {
-  const existingMission = {
-    id: 'diag-mission-1',
-    user_id: USER_ID,
-    theme_id: 'old-theme-id',
-    diagnostic_sequence: 1 as const,
-    catalog_version: 1,
-    diagnostic_plan: {},
-    objective_ids: [],
-    status: 'generated' as const,
-    regeneration_count: 0,
-    rejection_log: [],
-    prompt_version: 'v1',
-    validator_version: 'v1',
-    accepted_at: null,
-  };
-
-  it('com tema selecionado: NÃO reaproveita a missão diagnóstica existente — gera uma nova respeitando o tema', async () => {
-    mockGetDiagnosticContext.mockResolvedValueOnce({
-      shouldUseDiagnostic: true,
-      diagnosticSequence: 1,
-      existingActiveMission: existingMission,
-      diagnosticPlan: createDiagnosticPlan(1),
-      status: 'mission_1_generated',
-    });
-
-    const req = makeReq({ body: { theme: 'football_sports' } });
+describe('handler — currículo mal configurado', () => {
+  it('retorna 503 CURRICULUM_NOT_CONFIGURED e nunca chama a IA quando o currículo não está configurado', async () => {
+    mockResolveActivityPrompt.mockRejectedValueOnce(
+      new CurriculumConfigError('No published curriculum for learning_language="en"'),
+    );
     const res = makeRes();
-    await handler(req, res);
+    await handler(makeReq(), res);
 
-    expect(res._status).toBe(200);
-    expect(mockCreate).toHaveBeenCalled();
-    const firstCallUserMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(firstCallUserMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Futebol e esportes.');
-  });
-
-  it('sem tema selecionado: idempotência original é preservada — retorna a missão existente sem chamar a IA', async () => {
-    mockGetDiagnosticContext.mockResolvedValueOnce({
-      shouldUseDiagnostic: true,
-      diagnosticSequence: 1,
-      existingActiveMission: existingMission,
-      diagnosticPlan: createDiagnosticPlan(1),
-      status: 'mission_1_generated',
-    });
-
-    const existingThemeRow = {
-      id: 'old-theme-id',
-      title: 'Missão antiga já gerada',
-      description: 'Descrição da missão antiga.',
-      activity_type: 'e-mail',
-      context: 'trabalho',
-      semantic_summary: 'Formato: e-mail',
-      difficulty: 'medium',
-      vocabulary: [],
-      grammar_focus: [],
-    };
-    const themeRowChain: Record<string, unknown> = {};
-    for (const m of ['select', 'eq']) themeRowChain[m] = vi.fn().mockReturnValue(themeRowChain);
-    (themeRowChain as any).maybeSingle = vi.fn().mockResolvedValue({ data: existingThemeRow, error: null });
-    const mockSupa = { from: vi.fn(() => themeRowChain), rpc: vi.fn() };
-    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: mockSupa as any });
-
-    const req = makeReq({ body: {} });
-    const res = makeRes();
-    await handler(req, res);
-
-    expect(res._status).toBe(200);
+    expect(res._status).toBe(503);
+    expect((res._body as Record<string, unknown>).code).toBe('CURRICULUM_NOT_CONFIGURED');
     expect(mockCreate).not.toHaveBeenCalled();
-    const body = res._body as Record<string, unknown>;
-    expect((body.theme as Record<string, unknown>).title).toBe('Missão antiga já gerada');
   });
 });
 
@@ -1080,21 +1021,29 @@ describe('handler — modo revisão com tema selecionado (Missão do dia ignorav
     );
   });
 
-  it('injeta TEMA OBRIGATÓRIO no prompt de revisão quando um tema é selecionado', async () => {
+  // Data-driven: the review prompt now lives in the DB template
+  // `writing.generate_review_activity`. The dynamically-built review context
+  // (which carries the TEMA OBRIGATÓRIO block when a theme is selected) flows to
+  // the curriculum engine via userContext.review_context — not as raw text
+  // injected into the OpenAI user message. So we assert on what the handler
+  // hands to resolveActivityPrompt.
+  it('injeta TEMA OBRIGATÓRIO no review_context de revisão quando um tema é selecionado', async () => {
     const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
     await handler(req, makeRes());
 
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Música.');
-    expect(userMessage).toContain('mesmo que o tema original do grupo de revisão abaixo seja outro');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { templateKey: string; userContext?: Record<string, string> };
+    expect(opts.templateKey).toBe('writing.generate_review_activity');
+    const reviewContext = opts.userContext?.review_context ?? '';
+    expect(reviewContext).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Música.');
+    expect(reviewContext).toContain('mesmo que o tema original do grupo de revisão abaixo seja outro');
   });
 
-  it('deixa explícito no prompt que requiredWords não é afetado pelo tema', async () => {
+  it('deixa explícito no review_context que requiredWords não é afetado pelo tema', async () => {
     const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
     await handler(req, makeRes());
 
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).toContain('Isso NUNCA afeta requiredWords');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
+    expect(opts.userContext?.review_context ?? '').toContain('Isso NUNCA afeta requiredWords');
   });
 
   it('a missão antiga de viagem não é reaproveitada: a tag final reflete Música, não o tema original do grupo', async () => {
@@ -1121,17 +1070,18 @@ describe('handler — modo revisão com tema selecionado (Missão do dia ignorav
     const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup } });
     await handler(req, makeRes());
 
-    const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-    expect(userMessage).not.toContain('TEMA OBRIGATÓRIO');
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
+    expect(opts.userContext?.review_context ?? '').not.toContain('TEMA OBRIGATÓRIO');
   });
 
   it('funciona para todo o catálogo canônico de temas também no modo revisão', async () => {
     for (const t of WRITING_THEMES) {
       mockCreate.mockClear();
+      mockResolveActivityPrompt.mockClear();
       const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: t.value } });
       await handler(req, makeRes());
-      const userMessage = mockCreate.mock.calls[0][0].messages[1].content as string;
-      expect(userMessage).toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
+      const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
+      expect(opts.userContext?.review_context ?? '').toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
     }
   });
 });

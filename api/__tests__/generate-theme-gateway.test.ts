@@ -111,7 +111,27 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 
-// Diagnostic mode — off by default; individual tests override mockGetDiagnosticContext.
+// Data-driven curriculum runtime — normal-mode prompts are now composed from
+// the DB curriculum template. resolveActivityPrompt is stubbed to return a
+// fixed prompt (model null → handler falls back to AI_MODEL), so the gateway /
+// telemetry / billing path is exercised exactly as before.
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'CURRICULUM_SYSTEM_PROMPT',
+    user: 'Gere a missão de escrita agora.',
+    model: null,
+    temperature: 0.88,
+    subtopicKey: 'recorte-1',
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+
+// Diagnostic mode — REMOVED from the live path (disconnected, being reworked as
+// the placement test). Mock kept only so any stale reference stays inert.
 vi.mock('../_diagnostic-service', () => ({
   getDiagnosticGenerationContext: mockGetDiagnosticContext,
   saveDiagnosticMission: vi.fn(),
@@ -590,53 +610,6 @@ describe('failure resilience', () => {
   });
 });
 
-// ── 17. Cache / no-OpenAI path never creates a billable event ─────────────────
-
-describe('existing-mission shortcut (no physical call)', () => {
-  beforeEach(() => {
-    mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
-  });
-
-  it('returning an existing diagnostic mission never calls OpenAI or creates telemetry', async () => {
-    mockGetDiagnosticContext.mockResolvedValue({
-      shouldUseDiagnostic: true,
-      diagnosticSequence: 1,
-      existingActiveMission: { theme_id: 'existing-theme-1' },
-      diagnosticPlan: null,
-    });
-    const supa = makeDefaultSupabase();
-    (supa.from as any) = vi.fn((table: string) => {
-      if (table === 'generated_themes') {
-        return {
-          update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ data: null, error: null }) }) }),
-          select: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              order: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) }),
-              eq: vi.fn().mockReturnValue({
-                maybeSingle: vi.fn().mockResolvedValue({
-                  data: { id: 'existing-theme-1', title: 'Old', description: 'desc', activity_type: 'e-mail', context: 'trabalho', semantic_summary: '', difficulty: 'easy', vocabulary: [], grammar_focus: [] },
-                  error: null,
-                }),
-              }),
-            }),
-          }),
-          insert: vi.fn(),
-        };
-      }
-      return makeChain({ data: null, error: null });
-    });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: supa });
-
-    const res = makeRes();
-    await handler(makeReq(), res);
-
-    expect(mockCreate).not.toHaveBeenCalled();
-    expect(mockStartEvent).not.toHaveBeenCalled();
-    expect(res._status()).toBe(200);
-    expect((res._body() as any).themeId).toBe('existing-theme-1');
-  });
-});
-
 // ── 18. user_id matches the authenticated user ─────────────────────────────────
 
 describe('user isolation', () => {
@@ -771,37 +744,6 @@ describe('review phase', () => {
   });
 });
 
-// ── Diagnostic phase attemptNumber continues into normal phase ────────────────
-
-describe('diagnostic phase falling through to normal phase', () => {
-  it('physicalAttempt keeps counting from the diagnostic phase into the normal phase, without resetting', async () => {
-    mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
-    mockGetDiagnosticContext.mockResolvedValue({
-      shouldUseDiagnostic: true,
-      diagnosticSequence: 1,
-      existingActiveMission: null,
-      diagnosticPlan: { objectives: [] },
-    });
-    // Both diagnostic attempts fail validation (invalid JSON) -> falls through to normal mode.
-    mockCreate
-      .mockImplementationOnce(() => aiOk('not json'))     // diagnostic attempt 1
-      .mockImplementationOnce(() => aiOk('not json'))     // diagnostic attempt 2 (MAX_DIAGNOSTIC_GENERATION_ATTEMPTS)
-      .mockImplementationOnce(() => aiOk(VALID_THEME_JSON)); // normal attempt 1
-
-    await handler(makeReq(), makeRes());
-
-    expect(mockStartEvent).toHaveBeenCalledTimes(3);
-    const calls = mockStartEvent.mock.calls.map((c) => c[0] as any);
-    expect(calls.map((c) => c.attemptNumber)).toEqual([1, 2, 3]);
-    expect(calls.map((c) => c.metadata.phase)).toEqual(['diagnostic', 'diagnostic', 'normal']);
-    expect(calls.map((c) => c.metadata.physicalAttempt)).toEqual([1, 2, 3]);
-    // phaseAttempt resets per phase — only physicalAttempt is global.
-    expect(calls.map((c) => c.metadata.phaseAttempt)).toEqual([1, 2, 1]);
-    // correlationId is identical across the phase change.
-    expect(new Set(calls.map((c) => c.correlationId)).size).toBe(1);
-  });
-});
-
 // ── Plan entitlements enforcement ──────────────────────────────────────────────
 
 describe('plan entitlements enforcement', () => {
@@ -839,49 +781,6 @@ describe('plan entitlements enforcement', () => {
 
     expect(mockCreate).toHaveBeenCalledTimes(1);
     expect(res._status()).toBe(200);
-  });
-
-  it('does not block the diagnostic "reuse existing mission" shortcut on the daily generation limit', async () => {
-    const entitlements = permissiveEntitlements();
-    entitlements.writing.themeGenerations = {
-      enabled: true, unlimited: false, limit: 1, consumed: 1, remaining: 0, period: 'day', state: 'daily_limit_reached', canStart: false,
-    };
-    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
-    mockGetDiagnosticContext.mockResolvedValue({
-      shouldUseDiagnostic: true,
-      diagnosticSequence: 1,
-      existingActiveMission: { theme_id: 'existing-theme-1' },
-      diagnosticPlan: null,
-    });
-    const supa = makeDefaultSupabase();
-    (supa.from as any) = vi.fn((table: string) => {
-      if (table === 'generated_themes') {
-        return {
-          update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ data: null, error: null }) }) }),
-          select: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              order: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [], error: null }) }),
-              eq: vi.fn().mockReturnValue({
-                maybeSingle: vi.fn().mockResolvedValue({
-                  data: { id: 'existing-theme-1', title: 'Old', description: 'desc', activity_type: 'e-mail', context: 'trabalho', semantic_summary: '', difficulty: 'easy', vocabulary: [], grammar_focus: [] },
-                  error: null,
-                }),
-              }),
-            }),
-          }),
-          insert: vi.fn(),
-        };
-      }
-      return makeChain({ data: null, error: null });
-    });
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: supa });
-
-    const res = makeRes();
-    await handler(makeReq(), res);
-
-    expect(mockCreate).not.toHaveBeenCalled();
-    expect(res._status()).toBe(200);
-    expect((res._body() as any).themeId).toBe('existing-theme-1');
   });
 
   it('resolves entitlements from the authenticated userId, never from the request body', async () => {

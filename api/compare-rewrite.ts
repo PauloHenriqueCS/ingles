@@ -6,6 +6,8 @@ import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, s
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric, DedupeBeginResult } from './_ai-gateway/index';
+import { getCurriculumServiceClient } from './_curriculum/service-client';
+import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
@@ -114,132 +116,23 @@ async function lookupStoredFinalText(
   return { entryDate, reusableFinalText: storedFinal && unchanged ? storedFinal : null };
 }
 
-const SYSTEM_PROMPT_COMPARE = `Você é um professor de inglês para brasileiros adultos iniciantes.
-
-O aluno escreveu um texto em inglês, recebeu uma correção e depois tentou criar uma segunda versão corrigindo os próprios erros.
-
-Sua tarefa é comparar:
-1. o texto original;
-2. o texto corrigido de referência;
-3. a versão 2 escrita pelo aluno;
-4. os principais erros apontados na primeira revisão.
-
-Avalie se o aluno realmente melhorou o texto.
-
-Você deve responder em português do Brasil, exceto nos exemplos em inglês.
-
-Seja didático, direto e encorajador.
-Não humilhe o aluno.
-Não diga apenas que está certo ou errado.
-Explique o que melhorou e o que ainda precisa ser treinado.
-
-Retorne somente JSON válido.
-Não use markdown.
-Não escreva nada antes ou depois do JSON.
-
-Formato obrigatório:
-
-{
-  "improvementScore": number,
-  "fixedMistakesCount": number,
-  "remainingMistakesCount": number,
-  "fixedMistakes": [
-    {
-      "mistake": string,
-      "original": string,
-      "rewrite": string,
-      "feedback": string
-    }
-  ],
-  "remainingMistakes": [
-    {
-      "mistake": string,
-      "rewrite": string,
-      "correct": string,
-      "feedback": string
-    }
-  ],
-  "newIssues": [
-    {
-      "issue": string,
-      "rewrite": string,
-      "suggestion": string
-    }
-  ],
-  "overallFeedback": string,
-  "nextAction": string
-}
-
-Regras:
-- improvementScore deve ir de 0 a 100.
-- fixedMistakesCount deve indicar quantos erros da primeira revisão foram corrigidos na versão 2.
-- remainingMistakesCount deve indicar quantos erros ainda permaneceram.
-- fixedMistakes deve listar erros que o aluno conseguiu corrigir.
-- remainingMistakes deve listar erros que o aluno ainda não corrigiu.
-- newIssues deve listar novos problemas criados na versão 2, se existirem.
-- overallFeedback deve resumir a evolução da versão 1 para a versão 2.
-- nextAction deve sugerir uma tarefa curta para fixar o aprendizado.
-- Se a versão 2 for muito semelhante ao texto corrigido de referência, diga de forma gentil que parece ter sido copiada e incentive o aluno a tentar escrever com as próprias palavras.
-- Se a versão 2 for idêntica ao texto original, diga que ainda não houve melhora suficiente e oriente o aluno a focar nos erros apontados.
-- Se a versão 2 estiver melhor, reconheça claramente a melhora.
-- Se a versão 2 tiver menos erros mas ainda não estiver perfeita, valorize o progresso e explique o próximo ajuste.
-- Não reescrever o texto inteiro para o aluno.`;
-
-const SYSTEM_PROMPT_CORRECT = `You are an expert English writing coach for Brazilian adult learners.
-
-Your task: produce a clean, final corrected version of a student's rewritten text.
-
-Context:
-- The student received AI feedback on their first draft and saw a corrected version.
-- They wrote a second version (Version 2) trying to fix the errors on their own.
-- You must now correct any remaining issues in the student's Version 2.
-
-Rules:
-- Fix ALL grammatical errors, unnatural phrasing, and vocabulary mistakes in the student's Version 2.
-- Preserve the student's original meaning, ideas, and voice as closely as possible.
-- Keep similar length and structure — do not expand, summarize, or add new ideas.
-- Do NOT replace the text with a completely different composition.
-- Use natural English appropriate to the student's level.
-- Output ONLY the corrected text. No labels, no explanations, no markdown, no preamble, no postamble.`;
-
-function buildUserMessage(
-  originalText: string,
-  correctedText: string,
-  rewriteText: string,
-  mainMistakes: { original: string; correct: string; explanation: string }[]
+/**
+ * Renders the "principais erros da primeira revisão" block passed to the
+ * comparison prompt via {{main_mistakes}}. The pedagogical framing lives in
+ * the DB template; this only formats the caller-supplied error list into the
+ * same numbered text the previous hardcoded prompt used. Never empty (the
+ * template's required placeholder must resolve to a non-empty value).
+ */
+function buildMainMistakesText(
+  mainMistakes: { original: string; correct: string; explanation: string }[],
 ): string {
+  if (mainMistakes.length === 0) return '(nenhum erro específico listado na primeira revisão)';
   const lines: string[] = [];
-  lines.push('=== TEXTO ORIGINAL DO ALUNO ===');
-  lines.push(originalText.trim());
-  lines.push('');
-  lines.push('=== TEXTO CORRIGIDO DE REFERÊNCIA ===');
-  lines.push(correctedText.trim());
-  lines.push('');
-  lines.push('=== VERSÃO 2 ESCRITA PELO ALUNO ===');
-  lines.push(rewriteText.trim());
-  lines.push('');
-  if (mainMistakes.length > 0) {
-    lines.push('=== PRINCIPAIS ERROS DA PRIMEIRA REVISÃO ===');
-    mainMistakes.forEach((m, i) => {
-      lines.push(`${i + 1}. Você escreveu: "${m.original}" → Correto: "${m.correct}"`);
-      if (m.explanation) lines.push(`   Explicação: ${m.explanation}`);
-    });
-  }
+  mainMistakes.forEach((m, i) => {
+    lines.push(`${i + 1}. Você escreveu: "${m.original}" → Correto: "${m.correct}"`);
+    if (m.explanation) lines.push(`   Explicação: ${m.explanation}`);
+  });
   return lines.join('\n');
-}
-
-function buildFinalCorrectionPrompt(rewriteText: string, correctedText: string): string {
-  return `Reference (AI correction of student's first draft):
-"""
-${correctedText.trim()}
-"""
-
-Student's Version 2 (to be corrected):
-"""
-${rewriteText.trim()}
-"""
-
-Produce the final corrected version of Version 2 now:`;
 }
 
 // ── Metric extractor — reads from SDK response, never invents values ──────────
@@ -366,6 +259,29 @@ export default async function handler(req: any, res: any) {
       }
     }
 
+    // Data-driven prompt (DB-sourced; no hardcoded English fallback). Review /
+    // rewrite is NOT part of curricular progression → requireSubtopic:false and
+    // NO practice is recorded. CurriculumConfigError surfaces as an explicit
+    // operational error rather than a silent English prompt.
+    let correctSystem: string;
+    let correctUser: string;
+    try {
+      const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+        templateKey: 'writing.correct_v2_text',
+        activityType: 'writing',
+        requireSubtopic: false,
+        userContext: { corrected_text: correctedText.trim(), rewrite_text: rewriteText.trim() },
+      });
+      correctSystem = resolved.system;
+      correctUser = resolved.user ?? '';
+    } catch (err) {
+      if (err instanceof CurriculumConfigError) {
+        safeLog('compare-rewrite', 'curriculum_config_error', 500, { mode: 'final_text_only' });
+        return jsonError(res, 500, 'CURRICULUM_CONFIG_ERROR', 'O serviço está temporariamente indisponível. Tente novamente.');
+      }
+      throw err;
+    }
+
     if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
 
     // ── Gateway context — created only once auth/validation/rate-limit have
@@ -431,7 +347,7 @@ export default async function handler(req: any, res: any) {
             flowType: 'final_text_only',
           },
           estimatedMetrics: estimateTextTokens(
-            SYSTEM_PROMPT_CORRECT.length + buildFinalCorrectionPrompt(rewriteText, correctedText).length,
+            correctSystem.length + correctUser.length,
             DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
           ),
         },
@@ -439,8 +355,8 @@ export default async function handler(req: any, res: any) {
           model: AI_MODEL,
           temperature: 0.2,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT_CORRECT },
-            { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
+            { role: 'system', content: correctSystem },
+            { role: 'user', content: correctUser },
           ],
         }),
         gatewayDeps,
@@ -498,6 +414,46 @@ export default async function handler(req: any, res: any) {
   }
 
   if (!await applyRateLimit(res, userId, 'compare-rewrite')) return;
+
+  // ── Data-driven prompts (DB-sourced; no hardcoded English fallback) ────────
+  // Both the comparison and the final-correction prompts come from the DB.
+  // Review / rewrite is NOT part of curricular progression → requireSubtopic:
+  // false and NO practice is recorded. Resolved up-front (before any dedupe
+  // lock is held) so a CurriculumConfigError returns an explicit operational
+  // error without stranding a lock.
+  let compareSystem: string;
+  let compareUser: string;
+  let correctSystem: string;
+  let correctUser: string;
+  try {
+    const compareResolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'writing.compare_rewrite',
+      activityType: 'writing',
+      requireSubtopic: false,
+      userContext: {
+        original_text: originalText.trim(),
+        corrected_text: correctedText.trim(),
+        rewrite_text: rewriteText.trim(),
+        main_mistakes: buildMainMistakesText(Array.isArray(mainMistakes) ? mainMistakes : []),
+      },
+    });
+    compareSystem = compareResolved.system;
+    compareUser = compareResolved.user ?? '';
+    const correctResolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'writing.correct_v2_text',
+      activityType: 'writing',
+      requireSubtopic: false,
+      userContext: { corrected_text: correctedText.trim(), rewrite_text: rewriteText.trim() },
+    });
+    correctSystem = correctResolved.system;
+    correctUser = correctResolved.user ?? '';
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('compare-rewrite', 'curriculum_config_error', 500, { mode: 'compare_and_correct' });
+      return jsonError(res, 500, 'CURRICULUM_CONFIG_ERROR', 'O serviço está temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
 
   // ── Gateway context — one correlationId per HTTP request, one physical-
   // attempt counter shared across both physical calls made below (comparison
@@ -586,25 +542,15 @@ export default async function handler(req: any, res: any) {
           flowType: 'compare_and_correct',
         },
         estimatedMetrics: estimateTextTokens(
-          SYSTEM_PROMPT_COMPARE.length + buildUserMessage(
-            originalText, correctedText, rewriteText, Array.isArray(mainMistakes) ? mainMistakes : [],
-          ).length,
+          compareSystem.length + compareUser.length,
           DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
         ),
       },
       () => openai.chat.completions.create({
         model: AI_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT_COMPARE },
-          {
-            role: 'user',
-            content: buildUserMessage(
-              originalText,
-              correctedText,
-              rewriteText,
-              Array.isArray(mainMistakes) ? mainMistakes : []
-            ),
-          },
+          { role: 'system', content: compareSystem },
+          { role: 'user', content: compareUser },
         ],
       }),
       gatewayDeps,
@@ -664,7 +610,7 @@ export default async function handler(req: any, res: any) {
             flowType: 'compare_and_correct',
           },
           estimatedMetrics: estimateTextTokens(
-            SYSTEM_PROMPT_CORRECT.length + buildFinalCorrectionPrompt(rewriteText, correctedText).length,
+            correctSystem.length + correctUser.length,
             DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
           ),
         },
@@ -672,8 +618,8 @@ export default async function handler(req: any, res: any) {
           model: AI_MODEL,
           temperature: 0.2,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT_CORRECT },
-            { role: 'user', content: buildFinalCorrectionPrompt(rewriteText, correctedText) },
+            { role: 'system', content: correctSystem },
+            { role: 'user', content: correctUser },
           ],
         }),
         gatewayDeps,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeCorrectIndex, buildPrompt } from './generate-listening-story';
+import { normalizeCorrectIndex, buildOutputContract } from './generate-listening-story';
 
 const OPTS = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'];
 
@@ -39,19 +39,19 @@ describe('client-side answer comparison', () => {
   });
 });
 
-describe('buildPrompt theme injection', () => {
+describe('buildOutputContract theme injection', () => {
   it('omits theme rule when theme is null', () => {
-    const prompt = buildPrompt('B1', null);
+    const prompt = buildOutputContract('B1', null);
     expect(prompt).not.toContain('The story must be clearly related to the selected theme');
   });
 
   it('omits theme rule when theme is undefined', () => {
-    const prompt = buildPrompt('B1');
+    const prompt = buildOutputContract('B1');
     expect(prompt).not.toContain('The story must be clearly related to the selected theme');
   });
 
   it('injects theme rule when theme is provided', () => {
-    const prompt = buildPrompt('B1', 'travel');
+    const prompt = buildOutputContract('B1', 'travel');
     expect(prompt).toContain('The story must be clearly related to the selected theme: travel');
   });
 
@@ -60,12 +60,17 @@ describe('buildPrompt theme injection', () => {
     'football_sports', 'technology', 'food_restaurants', 'relationships_social_life',
     'health_wellbeing', 'money_shopping', 'mystery_adventure',
   ])('injects theme rule for %s', (theme) => {
-    const prompt = buildPrompt('A2', theme);
+    const prompt = buildOutputContract('A2', theme);
     expect(prompt).toContain(`The story must be clearly related to the selected theme: ${theme}`);
   });
 
-  it('includes the level in the prompt', () => {
-    const prompt = buildPrompt('C1', 'music');
-    expect(prompt).toContain('C1 CEFR learner');
+  it('carries only the technical output contract, not level/vocab PEDAGOGY', () => {
+    const prompt = buildOutputContract('C1', 'music');
+    // Level still drives the (duration) word range via the JSON scaffold, but the
+    // old hardcoded "C1 CEFR learner" vocabulary rubric is gone — pedagogy now
+    // comes from the data-driven curriculum template, not this builder.
+    expect(prompt).toContain('"level": "C1"');
+    expect(prompt).not.toContain('CEFR learner');
+    expect(prompt).not.toContain('Vocabulary and grammar appropriate');
   });
 });

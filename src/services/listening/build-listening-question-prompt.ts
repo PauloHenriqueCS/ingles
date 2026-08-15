@@ -1,3 +1,13 @@
+/**
+ * @deprecated NOT a runtime pedagogical authority. This module carries hardcoded
+ * English (EFL) prompt/word-count pedagogy for the LEGACY pre-generated listening
+ * inventory pipeline. User-facing listening is now fully data-driven: the
+ * curriculum Story path (api/listening/generate -> shared-story ->
+ * listening.two_part_generate, composed for the user CURRENT recorte) is the sole
+ * authority. The runtime routes that reached this pipeline (on-demand/*, group/*)
+ * are disabled; this file is retained only for offline scripts (npm run
+ * listening:*) and must never be re-wired into a runtime request path.
+ */
 import type { CEFRLevel } from '../../domain/curriculum/cefr';
 import type { ValidatedGeneratedQuestion, QuestionAIValidationResult } from './listening-question-schema';
 

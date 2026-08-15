@@ -203,7 +203,7 @@ export async function evaluateWritingRewrite(
   // `invoke` the Gateway wraps, and its real token usage (already present in
   // that same HTTP response) is what extractRewriteEvaluatorMetrics reports.
   const apiKey = process.env.OPENAI_API_KEY ?? '';
-  const modelInput = { originalText, correctedText, rewriteText, mainMistakes, effectiveLevel, deterministicResult };
+  const modelInput = { originalText, correctedText, rewriteText, mainMistakes, effectiveLevel, deterministicResult, userId: authenticatedUserId };
   const gatewayDeps = getProductionDeps();
   let modelOutput: ModelEvaluationOutput;
 

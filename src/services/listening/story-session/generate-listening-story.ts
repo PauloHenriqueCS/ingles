@@ -2,10 +2,13 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { resolveUserListeningLevel } from '../daily/resolve-user-listening-level';
+import type { CEFRLevel } from '../../../domain/curriculum/cefr';
+import type { LanguageSpeechConfig } from '../../../../api/_curriculum/language-speech-config';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, estimateTtsCharacters, estimateProviderRequests } from '../../../../api/_ai-gateway/index';
 import type { GatewayUsageMetric, GatewayDeps } from '../../../../api/_ai-gateway/index';
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
+import { getCurriculumServiceClient } from '../../../../api/_curriculum/service-client';
+import { resolveActivityPrompt, type ResolvedActivityPrompt } from '../../../../api/_curriculum/curriculum-runtime';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -116,22 +119,26 @@ function stepLog(requestId: string, step: string, extra: Record<string, unknown>
   console.error(JSON.stringify({ src: 'listening/generate', requestId, step, t: Date.now(), ...extra }));
 }
 
-// ── Prompt ────────────────────────────────────────────────────────────────────
-
-export function buildPrompt(level: string, theme?: string | null): string {
+// ── Output contract (TECHNICAL, not pedagogical) ──────────────────────────────
+// This block carries ONLY the machine-facing output contract: the JSON shape,
+// the fixed 2-part structure, the per-part word range (a duration bound — ~5 min
+// per part at 130 wpm — NOT a vocabulary/level rubric), and the answer rules.
+// All PEDAGOGY (which language is being learned, the CEFR level's vocabulary and
+// grammar, the recorte's target capability, the interface language for
+// explanations) now comes from the data-driven curriculum template
+// `listening.two_part_generate`, composed for the user's CURRENT recorte and
+// prepended as the system message (see callAI). The word ranges stay keyed by
+// level only because they encode audio length, not linguistic difficulty.
+export function buildOutputContract(level: string, theme?: string | null): string {
   const range = PART_WORD_RANGES[level] ?? { min: 500, max: 650 };
   const themeRule = theme
     ? `\n- The story must be clearly related to the selected theme: ${theme}`
     : '';
-  return `Generate an English listening comprehension activity for a ${level} CEFR learner.
-
-The activity is ONE continuous story divided into exactly 2 parts.
-
-Return ONLY a JSON object — no markdown fences, no extra text:
+  return `OUTPUT FORMAT — return ONLY a JSON object, no markdown fences, no extra text:
 {
-  "title": "Short title in English (max 8 words)",
+  "title": "Short title (max 8 words)",
   "level": "${level}",
-  "summary": "One-sentence summary of the full story in English (max 20 words)",
+  "summary": "One-sentence summary of the full story (max 20 words)",
   "parts": [
     {
       "id": 1,
@@ -140,7 +147,7 @@ Return ONLY a JSON object — no markdown fences, no extra text:
         "text": "Comprehension question about Part 1 ONLY",
         "options": ["Option A", "Option B", "Option C", "Option D", "Option E"],
         "correctIndex": 0,
-        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese"
+        "explanationPt": "1–2 sentence explanation of the correct answer"
       }
     },
     {
@@ -150,19 +157,18 @@ Return ONLY a JSON object — no markdown fences, no extra text:
         "text": "Comprehension question about Part 2 ONLY",
         "options": ["Option A", "Option B", "Option C", "Option D", "Option E"],
         "correctIndex": 0,
-        "explanationPt": "1–2 sentence explanation in Brazilian Portuguese"
+        "explanationPt": "1–2 sentence explanation of the correct answer"
       }
     }
   ]
 }
 
-Rules:
-- Vocabulary and grammar appropriate for ${level}
-- Part 2 must continue naturally where Part 1 ended
-- Each question tests only the part just heard — do not cross-reference parts
-- Exactly 5 options per question, exactly one correct, all distractors plausible
-- correctIndex: integer 0–4
-- Do NOT include Portuguese translations of the story text${themeRule}`;
+Structural rules:
+- The activity is ONE continuous story divided into exactly 2 parts.
+- Part 2 must continue naturally where Part 1 ended.
+- Each question tests only the part just heard — do not cross-reference parts.
+- Exactly 5 options per question, exactly one correct, all distractors plausible.
+- correctIndex: integer 0–4.${themeRule}`;
 }
 
 // ── Normalize correctIndex from AI (may return letter, 1-indexed, or text) ────
@@ -239,9 +245,19 @@ async function callAI(
   openaiKey: string,
   requestId: string,
   userId: string,
+  composed: ResolvedActivityPrompt,
   theme?: string | null,
 ): Promise<AIStory> {
   const client = new OpenAI({ apiKey: openaiKey, timeout: 120_000, maxRetries: 1 });
+
+  // Pedagogy comes from the curriculum template (composed for the user's current
+  // recorte); the technical output contract (JSON shape + duration word range) is
+  // appended below it. Model/temperature default only if the template leaves them
+  // unset — the template is authoritative when it specifies them.
+  const model = composed.model ?? 'gpt-4o-mini';
+  const temperature = composed.temperature ?? 0.8;
+  const systemPrompt = `${composed.system}\n\n${buildOutputContract(level, theme)}`;
+  const userPrompt = composed.user ?? 'Generate the listening activity now.';
 
   const t0 = Date.now();
   const gatewayDeps = getProductionDeps();
@@ -250,7 +266,7 @@ async function callAI(
       featureKey: 'listening.two_part_generate',
       provider: 'openai',
       service: 'chat.completions',
-      model: 'gpt-4o-mini',
+      model,
       userId,
       initiatedByUserId: userId,
       actorType: 'user',
@@ -262,16 +278,16 @@ async function callAI(
         endpoint: 'listening/generate',
         flowType: 'two_part_generate',
       },
-      estimatedMetrics: estimateTextTokens(buildPrompt(level, theme).length + 'Generate the listening activity now.'.length, 6000),
+      estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, 6000),
     },
     () => client.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model,
       messages: [
-        { role: 'system', content: buildPrompt(level, theme) },
-        { role: 'user', content: 'Generate the listening activity now.' },
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
       ],
       response_format: { type: 'json_object' },
-      temperature: 0.8,
+      temperature,
       max_tokens: 6000,
     }),
     gatewayDeps,
@@ -331,23 +347,25 @@ async function callAI(
 
 // ── Azure TTS ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_STORY_VOICE = 'en-US-AvaMultilingualNeural';
-
-const ALLOWED_STORY_VOICES = new Set([
-  'en-US-AvaMultilingualNeural',
-  'en-US-AndrewMultilingualNeural',
-  'en-US-JennyNeural',
-  'en-US-GuyNeural',
-]);
-
-async function resolveUserVoice(userId: string, supabase: SupabaseClient): Promise<string> {
+// Data-driven cutover: the TTS voice/locale are NOT hardcoded to en-US anymore.
+// The target language's default voice + locale come from public.languages
+// (LanguageSpeechConfig, resolved by the caller). The user's saved voice is
+// honored ONLY when it belongs to the SAME locale as the target language;
+// otherwise we fall back to that language's configured default voice.
+async function resolveUserVoice(
+  userId: string,
+  supabase: SupabaseClient,
+  speechConfig: LanguageSpeechConfig,
+): Promise<string> {
   const { data } = await supabase
     .from('user_learning_settings')
     .select('audio_preferences')
     .eq('user_id', userId)
     .single();
   const voice = (data?.audio_preferences as { voice?: string } | null)?.voice ?? '';
-  return ALLOWED_STORY_VOICES.has(voice) ? voice : DEFAULT_STORY_VOICE;
+  const belongsToTargetLocale = voice === speechConfig.defaultTtsVoice
+    || voice.startsWith(`${speechConfig.speechLocale}-`);
+  return belongsToTargetLocale ? voice : speechConfig.defaultTtsVoice;
 }
 
 function escapeXml(t: string): string {
@@ -400,6 +418,7 @@ async function synthesizeAudio(
   azureKey: string,
   azureRegion: string,
   voice: string,
+  speechLocale: string,
   partLabel: string,
   requestId: string,
   userId: string,
@@ -408,7 +427,7 @@ async function synthesizeAudio(
   attemptNumber: number,
 ): Promise<Buffer> {
   const ssml =
-    `<speak version="1.0" xml:lang="en-US">` +
+    `<speak version="1.0" xml:lang="${speechLocale}">` +
     `<voice name="${voice}">` +
     `<prosody rate="0%">${escapeXml(text)}</prosody>` +
     `</voice></speak>`;
@@ -510,6 +529,7 @@ async function synthesizeParts(
   azureKey: string,
   azureRegion: string,
   voice: string,
+  speechLocale: string,
   secret: string,
   requestId: string,
   userId: string,
@@ -527,8 +547,8 @@ async function synthesizeParts(
   const gatewayDeps = getProductionDeps();
   const ttsCorrelationId = gatewayDeps.uuidGen();
   const [audio1, audio2] = await Promise.all([
-    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, voice, 'part1', requestId, userId, gatewayDeps, ttsCorrelationId, 1),
-    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, voice, 'part2', requestId, userId, gatewayDeps, ttsCorrelationId, 2),
+    synthesizeAudio(ai.parts[0].text, azureKey, azureRegion, voice, speechLocale, 'part1', requestId, userId, gatewayDeps, ttsCorrelationId, 1),
+    synthesizeAudio(ai.parts[1].text, azureKey, azureRegion, voice, speechLocale, 'part2', requestId, userId, gatewayDeps, ttsCorrelationId, 2),
   ]);
 
   stepLog(requestId, 'tts_all_done', {
@@ -585,9 +605,15 @@ export async function generateListeningStory(
   azureRegion: string,
   secret: string,
   /** Optional: packed story from a previous call. Skips OpenAI if provided. */
-  storyPackage?: string | null,
+  storyPackage: string | null | undefined,
   /** Optional: story theme identifier (e.g. 'travel', 'music'). null = random. */
-  theme?: string | null,
+  theme: string | null | undefined,
+  /** CEFR level of the user's CURRENT recorte — the SINGLE level authority
+   *  (never learner_skill_profiles). Only affects audio LENGTH (word ranges),
+   *  never linguistic pedagogy (that comes from the recorte template). */
+  cefrLevel: CEFRLevel,
+  /** Data-driven Speech config for the target language (locale + default voice). */
+  speechConfig: LanguageSpeechConfig,
 ): Promise<ListeningStoryResult> {
   const requestId = crypto.randomUUID().slice(0, 8);
   const totalStart = Date.now();
@@ -601,12 +627,12 @@ export async function generateListeningStory(
     theme: theme ?? 'random',
   });
 
-  // 1. Resolve CEFR level and user's preferred voice from DB
-  const [level, voice] = await Promise.all([
-    resolveUserListeningLevel(serviceClient, userId),
-    resolveUserVoice(userId, serviceClient),
-  ]);
-  stepLog(requestId, 'level_resolved', { level, voice });
+  // 1. Level comes from the curriculum recorte (passed by the caller) — the
+  //    SINGLE level authority. Voice comes from the target language's data-driven
+  //    Speech config (with a same-locale user override).
+  const level = cefrLevel;
+  const voice = await resolveUserVoice(userId, serviceClient, speechConfig);
+  stepLog(requestId, 'level_resolved', { level, voice, speechLocale: speechConfig.speechLocale });
 
   // 2. Get story content — either from retry package or fresh OpenAI call
   let ai: AIStory;
@@ -620,8 +646,29 @@ export async function generateListeningStory(
       throw new Error(`STORY_PACKAGE_INVALID: ${msg}`);
     }
   } else {
-    stepLog(requestId, 'ai_start', { level, theme: theme ?? 'random' });
-    ai = await callAI(level, openaiKey, requestId, userId, theme);
+    // Data-driven curriculum: compose the story-generation prompt for the user's
+    // CURRENT recorte from the seeded `listening.two_part_generate` template
+    // (learning/interface language, level, subtopic capability, language targets).
+    // A CurriculumConfigError (missing published curriculum / template / required
+    // placeholder) is deliberately NOT caught here — it propagates to the route,
+    // which returns an explicit operational error. There is NO silent English
+    // fallback: the old hardcoded level/vocab rubric has been removed.
+    //
+    // Cross-user recorte sharing: RESOLVED. The story CONTENT is recorte-aligned
+    // here, AND the shared-story cache/lock key is now subtopic-aware — see
+    // ../shared-story/get-or-create-shared-listening-story.ts (it resolves the
+    // user's current recorte via ensureUserCurriculum and passes learning_language
+    // + subtopic_key + curriculum_version to the acquire_or_get_listening_shared_
+    // story RPC) and migration 20260815120500_listening_shared_stories_subtopic_
+    // aware.sql (adds those columns + scopes the unique constraint/RPC by them).
+    // Cross-user cache reuse therefore stays within the SAME recorte; it never
+    // serves a second user a story from a different recorte.
+    const composed = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      templateKey: 'listening.two_part_generate',
+      activityType: 'listening',
+    });
+    stepLog(requestId, 'ai_start', { level, theme: theme ?? 'random', subtopicKey: composed.subtopicKey ?? 'none' });
+    ai = await callAI(level, openaiKey, requestId, userId, composed, theme);
   }
 
   // Pack the story now — before TTS — so we can return it on audio failure
@@ -629,7 +676,7 @@ export async function generateListeningStory(
 
   // 3. TTS (throws StoryTtsError on failure, carrying the packed story for retry)
   try {
-    const result = await synthesizeParts(ai, azureKey, azureRegion, voice, secret, requestId, userId);
+    const result = await synthesizeParts(ai, azureKey, azureRegion, voice, speechConfig.speechLocale, secret, requestId, userId);
     stepLog(requestId, 'complete', { totalMs: Date.now() - totalStart });
     return result;
   } catch (err) {

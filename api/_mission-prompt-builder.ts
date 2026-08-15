@@ -1,4 +1,10 @@
 /**
+ * @deprecated DISCONNECTED from the live path. Writing generation is now
+ * data-driven via the curriculum engine (api/_curriculum/curriculum-runtime.ts
+ * + DB prompt templates); api/generate-theme.ts no longer imports this module.
+ * Kept (pure, no DB access) only for the existing domain unit tests
+ * (src/domain/missions/mission.test.ts). Do not wire back into generation.
+ *
  * SERVER-ONLY: Builds pedagogically-constrained prompt sections for mission generation.
  *
  * Injects the pedagogical plan's constraints into the AI prompt so the generator

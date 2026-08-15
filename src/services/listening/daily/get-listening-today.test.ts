@@ -70,20 +70,14 @@ describe('getListeningToday — multi-story per day', () => {
     vi.useRealTimers();
   });
 
-  it('scenario 1/2: limit=1 — first call selects and creates the single story', async () => {
-    mockSelectListeningEpisodeForUser.mockResolvedValue('episode-1');
-    mockGetOrCreateListeningAssignment.mockResolvedValue({
-      assignment: { id: 'assignment-1', episodeId: 'episode-1', status: 'assigned' },
-      created: true,
-    });
-
+  it('scenario 1/2 (data-driven cutover): with no active episode, defers to the curriculum Story path (empty_inventory) and never selects a legacy episode', async () => {
+    // The level-indexed legacy episode inventory is no longer selected for NEW
+    // practice — the sole authority is the per-recorte data-driven Story path.
     const result = await getListeningToday(makeSupabase([]), 'user-1', fakeServiceClient);
 
-    expect(mockSelectListeningEpisodeForUser).toHaveBeenCalledWith(expect.anything(), 'user-1', 'A1', []);
-    expect(result.status).toBe('in_progress');
-    if (result.status !== 'empty_inventory' && result.status !== 'story_completed') {
-      expect(result.episodeId).toBe('episode-1');
-    }
+    expect(result).toEqual({ status: 'empty_inventory' });
+    expect(mockSelectListeningEpisodeForUser).not.toHaveBeenCalled();
+    expect(mockGetOrCreateListeningAssignment).not.toHaveBeenCalled();
   });
 
   it('scenario 3: reopening the same active story does not select a new episode', async () => {
@@ -116,35 +110,25 @@ describe('getListeningToday — multi-story per day', () => {
     }
   });
 
-  it('scenario 5/6: limit=3 — after finishing story 1, getListeningToday selects a distinct story 2, excluding story 1', async () => {
+  it('scenario 5/6 (data-driven cutover): after finishing a story, still defers to the Story path (empty_inventory) — never selects a new legacy episode', async () => {
     const completedRow = makeRow({ id: 'assignment-1', episode_id: 'episode-1', status: 'completed' });
-    mockSelectListeningEpisodeForUser.mockResolvedValue('episode-2');
-    mockGetOrCreateListeningAssignment.mockResolvedValue({
-      assignment: { id: 'assignment-2', episodeId: 'episode-2', status: 'assigned' },
-      created: true,
-    });
 
-    await getListeningToday(makeSupabase([completedRow]), 'user-1', fakeServiceClient);
+    const result = await getListeningToday(makeSupabase([completedRow]), 'user-1', fakeServiceClient);
 
-    expect(mockSelectListeningEpisodeForUser).toHaveBeenCalledWith(expect.anything(), 'user-1', 'A1', ['episode-1']);
+    expect(result).toEqual({ status: 'empty_inventory' });
+    expect(mockSelectListeningEpisodeForUser).not.toHaveBeenCalled();
   });
 
-  it('scenario 5/6b: with 2 completed stories today, both are excluded when picking story 3', async () => {
+  it('scenario 5/6b (data-driven cutover): with completed stories today and nothing active, still defers to the Story path (empty_inventory)', async () => {
     const rows = [
       makeRow({ id: 'assignment-2', episode_id: 'episode-2', status: 'completed', created_at: '2026-07-18T11:00:00Z' }),
       makeRow({ id: 'assignment-1', episode_id: 'episode-1', status: 'completed', created_at: '2026-07-18T10:00:00Z' }),
     ];
-    mockSelectListeningEpisodeForUser.mockResolvedValue('episode-3');
-    mockGetOrCreateListeningAssignment.mockResolvedValue({
-      assignment: { id: 'assignment-3', episodeId: 'episode-3', status: 'assigned' },
-      created: true,
-    });
 
-    await getListeningToday(makeSupabase(rows), 'user-1', fakeServiceClient);
+    const result = await getListeningToday(makeSupabase(rows), 'user-1', fakeServiceClient);
 
-    const excludeArg = mockSelectListeningEpisodeForUser.mock.calls[0][3];
-    expect(excludeArg).toEqual(expect.arrayContaining(['episode-1', 'episode-2']));
-    expect(excludeArg).toHaveLength(2);
+    expect(result).toEqual({ status: 'empty_inventory' });
+    expect(mockSelectListeningEpisodeForUser).not.toHaveBeenCalled();
   });
 
   it('scenario 8: story-mode row (episode_id null) short-circuits and never touches episode selection', async () => {

@@ -1,4 +1,8 @@
 /**
+ * @deprecated DISCONNECTED from the live path. Writing generation is now
+ * data-driven via the curriculum engine; api/generate-theme.ts no longer reads
+ * these flags. Kept (pure, no DB) only for src/domain/missions/mission.test.ts.
+ *
  * SERVER-ONLY: Feature flags for the mission generator integration.
  *
  * When LEARNING_ENGINE_VERSION=v2 (default):

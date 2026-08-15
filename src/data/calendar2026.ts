@@ -1,121 +1,16 @@
 import { DaySchedule } from '../types';
 
-const MONTH_LEVEL: Record<number, string> = {
-  1: 'A2', 2: 'A2', 3: 'A2',
-  4: 'B1', 5: 'B1', 6: 'B1',
-  7: 'B1/B2', 8: 'B1/B2', 9: 'B1/B2',
-  10: 'B2', 11: 'B2',
-  12: 'B1-B2',
-};
-
-const MONTH_GRAMMAR: Record<number, { verbTense: string; objective: string }> = {
-  1: { verbTense: 'Present Simple', objective: 'Descrever hábitos, rotinas e fatos gerais' },
-  2: { verbTense: 'Present Continuous', objective: 'Descrever ações em progresso e mudanças temporárias' },
-  3: { verbTense: 'Past Simple', objective: 'Narrar eventos passados com início e fim definidos' },
-  4: { verbTense: 'Past Continuous', objective: 'Descrever contexto e ações em andamento no passado' },
-  5: { verbTense: 'Present Perfect', objective: 'Conectar experiências passadas ao presente' },
-  6: { verbTense: 'Present Perfect Continuous', objective: 'Enfatizar a duração de ações recentes' },
-  7: { verbTense: 'Past Perfect', objective: 'Narrar o que aconteceu antes de outro evento passado' },
-  8: { verbTense: 'Future: will / going to', objective: 'Fazer previsões e expressar planos futuros' },
-  9: { verbTense: 'Conditionals (1st & 2nd)', objective: 'Expressar condições, hipóteses e consequências' },
-  10: { verbTense: 'Passive Voice', objective: 'Focar na ação em vez do agente' },
-  11: { verbTense: 'Modal Verbs', objective: 'Expressar obrigação, possibilidade e conselho' },
-  12: { verbTense: 'Revisão Geral', objective: 'Usar todos os tempos verbais de forma integrada' },
-};
-
-const MONDAY_TOPICS = [
-  'Minha rotina matinal',
-  'Minha família',
-  'Minha saúde e bem-estar',
-  'Minha casa e ambiente',
-  'Uma memória especial',
-  'Meus hobbies',
-  'Minha rotina noturna',
-  'Meus amigos próximos',
-  'Meu estilo de vida',
-  'Minhas metas pessoais',
-  'Minha relação com dinheiro',
-  'O que me faz feliz',
-  'Meu ambiente de estudo',
-];
-
-const TUESDAY_TOPICS = [
-  'Meu trabalho ou estudos',
-  'Ferramentas digitais que uso',
-  'Trabalho remoto',
-  'Produtividade pessoal',
-  'Redes sociais no meu dia',
-  'Inteligência artificial',
-  'Minha carreira no futuro',
-  'Comunicação no trabalho',
-  'Reuniões e apresentações',
-  'Gerenciamento de tempo',
-  'Aprender algo online',
-  'Segurança digital',
-  'Compras pela internet',
-];
-
-const WEDNESDAY_TOPICS = [
-  'Um filme que adorei',
-  'Música favorita',
-  'Um livro memorável',
-  'Esportes que pratico',
-  'Uma viagem que fiz',
-  'Séries que estou assistindo',
-  'Um podcast interessante',
-  'Arte e criatividade',
-  'Jogos e entretenimento',
-  'Uma viagem dos sonhos',
-  'Festas e tradições',
-  'Culinária e receitas',
-  'Um show ou evento cultural',
-];
-
-const THURSDAY_TOPICS = [
-  'Meio ambiente e sustentabilidade',
-  'Educação e aprendizado',
-  'Saúde pública',
-  'Tecnologia e sociedade',
-  'Trabalho no futuro',
-  'Igualdade e diversidade',
-  'Finanças pessoais',
-  'Mobilidade urbana',
-  'Moradia e cidade',
-  'Alimentação saudável',
-  'Saúde mental',
-  'Cultura e identidade',
-  'Mudanças climáticas',
-];
-
-const FRIDAY_TOPICS = [
-  'Uma história de superação',
-  'Um erro que me ensinou muito',
-  'Uma conquista que me orgulha',
-  'Um sonho que quero realizar',
-  'Uma pessoa que admiro',
-  'O que aprendi esse mês',
-  'Uma decisão difícil',
-  'Um desafio que superei',
-  'Uma habilidade que desenvolvi',
-  'Um momento de virada',
-  'O que quero mudar',
-  'Uma aventura que vivi',
-  'Meu crescimento no inglês',
-];
-
-const TOPICS_BY_DOW: Record<number, string[]> = {
-  1: MONDAY_TOPICS,
-  2: TUESDAY_TOPICS,
-  3: WEDNESDAY_TOPICS,
-  4: THURSDAY_TOPICS,
-  5: FRIDAY_TOPICS,
-};
-
-function getWeekOfYear(date: Date): number {
-  const start = new Date(date.getFullYear(), 0, 1);
-  const diff = date.getTime() - start.getTime();
-  return Math.floor(diff / (7 * 24 * 60 * 60 * 1000));
-}
+/**
+ * Calendar SCHEDULING + date/UI helpers.
+ *
+ * DATA-DRIVEN CUTOVER: this module no longer carries any pedagogical authority.
+ * The old per-month grammar/level/tense catalog and the weekday writing-topic
+ * lists were removed — level, grammar, verb tense and the pedagogical sequence
+ * are now governed exclusively by the persisted curriculum (see
+ * src/domain/curriculum-engine + api/_curriculum). What remains here is purely
+ * WHICH days are practice days (scheduling) and calendar date/label helpers for
+ * the month/history UI — no bundled English pedagogy.
+ */
 
 export function getScheduleForDate(
   dateStr: string,
@@ -130,41 +25,10 @@ export function getScheduleForDate(
 
   if (!isPracticeDay) {
     const weekendActivity = dow === 0 ? 'descanso' : dow === 6 ? 'revisao' : undefined;
-    return {
-      date: dateStr,
-      isWeekend,
-      isPracticeDay: false,
-      weekendActivity,
-      theme: dow === 0
-        ? 'Domingo — Descanso'
-        : dow === 6
-        ? 'Sábado — Revisão da Semana'
-        : 'Dia inativo',
-      grammarObjective: dow === 0
-        ? 'Dia de descanso. Relaxe e recarregue as energias.'
-        : dow === 6
-        ? 'Reler os textos da semana, identificar padrões e corrigir erros.'
-        : 'Este dia não está configurado para prática.',
-      verbTense: dow === 6 ? 'Revisão' : '—',
-    };
+    return { date: dateStr, isWeekend, isPracticeDay: false, weekendActivity };
   }
 
-  const month = date.getMonth() + 1;
-  const grammar = MONTH_GRAMMAR[month];
-  const topics = TOPICS_BY_DOW[dow] ?? MONDAY_TOPICS;
-  const week = getWeekOfYear(date);
-  const theme = topics[week % topics.length];
-
-  return {
-    date: dateStr,
-    isWeekend,
-    isPracticeDay: true,
-    theme,
-    grammarObjective: grammar.objective,
-    verbTense: grammar.verbTense,
-    level: MONTH_LEVEL[month],
-    estimatedTime: 15,
-  };
+  return { date: dateStr, isWeekend, isPracticeDay: true };
 }
 
 export function getAllDatesInMonth(year: number, month: number): string[] {
@@ -189,8 +53,6 @@ export function getWeekdaysInMonth(
     return activeWeekdays.includes(dow) || overrideDates.includes(dateStr);
   });
 }
-
-export const ALL_VERB_TENSES = Object.values(MONTH_GRAMMAR).map((g) => g.verbTense);
 
 export const MONTH_NAMES_PT = [
   'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',

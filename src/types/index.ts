@@ -1,13 +1,20 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'settings' | 'subscription' | 'minute-packages';
+export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'settings' | 'subscription' | 'minute-packages' | 'curriculum-plan';
 
 export interface AIPreferences {
   // Identity
   teacherName: string;
   // Voice
   voice: string;
-  accent: 'american' | 'british' | 'neutral';
+  // accent is an OPEN data-driven variant_key, NOT a closed English union: each
+  // learning_language defines its OWN variants as DATA in
+  // public.conversation_language_variants (e.g. en → american/british/neutral,
+  // es → latin_american/spain/neutral). The server validates the stored key
+  // against that per-language catalog and falls back to the language's
+  // is_default when it does not apply — so widening this to `string` never
+  // delivers an unvalidated accent. (ROOT-2)
+  accent: string;
   speechPace: 'slow' | 'normal' | 'natural';
   // Personality
   personalityPreset: 'patient' | 'friend' | 'teacher' | 'unfiltered_friend' | 'custom';
@@ -122,12 +129,15 @@ export interface EnglishReviewSaved {
 
 export interface DaySchedule {
   date: string;
-  theme: string;
-  grammarObjective: string;
-  verbTense: string;
   isWeekend: boolean;
   isPracticeDay: boolean;
   weekendActivity?: 'revisao' | 'descanso';
+  // Legacy pedagogy fields — the old per-month grammar calendar no longer
+  // governs level/grammar/tense/theme (the persisted curriculum is the sole
+  // authority). Kept optional only for backward type-compat; not populated.
+  theme?: string;
+  grammarObjective?: string;
+  verbTense?: string;
   level?: string;
   estimatedTime?: number;
 }

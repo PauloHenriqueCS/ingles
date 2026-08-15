@@ -76,6 +76,31 @@ vi.mock('openai', () => ({
   }),
 }));
 
+// Data-driven curriculum seam — the correction prompts now come from the DB
+// templates (writing.correct / writing.correct_review), composed by
+// resolveActivityPrompt. This file exercises review-text's own logic (auth,
+// validation, retries, DB writes, plan limits), so the seam is stubbed to a
+// fixed composed prompt (model null → handler falls back to AI_MODEL) and
+// recordCurricularPractice is a best-effort no-op. Prompt composition itself is
+// covered by api/__tests__/review-text-gateway.test.ts and the seeded template
+// SQL guarded by api/__tests__/review-text-feedback-precision.test.ts.
+vi.mock('../../api/_curriculum/service-client', () => ({
+  getCurriculumServiceClient: () => ({}),
+}));
+vi.mock('../../api/_curriculum/curriculum-runtime', () => ({
+  resolveActivityPrompt: vi.fn().mockResolvedValue({
+    system: 'CURRICULUM_CORRECTION_SYSTEM',
+    user: 'CURRICULUM_CORRECTION_USER',
+    model: null,
+    temperature: null,
+    subtopicKey: null,
+    versionId: 'ver-1',
+    languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+  }),
+  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  CurriculumConfigError: class CurriculumConfigError extends Error {},
+}));
+
 import { requireAuth } from '../../api/_auth';
 import handler, {
   parseJsonSafely,

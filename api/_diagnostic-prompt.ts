@@ -1,4 +1,8 @@
 /**
+ * @deprecated DISCONNECTED from the live path (WRITING_DIAGNOSTIC_V1, default
+ * OFF). Being reworked into the placement test — OUT OF SCOPE. No longer
+ * imported by api/generate-theme.ts.
+ *
  * SERVER-ONLY: Prompt do gerador diagnóstico de escrita v1.
  *
  * Estende o gerador normal com instruções invisíveis ao usuário.

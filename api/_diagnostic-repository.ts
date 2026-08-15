@@ -1,4 +1,9 @@
 /**
+ * @deprecated DISCONNECTED from the live path (WRITING_DIAGNOSTIC_V1, default
+ * OFF). Being reworked into the placement test — OUT OF SCOPE. Targets
+ * writing_diagnostic_missions, a table not applied to production; no longer
+ * reached from the live generation path.
+ *
  * SERVER-ONLY: Repositório para writing_diagnostic_missions.
  * Nunca importar em código client-side (src/).
  */

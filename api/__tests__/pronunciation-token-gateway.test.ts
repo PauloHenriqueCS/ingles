@@ -12,14 +12,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 import { WORD_PRACTICE_MAX_ATTEMPTS } from '../../src/domain/pronunciation/word-practice-limits';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 
-const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, gw } = vi.hoisted(() => {
+const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, speechMissing, gw } = vi.hoisted(() => {
   const mockIssueToken = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockGetCurrentUserPlanEntitlements = vi.fn();
   const mockRpc = vi.fn();          // auth.supabase.rpc — register_word_practice_attempt
   const mockServiceRpc = vi.fn();   // service-role client — release_word_practice_attempt (refund)
-  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const speechMissing = { v: false }; // toggles the SERVICE-client Speech config presence
+  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, speechMissing, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -42,6 +44,7 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 // would 503 in the no-service-key test env before the gateway/token path.
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom({ missingLanguageConfig: speechMissing.v }) }) }));
 vi.mock('openai', () => ({ default: vi.fn() }));
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
@@ -157,7 +160,7 @@ beforeEach(() => {
   mockIssueToken.mockResolvedValue({ token: 'ephemeral-token-xyz', region: 'eastus', expiresInSeconds: 540 });
   mockRpc.mockResolvedValue({ data: { attemptsUsed: 1 }, error: null });
   mockServiceRpc.mockResolvedValue({ data: { attemptsUsed: 0 }, error: null });
-  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc } });
+  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc, from: makeSpeechConfigFrom() } });
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 
@@ -192,6 +195,18 @@ describe('LEGACY mode', () => {
     expect(body.attemptsUsed).toBe(1);
     expect(body.maxAttempts).toBe(WORD_PRACTICE_MAX_ATTEMPTS);
     expect(body.maxDurationSeconds).toBe(5);
+  });
+
+  it('missing Speech config → 503 BEFORE consuming a word attempt or minting a token (blocker 4A)', async () => {
+    // The active learning language has no Speech config → resolveUserSpeechConfig
+    // throws (resolved via the SERVICE client, before any side effect).
+    speechMissing.v = true;
+    const res = makeRes();
+    await handler(makeReq(), res);
+    speechMissing.v = false;
+    expect(res._status()).toBe(503);
+    expect(mockRpc).not.toHaveBeenCalled();        // register_word_practice_attempt NEVER ran
+    expect(mockIssueToken).not.toHaveBeenCalled();  // no Azure token
   });
 });
 

@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
@@ -53,6 +54,7 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 // service-key test env before the gateway/token path is reached.
 vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom() }) }));
 
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
@@ -76,6 +78,8 @@ const VALID_RESULT = {
 function makeSupabaseRpc(rpcResults: Record<string, unknown>) {
   return {
     rpc: vi.fn((name: string) => Promise.resolve({ data: rpcResults[name] ?? {}, error: null })),
+    // Data-driven Speech config resolution (start handler) reads these tables.
+    from: makeSpeechConfigFrom(),
   };
 }
 
