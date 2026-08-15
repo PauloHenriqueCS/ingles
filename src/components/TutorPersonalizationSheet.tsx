@@ -6,7 +6,6 @@ import {
   REALTIME_VOICES,
   PERSONALITY_PRESETS,
   PACE_LABELS,
-  ACCENT_LABELS,
   FORMALITY_LABELS,
   HUMOR_LABELS,
   ROAST_LABELS,
@@ -97,30 +96,44 @@ function useVoicePreview() {
 // ── Shared UI primitives ──────────────────────────────────────────────────────
 
 // Accent/variant options are DATA for the user's ACTIVE learning language
-// (GET /api/conversation/variants) — never a hardcoded English list (ROOT-2,
-// item 3). For English the server returns american/british/neutral because that
-// is what conversation_language_variants holds for 'en'; a different learning
-// language returns ITS OWN variants with no UI change. The built-in ACCENT_LABELS
-// remain ONLY as an offline fallback so the sheet never blocks on the network.
+// (GET /api/conversation/variants) — the SINGLE source, never a hardcoded
+// English list (ROOT-2, item 3). For English the server returns
+// american/british/neutral because that is what conversation_language_variants
+// holds for 'en'; a different learning language returns ITS OWN variants with no
+// UI change. On failure we surface an error+retry and DISABLE the selector — we
+// never invent English options (a Spanish learner must never see english
+// accents just because the endpoint failed).
+type AccentVariantsState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; options: { id: string; label: string }[] };
+
 function useAccentVariants() {
-  const [options, setOptions] = useState<{ id: string; label: string }[] | null>(null);
+  const [state, setState] = useState<AccentVariantsState>({ status: 'loading' });
+  const [attempt, setAttempt] = useState(0);
+  const reload = useCallback(() => { setState({ status: 'loading' }); setAttempt((n) => n + 1); }, []);
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const headers = await getAuthHeader();
         const resp = await fetch(apiUrl('/api/conversation/variants'), { headers });
-        if (!resp.ok) return;
+        if (!resp.ok) throw new Error('variants request failed');
         const body = await resp.json();
         const variants = Array.isArray(body?.variants) ? body.variants : [];
-        if (alive && variants.length > 0) {
-          setOptions(variants.map((v: { key: string; label: string }) => ({ id: String(v.key), label: String(v.label) })));
-        }
-      } catch { /* keep the offline fallback */ }
+        if (!alive) return;
+        if (variants.length === 0) { setState({ status: 'error' }); return; }
+        setState({
+          status: 'ready',
+          options: variants.map((v: { key: string; label: string }) => ({ id: String(v.key), label: String(v.label) })),
+        });
+      } catch {
+        if (alive) setState({ status: 'error' });
+      }
     })();
     return () => { alive = false; };
-  }, []);
-  return options;
+  }, [attempt]);
+  return { state, reload };
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -173,7 +186,7 @@ function VozSection({
   sessionActive: boolean;
 }) {
   const vp = useVoicePreview();
-  const accentOptions = useAccentVariants();
+  const { state: accentState, reload: reloadAccents } = useAccentVariants();
 
   return (
     <div className="space-y-6">
@@ -231,14 +244,36 @@ function VozSection({
         </div>
       </div>
 
-      {/* Accent */}
+      {/* Accent — options come exclusively from the data-driven per-language
+          catalog. On failure we show retry and disable selection; we never
+          invent English options for a non-English learning language. */}
       <div>
         <SectionTitle>Sotaque</SectionTitle>
-        <OptionGroup
-          value={prefs.accent}
-          onChange={(v) => update({ accent: v })}
-          options={accentOptions ?? (Object.entries(ACCENT_LABELS) as [string, string][]).map(([id, label]) => ({ id, label }))}
-        />
+        {accentState.status === 'loading' && (
+          <div className="flex items-center gap-2 text-xs text-slate-500 py-2" aria-live="polite">
+            <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" strokeWidth={2} aria-hidden="true" />
+            Carregando opções de sotaque…
+          </div>
+        )}
+        {accentState.status === 'error' && (
+          <div className="flex items-center gap-3 py-2" aria-live="polite">
+            <p className="text-xs text-red-400">Não foi possível carregar as opções de sotaque.</p>
+            <button
+              type="button"
+              onClick={reloadAccents}
+              className="text-xs text-slate-300 hover:text-white underline focus:outline-none focus:ring-1 focus:ring-blue-500 rounded"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        )}
+        {accentState.status === 'ready' && (
+          <OptionGroup
+            value={prefs.accent}
+            onChange={(v) => update({ accent: v })}
+            options={accentState.options}
+          />
+        )}
         <p className="text-xs text-slate-600 mt-2">O sotaque é aplicado por instruções de conversa, não por troca de voz.</p>
       </div>
 
