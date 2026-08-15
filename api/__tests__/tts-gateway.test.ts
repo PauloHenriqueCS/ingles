@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import { estimateTtsCharacters, estimateProviderRequests } from '../_ai-gateway/estimators';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 
 const { mockFetch, mockRequireAuth, gw, capturedContexts } = vi.hoisted(() => {
   const mockFetch = vi.fn();
@@ -104,7 +105,7 @@ beforeEach(() => {
   gw.resetDefaults();
   mockFetch.mockImplementation(() => mockAzureOk());
   global.fetch = mockFetch as any;
-  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
+  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { from: makeSpeechConfigFrom() } });
   process.env.AZURE_SPEECH_KEY = 'test-azure-key';
   process.env.AZURE_SPEECH_REGION = 'eastus';
 });

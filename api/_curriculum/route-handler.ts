@@ -13,8 +13,9 @@
 import { requireAuth } from '../_auth';
 import { methodGuard, readRawBody, jsonError, safeLog } from '../_helpers';
 import { getCurriculumServiceClient } from './service-client';
-import { ensureUserCurriculum, CurriculumConfigError } from './curriculum-runtime';
+import { ensureUserCurriculum, resyncCurriculumProgress, CurriculumConfigError } from './curriculum-runtime';
 import { SupabaseCurriculumRepository } from '../../src/domain/curriculum-engine/curriculum-repository';
+import { getBandLabelMap, getLanguageDisplayName } from './presentation-i18n';
 
 type ModuleState = 'completed' | 'current' | 'upcoming';
 
@@ -26,25 +27,11 @@ function levelCodeOf(subtopicKey: string): string {
   return subtopicKey.split('.')[0];
 }
 
-// ── Proficiency band labels (localized, ONE place) ───────────────────────────
-// The schema's proficiency_levels carries only a code + sort_order (no band
-// column, no *_i18n table). Rather than change the schema, the band is DERIVED
-// from the level's sort_order (pairs of levels → one band) and localized here in
-// a single backend map keyed by interface_language. This is the least-intrusive
-// correct option offered by the spec ("compute from a small localized map keyed
-// by interface_language in ONE backend place, never spread in the frontend").
-// Deriving from sort_order (DATA) — never from hardcoded level codes — keeps it
-// framework-agnostic: any 6-level scale groups 1-2 / 3-4 / 5-6.
-const BAND_LABELS: Record<string, string[]> = {
-  'pt-BR': ['Iniciante', 'Intermediário', 'Avançado'],
-  en: ['Beginner', 'Intermediate', 'Advanced'],
-};
-
-export function proficiencyBandLabel(sortOrder: number, interfaceLanguage: string): string {
-  const bands = BAND_LABELS[interfaceLanguage] ?? BAND_LABELS['pt-BR'];
-  const idx = Math.min(Math.max(0, Math.floor((sortOrder - 1) / 2)), bands.length - 1);
-  return bands[idx];
-}
+// Proficiency band labels are now DATA (blocker 14): each level carries a
+// band_key (proficiency_levels.band_key, seeded by the framework — no
+// pair-assumption), and its label is localized in proficiency_band_i18n by
+// interface_language. Resolved in handleTree (I/O) and passed to the pure
+// assembler below. No hardcoded pt-BR/en band map lives in the code anymore.
 
 // ── Pure macro-tree assembly (unit-tested; no DB / no I/O) ────────────────────
 
@@ -56,6 +43,8 @@ export interface TreeLevelInput {
   sortOrder: number;
   /** Localized display label from proficiency_levels (falls back to code). */
   label: string | null;
+  /** Localized proficiency band label (data-driven; falls back to '' when unset). */
+  bandLabel: string;
 }
 
 export interface TreeModuleInput {
@@ -158,7 +147,7 @@ export function assembleCurriculumTree(input: AssembleCurriculumTreeInput): Curr
     return {
       levelCode: lvl.code,
       name: lvl.label ?? lvl.code,
-      band: proficiencyBandLabel(lvl.sortOrder, input.interfaceLanguage),
+      band: lvl.bandLabel,
       status: levelStatus,
       modules,
     };
@@ -216,8 +205,9 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
 
   // All framework levels (A1..C2) — data-driven from proficiency_levels, so the
   // whole ladder is shown even for levels that currently have no modules.
+  const bandLabels = await getBandLabelMap(service, interfaceLanguage);
   const version = await repo.getPublishedVersion(ensured.languageContext.learningLanguage);
-  let levelInputs: Array<{ code: string; sortOrder: number; label: string | null }> = [];
+  let levelInputs: Array<{ code: string; sortOrder: number; label: string | null; bandLabel: string }> = [];
   if (version) {
     const { data: curRow } = await service
       .from('curricula')
@@ -228,11 +218,11 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
     if (frameworkId) {
       const { data: lvlRows } = await service
         .from('proficiency_levels')
-        .select('code, sort_order, label')
+        .select('code, sort_order, label, band_key')
         .eq('framework_id', frameworkId)
         .order('sort_order', { ascending: true });
-      levelInputs = ((lvlRows ?? []) as Array<{ code: string; sort_order: number; label: string | null }>).map(
-        (r) => ({ code: r.code, sortOrder: r.sort_order, label: r.label }),
+      levelInputs = ((lvlRows ?? []) as Array<{ code: string; sort_order: number; label: string | null; band_key: string | null }>).map(
+        (r) => ({ code: r.code, sortOrder: r.sort_order, label: r.label, bandLabel: r.band_key ? bandLabels.get(r.band_key) ?? '' : '' }),
       );
     }
   }
@@ -252,7 +242,7 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
   if (levelInputs.length === 0) {
     const seen = new Map<string, number>();
     for (const m of modules) if (!seen.has(m.levelCode)) seen.set(m.levelCode, seen.size + 1);
-    levelInputs = [...seen.entries()].map(([code, sortOrder]) => ({ code, sortOrder, label: code }));
+    levelInputs = [...seen.entries()].map(([code, sortOrder]) => ({ code, sortOrder, label: code, bandLabel: '' }));
   }
 
   const tree = assembleCurriculumTree({
@@ -327,9 +317,16 @@ async function handlePlan(res: any, userId: string, service: any): Promise<void>
 
 async function handleGetPreferences(res: any, userId: string, service: any): Promise<void> {
   const ensured = await ensureUserCurriculum(service, userId);
+  // Data-driven display name for the learning language (blocker 16) — the UI
+  // renders it instead of any hardcoded "inglês", so a Spanish learner sees
+  // "espanhol"/"Spanish" with no code change.
+  const learningLanguageLabel = await getLanguageDisplayName(
+    service, ensured.languageContext.learningLanguage, ensured.languageContext.interfaceLanguage,
+  );
   res.status(200).json({
     learningLanguage: ensured.languageContext.learningLanguage,
     interfaceLanguage: ensured.languageContext.interfaceLanguage,
+    learningLanguageLabel,
     modalities: ensured.prefs,
   });
 }
@@ -363,10 +360,27 @@ async function handlePutPreferences(req: any, res: any, userId: string, service:
     .eq('user_id', userId)
     .eq('curriculum_version_id', ensured.versionId);
 
+  // "MENU = REGRA": changing the modality menu re-evaluates the CURRENT recorte
+  // server-side immediately. If all now-selected modalities were already
+  // practised, the recorte completes and the pointer advances — with NO
+  // artificial practice required. Adding a modality never regresses history.
+  let resync;
+  try {
+    resync = await resyncCurriculumProgress(service, userId, ensured.versionId);
+  } catch (err) {
+    // A recompute failure must not lose the (already-persisted) preference
+    // change; surface it as a soft field rather than failing the whole request.
+    safeLog('curriculum', 'preferences_resync_failed', 200, { message: String(err).slice(0, 150) });
+    resync = null;
+  }
+
   safeLog('curriculum', 'preferences_updated', 200, {
     w: next.writing, l: next.listening, p: next.pronunciation, c: next.conversation,
   });
-  res.status(200).json({ modalities: next });
+  res.status(200).json({
+    modalities: next,
+    ...(resync ? { status: resync.status } : {}),
+  });
 }
 
 async function handleProgress(res: any, userId: string, service: any): Promise<void> {

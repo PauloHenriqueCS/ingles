@@ -14,6 +14,7 @@ import { resolve } from 'path';
 
 const planSrc = readFileSync(resolve(__dirname, '..', 'CurriculumPlanView.tsx'), 'utf8');
 const detailSrc = readFileSync(resolve(__dirname, '..', 'CurriculumLevelDetail.tsx'), 'utf8');
+const i18nSrc = readFileSync(resolve(__dirname, '..', '..', 'i18n', 'curriculumUiStrings.ts'), 'utf8');
 
 describe('CurriculumPlanView.tsx — data-driven levels list', () => {
   it('loads the plan from the data-driven endpoint (getCurriculumTree), not a hardcoded array', () => {
@@ -27,14 +28,27 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
     expect(planSrc).not.toMatch(/\[\s*'A1'\s*,\s*'A2'\s*,\s*'B1'/);
   });
 
-  it('marks the current level with a text badge (SEU NÍVEL), not color-only', () => {
-    expect(planSrc).toMatch(/SEU NÍVEL/);
-    expect(planSrc).toMatch(/current:\s*\{[\s\S]*label:\s*'SEU NÍVEL'/);
+  it('marks the current level with an interface-language text badge (not color-only)', () => {
+    // Label text is data-driven (i18n module), referenced via t.statusYourLevel.
+    expect(planSrc).toMatch(/t\.statusYourLevel/);
+    expect(i18nSrc).toMatch(/statusYourLevel:\s*'SEU NÍVEL'/); // pt-BR
+    expect(i18nSrc).toMatch(/statusYourLevel:\s*'YOUR LEVEL'/); // en
   });
 
-  it('spells out completed/future level states as text (Concluído / Futuro)', () => {
-    expect(planSrc).toMatch(/label:\s*'Concluído'/);
-    expect(planSrc).toMatch(/label:\s*'Futuro'/);
+  it('spells out completed/future level states as localized text', () => {
+    expect(planSrc).toMatch(/t\.statusCompleted/);
+    expect(planSrc).toMatch(/t\.statusFuture/);
+    expect(i18nSrc).toMatch(/statusCompleted:\s*'Concluído'/);
+    expect(i18nSrc).toMatch(/statusFuture:\s*'Futuro'/);
+  });
+
+  it('never renders "A1 — A1": a redundant level name falls back to the band descriptor', () => {
+    expect(planSrc).toMatch(/levelDescriptor\(/);
+    expect(planSrc).toMatch(/name !== levelCode/);
+  });
+
+  it('is interface-language aware (uses curriculumUiStrings keyed by the tree interface language)', () => {
+    expect(planSrc).toMatch(/curriculumUiStrings\(tree\?\.interfaceLanguage\)/);
   });
 
   it('clicking a level opens the level detail screen (sets selected level → renders CurriculumLevelDetail)', () => {
@@ -54,7 +68,8 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
 
   it('handles curriculum_completed with a concluded message and no reset', () => {
     expect(planSrc).toMatch(/curriculum_completed/);
-    expect(planSrc).toMatch(/Currículo concluído/);
+    expect(planSrc).toMatch(/t\.curriculumCompletedTitle/);
+    expect(i18nSrc).toMatch(/curriculumCompletedTitle:\s*'Currículo concluído'/);
   });
 
   it('keeps the modality preferences accessible from the plan', () => {
@@ -68,13 +83,14 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
 });
 
 describe('CurriculumLevelDetail.tsx — read-only module list for one level', () => {
-  it('marks the current module "Você está aqui" (text, not color-only)', () => {
-    expect(detailSrc).toMatch(/current:\s*\{[\s\S]*label:\s*'Você está aqui'/);
+  it('marks the current module "Você está aqui" (localized text, not color-only)', () => {
+    expect(detailSrc).toMatch(/t\.statusYouAreHere/);
+    expect(i18nSrc).toMatch(/statusYouAreHere:\s*'Você está aqui'/);
   });
 
-  it('spells out completed/future module states as text', () => {
-    expect(detailSrc).toMatch(/completed:\s*\{[\s\S]*label:\s*'Concluído'/);
-    expect(detailSrc).toMatch(/future:\s*\{[\s\S]*label:\s*'Futuro'/);
+  it('spells out completed/future module states as localized text', () => {
+    expect(detailSrc).toMatch(/t\.statusCompleted/);
+    expect(detailSrc).toMatch(/t\.statusFuture/);
   });
 
   it('renders the level band label from the endpoint', () => {

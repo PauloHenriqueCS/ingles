@@ -100,6 +100,11 @@ vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
 // FREE system carries the fixed "Your name is Orodim" identity (as the real
 // template does), so the identity assertions still hold.
 vi.mock('../../api/_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+// Language display names are data-driven (public.language_i18n) — stubbed here.
+vi.mock('../../api/_curriculum/presentation-i18n', () => ({
+  getLanguageDisplayName: vi.fn(async (_c: unknown, code: string) => (code === 'en' ? 'inglês' : code === 'pt-BR' ? 'português' : code)),
+  getBandLabelMap: vi.fn(async () => new Map<string, string>()),
+}));
 vi.mock('../../api/_curriculum/curriculum-runtime', () => ({
   ensureUserCurriculum: vi.fn().mockResolvedValue({
     versionId: 'v1',

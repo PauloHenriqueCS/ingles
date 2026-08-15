@@ -4,10 +4,10 @@ import { ASSISTANT_NAME, REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BAS
 import {
   buildConversationPersonalization,
   buildConversationContextSection,
-  conversationLanguageLabel,
   type ConversationStartContext,
 } from '../../src/lib/promptBuilder';
 import { getLanguageSpeechConfig } from '../_curriculum/language-speech-config';
+import { getLanguageDisplayName } from '../_curriculum/presentation-i18n';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPractice, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
@@ -611,9 +611,17 @@ async function handleSession(req: any, res: any) {
   // CurriculumConfigError returns an explicit operational error without ever
   // having reserved a trial hold or budget capacity to release.
   let conversationInPlan = false;
+  // Curricular identity (recorte + version) at session START — the recorte the
+  // conversation practices toward. Persisted on the authorization row so
+  // completion records against it even if the pointer advances mid-session
+  // (blockers 8/10), for BOTH free and guided sessions.
+  let conversationCurricularIdentity: { versionId: string; subtopicKey: string } | null = null;
   try {
     const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
     conversationInPlan = ensured.prefs.conversation;
+    if (ensured.currentSubtopicKey) {
+      conversationCurricularIdentity = { versionId: ensured.versionId, subtopicKey: ensured.currentSubtopicKey };
+    }
   } catch (err) {
     // Fail-SAFE to free: a curriculum-resolution problem (misconfig OR any
     // transient infra error) must never block the paid conversation feature.
@@ -750,14 +758,22 @@ async function handleSession(req: any, res: any) {
     instructions = guidedInstructions as string;
   } else {
     try {
-      const freeResolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
+      // Language display labels are DATA (public.language_i18n), resolved by the
+      // interface language — never a hardcoded TS Record (blocker 16). A Spanish
+      // learner gets "espanhol"/"Spanish" from the same code path.
+      const svc = getCurriculumServiceClient();
+      const [learningLabel, interfaceLabel] = await Promise.all([
+        getLanguageDisplayName(svc, languageContext.learningLanguage, languageContext.interfaceLanguage),
+        getLanguageDisplayName(svc, languageContext.interfaceLanguage, languageContext.interfaceLanguage),
+      ]);
+      const freeResolved = await resolveActivityPrompt(svc, userId, {
         templateKey: 'conversation.free',
         activityType: 'conversation',
         requireSubtopic: false,
         userContext: {
           level: cefrLevel,
-          learning_label: conversationLanguageLabel(languageContext.learningLanguage),
-          interface_label: conversationLanguageLabel(languageContext.interfaceLanguage),
+          learning_label: learningLabel,
+          interface_label: interfaceLabel,
           personalization: buildConversationPersonalization(prefs),
           session_context: buildConversationContextSection(ctx),
         },
@@ -996,6 +1012,24 @@ async function handleSession(req: any, res: any) {
     // it silently.
     await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'authorization_row_insert_failed');
   }
+  // Persist the start-time curricular identity on the authorization row (both
+  // trial and commercial paths converge here). Best-effort — never blocks the
+  // token response. Completion reads it back to record the practice on the
+  // recorte the session started on (blocker 10).
+  if (recordingAuthorizationId && conversationCurricularIdentity) {
+    try {
+      await getSharedServiceClient()
+        .from('conversation_session_authorizations')
+        .update({
+          curriculum_version_id: conversationCurricularIdentity.versionId,
+          curriculum_subtopic_key: conversationCurricularIdentity.subtopicKey,
+        })
+        .eq('id', recordingAuthorizationId)
+        .eq('user_id', userId);
+    } catch (e) {
+      gatewayDeps.logger('gateway.conversationSessionAuthorization.identityPersistFailed', { message: String(e) });
+    }
+  }
 
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
@@ -1055,7 +1089,7 @@ async function handleSessionComplete(req: any, res: any) {
     const client = getSharedServiceClient();
     const { data: authRow, error: fetchErr } = await client
       .from('conversation_session_authorizations')
-      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id')
+      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id, curriculum_version_id, curriculum_subtopic_key')
       .eq('id', recordingAuthorizationId)
       .eq('user_id', userId)
       .eq('status', 'authorized')
@@ -1069,6 +1103,7 @@ async function handleSessionComplete(req: any, res: any) {
     const row = authRow as {
       id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
       gateway_budget_reservation_id: string | null; gateway_session_id: string | null;
+      curriculum_version_id: string | null; curriculum_subtopic_key: string | null;
     };
     const elapsedSeconds = (nowMs - new Date(row.authorized_at).getTime()) / 1000;
     const durationSeconds = Math.floor(Math.max(0, Math.min(elapsedSeconds, row.authorized_max_seconds)));
@@ -1141,7 +1176,13 @@ async function handleSessionComplete(req: any, res: any) {
       try {
         const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
         if (ensured.prefs.conversation) {
-          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'conversation', row.id);
+          // Record against the recorte the session STARTED on (persisted on the
+          // auth row), not the current pointer — a session that ends after the
+          // user advanced counts for its own recorte, never the next (blocker 10).
+          const identity = row.curriculum_version_id && row.curriculum_subtopic_key
+            ? { versionId: row.curriculum_version_id, subtopicKey: row.curriculum_subtopic_key }
+            : null;
+          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'conversation', row.id, identity);
         }
       } catch (practiceErr) {
         if (!(practiceErr instanceof CurriculumConfigError)) {

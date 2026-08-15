@@ -98,7 +98,7 @@ interface RpcRow {
 // null → no pending (the default; runs the acquire/generate flow as before).
 function makeMockDb(
   rpcRow: RpcRow,
-  opts: { pending?: { storyId: string; status: 'ready' | 'generating' | 'failed'; lockExpiresAt?: string | null } | null } = {},
+  opts: { pending?: { storyId: string; status: 'ready' | 'generating' | 'failed'; lockExpiresAt?: string | null; identity?: { learningLanguage?: string; versionId?: string; subtopicKey?: string } } | null } = {},
 ) {
   const rpcMock = vi.fn(async () => ({ data: [rpcRow], error: null }));
   const updateSharedStoryMock = vi.fn(async () => ({ error: null }));
@@ -127,6 +127,12 @@ function makeMockDb(
         part2_audio_path: ready ? 'shared/A1_A2/pending/part2.mp3' : null,
         audio_mime_type: ready ? 'audio/mpeg' : null,
         lock_expires_at: pending?.lockExpiresAt ?? null,
+        // Curricular identity MATCHING the ensureUserCurriculum mock above
+        // (blocker 6: a pending is only served when it matches the current
+        // recorte/version/language). Overridable per-test via pending.identity.
+        learning_language: pending?.identity?.learningLanguage ?? 'en',
+        curriculum_version_id: pending?.identity?.versionId ?? 'ver-1',
+        subtopic_key: pending?.identity?.subtopicKey ?? 'recorte-current',
       }
     : null;
 
@@ -594,6 +600,39 @@ describe('getPendingListeningStoryForToday — read-only auto-recovery (no gener
     expect(result).toBeNull();
     expect(db.deleteProgressMock).not.toHaveBeenCalled();
     expect(generateListeningStory).not.toHaveBeenCalled();
+  });
+
+  // ── Blocker 6: pending from a DIFFERENT recorte/version must not be served ──
+  it('returns null for a ready pending that belongs to a DIFFERENT recorte (never resumes stale)', async () => {
+    const db = makeMockDb(wonRow(), {
+      pending: { storyId: 'pending-1', status: 'ready', identity: { subtopicKey: 'recorte-OLD' } },
+    });
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+    expect(result).toBeNull(); // current recorte is 'recorte-current' — old one is not served
+  });
+
+  it('returns null for a ready pending of a DIFFERENT curriculum version', async () => {
+    const db = makeMockDb(wonRow(), {
+      pending: { storyId: 'pending-1', status: 'ready', identity: { versionId: 'ver-OTHER' } },
+    });
+    const result = await getPendingListeningStoryForToday('user-1', db.client, SECRET);
+    expect(result).toBeNull();
+  });
+});
+
+describe('getOrCreateSharedListeningStory — pending from a different recorte is dropped (blocker 6)', () => {
+  it('drops a mismatched-recorte pending and proceeds to acquire a fresh recorte-aligned story', async () => {
+    setCurrentLevel('A1');
+    const db = makeMockDb(readyRow({ id: 'fresh-story' }), {
+      pending: { storyId: 'stale-pending', status: 'ready', identity: { subtopicKey: 'recorte-OLD' } },
+    });
+
+    const result = await getOrCreateSharedListeningStory('user-1', db.client, OPENAI_KEY, AZURE_KEY, AZURE_REGION, SECRET);
+
+    // The stale pending was dropped (not returned) and a fresh story acquired.
+    expect(db.deleteProgressMock).toHaveBeenCalled();
+    expect(db.rpcMock).toHaveBeenCalled(); // acquire ran instead of serving the stale pending
+    expect(result.sharedStoryId).not.toBe('stale-pending');
   });
 });
 

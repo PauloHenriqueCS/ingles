@@ -9,6 +9,7 @@ import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPractice, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
 import { checkFeatureConfigError, checkRecordingDuration } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { evaluateSkillPromotion } from '../../src/lib/promotionService';
@@ -346,6 +347,23 @@ async function handleGenerateText(req: any, res: any) {
       safeLog('pronunciation-training/generate-text', 'persist_rejected', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
+    // Persist the curricular identity the activity was GENERATED for, ONCE
+    // (only when still null), so completion records the practice on THIS recorte
+    // even if the pointer advances before the user finishes (blocker 8/10).
+    // Best-effort — never fails the (already-generated) text response.
+    if (result.sessionId && resolvedPrompt.subtopicKey) {
+      try {
+        await supabase
+          .from('pronunciation_training_sessions')
+          .update({ curriculum_version_id: resolvedPrompt.versionId, curriculum_subtopic_key: resolvedPrompt.subtopicKey })
+          .eq('id', result.sessionId as string)
+          .eq('user_id', userId)
+          .is('curriculum_subtopic_key', null);
+      } catch {
+        safeLog('pronunciation-training/generate-text', 'identity_persist_failed', 200);
+      }
+    }
+
     safeLog('pronunciation-training/generate-text', 'success', 200);
     return res.status(200).json({
       sessionId: result.sessionId,
@@ -490,6 +508,21 @@ async function handleToken(req: any, res: any) {
   }
   const attemptsUsed = typeof attempt.attemptsUsed === 'number' ? attempt.attemptsUsed : 1;
 
+  // Recognition locale is data-driven from the user's learning language
+  // (public.languages.speech_locale), never the global audio.azure.defaultLocale.
+  // A configured language with no Speech config fails explicitly — never falls
+  // back to en-US.
+  let recognitionLocale: string;
+  try {
+    recognitionLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/token', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
   const gatewayDeps = getProductionDeps();
   try {
     const { token, region, expiresInSeconds } = await executeAiGatewayCall(
@@ -516,6 +549,7 @@ async function handleToken(req: any, res: any) {
     return res.status(200).json({
       token,
       region,
+      language: recognitionLocale,
       expiresInSeconds,
       attemptsUsed,
       maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
@@ -646,11 +680,22 @@ async function handleTrainingStart(req: any, res: any) {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao preparar a análise.');
   }
 
-  const audioDefaults = (await getProductConfig(resolveConfigEnvironment())).values['audio.azure'];
+  // Recognition locale is data-driven from the user's learning language, never
+  // the global audio.azure.defaultLocale. Missing config → explicit error.
+  let startLocale: string;
+  try {
+    startLocale = (await resolveUserSpeechConfig(supabase, userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/start', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     sessionId, attemptId, token: tokenResult.token, region: tokenResult.region,
-    language: audioDefaults.defaultLocale, referenceText,
+    language: startLocale, referenceText,
     dailyCompleted: reserved.dailyCompleted,
     dailyLimit: entitlements.pronunciation.evaluations.limit,
     dailyUnlimited: entitlements.pronunciation.evaluations.unlimited,
@@ -737,10 +782,24 @@ async function handleTrainingComplete(req: any, res: any) {
   }
 
   // Data-driven curriculum: a successfully completed assessment is one valid
-  // pronunciation practice for the user's current recorte. Best-effort — a
-  // recording failure must never affect the assessment response the user gets.
+  // pronunciation practice — recorded against the recorte the session was
+  // GENERATED for (persisted on the session), NOT the current pointer, so a
+  // session that finishes after the user advanced never marks the next recorte
+  // (blocker 8/10). Best-effort — a recording failure must never affect the
+  // assessment response the user gets.
   try {
-    await recordCurricularPractice(getCurriculumServiceClient(), userId, 'pronunciation', sessionId);
+    const svc = getCurriculumServiceClient();
+    const { data: sessionRow } = await svc
+      .from('pronunciation_training_sessions')
+      .select('curriculum_version_id, curriculum_subtopic_key')
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    const sr = sessionRow as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+    const identity = sr?.curriculum_version_id && sr.curriculum_subtopic_key
+      ? { versionId: sr.curriculum_version_id, subtopicKey: sr.curriculum_subtopic_key }
+      : null;
+    await recordCurricularPractice(svc, userId, 'pronunciation', sessionId, identity);
   } catch {
     safeLog('pronunciation-training/complete', 'record_curricular_practice_failed', 200);
   }

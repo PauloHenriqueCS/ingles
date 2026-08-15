@@ -27,6 +27,9 @@ export class CurriculumConfigError extends Error {
 
 export interface CurriculumRepository {
   getPublishedVersion(learningLanguage: string): Promise<CurriculumVersionRef | null>;
+  /** Loads a specific version by id (for version pinning — the user stays on
+   *  their pinned version even after a newer one is published). */
+  getVersionById(versionId: string): Promise<CurriculumVersionRef | null>;
   listOrderedSubtopics(versionId: string): Promise<OrderedSubtopic[]>;
   getModuleByKey(versionId: string, moduleKey: string, interfaceLanguage: string): Promise<CurriculumModule | null>;
   getSubtopicByKey(versionId: string, subtopicKey: string, interfaceLanguage: string): Promise<CurriculumSubtopic | null>;
@@ -79,6 +82,18 @@ export class SupabaseCurriculumRepository implements CurriculumRepository {
     if (!data) return null;
     const row = data as unknown as VersionRow;
     return { id: row.id, curriculumId: row.curriculum_id, version: row.version, status: 'published' };
+  }
+
+  async getVersionById(versionId: string): Promise<CurriculumVersionRef | null> {
+    const { data, error } = await this.client
+      .from('curriculum_versions')
+      .select('id, curriculum_id, version, status')
+      .eq('id', versionId)
+      .maybeSingle();
+    if (error) throw new CurriculumConfigError(`getVersionById failed: ${error.message}`);
+    if (!data) return null;
+    const row = data as unknown as VersionRow;
+    return { id: row.id, curriculumId: row.curriculum_id, version: row.version, status: row.status as CurriculumVersionRef['status'] };
   }
 
   async listOrderedSubtopics(versionId: string): Promise<OrderedSubtopic[]> {

@@ -14,17 +14,12 @@ import { executeAiGatewayCall, getProductionDeps, estimateTtsCharacters, estimat
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
 import { getProductConfig, resolveConfigEnvironment } from '../src/server/product-config';
+import { resolveUserSpeechConfig, SpeechConfigError, SAFE_AZURE_VOICE_RE } from './_curriculum/language-speech-config';
 
 // ── Voice configuration ───────────────────────────────────────────────────────
-
-export const DEFAULT_ENGLISH_VOICE = 'en-US-AvaMultilingualNeural';
-
-const ALLOWED_VOICES = new Set([
-  'en-US-AvaMultilingualNeural',
-  'en-US-AndrewMultilingualNeural',
-  'en-US-JennyNeural',
-  'en-US-GuyNeural',
-]);
+// Voice + locale are NOT hardcoded to English: they come from the user's
+// learning-language Speech config (public.languages). Only OUTPUT FORMAT (a
+// global technical concern) still comes from product config.
 
 const TTS_MAX_CHARS = 4_500;
 const TTS_TIMEOUT_MS = 25_000;
@@ -147,20 +142,38 @@ export default async function handler(req: any, res: any) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'O texto é muito longo para síntese de voz.');
   }
 
-  // Config only ever picks the DEFAULT voice/locale/format; the client-input
-  // allowlist above is unchanged and still the only way `voice` is chosen
-  // when the client sends one. defaultVoiceName is a free-form string in the
-  // dashboard's schema (no enum) — re-checked against ALLOWED_VOICES here so
-  // an admin-configured value can never reach the unescaped `<voice name=...>`
-  // SSML attribute unless it's one of the four vetted voices.
+  // Locale + voice are resolved from the USER'S learning-language Speech config
+  // (public.languages) — never a global English default. A configured language
+  // with no Speech config fails loudly below (503), never silently synthesizing
+  // English. Only outputFormat (a global technical property) comes from config.
+  let speechConfig: Awaited<ReturnType<typeof resolveUserSpeechConfig>>;
+  try {
+    speechConfig = await resolveUserSpeechConfig(auth.supabase, auth.userId);
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('tts', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+    }
+    throw err;
+  }
   const productConfig = await getProductConfig(resolveConfigEnvironment());
   const azureConfig = productConfig.values['audio.azure'];
-  const configuredDefaultVoice = ALLOWED_VOICES.has(azureConfig.defaultVoiceName)
-    ? azureConfig.defaultVoiceName
-    : DEFAULT_ENGLISH_VOICE;
+  // A client-requested voice is honoured ONLY when it is in this language's
+  // data-driven allowlist AND is a well-formed Azure voice token (defence
+  // against SSML injection). Otherwise fall back to the language default voice
+  // — never to a hardcoded English voice.
+  const allowedForLanguage = new Set(speechConfig.allowedTtsVoices);
   const resolvedVoice =
-    typeof voice === 'string' && ALLOWED_VOICES.has(voice) ? voice : configuredDefaultVoice;
-  const resolvedLocale = azureConfig.defaultLocale;
+    typeof voice === 'string' && allowedForLanguage.has(voice) && SAFE_AZURE_VOICE_RE.test(voice)
+      ? voice
+      : speechConfig.defaultTtsVoice;
+  // Guard: the language's own default voice must also be well-formed before it
+  // reaches the SSML attribute (config integrity, not user input).
+  if (!SAFE_AZURE_VOICE_RE.test(resolvedVoice)) {
+    safeLog('tts', 'invalid_voice_config', 503);
+    return jsonError(res, 503, 'TTS_UNAVAILABLE', 'Não foi possível gerar o áudio agora. Tente novamente.');
+  }
+  const resolvedLocale = speechConfig.speechLocale;
   const resolvedOutputFormat = azureConfig.outputFormat;
 
   // ── Azure availability check ───────────────────────────────────────────────

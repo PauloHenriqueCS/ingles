@@ -81,6 +81,10 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
 // and STT resolves the language's speech config. Mock both so free-mode session
 // start works without a live curriculum/DB (conversation:false → free mode).
 vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+vi.mock('../_curriculum/presentation-i18n', () => ({
+  getLanguageDisplayName: vi.fn(async (_c: unknown, code: string) => (code === 'en' ? 'inglês' : code === 'pt-BR' ? 'português' : code)),
+  getBandLabelMap: vi.fn(async () => new Map<string, string>()),
+}));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   ensureUserCurriculum: vi.fn().mockResolvedValue({
     versionId: 'v1',
@@ -1705,24 +1709,27 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
     vi.stubGlobal('fetch', mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } }));
     // handleSession's best-effort conversation_session_authorizations
     // insert: .insert({...}).select('id').single()
+    const identityUpdateEq2 = vi.fn().mockResolvedValue({ data: null, error: null });
     mockSessionsFrom.mockReturnValue({
       insert: vi.fn().mockReturnValue({
         select: vi.fn().mockReturnValue({
           single: vi.fn().mockResolvedValue({ data: { id: 'eeeeeeee-0000-0000-0000-000000000099' }, error: null }),
         }),
       }),
+      // Best-effort UPDATE that persists the start-time curricular identity on
+      // the authorization row (recorte the conversation practices toward).
+      update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: identityUpdateEq2 }) }),
     });
     const res = makeRes();
     await handler(vercelReq('session'), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('tok');
-    // Touches conversation_session_authorizations (the quota-bypass fix's
-    // best-effort authorization row, opened here and closed by
-    // /session-complete) but never the webrtc bridge tables
-    // (ai_provider_sessions/ai_usage_events) — those stay untouched unless
-    // conversation.webrtc_connect is in observe mode, which this test never
-    // configures.
-    expect(mockSessionsFrom).toHaveBeenCalledTimes(1);
+    // Touches conversation_session_authorizations twice — the best-effort
+    // authorization-row INSERT (opened here, closed by /session-complete) AND
+    // the best-effort curricular-identity UPDATE — but never the webrtc bridge
+    // tables (ai_provider_sessions/ai_usage_events), which stay untouched unless
+    // conversation.webrtc_connect is in observe mode (never configured here).
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(2);
     expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
   });
 

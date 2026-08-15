@@ -1,6 +1,5 @@
 import { getAuthHeader } from './apiAuth';
 import { apiUrl } from './apiUrl';
-import { supabase } from './supabase';
 import type {
   EpisodeSessionResponse,
   SubmitAnswerResult,
@@ -310,37 +309,16 @@ export function verifyStoryAnswer(input: {
 }
 
 export async function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
-  const activityDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
-  if (authError || !user) throw new Error('Not authenticated');
-
-  const { data: existing } = await supabase
-    .from('user_listening_assignments')
-    .select('id, status')
-    .eq('user_id', user.id)
-    .eq('activity_date', activityDate)
-    .is('episode_id', null)
-    .maybeSingle();
-
-  if (existing?.status === 'completed') {
-    return { activityDate, saved: true };
-  }
-
-  const now = new Date().toISOString();
-  if (existing) {
-    const { error } = await supabase
-      .from('user_listening_assignments')
-      .update({ status: 'completed', completed_at: now, updated_at: now })
-      .eq('id', existing.id);
-    if (error) throw error;
-  } else {
-    const { error } = await supabase
-      .from('user_listening_assignments')
-      .insert({ user_id: user.id, episode_id: null, activity_date: activityDate, status: 'completed', completed_at: now });
-    if (error) throw error;
-  }
-
-  return { activityDate, saved: true };
+  // Real-completion event routed through the SERVER (was a direct client write).
+  // The server marks the assignment complete AND records the curricular
+  // 'listening' practice for the recorte of the story the user actually
+  // practised — so curriculum credit is granted at REAL completion, never at
+  // "Começar a ouvir" (blocker 9). Server-authoritative: it resolves the user's
+  // consumed story identity itself, never trusting a client-supplied recorte.
+  return apiFetch<{ activityDate: string; saved: boolean }>('/api/listening/story/complete', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 // ── On-demand generation ───────────────────────────────────────────────────────

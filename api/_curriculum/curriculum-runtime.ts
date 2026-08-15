@@ -19,7 +19,6 @@ import {
   CurriculumConfigError,
 } from '../../src/domain/curriculum-engine/curriculum-repository';
 import { resolveCurriculumPrompt } from '../../src/domain/curriculum-engine/resolve-curriculum-prompt';
-import { decidePractice } from '../../src/domain/curriculum-engine/practice-decision';
 import type { CurricularModality, ModalityPreferences, OrderedSubtopic } from '../../src/domain/curriculum-engine/progression';
 import type { LanguageContext } from '../../src/domain/curriculum-engine/language-context';
 import type { ComposedPrompt } from '../../src/domain/curriculum-engine/prompt-composer';
@@ -83,37 +82,51 @@ async function resolveUserLevel(client: SupabaseClient, userId: string): Promise
 export async function ensureUserCurriculum(client: SupabaseClient, userId: string): Promise<EnsuredCurriculum> {
   const repo = new SupabaseCurriculumRepository(client);
 
-  // 1) Language context: from prefs if present, else bootstrap default.
+  // 1) VERSION PINNING. The schema allows one prefs row per (user, version), so
+  //    NEVER `.maybeSingle()` by user_id alone — that throws once a second
+  //    version exists. Read the user's CURRENT path deterministically: the most
+  //    recently used prefs row. Its curriculum_version_id is the AUTHORITY for
+  //    this user until an explicit V→V migration writes a newer row. Publishing
+  //    a new version does NOT touch this row, so it never silently migrates the
+  //    user (that is a separate, explicit operation, out of scope here).
   const { data: prefsData } = await client
     .from('user_curriculum_preferences')
     .select('learning_language, interface_language, practice_writing, practice_listening, practice_pronunciation, practice_conversation, curriculum_version_id')
     .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
   const existingPrefs = (prefsData ?? null) as (PrefsRow & { curriculum_version_id: string }) | null;
 
-  const languageContext: LanguageContext = existingPrefs
-    ? { learningLanguage: existingPrefs.learning_language, interfaceLanguage: existingPrefs.interface_language }
-    : { ...CURRICULUM_BOOTSTRAP_DEFAULT };
-
-  // 2) Published version for the learning language.
-  const version = await repo.getPublishedVersion(languageContext.learningLanguage);
-  if (!version) {
-    throw new CurriculumConfigError(
-      `No published curriculum for learning_language="${languageContext.learningLanguage}"`,
-    );
-  }
-
-  const ordered = await repo.listOrderedSubtopics(version.id);
-  const pairs = await repo.listSubtopicIdKeyPairs(version.id);
-  const keyToId = new Map(pairs.map((p) => [p.subtopicKey, p.id]));
-  const idToKey = new Map(pairs.map((p) => [p.id, p.subtopicKey]));
-
-  // 3) Ensure preferences row.
+  let version;
+  let languageContext: LanguageContext;
   let prefs: ModalityPreferences;
-  if (existingPrefs && existingPrefs.curriculum_version_id === version.id) {
+
+  if (existingPrefs) {
+    // Honour the PINNED version — load it by id, not the latest published one.
+    version = await repo.getVersionById(existingPrefs.curriculum_version_id);
+    if (!version) {
+      throw new CurriculumConfigError(
+        `Pinned curriculum version ${existingPrefs.curriculum_version_id} for user ${userId} not found`,
+      );
+    }
+    languageContext = { learningLanguage: existingPrefs.learning_language, interfaceLanguage: existingPrefs.interface_language };
     prefs = rowToPrefs(existingPrefs);
   } else {
-    prefs = existingPrefs ? rowToPrefs(existingPrefs) : DEFAULT_PREFS;
+    // BOOTSTRAP (never started): product default language + its published
+    // version. This is the ONLY place we resolve "latest published" and the
+    // only place a language literal enters — product config, not pedagogy.
+    languageContext = { ...CURRICULUM_BOOTSTRAP_DEFAULT };
+    const published = await repo.getPublishedVersion(languageContext.learningLanguage);
+    if (!published) {
+      throw new CurriculumConfigError(
+        `No published curriculum for learning_language="${languageContext.learningLanguage}"`,
+      );
+    }
+    version = published;
+    prefs = DEFAULT_PREFS;
+    // INSERT-IF-ABSENT (race-safe): a concurrent first-access must not create a
+    // duplicate prefs row nor clobber one that may already exist.
     await client.from('user_curriculum_preferences').upsert(
       {
         user_id: userId,
@@ -126,9 +139,14 @@ export async function ensureUserCurriculum(client: SupabaseClient, userId: strin
         practice_conversation: prefs.conversation,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'user_id,curriculum_version_id' },
+      { onConflict: 'user_id,curriculum_version_id', ignoreDuplicates: true },
     );
   }
+
+  const ordered = await repo.listOrderedSubtopics(version.id);
+  const pairs = await repo.listSubtopicIdKeyPairs(version.id);
+  const keyToId = new Map(pairs.map((p) => [p.subtopicKey, p.id]));
+  const idToKey = new Map(pairs.map((p) => [p.id, p.subtopicKey]));
 
   // 4) Ensure progress row (safe bootstrap for existing users).
   const { data: progData } = await client
@@ -261,37 +279,73 @@ export async function resolveActivityPrompt(
 
 export interface RecordPracticeResult {
   recorded: boolean;
+  /** The recorte the practice was recorded against (its ORIGIN, not necessarily current). */
   subtopicKey: string | null;
-  completedNow: string[];
+  /** The version the practice was recorded under (the user's pinned version). */
+  versionId: string | null;
+  /** Current recorte AFTER the atomic resync (null when curriculum_completed). */
   currentSubtopicKey: string | null;
   status: 'active' | 'curriculum_completed';
 }
 
 /**
- * Records ONE valid practice of `modality` for the user's CURRENT recorte and,
- * if all selected modalities are now practised, marks the recorte complete and
- * advances. Idempotent per (user, subtopic, modality). Practising the same
- * modality again is harmless and never regresses.
+ * The curricular identity an activity CARRIED when it was created/generated —
+ * persisted on the activity resource (which the user owns) and read server-side
+ * at completion. Passing it makes the practice land on the recorte the activity
+ * was ORIGINATED for, never on whatever recorte happens to be current now (which
+ * may have advanced meanwhile). See blockers 8 & 10.
+ */
+export interface CurricularActivityIdentity {
+  versionId: string;
+  subtopicKey: string;
+}
+
+/**
+ * Records ONE valid practice of `modality` and atomically resyncs progression.
+ *
+ * The practice is recorded against the ACTIVITY'S recorte (`identity`, read
+ * server-side from the owned resource) — NOT the current pointer — so an activity
+ * generated for recorte A that completes after the user already advanced to B is
+ * recorded on A and can never mark/advance B. When `identity` is omitted (e.g. a
+ * same-request writing review whose recorte is trivially the current one) the
+ * current recorte is used.
+ *
+ * Completion + pointer advance happen in the atomic, advisory-locked
+ * resync_curriculum_progress RPC (idempotent; safe under concurrent completions,
+ * tabs, retries and devices — blocker 11). Never regresses history.
  */
 export async function recordCurricularPractice(
   client: SupabaseClient,
   userId: string,
   modality: CurricularModality,
   sourceRef?: string | null,
+  identity?: CurricularActivityIdentity | null,
 ): Promise<RecordPracticeResult> {
   const ensured = await ensureUserCurriculum(client, userId);
-  if (!ensured.currentSubtopicId || !ensured.currentSubtopicKey) {
-    return { recorded: false, subtopicKey: null, completedNow: [], currentSubtopicKey: null, status: ensured.status };
+
+  // Resolve the recorte to record the practice against.
+  let targetSubtopicKey: string | null;
+  if (identity) {
+    // Foreign-version activity (e.g. generated under a version the user is no
+    // longer pinned to): ignore — never cross versions.
+    if (identity.versionId !== ensured.versionId) {
+      return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: ensured.currentSubtopicKey, status: ensured.status };
+    }
+    targetSubtopicKey = identity.subtopicKey;
+  } else {
+    targetSubtopicKey = ensured.currentSubtopicKey;
+  }
+  const targetSubtopicId = targetSubtopicKey ? ensured.keyToId.get(targetSubtopicKey) ?? null : null;
+  if (!targetSubtopicId || !targetSubtopicKey) {
+    return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: ensured.currentSubtopicKey, status: ensured.status };
   }
 
-  const currentId = ensured.currentSubtopicId;
-  const currentKey = ensured.currentSubtopicKey;
-
-  // 1) Upsert the practice record (idempotent per user+subtopic+modality).
+  // 1) Upsert the practice on the ACTIVITY'S recorte (idempotent per
+  //    user+subtopic+modality — a retry/refresh never duplicates).
   await client.from('user_subtopic_modality_progress').upsert(
     {
       user_id: userId,
-      subtopic_id: currentId,
+      subtopic_id: targetSubtopicId,
       modality,
       status: 'practiced',
       source_ref: sourceRef ?? null,
@@ -300,70 +354,65 @@ export async function recordCurricularPractice(
     { onConflict: 'user_id,subtopic_id,modality' },
   );
 
-  // 2) Practised modalities for the current recorte.
-  const { data: practicedData } = await client
-    .from('user_subtopic_modality_progress')
-    .select('modality')
-    .eq('user_id', userId)
-    .eq('subtopic_id', currentId);
-  const practicedRows = (practicedData ?? []) as Array<{ modality: CurricularModality }>;
-  const practicedSet = new Set<CurricularModality>(practicedRows.map((r) => r.modality));
-
-  // 3) Previously-completed keys for this user (mapped id → key).
-  const { data: completedData } = await client
-    .from('user_subtopic_completion')
-    .select('subtopic_id')
-    .eq('user_id', userId);
-  const completedRows = (completedData ?? []) as Array<{ subtopic_id: string }>;
-  const previousCompleted = new Set<string>(
-    completedRows.map((r) => ensured.idToKey.get(r.subtopic_id)).filter((k): k is string => !!k),
-  );
-
-  // 4) Pure decision.
-  const decision = decidePractice({
-    prefs: ensured.prefs,
-    orderedSubtopics: ensured.ordered,
-    practicedBySubtopic: new Map([[currentKey, practicedSet]]),
-    previousCompleted,
-  });
-
-  // 5) Persist newly-completed recortes + advance the pointer.
-  if (decision.completedNow.length > 0) {
-    const rows = decision.completedNow
-      .map((key) => ensured.keyToId.get(key))
-      .filter((id): id is string => !!id)
-      .map((id) => ({ user_id: userId, subtopic_id: id }));
-    if (rows.length > 0) {
-      await client.from('user_subtopic_completion').upsert(rows, { onConflict: 'user_id,subtopic_id' });
-    }
-
-    const nextKey = decision.state.currentSubtopicKey;
-    const nextId = nextKey ? ensured.keyToId.get(nextKey) ?? null : null;
-    let nextModuleId: string | null = null;
-    if (nextKey) {
-      const sub = await new SupabaseCurriculumRepository(client).getSubtopicByKey(
-        ensured.versionId,
-        nextKey,
-        ensured.languageContext.interfaceLanguage,
-      );
-      nextModuleId = sub?.moduleId ?? null;
-    }
-    await client.from('user_curriculum_progress').update({
-      current_subtopic_id: nextId,
-      current_module_id: nextModuleId,
-      current_level_code: decision.state.currentLevelCode,
-      status: decision.state.status,
-      updated_at: new Date().toISOString(),
-    })
-      .eq('user_id', userId)
-      .eq('curriculum_version_id', ensured.versionId);
-  }
+  // 2) Atomic, advisory-locked recompute of completion + pointer from persisted
+  //    facts. Safe under concurrency; never advances more than one recorte per
+  //    real completion and never regresses.
+  const resync = await resyncCurriculumProgress(client, userId, ensured.versionId);
 
   return {
     recorded: true,
-    subtopicKey: currentKey,
-    completedNow: decision.completedNow,
-    currentSubtopicKey: decision.state.currentSubtopicKey,
-    status: decision.state.status,
+    subtopicKey: targetSubtopicKey,
+    versionId: ensured.versionId,
+    currentSubtopicKey: resync.currentSubtopicKey,
+    status: resync.status,
   };
+}
+
+export interface ResyncResult {
+  currentSubtopicKey: string | null;
+  status: 'active' | 'curriculum_completed';
+}
+
+/**
+ * Atomically recomputes the user's curriculum completion + current pointer from
+ * the persisted facts (practices per recorte + the CURRENT modality menu). Used
+ * after a practice AND after a preferences change ("menu = regra"): removing the
+ * last pending modality can complete/advance the current recorte immediately,
+ * with NO artificial practice required; adding a modality never regresses an
+ * already-completed recorte. Race-safe via the RPC's per-user advisory lock.
+ *
+ * `versionId` defaults to the user's pinned version when omitted.
+ */
+export async function resyncCurriculumProgress(
+  client: SupabaseClient,
+  userId: string,
+  versionId?: string,
+): Promise<ResyncResult> {
+  let resolvedVersionId = versionId;
+  let idToKey: Map<string, string> | null = null;
+  if (!resolvedVersionId) {
+    const ensured = await ensureUserCurriculum(client, userId);
+    resolvedVersionId = ensured.versionId;
+    idToKey = ensured.idToKey;
+  }
+
+  const { data, error } = await client.rpc('resync_curriculum_progress', {
+    p_user_id: userId,
+    p_curriculum_version_id: resolvedVersionId,
+  });
+  if (error) throw new CurriculumConfigError(`resync_curriculum_progress failed: ${error.message}`);
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { current_subtopic_id: string | null; status: string }
+    | undefined;
+  const status = (row?.status === 'curriculum_completed' ? 'curriculum_completed' : 'active') as ResyncResult['status'];
+
+  // Map the returned subtopic id → semantic key (load the map only if we didn't
+  // already have it from a bootstrap ensure above).
+  if (!idToKey) {
+    const pairs = await new SupabaseCurriculumRepository(client).listSubtopicIdKeyPairs(resolvedVersionId);
+    idToKey = new Map(pairs.map((p) => [p.id, p.subtopicKey]));
+  }
+  const currentSubtopicKey = row?.current_subtopic_id ? idToKey.get(row.current_subtopic_id) ?? null : null;
+
+  return { currentSubtopicKey, status };
 }

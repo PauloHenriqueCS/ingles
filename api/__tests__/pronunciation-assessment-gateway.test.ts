@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
@@ -72,6 +73,8 @@ const VALID_RESULT = {
 function makeSupabaseRpc(rpcResults: Record<string, unknown>) {
   return {
     rpc: vi.fn((name: string) => Promise.resolve({ data: rpcResults[name] ?? {}, error: null })),
+    // Data-driven Speech config resolution (start handler) reads these tables.
+    from: makeSpeechConfigFrom(),
   };
 }
 

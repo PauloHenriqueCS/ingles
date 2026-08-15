@@ -7,6 +7,7 @@ import {
   type CurriculumModalities,
   type ModalityKey,
 } from '../lib/curriculumApi';
+import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -19,34 +20,12 @@ interface ModalityDef {
   warning?: string;
 }
 
-const MODALITIES: ModalityDef[] = [
-  {
-    key: 'writing',
-    label: 'Escrita',
-    description: 'Escrever um texto e revisá-lo com a IA fará parte das práticas necessárias para avançar em cada etapa.',
-    icon: PenSquare,
-  },
-  {
-    key: 'listening',
-    label: 'Listening',
-    description: 'Ouvir uma história e responder às perguntas fará parte das práticas necessárias para avançar em cada etapa.',
-    icon: Headphones,
-  },
-  {
-    key: 'pronunciation',
-    label: 'Pronúncia',
-    description: 'Treinar a pronúncia das palavras fará parte das práticas necessárias para avançar em cada etapa.',
-    icon: AudioLines,
-  },
-  {
-    key: 'conversation',
-    label: 'Conversação IA',
-    description: 'Converse com o tutor virtual para praticar inglês falado.',
-    icon: MessagesSquare,
-    warning:
-      'Ao incluir Conversação IA no seu plano de ensino, uma conversa guiada fará parte das práticas necessárias para avançar em cada etapa e utilizará seus minutos disponíveis.',
-  },
-];
+const MODALITY_ICONS: Record<ModalityKey, LucideIcon> = {
+  writing: PenSquare,
+  listening: Headphones,
+  pronunciation: AudioLines,
+  conversation: MessagesSquare,
+};
 
 function countSelected(m: CurriculumModalities): number {
   return Object.values(m).filter(Boolean).length;
@@ -54,15 +33,29 @@ function countSelected(m: CurriculumModalities): number {
 
 export default function CurriculumModalityPreferences() {
   const [modalities, setModalities] = useState<CurriculumModalities | null>(null);
+  const [interfaceLanguage, setInterfaceLanguage] = useState<string | null>(null);
+  // Data-driven display name of the taught language (blocker 16) — used in the
+  // conversation description instead of any hardcoded "inglês".
+  const [learningLanguageLabel, setLearningLanguageLabel] = useState<string>('');
   const [loadState, setLoadState] = useState<'loading' | 'done' | 'error'>('loading');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
+
+  const t = curriculumUiStrings(interfaceLanguage);
+  const MODALITIES: ModalityDef[] = [
+    { key: 'writing', label: t.modalityWriting, description: t.descWriting, icon: MODALITY_ICONS.writing },
+    { key: 'listening', label: t.modalityListening, description: t.descListening, icon: MODALITY_ICONS.listening },
+    { key: 'pronunciation', label: t.modalityPronunciation, description: t.descPronunciation, icon: MODALITY_ICONS.pronunciation },
+    { key: 'conversation', label: t.modalityConversation, description: t.descConversation(learningLanguageLabel), icon: MODALITY_ICONS.conversation, warning: t.warnConversation },
+  ];
 
   function load() {
     setLoadState('loading');
     getCurriculumPreferences()
       .then((prefs) => {
         setModalities(prefs.modalities);
+        setInterfaceLanguage(prefs.interfaceLanguage);
+        setLearningLanguageLabel(prefs.learningLanguageLabel);
         setLoadState('done');
       })
       .catch(() => setLoadState('error'));
@@ -77,7 +70,7 @@ export default function CurriculumModalityPreferences() {
     // "menu = regra" — but the menu can never be empty: at least one modality
     // must stay required to advance a recorte.
     if (countSelected(next) === 0) {
-      setValidationMsg('Selecione ao menos uma prática para o seu plano de ensino.');
+      setValidationMsg(t.atLeastOne);
       return;
     }
 
@@ -99,26 +92,24 @@ export default function CurriculumModalityPreferences() {
   return (
     <section className="bg-slate-800 rounded-xl p-5 space-y-4">
       <div className="space-y-1">
-        <h2 className="text-sm font-semibold text-slate-100">Práticas do seu plano</h2>
+        <h2 className="text-sm font-semibold text-slate-100">{t.modalitiesTitle}</h2>
         <p className="text-xs text-slate-400 leading-relaxed">
-          O menu é a regra: cada prática que você selecionar aqui passa a ser
-          <span className="text-slate-300 font-medium"> obrigatória para avançar em cada etapa</span> do
-          seu plano de ensino.
+          {t.modalitiesIntro(t.modalitiesIntroEmphasis)}
         </p>
       </div>
 
       {loadState === 'loading' && (
         <div className="flex items-center gap-2 py-4 text-slate-400 text-sm">
           <Loader2 className="w-4 h-4 animate-spin shrink-0" aria-hidden="true" />
-          Carregando preferências…
+          {t.loadingPrefs}
         </div>
       )}
 
       {loadState === 'error' && (
         <div className="bg-red-900/30 border border-red-800 rounded-lg p-4 text-center space-y-2">
-          <p className="text-red-300 text-sm">Não foi possível carregar suas preferências.</p>
+          <p className="text-red-300 text-sm">{t.prefsLoadError}</p>
           <button onClick={load} className="text-xs text-slate-400 hover:text-slate-200 transition-colors">
-            Tentar novamente
+            {t.retry}
           </button>
         </div>
       )}
@@ -151,7 +142,7 @@ export default function CurriculumModalityPreferences() {
                       type="button"
                       role="switch"
                       aria-checked={checked}
-                      aria-label={`${checked ? 'Remover' : 'Incluir'} ${label} no plano`}
+                      aria-label={`${checked ? t.removeFromPlan : t.includeInPlan} ${label}`}
                       onClick={() => handleToggle(key)}
                       className={`relative shrink-0 w-11 h-6 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-800 ${
                         checked ? 'bg-blue-600' : 'bg-slate-600'
@@ -187,19 +178,19 @@ export default function CurriculumModalityPreferences() {
             {saveStatus === 'saving' && (
               <span className="text-slate-400 flex items-center gap-1.5">
                 <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
-                Salvando…
+                {t.saving}
               </span>
             )}
             {saveStatus === 'saved' && (
               <span className="text-green-400 flex items-center gap-1.5">
                 <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                Preferências salvas.
+                {t.saved}
               </span>
             )}
             {saveStatus === 'error' && (
               <span className="text-red-400 flex items-center gap-1.5">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                Não foi possível salvar. Tente novamente.
+                {t.saveError}
               </span>
             )}
           </div>

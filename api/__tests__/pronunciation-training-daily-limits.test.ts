@@ -14,6 +14,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
 const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockIssueAzureSpeechToken, mockCreate, gw } = vi.hoisted(() => ({
@@ -155,6 +156,10 @@ function makeSupabase(overrides: {
         };
         return chain;
       }
+      // Data-driven Speech config resolution (token/start handlers) reads these.
+      if (table === 'languages' || table === 'user_curriculum_preferences') {
+        return speechFrom(table);
+      }
       return {
         select: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
@@ -166,6 +171,7 @@ function makeSupabase(overrides: {
     rpc,
   };
 }
+const speechFrom = makeSpeechConfigFrom();
 
 const activeTextRow = (o: Record<string, unknown> = {}) => ({
   id: 's1', level: 'B1', generated_text: 'Text.', status: 'text_generated',

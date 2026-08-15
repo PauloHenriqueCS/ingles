@@ -613,7 +613,18 @@ export default async function handler(req: any, res: any) {
   // must never fail an already-completed, already-persisted review.
   if (!isReviewMode) {
     try {
-      await recordCurricularPractice(getCurriculumServiceClient(), userId, 'writing', reviewId);
+      // Writing is a SAME-REQUEST activity: submitting a text for correction IS
+      // its completion, so it binds to the current recorte at review time. The
+      // recorte it was recorded against is persisted on the review row for audit
+      // and correlation (blocker 8/10).
+      const rec = await recordCurricularPractice(getCurriculumServiceClient(), userId, 'writing', reviewId);
+      if (rec.recorded && rec.subtopicKey) {
+        await supabase
+          .from('english_reviews')
+          .update({ curriculum_version_id: rec.versionId, curriculum_subtopic_key: rec.subtopicKey })
+          .eq('id', reviewId)
+          .eq('user_id', userId);
+      }
     } catch (e) {
       safeLog('review-text', 'record_curricular_practice_failed', 500, { detail: String(e).slice(0, 150) });
     }

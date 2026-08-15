@@ -16,21 +16,21 @@
 import { describe, it, expect } from 'vitest';
 import {
   assembleCurriculumTree,
-  proficiencyBandLabel,
   type AssembleCurriculumTreeInput,
   type TreeLevelInput,
   type TreeModuleInput,
 } from '../../../api/_curriculum/route-handler';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
-
+// bandLabel is now RESOLVED FROM DATA (proficiency_band_i18n) in handleTree and
+// passed to the pure assembler — no in-code band derivation (blocker 14).
 const LEVELS: TreeLevelInput[] = [
-  { code: 'A1', sortOrder: 1, label: 'A1' },
-  { code: 'A2', sortOrder: 2, label: 'A2' },
-  { code: 'B1', sortOrder: 3, label: 'B1' },
-  { code: 'B2', sortOrder: 4, label: 'B2' },
-  { code: 'C1', sortOrder: 5, label: 'C1' },
-  { code: 'C2', sortOrder: 6, label: 'C2' },
+  { code: 'A1', sortOrder: 1, label: 'A1', bandLabel: 'Iniciante' },
+  { code: 'A2', sortOrder: 2, label: 'A2', bandLabel: 'Iniciante' },
+  { code: 'B1', sortOrder: 3, label: 'B1', bandLabel: 'Intermediário' },
+  { code: 'B2', sortOrder: 4, label: 'B2', bandLabel: 'Intermediário' },
+  { code: 'C1', sortOrder: 5, label: 'C1', bandLabel: 'Avançado' },
+  { code: 'C2', sortOrder: 6, label: 'C2', bandLabel: 'Avançado' },
 ];
 
 // Two modules per level; module_key carries the level prefix.
@@ -89,24 +89,12 @@ function levelByCode(tree: ReturnType<typeof assembleCurriculumTree>, code: stri
 
 // ── Band labels ──────────────────────────────────────────────────────────────
 
-describe('proficiencyBandLabel — localized, derived from sort_order (data), not codes', () => {
-  it('maps A1/A2→Iniciante, B1/B2→Intermediário, C1/C2→Avançado (pt-BR)', () => {
-    expect(proficiencyBandLabel(1, 'pt-BR')).toBe('Iniciante');
-    expect(proficiencyBandLabel(2, 'pt-BR')).toBe('Iniciante');
-    expect(proficiencyBandLabel(3, 'pt-BR')).toBe('Intermediário');
-    expect(proficiencyBandLabel(4, 'pt-BR')).toBe('Intermediário');
-    expect(proficiencyBandLabel(5, 'pt-BR')).toBe('Avançado');
-    expect(proficiencyBandLabel(6, 'pt-BR')).toBe('Avançado');
-  });
-
-  it('respects interface_language (en)', () => {
-    expect(proficiencyBandLabel(1, 'en')).toBe('Beginner');
-    expect(proficiencyBandLabel(3, 'en')).toBe('Intermediate');
-    expect(proficiencyBandLabel(5, 'en')).toBe('Advanced');
-  });
-
-  it('falls back to pt-BR for an unknown interface_language', () => {
-    expect(proficiencyBandLabel(1, 'xx')).toBe('Iniciante');
+describe('band labels are passed through from data (blocker 14)', () => {
+  it('the assembler surfaces the DATA-resolved band label per level (no in-code derivation)', () => {
+    const tree = assembleCurriculumTree(baseInput({ currentSubtopicKey: 'A1.SELFINTRO.S1', completedSubtopicKeys: new Set() }));
+    expect(levelByCode(tree, 'A1').band).toBe('Iniciante');
+    expect(levelByCode(tree, 'B1').band).toBe('Intermediário');
+    expect(levelByCode(tree, 'C1').band).toBe('Avançado');
   });
 });
 

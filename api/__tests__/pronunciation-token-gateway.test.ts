@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 import { WORD_PRACTICE_MAX_ATTEMPTS } from '../../src/domain/pronunciation/word-practice-limits';
+import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 
 const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, gw } = vi.hoisted(() => {
   const mockIssueToken = vi.fn();
@@ -153,7 +154,7 @@ beforeEach(() => {
   mockIssueToken.mockResolvedValue({ token: 'ephemeral-token-xyz', region: 'eastus', expiresInSeconds: 540 });
   mockRpc.mockResolvedValue({ data: { attemptsUsed: 1 }, error: null });
   mockServiceRpc.mockResolvedValue({ data: { attemptsUsed: 0 }, error: null });
-  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc } });
+  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc, from: makeSpeechConfigFrom() } });
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
 });
 

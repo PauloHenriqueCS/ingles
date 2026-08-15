@@ -554,6 +554,42 @@ async function handleStoryComplete(req: any, res: any) {
       if (error) throw error;
     }
 
+    // ── Curricular practice at REAL completion (blocker 9) ────────────────────
+    // Listening counts as curriculum practice ONLY here — the genuine completion
+    // event — never at "Começar a ouvir" (consume) which merely started it. The
+    // recorte identity is resolved SERVER-SIDE from the story the user actually
+    // consumed today (never trusting a client-supplied recorte), so an activity
+    // for recorte A completing after the user advanced to B is recorded on A and
+    // never marks B (blocker 10). Best-effort + idempotent.
+    try {
+      const { data: prog } = await serviceClient
+        .from('user_listening_shared_progress')
+        .select('shared_story_id')
+        .eq('user_id', userId)
+        .eq('activity_date', activityDate)
+        .eq('completed', true)
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const sid = (prog as { shared_story_id?: string } | null)?.shared_story_id ?? null;
+      if (sid) {
+        const { data: story } = await serviceClient
+          .from('listening_shared_stories')
+          .select('curriculum_version_id, subtopic_key')
+          .eq('id', sid)
+          .maybeSingle();
+        const s = story as { curriculum_version_id?: string | null; subtopic_key?: string | null } | null;
+        if (s?.curriculum_version_id && s.subtopic_key) {
+          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'listening', sid, {
+            versionId: s.curriculum_version_id,
+            subtopicKey: s.subtopic_key,
+          });
+        }
+      }
+    } catch {
+      safeLog('listening/story/complete', 'record_curricular_practice_failed', 200, { userId });
+    }
+
     safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
     console.log('[11] Retorno enviado ao frontend → 200 saved');
     return res.status(200).json({ activityDate, saved: true });
@@ -1061,18 +1097,12 @@ async function handleStoryPracticeStart(req: any, res: any) {
 
   const consumed = rpc.consumed ?? 0;
 
-  // Data-driven curriculum: a successful consume is the ONE unambiguous "real
-  // practice" event for Listening (the "Começar a ouvir" action). Preparing,
-  // opening, refreshing, or auto-recovering a pending story never reaches this
-  // handler, so this is the correct single place to record curricular practice.
-  // Best-effort and idempotent (recordCurricularPractice de-dupes per
-  // user+subtopic+modality) — it must never affect the consume response, and a
-  // repeated practice of the same story never double-advances the recorte.
-  try {
-    await recordCurricularPractice(getCurriculumServiceClient(), userId, 'listening', sharedStoryId);
-  } catch {
-    safeLog('listening/story/practice-start', 'record_curricular_practice_failed', 200);
-  }
+  // NOTE: "Começar a ouvir" (consume) debits the COMMERCIAL listening quota, but
+  // it is NOT curricular completion — the user has only STARTED. Curriculum
+  // credit for Listening is recorded exclusively at the REAL completion event
+  // (POST /api/listening/story/complete → handleStoryComplete), so opening,
+  // preparing, recovering a pending, or merely starting never advances a recorte
+  // (blocker 9). Commercial quota and curricular progression are independent.
 
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({

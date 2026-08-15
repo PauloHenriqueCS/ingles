@@ -78,6 +78,8 @@ export interface CurriculumModalities {
 export interface CurriculumPreferences {
   learningLanguage: string;
   interfaceLanguage: string;
+  /** Data-driven display name of the learning language, localized to interface. */
+  learningLanguageLabel: string;
   modalities: CurriculumModalities;
 }
 

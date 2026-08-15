@@ -19,9 +19,11 @@ export interface PromptLanguageContext {
 
 const DEFAULT_LANGUAGE_CONTEXT: PromptLanguageContext = { ...CURRICULUM_BOOTSTRAP_DEFAULT };
 
-// Human-readable (interface-language) labels for the language directive. This is
-// display i18n, not pedagogy: it carries no grammar/level/curriculum content and
-// falls back to the raw code (or its primary subtag) for any unmapped locale.
+// LEGACY-ONLY: consumed exclusively by buildTutorInstructions below, which has
+// NO live runtime consumer (the live conversation path resolves language display
+// names from DATA — public.language_i18n via getLanguageDisplayName — see
+// api/conversation). Kept only so the legacy builder's unit tests still compile;
+// it is NOT the language-name authority for any production pedagogy (blocker 16).
 const LANGUAGE_LABELS: Record<string, string> = {
   en: 'inglês',
   pt: 'português',
@@ -231,15 +233,6 @@ export function buildSystemPrompt(prefs: AIPreferences): string {
 }
 
 /**
- * Interface-language label for a language code (display i18n, NOT pedagogy).
- * Exported so the FREE-conversation DB template path can pass the taught/
- * interface language as human-readable labels via userContext.
- */
-export function conversationLanguageLabel(code: string): string {
-  return languageLabel(code);
-}
-
-/**
  * The user's conversation-STYLE personalization block (pace, accent, formality,
  * humour, roast, initiative, correction timing/scope/detail/language). This is
  * language-NEUTRAL conversation-style config written in the interface language —
@@ -345,23 +338,29 @@ function buildContextSection(ctx: ConversationStartContext): string {
   lines.push('### Meta de conversação');
   lines.push(`Meta diária: ${ctx.conversationGoalMinutes} min | Restante hoje: ${remaining} min`);
   if (remaining > 0 && remaining <= 3) {
-    lines.push('ATENÇÃO: Pouquíssimos minutos restantes. Encerre naturalmente em breve: "Before we finish, one last question..."');
+    // Language-NEUTRAL directive — NO English example sentence. The model
+    // produces the closing in the TARGET language per the template's language
+    // rule (blocker 15: no authoritative English prose in the builder).
+    lines.push('ATENÇÃO: Pouquíssimos minutos restantes. Encerre a conversa naturalmente em breve, no idioma-alvo.');
   } else if (remaining > 0 && remaining <= 5) {
     lines.push('Poucos minutos restantes. Comece a preparar um encerramento natural.');
   }
   lines.push('');
 
+  // "Como iniciar" — DATA + LANGUAGE-NEUTRAL directives only. No hardcoded
+  // English (or any target-language) example sentences: the model greets in the
+  // TARGET language (the template's "responda sempre em {learning_label}" rule).
   lines.push('### Como iniciar a conversa');
-  lines.push('IMPORTANTE: Você DEVE falar primeiro. Não espere o aluno. Inicie imediatamente ao conectar.');
+  lines.push('IMPORTANTE: Você DEVE falar primeiro, no idioma-alvo. Não espere o aluno. Inicie imediatamente ao conectar.');
   lines.push('');
   if (ctx.studentText) {
-    const ref = ctx.missionTitle ? `about "${ctx.missionTitle}"` : '';
-    lines.push(`Inicie referenciando o texto do aluno ${ref}. Exemplo: "I really enjoyed reading your text! [observe algo específico do texto]. Tell me more about [aspecto concreto]..."`);
-    lines.push('Após explorar o texto, migre naturalmente para outros ângulos: hipóteses, conflitos, roleplay, pedidos de opinião, comparações.');
+    const ref = ctx.missionTitle ? ` (missão: "${ctx.missionTitle}")` : '';
+    lines.push(`Inicie referenciando, no idioma-alvo, o texto que o aluno escreveu hoje${ref}: comente algo específico dele e peça que fale mais sobre um aspecto concreto.`);
+    lines.push('Depois, migre naturalmente para outros ângulos: hipóteses, conflitos, roleplay, pedidos de opinião, comparações.');
   } else if (ctx.missionTitle) {
-    lines.push(`Inicie com o tema da missão: "${ctx.missionTitle}". Exemplo: "Today I'd love to explore the topic of ${ctx.missionTitle} with you. What's your take on this?"`);
+    lines.push(`Inicie, no idioma-alvo, pelo tema da missão ("${ctx.missionTitle}"): apresente o tema de forma acolhedora e convide o aluno a dar sua opinião.`);
   } else {
-    lines.push('Inicie de forma acolhedora e natural. Exemplo: "Hi! Great to see you here. How has your day been so far?"');
+    lines.push('Inicie de forma acolhedora e natural, no idioma-alvo, com uma saudação breve e uma pergunta aberta sobre o dia do aluno.');
   }
 
   return lines.join('\n');
