@@ -45,9 +45,14 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout }
         aria-hidden="true"
       />
 
-      {/* Drawer */}
+      {/* Drawer — safe-area padding so its header/footer clear the status and
+          navigation bars under Android 15+ edge-to-edge (env() is 0 otherwise). */}
       <nav
         className="fixed top-0 left-0 bottom-0 w-72 bg-slate-800 z-40 flex flex-col shadow-2xl"
+        style={{
+          paddingTop: 'env(safe-area-inset-top)',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}
         role="navigation"
         aria-label="Menu principal"
       >
