@@ -37,12 +37,25 @@ export interface CurriculumPlan {
 
 export type CurriculumNodeStatus = 'completed' | 'current' | 'future';
 
+/** A single "step" (etapa) shown inside a module detail. Carries only an opaque
+ *  positional id (never a subtopic/recorte key), a localized title and status. */
+export interface CurriculumTreeStep {
+  id: string;
+  title: string;
+  status: CurriculumNodeStatus;
+}
+
 export interface CurriculumTreeModule {
   /** Opaque, stable module id (safe to show; carries no recorte data). */
   moduleKey: string;
   /** Localized (interface language) title. */
   title: string;
   status: CurriculumNodeStatus;
+  /** Completed vs total steps (etapas) — for the "X de Y etapas" progress. */
+  completedSteps: number;
+  totalSteps: number;
+  /** Ordered steps of this module, revealed when the module is opened. */
+  steps: CurriculumTreeStep[];
 }
 
 export interface CurriculumTreeLevel {

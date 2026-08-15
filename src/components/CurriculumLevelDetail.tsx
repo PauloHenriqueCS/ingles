@@ -1,4 +1,4 @@
-import { ArrowLeft, CheckCircle2, MapPin, Circle } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, MapPin, Circle, ChevronRight } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { CurriculumTreeLevel, CurriculumNodeStatus } from '../lib/curriculumApi';
 import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
@@ -7,7 +7,17 @@ interface Props {
   level: CurriculumTreeLevel;
   interfaceLanguage: string | null;
   onBack: () => void;
+  /** Opens the read-only step detail for a module (pure navigation, no write). */
+  onSelectModule: (moduleKey: string) => void;
 }
+
+// Progress-bar fill colour per module state (paired with the text label, never
+// color-only — the "X de Y etapas" text and the status badge carry the meaning).
+const MODULE_BAR_CLASS: Record<CurriculumNodeStatus, string> = {
+  completed: 'bg-green-500',
+  current: 'bg-blue-500',
+  future: 'bg-slate-600',
+};
 
 // Icon/colour per module state; the LABEL is interface-language localized at
 // render (never color-only, never a hardcoded pt-BR string).
@@ -30,7 +40,7 @@ function levelDescriptor(levelCode: string, name: string, band: string): string 
  * one) NEVER mutates progress — this component takes the already-loaded level
  * data and performs no writes and no level selection.
  */
-export default function CurriculumLevelDetail({ level, interfaceLanguage, onBack }: Props) {
+export default function CurriculumLevelDetail({ level, interfaceLanguage, onBack, onSelectModule }: Props) {
   const t = curriculumUiStrings(interfaceLanguage);
   const descriptor = levelDescriptor(level.levelCode, level.name, level.band);
   const showBand = level.band && level.band !== descriptor;
@@ -75,12 +85,16 @@ export default function CurriculumLevelDetail({ level, interfaceLanguage, onBack
             const meta = MODULE_STATE_META[mod.status];
             const Icon = meta.icon;
             const modLabel = mod.status === 'current' ? t.statusYouAreHere : mod.status === 'completed' ? t.statusCompleted : t.statusFuture;
+            const pct = mod.totalSteps > 0 ? Math.round((mod.completedSteps / mod.totalSteps) * 100) : 0;
             return (
-              <div
+              <button
                 key={mod.moduleKey}
-                className={`bg-slate-800 rounded-xl p-4 border ${
+                type="button"
+                onClick={() => onSelectModule(mod.moduleKey)}
+                className={`w-full text-left bg-slate-800 rounded-xl p-4 border transition-colors hover:bg-slate-700/50 focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                   mod.status === 'current' ? 'border-blue-800/60' : 'border-slate-700'
                 }`}
+                aria-label={`${mod.title} — ${t.stepsProgress(mod.completedSteps, mod.totalSteps)} (${modLabel})`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-3 min-w-0">
@@ -89,13 +103,26 @@ export default function CurriculumLevelDetail({ level, interfaceLanguage, onBack
                       strokeWidth={2}
                       aria-hidden="true"
                     />
-                    <p className="text-sm font-medium text-slate-100 leading-snug min-w-0">{mod.title}</p>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-slate-100 leading-snug min-w-0">{mod.title}</p>
+                      {mod.totalSteps > 0 && (
+                        <p className="text-xs text-slate-400 mt-0.5">{t.stepsProgress(mod.completedSteps, mod.totalSteps)}</p>
+                      )}
+                    </div>
                   </div>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium shrink-0 ${meta.badgeClass}`}>
-                    {modLabel}
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${meta.badgeClass}`}>
+                      {modLabel}
+                    </span>
+                    <ChevronRight className="w-4 h-4 text-slate-500 shrink-0" aria-hidden="true" />
+                  </div>
                 </div>
-              </div>
+                {mod.totalSteps > 0 && (
+                  <div className="mt-3 h-1.5 rounded-full bg-slate-700/70 overflow-hidden" aria-hidden="true">
+                    <div className={`h-full rounded-full ${MODULE_BAR_CLASS[mod.status]}`} style={{ width: `${pct}%` }} />
+                  </div>
+                )}
+              </button>
             );
           })}
         </div>

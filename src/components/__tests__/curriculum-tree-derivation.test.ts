@@ -56,6 +56,18 @@ function subtopicsByModule(): Map<string, string[]> {
   return m;
 }
 
+// Friendly (interface-language) step titles — NEVER contain the subtopic_key, so
+// the "no recorte key leaks" invariant is testable. Keyed by subtopic key
+// internally; only the VALUES are user-facing.
+function titlesByKey(): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const [, moduleKey] of MODULE_DEFS) {
+    m.set(`${moduleKey}.S1`, 'Primeira etapa amigável');
+    m.set(`${moduleKey}.S2`, 'Segunda etapa amigável');
+  }
+  return m;
+}
+
 /** All subtopic keys belonging to the given level codes. */
 function completedThroughLevels(levelCodes: string[]): Set<string> {
   const set = new Set<string>();
@@ -75,6 +87,7 @@ function baseInput(overrides: Partial<AssembleCurriculumTreeInput>): AssembleCur
     levels: LEVELS,
     modules: MODULES,
     subtopicKeysByModule: subtopicsByModule(),
+    subtopicTitlesByKey: titlesByKey(),
     completedSubtopicKeys: new Set<string>(),
     currentSubtopicKey: null,
     ...overrides,
@@ -160,15 +173,106 @@ describe('B1 user — A1/A2 Concluído, B1 current, later levels future', () => 
     expect(b1.modules.find((m) => m.moduleKey === 'B1.WORK')?.status).toBe('future');
   });
 
-  it('module nodes expose ONLY moduleKey/title/status — never recortes, counts or ids', () => {
+  it('module nodes expose title/status/step counts/steps — and NEVER a recorte key', () => {
     for (const level of tree.levels) {
       for (const mod of level.modules) {
-        expect(Object.keys(mod).sort()).toEqual(['moduleKey', 'status', 'title']);
+        expect(Object.keys(mod).sort()).toEqual(['completedSteps', 'moduleKey', 'status', 'steps', 'title', 'totalSteps']);
         // No recorte/subtopic key ever leaks into a displayable field.
         expect(mod.title).not.toMatch(/\.S\d/);
         expect(JSON.stringify(mod)).not.toMatch(/\.S1|\.S2/);
+        for (const step of mod.steps) {
+          expect(Object.keys(step).sort()).toEqual(['id', 'status', 'title']);
+          expect(step.id).toMatch(/^\d+$/);         // opaque positional id, not the key
+          expect(step.title).not.toMatch(/\.S\d/);  // friendly title, never the key
+        }
       }
     }
+  });
+});
+
+// ── Steps (etapas) inside a module ───────────────────────────────────────────
+
+const STEP_TITLES = ['Organizar acontecimentos', 'Descrever contexto', 'Relatar consequências', 'Conectar eventos'];
+function fourStepInput(overrides: Partial<AssembleCurriculumTreeInput> = {}): AssembleCurriculumTreeInput {
+  const subs = ['A1.STORY.S1', 'A1.STORY.S2', 'A1.STORY.S3', 'A1.STORY.S4'];
+  return {
+    interfaceLanguage: 'pt-BR',
+    status: 'active',
+    levels: [{ code: 'A1', sortOrder: 1, label: 'A1', bandLabel: 'Iniciante' }],
+    modules: [{ moduleKey: 'A1.STORY', levelCode: 'A1', title: 'Contar uma história', sortOrder: 1 }],
+    subtopicKeysByModule: new Map([['A1.STORY', subs]]),
+    subtopicTitlesByKey: new Map(subs.map((k, i) => [k, STEP_TITLES[i]])),
+    completedSubtopicKeys: new Set<string>(),
+    currentSubtopicKey: 'A1.STORY.S1',
+    ...overrides,
+  };
+}
+function storyModule(tree: ReturnType<typeof assembleCurriculumTree>) {
+  const mod = levelByCode(tree, 'A1').modules.find((m) => m.moduleKey === 'A1.STORY');
+  if (!mod) throw new Error('A1.STORY module missing');
+  return mod;
+}
+
+describe('module steps — 4 etapas, X/Y progress and per-step status', () => {
+  it('0 concluídas → 0 de 4, module current, first step current, rest future (test 1,5)', () => {
+    const mod = storyModule(assembleCurriculumTree(fourStepInput()));
+    expect(mod.completedSteps).toBe(0);
+    expect(mod.totalSteps).toBe(4);
+    expect(mod.status).toBe('current');
+    expect(mod.steps.map((s) => s.status)).toEqual(['current', 'future', 'future', 'future']);
+  });
+
+  it('2 concluídas → 2 de 4, current 3rd step, order ✓✓●○ (test 2,4,6)', () => {
+    const mod = storyModule(assembleCurriculumTree(fourStepInput({
+      completedSubtopicKeys: new Set(['A1.STORY.S1', 'A1.STORY.S2']),
+      currentSubtopicKey: 'A1.STORY.S3',
+    })));
+    expect(mod.completedSteps).toBe(2);
+    expect(mod.totalSteps).toBe(4);
+    expect(mod.status).toBe('current');
+    expect(mod.steps.map((s) => s.status)).toEqual(['completed', 'completed', 'current', 'future']);
+  });
+
+  it('all concluídas → 4 de 4 and the module is completed (test 3)', () => {
+    const mod = storyModule(assembleCurriculumTree(fourStepInput({
+      completedSubtopicKeys: new Set(['A1.STORY.S1', 'A1.STORY.S2', 'A1.STORY.S3', 'A1.STORY.S4']),
+      currentSubtopicKey: 'A1.NEXT.S1', // pointer moved on to another module
+    })));
+    expect(mod.completedSteps).toBe(4);
+    expect(mod.totalSteps).toBe(4);
+    expect(mod.status).toBe('completed');
+    expect(mod.steps.every((s) => s.status === 'completed')).toBe(true);
+  });
+
+  it('step titles come from the localized map, never the subtopic key (test 9,10)', () => {
+    const mod = storyModule(assembleCurriculumTree(fourStepInput()));
+    expect(mod.steps.map((s) => s.title)).toEqual(STEP_TITLES);
+    expect(JSON.stringify(mod.steps)).not.toMatch(/A1\.STORY|\.S\d/);
+    // A different interface language would pass a DIFFERENT title map → different
+    // titles with NO code change (proves data-driven i18n).
+    const en = storyModule(assembleCurriculumTree(fourStepInput({
+      interfaceLanguage: 'en',
+      subtopicTitlesByKey: new Map([['A1.STORY.S1', 'Organize events'], ['A1.STORY.S2', 'Describe context'], ['A1.STORY.S3', 'Report consequences'], ['A1.STORY.S4', 'Connect events']]),
+    })));
+    expect(en.steps[0].title).toBe('Organize events');
+  });
+
+  it('viewing a future module never marks a current step (read-only, test 7)', () => {
+    // current recorte is in ANOTHER module → this module is future, no step current.
+    const mod = storyModule(assembleCurriculumTree(fourStepInput({ currentSubtopicKey: 'A1.OTHER.S1' })));
+    expect(mod.status).toBe('future');
+    expect(mod.steps.some((s) => s.status === 'current')).toBe(false);
+    expect(mod.steps.every((s) => s.status === 'future')).toBe(true);
+  });
+
+  it('curriculum_completed → every step of every module completed, none current (test 14)', () => {
+    const mod = storyModule(assembleCurriculumTree(fourStepInput({
+      status: 'curriculum_completed',
+      currentSubtopicKey: null,
+      completedSubtopicKeys: new Set(['A1.STORY.S1', 'A1.STORY.S2', 'A1.STORY.S3', 'A1.STORY.S4']),
+    })));
+    expect(mod.status).toBe('completed');
+    expect(mod.steps.every((s) => s.status === 'completed')).toBe(true);
   });
 });
 

@@ -62,12 +62,28 @@ export interface AssembleCurriculumTreeInput {
   levels: TreeLevelInput[];
   /** ALL modules of the version (localized title), any order — sorted here. */
   modules: TreeModuleInput[];
-  /** subtopic (recorte) keys per moduleKey — used ONLY to derive counts→status. */
+  /** subtopic (recorte) keys per moduleKey, IN PROGRESSION ORDER — used to derive
+   *  per-module counts→status AND the ordered "steps" (etapas) list. The keys are
+   *  internal; only positional ids + localized titles leave this function. */
   subtopicKeysByModule: Map<string, string[]>;
+  /** Localized (interface-language) display title per subtopic key. The map's
+   *  VALUES are user-facing "step" titles; the KEYS never leave this function. */
+  subtopicTitlesByKey: Map<string, string>;
   /** Set of completed subtopic keys for the user. */
   completedSubtopicKeys: Set<string>;
   /** The user's current recorte key, or null when curriculum_completed. */
   currentSubtopicKey: string | null;
+}
+
+/** A single "step" (etapa) inside a module — the user-facing granularity of a
+ *  recorte. Carries ONLY an opaque positional id (never the subtopic_key), a
+ *  localized title, and its status. */
+export interface CurriculumTreeStepNode {
+  /** Opaque, stable-per-module positional id ("1".."N"); NOT the subtopic_key. */
+  id: string;
+  /** Localized (interface language) step title. */
+  title: string;
+  status: CurriculumNodeStatus;
 }
 
 export interface CurriculumTreeModuleNode {
@@ -75,6 +91,12 @@ export interface CurriculumTreeModuleNode {
   moduleKey: string;
   title: string;
   status: CurriculumNodeStatus;
+  /** How many of this module's steps the user has completed (for "X de Y"). */
+  completedSteps: number;
+  /** Total steps in the module. */
+  totalSteps: number;
+  /** Ordered steps (etapas): completed → current → future. Read-only. */
+  steps: CurriculumTreeStepNode[];
 }
 
 export interface CurriculumTreeLevelNode {
@@ -141,7 +163,18 @@ export function assembleCurriculumTree(input: AssembleCurriculumTreeInput): Curr
         if (total > 0 && done === total) status = 'completed';
         else if (!isCompleted && m.moduleKey === currentModuleKey) status = 'current';
         else status = 'future';
-        return { moduleKey: m.moduleKey, title: m.title, status };
+        // Per-step (etapa) status, from the SAME server authority as the module:
+        // completed = in the completed set; current = the exact current recorte
+        // (only when the curriculum is still active); everything else = future.
+        // The id is positional (opaque), never the subtopic_key.
+        const steps: CurriculumTreeStepNode[] = subs.map((k, i) => {
+          let stepStatus: CurriculumNodeStatus;
+          if (input.completedSubtopicKeys.has(k)) stepStatus = 'completed';
+          else if (!isCompleted && k === input.currentSubtopicKey) stepStatus = 'current';
+          else stepStatus = 'future';
+          return { id: String(i + 1), title: input.subtopicTitlesByKey.get(k) ?? '', status: stepStatus };
+        });
+        return { moduleKey: m.moduleKey, title: m.title, status, completedSteps: done, totalSteps: total, steps };
       });
 
     return {
@@ -239,6 +272,25 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
     subtopicsByModule.set(s.moduleKey, arr);
   }
 
+  // Localized STEP (etapa) titles come from the existing recorte i18n layer
+  // (curriculum_subtopic_i18n.capability), filtered to the user's PINNED version
+  // and interface language — the same data source the practice flow reads. Only
+  // the localized title (a value) is used for display; the subtopic_key stays
+  // internal. Transversal topics live in a different table and are NOT here, so
+  // they never enter the steps list or the counts.
+  const subtopicTitlesByKey = new Map<string, string>();
+  {
+    const { data: capRows } = await service
+      .from('curriculum_subtopic_i18n')
+      .select('capability, curriculum_subtopics!inner(subtopic_key, curriculum_version_id)')
+      .eq('interface_language', interfaceLanguage)
+      .eq('curriculum_subtopics.curriculum_version_id', ensured.versionId);
+    for (const r of (capRows ?? []) as Array<{ capability: string | null; curriculum_subtopics: { subtopic_key: string } | null }>) {
+      const key = r.curriculum_subtopics?.subtopic_key;
+      if (key) subtopicTitlesByKey.set(key, r.capability ?? '');
+    }
+  }
+
   // Fallback: if proficiency_levels is unavailable, derive the ladder from the
   // modules' level codes so the tree is never empty.
   if (levelInputs.length === 0) {
@@ -258,6 +310,7 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
       sortOrder: m.sortOrder,
     })),
     subtopicKeysByModule: subtopicsByModule,
+    subtopicTitlesByKey,
     completedSubtopicKeys: completed,
     currentSubtopicKey: ensured.currentSubtopicKey,
   });

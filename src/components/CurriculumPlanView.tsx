@@ -5,10 +5,12 @@ import {
   getCurriculumTree,
   type CurriculumTree,
   type CurriculumTreeLevel,
+  type CurriculumTreeModule,
   type CurriculumNodeStatus,
 } from '../lib/curriculumApi';
 import CurriculumModalityPreferences from './CurriculumModalityPreferences';
 import CurriculumLevelDetail from './CurriculumLevelDetail';
+import CurriculumModuleDetail from './CurriculumModuleDetail';
 import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
 
 interface Props {
@@ -38,6 +40,7 @@ export default function CurriculumPlanView({ onBack }: Props) {
   const [tree, setTree] = useState<CurriculumTree | null>(null);
   const [loadState, setLoadState] = useState<'loading' | 'done' | 'error'>('loading');
   const [selectedLevelCode, setSelectedLevelCode] = useState<string | null>(null);
+  const [selectedModuleKey, setSelectedModuleKey] = useState<string | null>(null);
 
   function load() {
     setLoadState('loading');
@@ -51,15 +54,23 @@ export default function CurriculumPlanView({ onBack }: Props) {
 
   useEffect(() => { load(); }, []);
 
-  // Opening a level is pure navigation into a read-only detail view — it never
-  // changes the user's level or writes any progress.
+  // Opening a level (and then a module) is pure navigation into read-only detail
+  // views — it never changes the user's level/pointer or writes any progress.
   const selectedLevel: CurriculumTreeLevel | null =
     tree && selectedLevelCode ? tree.levels.find((l) => l.levelCode === selectedLevelCode) ?? null : null;
+  // Derived from the CURRENT level's modules only, so backing out of a level
+  // clears the module too (no stale cross-level selection).
+  const selectedModule: CurriculumTreeModule | null =
+    selectedLevel && selectedModuleKey ? selectedLevel.modules.find((m) => m.moduleKey === selectedModuleKey) ?? null : null;
 
   const t = curriculumUiStrings(tree?.interfaceLanguage);
 
+  if (selectedLevel && selectedModule) {
+    return <CurriculumModuleDetail level={selectedLevel} module={selectedModule} interfaceLanguage={tree?.interfaceLanguage ?? null} onBack={() => setSelectedModuleKey(null)} />;
+  }
+
   if (selectedLevel) {
-    return <CurriculumLevelDetail level={selectedLevel} interfaceLanguage={tree?.interfaceLanguage ?? null} onBack={() => setSelectedLevelCode(null)} />;
+    return <CurriculumLevelDetail level={selectedLevel} interfaceLanguage={tree?.interfaceLanguage ?? null} onBack={() => setSelectedLevelCode(null)} onSelectModule={setSelectedModuleKey} />;
   }
 
   const isCompleted = tree?.status === 'curriculum_completed';
