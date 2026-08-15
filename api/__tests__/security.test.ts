@@ -451,13 +451,38 @@ describe('grammar-explanation handler', () => {
 
 // ─── _rateLimit: Retry-After header ──────────────────────────────────────────
 
-describe('applyRateLimit Retry-After', () => {
-  it('sets Retry-After header when rate limited', async () => {
-    // Without SUPABASE_SERVICE_ROLE_KEY the real implementation fails open (allowed = true)
+describe('applyRateLimit fail-closed vs fail-open on infra failure', () => {
+  // Force the "rate-limit store unreachable" scenario deterministically,
+  // independent of whatever ambient .env the runner has: no service creds →
+  // no client → infra failure.
+  beforeEach(() => {
+    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', '');
+    vi.stubEnv('VITE_SUPABASE_URL', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('paid route fails CLOSED (503, provider not reached) when the rate-limit infra is unavailable', async () => {
+    // No SUPABASE_SERVICE_ROLE_KEY in the test env → the rate-limit RPC store
+    // is unreachable. A paid AI route (generate-theme, failClosed:true) must
+    // now refuse the request with 503 RATE_LIMIT_INFRA_FAILURE — never the old
+    // silent fail-open that let a paid endpoint run unlimited (audit §12).
     const { applyRateLimit: realApplyRateLimit } = await vi.importActual<typeof import('../_rateLimit')>('../_rateLimit');
     const res = makeRes();
     const result = await realApplyRateLimit(res, 'user-1', 'generate-theme');
-    expect(result).toBe(true); // fail open because no key configured
+    expect(result).toBe(false);
+    expect(res._status()).toBe(503);
+    expect((res._body() as any)?.code).toBe('RATE_LIMIT_INFRA_FAILURE');
+    // Distinct from a genuine 429 rate-limit hit.
+    expect((res._body() as any)?.code).not.toBe('RATE_LIMITED');
+  });
+
+  it('non-cost route fails OPEN (allowed) on the same infra failure', async () => {
+    const { applyRateLimit: realApplyRateLimit } = await vi.importActual<typeof import('../_rateLimit')>('../_rateLimit');
+    const res = makeRes();
+    // plan-entitlements has no failClosed flag → locking a user out of an
+    // entitlement read on an infra blip is worse than letting one through.
+    const result = await realApplyRateLimit(res, 'user-1', 'plan-entitlements');
+    expect(result).toBe(true);
   });
 });
 

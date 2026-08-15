@@ -156,6 +156,9 @@ export type { BudgetCheckerInterface, BudgetScope, BudgetPeriod, BudgetCheckPara
 export { SupabaseCircuitBreaker } from './circuit-breaker';
 export type { CircuitBreakerInterface, BreakerState, BreakerStateResult } from './circuit-breaker';
 
+export { SupabaseConcurrencyLimiter } from './concurrency-limiter';
+export type { ConcurrencyLimiterInterface, ConcurrencyAcquireResult } from './concurrency-limiter';
+
 export {
   estimateTtsCharacters,
   estimateAudioSecondsCeiling,

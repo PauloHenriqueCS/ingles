@@ -987,6 +987,10 @@ describe('GatewayPolicyResolver', () => {
       const policy = await resolver.resolvePolicy(baseContext());
 
       expect(policy.maxConcurrentRequests).toBe(50);
+      // The winning value came from the 'global' row (the 'feature' row's is
+      // null) — its scope must be reported so concurrency keys against the
+      // right per-user dimension, exactly like the budget scope tracking.
+      expect(policy.maxConcurrentScopeType).toBe('global');
       expect(policy.rateLimitRequests).toBe(1000);
       expect(policy.rateLimitWindowSeconds).toBe(3600);
     });

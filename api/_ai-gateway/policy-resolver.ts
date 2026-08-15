@@ -206,6 +206,10 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
     // not shadow a budget set only at a broader scope (typically 'global').
     const dailyBudget = mostSpecificFieldValueWithScope(rows, 'daily_budget_usd');
     const monthlyBudget = mostSpecificFieldValueWithScope(rows, 'monthly_budget_usd');
+    // Resolved WITH its scope, same as budgets: a global/provider concurrency
+    // cap keys per-user against that shared dimension, never re-labeled
+    // per-feature — see enforcement.ts's resolveConcurrencyScope.
+    const maxConcurrent = mostSpecificFieldValueWithScope(rows, 'max_concurrent_requests');
 
     return {
       gatewayMode,
@@ -214,7 +218,8 @@ export class GatewayPolicyResolver implements PolicyResolverInterface {
       monthlyBudgetUsd:        monthlyBudget != null ? String(monthlyBudget.value) : null,
       dailyBudgetScopeType:    dailyBudget?.scopeType ?? null,
       monthlyBudgetScopeType:  monthlyBudget?.scopeType ?? null,
-      maxConcurrentRequests:  mostSpecificFieldValue(rows, 'max_concurrent_requests'),
+      maxConcurrentRequests:  maxConcurrent?.value ?? null,
+      maxConcurrentScopeType: maxConcurrent?.scopeType ?? null,
       rateLimitRequests:      mostSpecificFieldValue(rows, 'rate_limit_requests'),
       rateLimitWindowSeconds: mostSpecificFieldValue(rows, 'rate_limit_window_seconds'),
     };

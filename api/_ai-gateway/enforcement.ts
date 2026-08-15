@@ -131,6 +131,40 @@ export function buildBudgetScopes(policy: GatewayPolicy, context: GatewayCallCon
   return scopes;
 }
 
+// Lease for a concurrency slot — the ceiling on how long one held slot can
+// survive a process that died mid-call before its finally/catch released it.
+// Must exceed the longest possible invoke(): listening story/TTS uses a 120s
+// provider timeout, so 180s gives a margin without pinning capacity for long
+// after a real crash. The normal success/error paths release immediately; this
+// is only the abandoned-slot backstop.
+const CONCURRENCY_LEASE_SECONDS = 180;
+
+// Concurrency is ALWAYS per-user (§9 "por usuário"): the winning
+// ai_runtime_controls scope only selects which DIMENSION the per-user count is
+// bucketed by, never turns it into a single bucket shared across users. A
+// 'global' cap therefore means "N paid calls in flight per user, summed across
+// every feature" — not one global pool. System/cron actors (no userId) are
+// skipped: they are not the multi-in-flight abuse vector and have no per-user
+// bucket to occupy.
+function resolveConcurrencyScope(
+  policy: GatewayPolicy,
+  context: GatewayCallContext,
+  featureKey: AiFeatureKey,
+): { scopeKey: string; maxConcurrent: number } | null {
+  const max = policy.maxConcurrentRequests;
+  if (max == null || max <= 0) return null;
+  if (!context.userId) return null;
+  let dimension: string;
+  switch (policy.maxConcurrentScopeType) {
+    case 'feature':  dimension = `feature:${featureKey}`; break;
+    case 'provider': dimension = `provider:${context.provider}`; break;
+    case 'user':     dimension = 'user'; break;
+    case 'global':
+    default:         dimension = 'global'; break;
+  }
+  return { scopeKey: `u:${context.userId}|${dimension}`, maxConcurrent: max };
+}
+
 export async function executeEnforcedPipeline<T>(
   featureKey: AiFeatureKey,
   context: GatewayCallContext,
@@ -169,9 +203,20 @@ export async function executeEnforcedPipeline<T>(
     }
   }
 
-  // 3. Rate limit — only when this scope has a configured ceiling
-  // (ai_runtime_controls.rate_limit_requests); unconfigured (NULL, the
-  // default) applies no gateway-level rate limit to this feature yet.
+  // 3. Rate limit (gateway backstop). Two-layer contract, ONE atomic store
+  // (check_and_increment_rate_limit on api_rate_limits — no third system):
+  //   • AUTHORITATIVE per-user-action limits live at the route level
+  //     (api/_rateLimit.ts applyRateLimit, keyed user_id+route_key), which
+  //     preserves the audited business numbers (25/h, 30/h, …) and applies
+  //     ONE limit per user action regardless of how many provider calls it
+  //     fans out into. Every paid route is covered there (verified by
+  //     api/__tests__/paid-endpoint-rate-limit-coverage.test.ts).
+  //   • This gateway-level check is the OPTIONAL per-feature backstop an admin
+  //     arms via ai_runtime_controls.rate_limit_requests. Keyed per feature
+  //     (gateway:<featureKey>), it only fires where configured; NULL (today's
+  //     default) means "the route-level limit is authoritative for this
+  //     feature", not "unprotected". When configured it fails CLOSED, exactly
+  //     like every other enforce gate.
   if (context.userId && deps.rateLimiter && policy.rateLimitRequests != null) {
     try {
       const rl = await deps.rateLimiter.check(
@@ -273,6 +318,49 @@ export async function executeEnforcedPipeline<T>(
     }
   }
 
+  // 6b. Concurrency — acquire an in-flight slot for THIS paid call, capping how
+  // many run simultaneously per user (ai_runtime_controls.max_concurrent_requests,
+  // previously dead config). Distinct from the hourly rate limit above. Atomic
+  // and cross-instance via acquire_gateway_concurrency_slot_v1 (Postgres
+  // advisory lock) — an in-process Map could never see other Vercel instances'
+  // in-flight calls. Released in every terminal path below (success AND provider
+  // error); the SQL lease recovers a slot whose process died before either ran.
+  // Unwinds the reservation + dedupe it already took, so a concurrency block
+  // never leaves reserved quota/budget stranded.
+  let concurrencySlotId: string | null = null;
+  const concurrency = resolveConcurrencyScope(policy, context, featureKey);
+  if (concurrency && deps.concurrencyLimiter) {
+    try {
+      const acq = await deps.concurrencyLimiter.acquire(
+        concurrency.scopeKey, context.userId ?? null, featureKey, context.provider,
+        concurrency.maxConcurrent, CONCURRENCY_LEASE_SECONDS,
+      );
+      if (!acq.acquired) {
+        if (reservationId && deps.reservationsRepository) {
+          await deps.reservationsRepository.release(reservationId, 'concurrency_limited').catch(() => undefined);
+        }
+        if (dedupeLockId && deps.dedupeStore) await deps.dedupeStore.fail(dedupeLockId).catch(() => undefined);
+        return deny('CONCURRENCY_LIMITED', 'Too many requests in flight for this account. Try again in a moment.');
+      }
+      concurrencySlotId = acq.slotId;
+    } catch (concErr) {
+      deps.logger('gateway.enforce.concurrencyAcquire.failed', sanitizeError(concErr));
+      if (reservationId && deps.reservationsRepository) {
+        await deps.reservationsRepository.release(reservationId, 'concurrency_infra_error').catch(() => undefined);
+      }
+      if (dedupeLockId && deps.dedupeStore) await deps.dedupeStore.fail(dedupeLockId).catch(() => undefined);
+      return deny('POLICY_UNAVAILABLE', 'Concurrency limiter unavailable — failing closed.');
+    }
+  }
+
+  const releaseConcurrencySlot = async (reason: string): Promise<void> => {
+    if (!concurrencySlotId || !deps.concurrencyLimiter) return;
+    const slotId = concurrencySlotId;
+    concurrencySlotId = null; // guard against a double release across paths
+    try { await deps.concurrencyLimiter.release(slotId, reason); }
+    catch (relErr) { deps.logger('gateway.enforce.concurrencyRelease.failed', sanitizeError(relErr)); }
+  };
+
   await recordDecisionSafely(deps.decisionsRepository, {
     outcome: 'allowed', reasonCode: 'OK', featureKey, provider: context.provider,
     userId: context.userId, actorType: context.actorType, gatewayMode: 'enforce', correlationId,
@@ -337,6 +425,8 @@ export async function executeEnforcedPipeline<T>(
       providerRequestId: errInfo.requestId ?? null,
       correlationId:     context.correlationId ?? null,
     }, deps.logger);
+    // Provider call finished (with an error) — the slot is no longer in flight.
+    await releaseConcurrencySlot('provider_error');
     throw invokeErr;
   }
 
@@ -394,6 +484,8 @@ export async function executeEnforcedPipeline<T>(
   if (deps.circuitBreaker) {
     await deps.circuitBreaker.recordOutcome(context.provider, context.model ?? null, featureKey, true).catch(() => undefined);
   }
+  // Provider call finished successfully — release the in-flight slot.
+  await releaseConcurrencySlot('completed');
 
   return result;
 }

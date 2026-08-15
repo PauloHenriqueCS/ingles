@@ -34,6 +34,11 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
   };
 });
 
+// Rate limiting is orthogonal to the gateway/telemetry behavior under test —
+// allow it through (its own coverage lives in _rateLimit/security tests). Since
+// 'tts' is now failClosed, leaving the real applyRateLimit here would 503 in
+// the no-service-key test env before the gateway is ever reached.
+vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 
 // api/tts.ts now resolves the default voice/locale/output-format from the

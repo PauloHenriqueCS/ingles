@@ -7,11 +7,14 @@
  *   legacy  — invoke once, no telemetry, no DB dependency on critical path.
  *   observe — invoke once, record events and metrics; telemetry failures
  *             never break the call.
- *   enforce — the full pipeline (entitlements, budget, rate limit, dedupe,
- *             reservation — see enforcement.ts) runs before invoke(); fails
- *             closed (no provider call) whenever policy can't be positively
- *             confirmed. Unreachable in production this stage: no feature's
- *             gateway_mode is 'enforce', and nothing here flips one.
+ *   enforce — the full pipeline (entitlements, breaker, rate limit, dedupe,
+ *             quota+budget reservation, concurrency — see enforcement.ts) runs
+ *             before invoke(); fails closed (no provider call) whenever policy
+ *             can't be positively confirmed. LIVE in production: every real
+ *             feature/provider/global ai_runtime_controls row is gateway_mode
+ *             'enforce' today (see enforcement.ts's header). An older comment
+ *             here called it "unreachable" — that was true before the
+ *             activation migration and is no longer correct.
  */
 
 import { randomUUID } from 'crypto';
@@ -37,6 +40,7 @@ import { SupabaseDedupeStore, type DedupeStoreInterface } from './dedupe';
 import { SupabaseReservationsRepository, type ReservationsRepositoryInterface } from './reservations';
 import { SupabaseBudgetChecker, type BudgetCheckerInterface } from './budgets';
 import { SupabaseCircuitBreaker, type CircuitBreakerInterface } from './circuit-breaker';
+import { SupabaseConcurrencyLimiter, type ConcurrencyLimiterInterface } from './concurrency-limiter';
 import { executeEnforcedPipeline } from './enforcement';
 import { dispatchProviderIncident } from './alerts';
 
@@ -60,6 +64,11 @@ export interface GatewayDeps {
   reservationsRepository?: ReservationsRepositoryInterface;
   budgetChecker?: BudgetCheckerInterface;
   circuitBreaker?: CircuitBreakerInterface;
+  // Concurrency limiter — enforces ai_runtime_controls.max_concurrent_requests
+  // (paid calls simultaneously in flight, per user). Optional like the other
+  // enforce-only deps: a mock GatewayDeps that omits it simply skips the
+  // concurrency step (as does any policy whose maxConcurrentRequests is NULL).
+  concurrencyLimiter?: ConcurrencyLimiterInterface;
   clock: () => number;
   uuidGen: () => string;
   logger: (event: string, data?: Record<string, unknown>) => void;
@@ -88,6 +97,7 @@ export function getProductionDeps(): GatewayDeps {
     reservationsRepository: new SupabaseReservationsRepository(),
     budgetChecker:         new SupabaseBudgetChecker(),
     circuitBreaker:        new SupabaseCircuitBreaker(),
+    concurrencyLimiter:    new SupabaseConcurrencyLimiter(),
     clock:                 () => Date.now(),
     uuidGen:               () => randomUUID(),
     logger:                (event, data) => {
@@ -152,11 +162,11 @@ export async function executeAiGatewayCall<T>(
     );
   }
 
-  // 4. Enforce mode — the full pipeline (entitlements, budget, rate limit,
-  // dedupe, reservation) is implemented in enforcement.ts but is unreachable
-  // in production: no feature's gateway_mode is 'enforce' at the end of
-  // this stage, and executeAiGatewayCall itself never flips a feature into
-  // it.
+  // 4. Enforce mode — the full pipeline (entitlements, breaker, rate limit,
+  // dedupe, quota+budget reservation, concurrency) is implemented in
+  // enforcement.ts and is LIVE in production (every real ai_runtime_controls
+  // row is 'enforce'). executeAiGatewayCall never flips a feature's mode
+  // itself — the mode is authored entirely in ai_runtime_controls.
   if (policy.gatewayMode === 'enforce') {
     return executeEnforcedPipeline(featureKey, context, invoke, deps, policy, extractMetrics);
   }
