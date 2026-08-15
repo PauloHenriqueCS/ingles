@@ -100,9 +100,16 @@ async function nativeGoogleSignIn(): Promise<GoogleSignInResult> {
 
   let idToken: string | null;
   try {
+    // NO `scopes` here on purpose. We only need the OIDC identity token for
+    // supabase.auth.signInWithIdToken — Credential Manager's GetGoogleIdOption
+    // already returns an ID token carrying email/profile claims. Passing
+    // `scopes` switches @capgo to the Google Authorization (access-token) flow,
+    // which requires native MainActivity wiring and otherwise rejects with
+    // "You CANNOT use scopes without modifying the main activity" (the exact
+    // error the debug APK hit). Identity-only, so no scopes, no access token.
     const { result } = await SocialLogin.login({
       provider: 'google',
-      options: { scopes: ['email', 'profile'], nonce: hashed },
+      options: { nonce: hashed },
     });
     idToken = 'idToken' in result ? result.idToken : null;
   } catch (e) {
