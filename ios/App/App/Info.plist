@@ -26,6 +26,12 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>O Orodim usa o microfone para gravar sua pronúncia e suas conversas em inglês durante as atividades de prática.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<!-- Required for OneSignal confirmed delivery / content-available
+		     (background) push handling. Only this mode is enabled. -->
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
