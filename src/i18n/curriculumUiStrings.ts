@@ -28,6 +28,15 @@ export interface CurriculumUiStrings {
   // Level detail
   backToLevels: string;
   modulesComingSoon: string;
+  // Module steps (etapas) — the recorte granularity, shown with friendly words
+  // only (never "recorte"/"subtopic"/semantic keys).
+  stepsLabel: string;                                    // "Etapas"
+  stepsProgress: (done: number, total: number) => string;        // "2 de 4 etapas"
+  stepsCompletedCount: (done: number, total: number) => string;  // "2 de 4 etapas concluídas"
+  stepCompleted: string;                                 // "Concluída"
+  stepCurrent: string;                                   // "Atual"
+  stepFuture: string;                                    // "Futuro"
+  backToModules: string;                                 // back from module detail
   // Modality preferences
   modalitiesTitle: string;
   modalitiesIntro: (emphasis: string) => string;
@@ -66,6 +75,13 @@ const PT_BR: CurriculumUiStrings = {
   statusFuture: 'Futuro',
   backToLevels: 'Voltar aos níveis',
   modulesComingSoon: 'Os módulos deste nível ainda serão disponibilizados.',
+  stepsLabel: 'Etapas',
+  stepsProgress: (done, total) => `${done} de ${total} etapas`,
+  stepsCompletedCount: (done, total) => `${done} de ${total} etapas concluídas`,
+  stepCompleted: 'Concluída',
+  stepCurrent: 'Atual',
+  stepFuture: 'Futuro',
+  backToModules: 'Voltar aos módulos',
   modalitiesTitle: 'Práticas do seu plano',
   modalitiesIntro: (emphasis) => `O menu é a regra: cada prática que você selecionar aqui passa a ser ${emphasis} do seu plano de ensino.`,
   modalitiesIntroEmphasis: 'obrigatória para avançar em cada etapa',
@@ -102,6 +118,13 @@ const EN: CurriculumUiStrings = {
   statusFuture: 'Upcoming',
   backToLevels: 'Back to levels',
   modulesComingSoon: 'The modules for this level are not available yet.',
+  stepsLabel: 'Steps',
+  stepsProgress: (done, total) => `${done} of ${total} steps`,
+  stepsCompletedCount: (done, total) => `${done} of ${total} steps completed`,
+  stepCompleted: 'Completed',
+  stepCurrent: 'Current',
+  stepFuture: 'Upcoming',
+  backToModules: 'Back to modules',
   modalitiesTitle: 'Practices in your plan',
   modalitiesIntro: (emphasis) => `The menu is the rule: every practice you select here becomes ${emphasis} of your teaching plan.`,
   modalitiesIntroEmphasis: 'required to advance at every step',

@@ -14,6 +14,7 @@ import { resolve } from 'path';
 
 const planSrc = readFileSync(resolve(__dirname, '..', 'CurriculumPlanView.tsx'), 'utf8');
 const detailSrc = readFileSync(resolve(__dirname, '..', 'CurriculumLevelDetail.tsx'), 'utf8');
+const moduleSrc = readFileSync(resolve(__dirname, '..', 'CurriculumModuleDetail.tsx'), 'utf8');
 const i18nSrc = readFileSync(resolve(__dirname, '..', '..', 'i18n', 'curriculumUiStrings.ts'), 'utf8');
 
 describe('CurriculumPlanView.tsx — data-driven levels list', () => {
@@ -57,6 +58,18 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
     expect(planSrc).toMatch(/<CurriculumLevelDetail level=\{selectedLevel\}/);
   });
 
+  it('opening a module renders the read-only step detail (Plano → nível → módulo → etapas)', () => {
+    expect(planSrc).toMatch(/import CurriculumModuleDetail from '\.\/CurriculumModuleDetail'/);
+    expect(planSrc).toMatch(/setSelectedModuleKey/);
+    expect(planSrc).toMatch(/<CurriculumModuleDetail /);
+    // The level detail is wired to open a module (pure navigation callback).
+    expect(planSrc).toMatch(/onSelectModule=\{setSelectedModuleKey\}/);
+    // Back from the module clears only the local module selection (no write).
+    expect(planSrc).toMatch(/onBack=\{\(\) => setSelectedModuleKey\(null\)\}/);
+    // The module is derived from the CURRENT level's modules (no stale cross-level).
+    expect(planSrc).toMatch(/selectedLevel\.modules\.find\(/);
+  });
+
   it('is read-only: no progress mutation and no level selector are wired in', () => {
     expect(planSrc).not.toMatch(/updateCurriculum(Progress|Level)/);
     expect(planSrc).not.toMatch(/setLevel\(|selectLevel\(|advance/i);
@@ -82,7 +95,7 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
   });
 });
 
-describe('CurriculumLevelDetail.tsx — read-only module list for one level', () => {
+describe('CurriculumLevelDetail.tsx — module list with step progress', () => {
   it('marks the current module "Você está aqui" (localized text, not color-only)', () => {
     expect(detailSrc).toMatch(/t\.statusYouAreHere/);
     expect(i18nSrc).toMatch(/statusYouAreHere:\s*'Você está aqui'/);
@@ -93,18 +106,57 @@ describe('CurriculumLevelDetail.tsx — read-only module list for one level', ()
     expect(detailSrc).toMatch(/t\.statusFuture/);
   });
 
-  it('renders the level band label from the endpoint', () => {
-    expect(detailSrc).toMatch(/level\.band/);
+  it('shows each module\'s progress as friendly "X de Y etapas" (data-driven counts)', () => {
+    expect(detailSrc).toMatch(/t\.stepsProgress\(mod\.completedSteps, mod\.totalSteps\)/);
+    expect(i18nSrc).toMatch(/stepsProgress:/);
+    expect(i18nSrc).toMatch(/etapas/); // pt-BR uses "etapas", never "recortes"
   });
 
-  it('iterates the modules provided by the endpoint (level.modules)', () => {
+  it('each module is tappable and opens the step detail (pure navigation, no write)', () => {
+    expect(detailSrc).toMatch(/onClick=\{\(\) => onSelectModule\(mod\.moduleKey\)\}/);
+  });
+
+  it('renders the level band + iterates endpoint modules', () => {
+    expect(detailSrc).toMatch(/level\.band/);
     expect(detailSrc).toMatch(/level\.modules\.map\(/);
     expect(detailSrc).toMatch(/mod\.title/);
     expect(detailSrc).toMatch(/mod\.status/);
   });
 
-  it('performs NO writes and exposes NO recortes/subtopics or counts', () => {
+  it('performs NO writes and never uses technical recorte/subtopic terms', () => {
     expect(detailSrc).not.toMatch(/fetch\(|updateCurriculum|apiFetch/);
-    expect(detailSrc).not.toMatch(/recorte|subtopic|completedCount|totalCount/i);
+    expect(detailSrc).not.toMatch(/recorte|subtopic/i);
+  });
+});
+
+describe('CurriculumModuleDetail.tsx — read-only steps (etapas) for one module', () => {
+  it('shows the "X de Y etapas concluídas" summary and the "Etapas" label', () => {
+    expect(moduleSrc).toMatch(/t\.stepsCompletedCount\(module\.completedSteps, module\.totalSteps\)/);
+    expect(moduleSrc).toMatch(/t\.stepsLabel/);
+    expect(i18nSrc).toMatch(/stepsLabel:\s*'Etapas'/);
+  });
+
+  it('lists endpoint steps with localized status labels (Atual / Concluída / Futuro)', () => {
+    expect(moduleSrc).toMatch(/module\.steps\.map\(/);
+    expect(moduleSrc).toMatch(/t\.stepCurrent/);
+    expect(moduleSrc).toMatch(/t\.stepCompleted/);
+    expect(moduleSrc).toMatch(/t\.stepFuture/);
+    expect(i18nSrc).toMatch(/stepCurrent:\s*'Atual'/);
+    expect(i18nSrc).toMatch(/stepCompleted:\s*'Concluída'/);
+  });
+
+  it('is READ-ONLY: no write, and steps are not interactive (only the back button clicks)', () => {
+    expect(moduleSrc).not.toMatch(/fetch\(|updateCurriculum|apiFetch/);
+    // The ONLY onClick in the screen is the header back button — a future step
+    // click can never write because steps render as static rows.
+    expect((moduleSrc.match(/onClick/g) || []).length).toBe(1);
+    expect(moduleSrc).toMatch(/onClick=\{onBack\}/);
+  });
+
+  it('never exposes recorte/subtopic technical terms; the React key is the opaque step id', () => {
+    expect(moduleSrc).not.toMatch(/recorte|subtopic|subtopic_key/i);
+    expect(moduleSrc).toMatch(/key=\{step\.id\}/);
+    expect(moduleSrc).toMatch(/t\.backToModules/);
+    expect(i18nSrc).toMatch(/backToModules:/);
   });
 });
