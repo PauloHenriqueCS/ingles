@@ -1,4 +1,5 @@
 import { requireAuth } from '../_auth';
+import { applyRateLimit } from '../_rateLimit';
 import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../_helpers';
 import { readEnv } from '../_env';
 import { canUserAccessListeningEpisode } from '../../src/services/listening/publication/authorize-listening-access';
@@ -575,6 +576,9 @@ async function handleStoryGenerate(req: any, res: any) {
   const listeningAccessCheck = await checkListeningCanStart(userId);
   if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
 
+  // Server-side rate limit BEFORE any OpenAI/Azure call. Fail-closed (paid).
+  if (!await applyRateLimit(res, userId, 'listening-generate')) return;
+
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
   const azureRegion = process.env.AZURE_SPEECH_REGION ?? '';
@@ -636,6 +640,10 @@ async function handleListeningGenerate(req: any, res: any) {
 
   const listeningAccessCheck = await checkListeningCanStart(userId);
   if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
+  // Server-side rate limit BEFORE any OpenAI/Azure call. Fail-closed (paid).
+  // Also covers the storyPackage TTS-retry path (still a paid Azure call).
+  if (!await applyRateLimit(res, userId, 'listening-generate')) return;
 
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const azureKey = process.env.AZURE_SPEECH_KEY ?? '';
@@ -750,6 +758,10 @@ async function handleOnDemandStart(req: any, res: any) {
 
   const listeningAccessCheck = await checkListeningCanStart(userId);
   if (listeningAccessCheck) return jsonError(res, listeningAccessCheck.status, listeningAccessCheck.code, listeningAccessCheck.message);
+
+  // Rate limit the entry point that kicks off an on-demand generation pipeline
+  // (whose steps each call OpenAI/Azure through the gateway). Fail-closed.
+  if (!await applyRateLimit(res, userId, 'listening-generation-start')) return;
 
   try {
     const serviceClient = getListeningServiceClient();

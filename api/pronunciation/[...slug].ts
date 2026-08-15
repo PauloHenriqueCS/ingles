@@ -1,4 +1,5 @@
 import { requireAuth } from '../_auth';
+import { applyRateLimit } from '../_rateLimit';
 import { isValidUuid, buildStatusResponse, rowToAssessment } from '../../src/lib/pronunciationAssessment';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import type { PronunciationNormalizedResult, PronunciationFailCode } from '../../src/types';
@@ -445,6 +446,12 @@ async function handleStart(req: any, res: any) {
     const code = entitlements.pronunciation.evaluations.state === 'monthly_limit_reached' ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
     return res.status(403).json({ code, message: ENTITLEMENT_MESSAGES.pronunciationEvaluationsExhausted });
   }
+
+  // Server-side burst/abuse rate limit BEFORE any Azure credential is minted or
+  // budget reserved. Fail-closed (paid path): a rate-limit-infra outage returns
+  // 503, never an uncapped token. Uses the pre-existing 'pronunciation-start'
+  // key that until now was defined but never wired to this endpoint.
+  if (!await applyRateLimit(res, auth.userId, 'pronunciation-start')) return;
 
   const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_assessment', {
     p_text_version_id: textVersionId, p_azure_region: azureRegion, p_attempt_id: attemptId,

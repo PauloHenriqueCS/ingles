@@ -50,6 +50,12 @@ export interface GatewayPolicy {
   dailyBudgetScopeType?: 'user' | 'feature' | 'provider' | 'global' | null;
   monthlyBudgetScopeType?: 'user' | 'feature' | 'provider' | 'global' | null;
   maxConcurrentRequests?: number | null;
+  // Which ai_runtime_controls scope produced the winning maxConcurrentRequests
+  // value (most-specific-wins per field). Determines the concurrency scope key
+  // (always per-user; the scope only selects the counting dimension — see
+  // enforcement.ts's resolveConcurrencyScope). Absent/null defaults to 'global'
+  // (per-user across every feature), the intended meaning of a global cap.
+  maxConcurrentScopeType?: 'user' | 'feature' | 'provider' | 'global' | null;
   rateLimitRequests?: number | null;
   rateLimitWindowSeconds?: number | null;
 }

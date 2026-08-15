@@ -68,6 +68,8 @@ function makeDeps(): GatewayDeps & {
   markReconciliationRequired: ReturnType<typeof vi.fn>;
   recordOutcome: ReturnType<typeof vi.fn>;
   decisionsRecord: ReturnType<typeof vi.fn>;
+  concurrencyAcquire: ReturnType<typeof vi.fn>;
+  concurrencyRelease: ReturnType<typeof vi.fn>;
 } {
   const startEvent = vi.fn().mockResolvedValue('event-1');
   const completeEvent = vi.fn().mockResolvedValue(undefined);
@@ -85,6 +87,12 @@ function makeDeps(): GatewayDeps & {
   const markReconciliationRequired = vi.fn().mockResolvedValue(undefined);
   const recordOutcome = vi.fn().mockResolvedValue('closed');
   const decisionsRecord = vi.fn().mockResolvedValue(undefined);
+  // Default: a slot is always available. Inert for every existing test whose
+  // policy leaves maxConcurrentRequests undefined (resolveConcurrencyScope
+  // returns null → the limiter is never consulted). The concurrency describe
+  // block below overrides these per test.
+  const concurrencyAcquire = vi.fn().mockResolvedValue({ acquired: true, slotId: 'slot-1', activeCount: 1 });
+  const concurrencyRelease = vi.fn().mockResolvedValue(undefined);
 
   return {
     policyResolver: { resolvePolicy: vi.fn(), invalidate: vi.fn() },
@@ -103,12 +111,14 @@ function makeDeps(): GatewayDeps & {
     dedupeStore: { begin: dedupeBegin, complete: dedupeComplete, fail: dedupeFail },
     reservationsRepository: { reserve, commit, release, markReconciliationRequired },
     circuitBreaker: { getState, recordOutcome },
+    concurrencyLimiter: { acquire: concurrencyAcquire, release: concurrencyRelease },
     clock: vi.fn(() => 1000),
     uuidGen: vi.fn(() => 'test-uuid'),
     logger: vi.fn(),
     startEvent, completeEvent, failEvent, insertMetrics,
     entitlementResolve, getState, rateLimiterCheck, dedupeBegin, dedupeComplete, dedupeFail,
     reserve, commit, release, markReconciliationRequired, recordOutcome, decisionsRecord,
+    concurrencyAcquire, concurrencyRelease,
   };
 }
 
@@ -699,5 +709,115 @@ describe('executeEnforcedPipeline', () => {
     const params = deps.reserve.mock.calls[0][0] as ReserveUsageParams;
     expect(params.budgetScopes).toHaveLength(1);
     expect(params.budgetScopes[0]).toEqual(expect.objectContaining({ scopeType: 'feature', limitUsd: '10.00' }));
+  });
+
+  // ── Concurrency (max_concurrent_requests — previously dead config) ─────────
+  describe('concurrency limiting', () => {
+    const concPolicy = (over: Partial<GatewayPolicy> = {}) =>
+      basePolicy({ maxConcurrentRequests: 2, maxConcurrentScopeType: 'global', ...over });
+
+    it('acquires a slot BEFORE invoke and releases it AFTER a successful call', async () => {
+      await expect(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+      ).resolves.toBe('ok');
+
+      expect(deps.concurrencyAcquire).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      // acquire strictly precedes the provider call…
+      expect(deps.concurrencyAcquire.mock.invocationCallOrder[0])
+        .toBeLessThan(invoke.mock.invocationCallOrder[0]);
+      // …and the slot is released exactly once, as completed.
+      expect(deps.concurrencyRelease).toHaveBeenCalledTimes(1);
+      expect(deps.concurrencyRelease).toHaveBeenCalledWith('slot-1', 'completed');
+    });
+
+    it('keys the slot per-user + the winning scope dimension', async () => {
+      await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy({ maxConcurrentScopeType: 'feature' }));
+      expect(deps.concurrencyAcquire).toHaveBeenCalledWith(
+        'u:user-123|feature:writing.correct', 'user-123', 'writing.correct', 'openai', 2, expect.any(Number),
+      );
+
+      deps.concurrencyAcquire.mockClear();
+      await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy({ maxConcurrentScopeType: 'global' }));
+      expect(deps.concurrencyAcquire).toHaveBeenCalledWith(
+        'u:user-123|global', 'user-123', 'writing.correct', 'openai', 2, expect.any(Number),
+      );
+    });
+
+    it('DENIES with CONCURRENCY_LIMITED (no provider call) when no slot is available, and releases the reservation it took', async () => {
+      deps.concurrencyAcquire.mockResolvedValue({ acquired: false, slotId: null, activeCount: 2 });
+
+      await expectGatewayError(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+        'CONCURRENCY_LIMITED',
+      );
+
+      expect(invoke).not.toHaveBeenCalled();               // 1. provider never reached
+      expect(deps.concurrencyRelease).not.toHaveBeenCalled(); // nothing was acquired to release
+      expect(deps.release).toHaveBeenCalledWith('res-1', 'concurrency_limited'); // 2+3+4. reservation
+      // (quota + budget) unwound via release_gateway_reservation_v1, reservation no longer pending
+      expect(deps.startEvent).not.toHaveBeenCalled();      // 5. no usage event / ledger row created
+      expect(deps.commit).not.toHaveBeenCalled();          // 5. nothing ever committed
+    });
+
+    it('a later retry after a concurrency deny reserves FRESH and reaches the provider (deny does not poison future calls)', async () => {
+      // Request 3: no slot → CONCURRENCY_LIMITED, its reservation released.
+      deps.concurrencyAcquire.mockResolvedValueOnce({ acquired: false, slotId: null, activeCount: 2 });
+      await expectGatewayError(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+        'CONCURRENCY_LIMITED',
+      );
+      expect(deps.release).toHaveBeenCalledWith('res-1', 'concurrency_limited');
+      expect(invoke).not.toHaveBeenCalled();
+
+      // 6. Retry once a slot frees up (default acquire → acquired:true): a NEW
+      // reservation is taken and the provider is reached — the released prior
+      // reservation left nothing stranded that blocks the retry.
+      deps.reserve.mockClear();
+      invoke.mockClear();
+      await expect(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+      ).resolves.toBe('ok');
+      expect(deps.reserve).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the slot AND the reservation when the provider call throws', async () => {
+      const boom = new Error('provider exploded');
+      invoke.mockRejectedValue(boom);
+
+      await expect(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+      ).rejects.toBe(boom);
+
+      expect(deps.concurrencyRelease).toHaveBeenCalledWith('slot-1', 'provider_error');
+      expect(deps.release).toHaveBeenCalledWith('res-1', 'provider_error');
+    });
+
+    it('fails CLOSED (POLICY_UNAVAILABLE, no provider call) when the limiter infra errors, and releases the reservation', async () => {
+      deps.concurrencyAcquire.mockRejectedValue(new Error('db unreachable'));
+
+      await expectGatewayError(
+        executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, concPolicy()),
+        'POLICY_UNAVAILABLE',
+      );
+
+      expect(invoke).not.toHaveBeenCalled();
+      expect(deps.release).toHaveBeenCalledWith('res-1', 'concurrency_infra_error');
+    });
+
+    it('skips concurrency entirely when max_concurrent_requests is null (backward compatible)', async () => {
+      await executeEnforcedPipeline('writing.correct', baseContext(), invoke, deps, basePolicy());
+      expect(deps.concurrencyAcquire).not.toHaveBeenCalled();
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips concurrency for a system actor with no userId even when configured', async () => {
+      const ctx = baseContext({ userId: undefined, actorType: 'system' });
+      deps.entitlementResolve.mockResolvedValue(allowedEntitlement({ userId: null, actorType: 'system', source: 'system_actor' }));
+      await executeEnforcedPipeline('writing.correct', ctx, invoke, deps, concPolicy());
+      expect(deps.concurrencyAcquire).not.toHaveBeenCalled();
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
   });
 });

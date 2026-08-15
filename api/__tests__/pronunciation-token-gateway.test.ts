@@ -37,6 +37,10 @@ vi.mock('../_azure-speech', async (importOriginal) => {
   return { ...actual, issueAzureSpeechToken: mockIssueToken };
 });
 
+// Rate limiting is orthogonal here (covered by its own tests). The
+// 'pronunciation-training-token' key is failClosed, so the real applyRateLimit
+// would 503 in the no-service-key test env before the gateway/token path.
+vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true), RATE_LIMITS: {} }));
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('openai', () => ({ default: vi.fn() }));
 vi.mock('../_entitlements/plan-entitlements-service', () => ({

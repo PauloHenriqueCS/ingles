@@ -16,6 +16,7 @@ export type GatewayErrorCode =
   | 'USER_BLOCKED'
   | 'PLAN_NOT_ALLOWED'
   | 'RATE_LIMITED'
+  | 'CONCURRENCY_LIMITED'
   | 'QUOTA_EXCEEDED'
   | 'BUDGET_EXCEEDED'
   | 'DUPLICATE_IN_PROGRESS'
@@ -38,6 +39,7 @@ export const GATEWAY_ERROR_HTTP_STATUS: Record<GatewayErrorCode, number> = {
   USER_BLOCKED:                    403,
   PLAN_NOT_ALLOWED:                403,
   RATE_LIMITED:                    429,
+  CONCURRENCY_LIMITED:             429,
   QUOTA_EXCEEDED:                  429,
   BUDGET_EXCEEDED:                 429,
   DUPLICATE_IN_PROGRESS:           409,
