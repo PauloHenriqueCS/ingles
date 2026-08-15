@@ -37,27 +37,68 @@ export type AppleSignInResult =
 const APPLE_WEB_ENABLED =
   ((import.meta.env.VITE_APPLE_SIGNIN_ENABLED as string | undefined) ?? '').trim() === 'true';
 
+/** Custom-scheme deep link the Supabase Apple OAuth redirect returns to on
+ *  Android (which has no native Apple SDK). It MUST be present in the Supabase
+ *  project's Authentication → URL Configuration → Redirect URLs allow list
+ *  (homolog AND prod), or Supabase falls back to the Site URL and the return
+ *  breaks. Received by the AndroidManifest intent-filter + the appUrlOpen
+ *  listener in nativeAuthDeepLink.ts. Same string for debug/prod — the
+ *  environment differs only by which Supabase the loaded frontend talks to. */
+export const ANDROID_OAUTH_CALLBACK = 'com.orodim.app://auth/callback';
+
 /**
- * Whether "Continuar com Apple" can be offered here. iOS native: gated by the
- * plugin (which is present only when the Sign in with Apple entitlement is on).
- * Web: gated by VITE_APPLE_SIGNIN_ENABLED so it stays hidden until the Supabase
- * Apple provider is configured. Native Android: never (Apple is not offered).
+ * Whether "Continuar com Apple" can be offered here.
+ *  - iOS: native @capgo path, gated by the Sign in with Apple entitlement/plugin.
+ *  - Web AND Android: gated by the same VITE_APPLE_SIGNIN_ENABLED flag. Android
+ *    has no native Apple SDK, so it uses the OAuth-in-system-browser flow
+ *    (androidAppleSignIn) with a deep-link return — offered whenever the Supabase
+ *    Apple provider is enabled.
  */
 export function isAppleSignInAvailable(): boolean {
   if (Capacitor.getPlatform() === 'ios') return Capacitor.isPluginAvailable('SocialLogin');
-  if (!Capacitor.isNativePlatform()) return APPLE_WEB_ENABLED;
-  return false;
+  return APPLE_WEB_ENABLED;
 }
 
 export async function signInWithApple(): Promise<AppleSignInResult> {
   try {
+    const platform = Capacitor.getPlatform();
     const result =
-      Capacitor.getPlatform() === 'ios' ? await nativeAppleSignIn() : await webAppleSignIn();
+      platform === 'ios'
+        ? await nativeAppleSignIn()
+        : platform === 'android'
+          ? await androidAppleSignIn()
+          : await webAppleSignIn();
     if (result.ok) rememberAuthMethod('apple');
     return result;
   } catch (e) {
     return { ok: false, reason: classifyThrown(e), message: describe(e) };
   }
+}
+
+/**
+ * Android has no Apple AuthenticationServices. Run the Supabase Apple OAuth in
+ * the system browser (a Chrome Custom Tab via @capacitor/browser) and return to
+ * the app through the ANDROID_OAUTH_CALLBACK deep link. `skipBrowserRedirect`
+ * stops supabase-js from navigating the WebView — we open `data.url` ourselves.
+ * The session is finished by the appUrlOpen handler in nativeAuthDeepLink.ts.
+ * This is NOT an embedded-WebView spoof: auth happens in the real system browser.
+ */
+async function androidAppleSignIn(): Promise<AppleSignInResult> {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'apple',
+    options: { redirectTo: ANDROID_OAUTH_CALLBACK, skipBrowserRedirect: true },
+  });
+  if (error) return fail(error.message);
+  if (!data?.url) {
+    return { ok: false, reason: 'unknown', message: 'Não foi possível iniciar o login com a Apple.' };
+  }
+
+  const { Browser } = await import('@capacitor/browser');
+  await Browser.open({ url: data.url });
+  // Success-in-progress: the user is now authenticating in the browser. When
+  // Supabase redirects back to the deep link, nativeAuthDeepLink.ts establishes
+  // the session and App.tsx renders the Home.
+  return { ok: true };
 }
 
 async function webAppleSignIn(): Promise<AppleSignInResult> {

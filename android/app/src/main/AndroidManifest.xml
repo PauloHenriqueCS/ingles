@@ -24,6 +24,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- OAuth deep-link return for Sign in with Apple on Android. The
+                 system browser redirects to com.orodim.app://auth/callback; with
+                 launchMode=singleTask this arrives via onNewIntent and Capacitor's
+                 @capacitor/app fires appUrlOpen (handled in nativeAuthDeepLink.ts).
+                 Scheme is the applicationId so only this app registers it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.orodim.app" android:host="auth" />
+            </intent-filter>
+
         </activity>
 
         <provider

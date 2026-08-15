@@ -7,6 +7,7 @@ const {
   getPlatformMock,
   isNativeMock,
   isPluginMock,
+  browserOpenMock,
 } = vi.hoisted(() => ({
   signInWithOAuthMock: vi.fn(),
   signInWithIdTokenMock: vi.fn(),
@@ -14,6 +15,7 @@ const {
   getPlatformMock: vi.fn(() => 'web'),
   isNativeMock: vi.fn(() => false),
   isPluginMock: vi.fn(() => false),
+  browserOpenMock: vi.fn(),
 }));
 
 vi.mock('./supabase', () => ({
@@ -27,12 +29,14 @@ vi.mock('@capacitor/core', () => ({
     isPluginAvailable: isPluginMock,
   },
 }));
+vi.mock('@capacitor/browser', () => ({ Browser: { open: browserOpenMock, close: vi.fn() } }));
 
 import {
   signInWithApple,
   isAppleSignInAvailable,
   classifySupabaseError,
   isUserCancellation,
+  ANDROID_OAUTH_CALLBACK,
 } from './appleAuth';
 
 beforeEach(() => {
@@ -81,10 +85,47 @@ describe('isAppleSignInAvailable', () => {
     isPluginMock.mockReturnValue(false);
     expect(isAppleSignInAvailable()).toBe(false);
   });
-  it('is never offered on native Android', () => {
+  it('on Android follows the web flag (hidden here because it is off in tests)', () => {
+    // Android now offers Apple via the OAuth-in-browser flow, gated by the same
+    // VITE_APPLE_SIGNIN_ENABLED flag as web — no longer hardcoded false.
     getPlatformMock.mockReturnValue('android');
     isNativeMock.mockReturnValue(true);
-    expect(isAppleSignInAvailable()).toBe(false);
+    expect(isAppleSignInAvailable()).toBe(false); // flag unset in test env
+  });
+});
+
+describe('signInWithApple (Android OAuth-in-browser path)', () => {
+  it('starts Supabase OAuth with the deep-link redirect and opens the system browser', async () => {
+    getPlatformMock.mockReturnValue('android');
+    isNativeMock.mockReturnValue(true);
+    signInWithOAuthMock.mockResolvedValue({
+      data: { url: 'https://ahszqexfzpbirdlkmdci.supabase.co/auth/v1/authorize?provider=apple' },
+      error: null,
+    });
+
+    const result = await signInWithApple();
+
+    expect(result).toEqual({ ok: true });
+    expect(signInWithOAuthMock).toHaveBeenCalledWith({
+      provider: 'apple',
+      options: { redirectTo: ANDROID_OAUTH_CALLBACK, skipBrowserRedirect: true },
+    });
+    expect(browserOpenMock).toHaveBeenCalledWith({
+      url: 'https://ahszqexfzpbirdlkmdci.supabase.co/auth/v1/authorize?provider=apple',
+    });
+    // Never the iOS native id-token path on Android.
+    expect(signInWithIdTokenMock).not.toHaveBeenCalled();
+  });
+
+  it('fails cleanly (no browser) when Supabase returns no auth url', async () => {
+    getPlatformMock.mockReturnValue('android');
+    isNativeMock.mockReturnValue(true);
+    signInWithOAuthMock.mockResolvedValue({ data: { url: null }, error: null });
+
+    const result = await signInWithApple();
+
+    expect(result.ok).toBe(false);
+    expect(browserOpenMock).not.toHaveBeenCalled();
   });
 });
 
