@@ -24,6 +24,7 @@ import { checkRecordingDuration, checkFeatureConfigError } from '../_entitlement
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
+import { getCurriculumServiceClient } from '../_curriculum/service-client';
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
@@ -453,7 +454,7 @@ async function handleStart(req: any, res: any) {
   // config → explicit 503 with ZERO side effects; never an en-US fallback.
   let assessLocale: string;
   try {
-    assessLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
+    assessLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId)).speechLocale;
   } catch (err) {
     if (err instanceof SpeechConfigError) {
       safeLog('pronunciation/assess-text-start', 'speech_config_missing', 503);

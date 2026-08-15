@@ -36,6 +36,8 @@ vi.mock('../_ai-gateway/index', async (importOriginal) => {
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+// Speech config now resolves via the SERVICE client (active-path authority).
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom() }) }));
 
 // api/tts.ts now resolves the default voice/locale/output-format from the
 // product-config service (Central de Configuração — see

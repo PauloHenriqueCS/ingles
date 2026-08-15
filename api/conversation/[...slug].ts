@@ -608,32 +608,57 @@ async function handleSession(req: any, res: any) {
   // completion records against it even if the pointer advances mid-session
   // (blockers 8/10), for BOTH free and guided sessions.
   let conversationCurricularIdentity: { versionId: string; subtopicKey: string } | null = null;
-  try {
-    const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+  // BLOCKER 3: resolving the ACTIVE learning path (language + level) is a
+  // PRECONDITION for BOTH modes — FREE is now language-aware, so a Spanish
+  // learner must never get a default English/A1 FREE session on a transient
+  // error. This runs BEFORE any trial reservation, budget reservation, OpenAI
+  // client_secret or WebRTC authorization (all below), so a failure returns an
+  // explicit operational error with ZERO side effects — never a default
+  // fallback. A brand-new user with NO path is bootstrapped normally by
+  // ensureUserCurriculum (that is NOT an error).
+  {
+    let ensured;
+    try {
+      ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+    } catch (err) {
+      const isConfig = err instanceof CurriculumConfigError;
+      safeLog('conversation/session', isConfig ? 'active_path_not_configured' : 'active_path_read_failed', isConfig ? 503 : 500, { message: String(err).slice(0, 150) });
+      return jsonError(
+        res,
+        isConfig ? 503 : 500,
+        isConfig ? 'CURRICULUM_NOT_CONFIGURED' : 'INTERNAL_ERROR',
+        'Não foi possível preparar a sessão de conversa agora. Tente novamente.',
+      );
+    }
     conversationInPlan = ensured.prefs.conversation;
     // Single authority for language + reference level of the ACTIVE learning
-    // path (blockers 8, 10): FREE conversation's level comes from the active
-    // path, not a global english_learning_memory level; a Spanish path never
-    // inherits an English level.
+    // path: FREE conversation's level comes from the active path, not a global
+    // english_learning_memory level; a Spanish path never inherits an English
+    // level. 'A1' below is only a display default WITHIN a successfully-resolved
+    // path (progression normally provides a level) — never error recovery.
     languageContext = ensured.languageContext;
     cefrLevel = ensured.currentLevelCode ?? 'A1';
     if (ensured.currentSubtopicKey) {
       conversationCurricularIdentity = { versionId: ensured.versionId, subtopicKey: ensured.currentSubtopicKey };
     }
-  } catch (err) {
-    // Fail-SAFE to free: a curriculum-resolution problem (misconfig OR any
-    // transient infra error) must never block the paid conversation feature.
-    // Free mode is a first-class product mode (personalized, language-
-    // parameterized — NOT a hardcoded English pedagogical fallback), so this is
-    // not a silent pedagogical fallback. When the user IS in-plan and the
-    // curriculum is genuinely misconfigured, the guided branch below still
-    // surfaces it explicitly (resolveActivityPrompt → 503).
-    if (err instanceof CurriculumConfigError) {
-      safeLog('conversation/session', 'curriculum_pref_unavailable', 200);
-    } else {
-      safeLog('conversation/session', 'curriculum_pref_read_failed', 200, { message: String(err).slice(0, 150) });
-    }
   }
+
+  // STT language is data-driven (public.languages.stt_language) and resolved
+  // BEFORE any reservation/token/cost (blockers 3, 4, 11): a configured language
+  // with NO stt_language is an explicit error with ZERO side effects — never a
+  // silent auto-detect fallback that could recognise the wrong language.
+  let sttLanguage: string;
+  try {
+    sttLanguage = (await getLanguageSpeechConfig(getCurriculumServiceClient(), languageContext.learningLanguage)).sttLanguage;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('conversation/session', 'stt_config_missing', 503, { lang: languageContext.learningLanguage });
+      return jsonError(res, 503, 'SPEECH_NOT_CONFIGURED', 'O reconhecimento de fala ainda não está configurado para este idioma.');
+    }
+    throw err;
+  }
+  const transcriptionConfig = { model: 'gpt-4o-mini-transcribe', language: sttLanguage };
+
   const forceFree = (req.body ?? {}).mode === 'free';
   const sessionMode: 'guided' | 'free' = (conversationInPlan && !forceFree) ? 'guided' : 'free';
   let guidedInstructions: string | null = null;
@@ -766,7 +791,7 @@ async function handleSession(req: any, res: any) {
       const [learningLabel, interfaceLabel, personalization] = await Promise.all([
         getLanguageDisplayName(svc, languageContext.learningLanguage, languageContext.interfaceLanguage),
         getLanguageDisplayName(svc, languageContext.interfaceLanguage, languageContext.interfaceLanguage),
-        buildConversationPersonalizationFromData(svc, prefs, languageContext.interfaceLanguage),
+        buildConversationPersonalizationFromData(svc, prefs, languageContext.interfaceLanguage, languageContext.learningLanguage),
       ]);
       const freeResolved = await resolveActivityPrompt(svc, userId, {
         templateKey: 'conversation.free',
@@ -792,24 +817,6 @@ async function handleSession(req: any, res: any) {
   if (!instructions) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
-
-  // STT language is data-driven (public.languages.stt_language). A configured
-  // learning language with NO stt_language is an explicit operational error —
-  // NEVER a silent auto-detect fallback that could recognise the wrong language
-  // (blocker 11). Auto-detect, if ever supported, must be an explicit data flag.
-  let sttLanguage: string;
-  try {
-    sttLanguage = (await getLanguageSpeechConfig(getCurriculumServiceClient(), languageContext.learningLanguage)).sttLanguage;
-  } catch (err) {
-    if (err instanceof SpeechConfigError) {
-      safeLog('conversation/session', 'stt_config_missing', 503, { lang: languageContext.learningLanguage });
-      return jsonError(res, 503, 'SPEECH_NOT_CONFIGURED', 'O reconhecimento de fala ainda não está configurado para este idioma.');
-    }
-    throw err;
-  }
-  const transcriptionConfig = sttLanguage
-    ? { model: 'gpt-4o-mini-transcribe', language: sttLanguage }
-    : { model: 'gpt-4o-mini-transcribe' };
 
   const sessionConfig = {
     expires_after: { anchor: 'created_at', seconds: 120 },
@@ -970,6 +977,18 @@ async function handleSession(req: any, res: any) {
   // student is waiting for; it just means this call's duration silently
   // won't count toward their quota (same direction of failure as before this
   // fix existed, never worse).
+  // Curricular eligibility + identity are decided at session START (blockers 3,
+  // 7). GUIDED is eligible ONLY when there is a real current recorte to credit;
+  // FREE is never eligible. The identity is persisted DURABLY with the row (in
+  // the commercial INSERT below, atomically) and re-checked for guided.
+  const guidedEligible = sessionMode === 'guided' && conversationCurricularIdentity != null;
+  const identityCols = {
+    session_mode: sessionMode,
+    curriculum_practice_eligible: guidedEligible,
+    curriculum_version_id: guidedEligible ? conversationCurricularIdentity!.versionId : null,
+    curriculum_subtopic_key: guidedEligible ? conversationCurricularIdentity!.subtopicKey : null,
+  };
+
   const authorizedMaxSecondsFloor = Math.floor(authorizedAtStart.authorizedMaxRecordingSeconds);
   if (recordingAuthorizationId) {
     // Etapa 2A — trial path: the row already exists (created atomically,
@@ -1003,6 +1022,9 @@ async function handleSession(req: any, res: any) {
           // THIS id (ai_provider_sessions.id, not this row's own id) —
           // required to look them up when reconciling the reservation above.
           gateway_session_id: gatewaySessionId ?? null,
+          // Curricular eligibility + identity persisted ATOMICALLY with the row
+          // (blocker 7) — a guided session can always be credited from here.
+          ...identityCols,
         })
         .select('id')
         .single();
@@ -1011,36 +1033,37 @@ async function handleSession(req: any, res: any) {
       gatewayDeps.logger('gateway.conversationSessionAuthorization.failed', { message: String(e) });
     }
   }
-  if (!recordingAuthorizationId && realtimeBudget.reservationId) {
-    // The authorization row itself failed to insert (best-effort, logged
-    // above) — nothing will ever call /session-complete for a row that
-    // doesn't exist, so this reservation would otherwise sit held until its
-    // REALTIME_MAX_SESSION_SECONDS expiry. Release it now rather than leak
-    // it silently.
-    await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'authorization_row_insert_failed');
-  }
-  // FREEZE the curricular eligibility + identity at session START on the
-  // authorization row (both trial and commercial paths converge here). The
-  // decision (guided ⇒ eligible; free ⇒ never) is taken NOW and read back at
-  // completion — the completion never re-consults the CURRENT preference, so
-  // toggling the modality mid-session can never change whether this session
-  // counts (blocker 3). Best-effort — never blocks the token response.
-  if (recordingAuthorizationId) {
+  if (!recordingAuthorizationId) {
+    // No authorization row exists. For a GUIDED session this is fatal: it could
+    // never be credited (blocker 7) — release the reservation and error rather
+    // than start an uncreditable guided session. For FREE it is harmless (free
+    // never credits): just release any held reservation and proceed.
+    if (realtimeBudget.reservationId) {
+      await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'authorization_row_insert_failed');
+    }
+    if (guidedEligible) {
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'Não foi possível preparar a sessão guiada agora. Tente novamente.');
+    }
+  } else {
+    // FREEZE the eligibility + identity (blocker 3). The commercial INSERT
+    // already carried identityCols; this UPDATE is for the TRIAL path (whose row
+    // was created earlier without them) and is idempotent for commercial. For a
+    // GUIDED (eligible) session, durable identity is a HARD requirement (blocker
+    // 7): if it cannot be persisted, release the reservation and error.
     try {
-      const eligible = sessionMode === 'guided';
       await getSharedServiceClient()
         .from('conversation_session_authorizations')
-        .update({
-          session_mode: sessionMode,
-          curriculum_practice_eligible: eligible,
-          // Identity only for guided (the mode that can count); null otherwise.
-          curriculum_version_id: eligible ? conversationCurricularIdentity?.versionId ?? null : null,
-          curriculum_subtopic_key: eligible ? conversationCurricularIdentity?.subtopicKey ?? null : null,
-        })
+        .update(identityCols)
         .eq('id', recordingAuthorizationId)
         .eq('user_id', userId);
     } catch (e) {
       gatewayDeps.logger('gateway.conversationSessionAuthorization.identityPersistFailed', { message: String(e) });
+      if (guidedEligible) {
+        if (realtimeBudget.reservationId) {
+          await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'guided_identity_persist_failed');
+        }
+        return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'Não foi possível preparar a sessão guiada agora. Tente novamente.');
+      }
     }
   }
 
@@ -1102,15 +1125,33 @@ async function handleSessionComplete(req: any, res: any) {
     const client = getSharedServiceClient();
     const { data: authRow, error: fetchErr } = await client
       .from('conversation_session_authorizations')
-      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id, curriculum_version_id, curriculum_subtopic_key, curriculum_practice_eligible')
+      .select('id, status, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id, curriculum_version_id, curriculum_subtopic_key, curriculum_practice_eligible')
       .eq('id', recordingAuthorizationId)
       .eq('user_id', userId)
-      .eq('status', 'authorized')
       .maybeSingle();
 
     if (fetchErr || !authRow) {
-      // Foreign, already completed, or never created — idempotent no-op.
+      // Foreign or never created — idempotent no-op.
       return res.status(200).json({ status: 'ignored' });
+    }
+    const status = (authRow as { status?: string }).status;
+    if (status === 'completed') {
+      // CONVERGENT credit (blocker 6.C): an already-completed GUIDED session that
+      // failed to credit on the first completion must still land the credit on a
+      // retry — idempotently, using the identity FROZEN at start (blocker 3). No
+      // commercial re-work (quota/mirror already done). FREE never credits.
+      const r = authRow as { curriculum_practice_eligible?: boolean | null; curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null };
+      if (r.curriculum_practice_eligible === true && r.curriculum_version_id && r.curriculum_subtopic_key) {
+        try {
+          await recordCurricularPracticeFromIdentity(
+            getCurriculumServiceClient(), userId, 'conversation', recordingAuthorizationId,
+            { versionId: r.curriculum_version_id, subtopicKey: r.curriculum_subtopic_key },
+          );
+        } catch (e) {
+          console.error('[conversation/session-complete] credit reconcile failed', e instanceof Error ? e.message : 'unknown');
+        }
+      }
+      return res.status(200).json({ status: 'already_completed' });
     }
 
     const row = authRow as {

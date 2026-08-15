@@ -68,11 +68,48 @@ describe('20260815121600 — conversation_pref_fragments (blocker 2)', () => {
   });
 });
 
-describe('20260815121700 — conversation.free context framing moved to the template (blocker 2)', () => {
+describe('20260815121700 — conversation.free context framing moved to the template (blockers 2, 9)', () => {
   const sql = read('20260815121700_conversation_free_context_framing.sql');
   it('injects the framing into the template (data), idempotently, around {{session_context}}', () => {
     expect(sql).toMatch(/UPDATE public\.prompt_templates/);
     expect(sql).toMatch(/template_key = 'conversation\.free'/);
     expect(sql).toMatch(/NOT LIKE '%## Contexto da sessão \(dados\)%'/); // idempotent guard
+  });
+  it('applies the PORTUGUESE framing ONLY to interface_language = pt-BR (blocker 9)', () => {
+    expect(sql).toMatch(/interface_language = 'pt-BR'/);
+  });
+});
+
+describe('20260815121900 — personality fragments + language variants (blockers 4, 5)', () => {
+  const sql = read('20260815121900_conversation_personality_and_variants.sql');
+
+  it('seeds the personality preset intro as DATA in both pt-BR and en (blocker 4)', () => {
+    for (const v of ['patient', 'friend', 'teacher', 'unfiltered_friend', 'custom']) {
+      expect(sql).toMatch(new RegExp(`'personality','${v}','pt-BR'`));
+      expect(sql).toMatch(new RegExp(`'personality','${v}','en'`));
+    }
+  });
+
+  it('creates the per-learning-language variant catalog and seeds ONLY English (blocker 5)', () => {
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS public\.conversation_language_variants/);
+    expect(sql).toMatch(/PRIMARY KEY \(learning_language, variant_key, interface_language\)/);
+    expect(sql).toMatch(/FOR SELECT TO authenticated USING \(true\)/);
+    expect(sql).toMatch(/'en','american'/);
+    expect(sql).toMatch(/'en','british'/);
+    expect(sql).toMatch(/'en','neutral'/);
+    // No production Spanish seed (the es fixture lives in tests only).
+    expect(sql).not.toMatch(/'es','/);
+  });
+});
+
+describe('20260815121800 — writing theme link + convergent credit (blockers 2, 6)', () => {
+  const sql = read('20260815121800_writing_theme_link_and_convergent_credit.sql');
+  it('links the review to the EXACT mission (english_reviews.generated_theme_id)', () => {
+    expect(sql).toMatch(/ALTER TABLE public\.english_reviews[\s\S]*generated_theme_id uuid/);
+  });
+  it('adds a convergent-credit marker on each lifecycle activity (source of truth stays the progress table)', () => {
+    expect(sql).toMatch(/english_reviews[\s\S]*curriculum_credit_status text/);
+    expect(sql).toMatch(/pronunciation_training_sessions[\s\S]*curriculum_credit_status text/);
+    expect(sql).toMatch(/conversation_session_authorizations[\s\S]*curriculum_credit_status text/);
   });
 });

@@ -56,6 +56,71 @@ interface EnglishReviewRow {
   created_at: string;
 }
 
+/**
+ * CONVERGENT curricular credit for a NORMAL writing review (blockers 2, 5, 6, 7).
+ * Idempotent: safe to call on first success AND on a later retry of an
+ * already-completed review. It binds the credit to the EXACT mission
+ * (generatedThemeId from the client, or the one persisted on the review),
+ * NEVER "the latest theme" and NEVER the current pointer. A missing identity
+ * marks the review 'pending' (recoverable by a later retry) and grants no credit;
+ * a landed credit marks it 'credited'. Never re-calls the AI provider.
+ */
+async function ensureWritingCurricularCredit(
+  supabase: any,
+  userId: string,
+  reviewId: string,
+  generatedThemeId: unknown,
+): Promise<void> {
+  // 1) Resolve the mission's persisted identity — prefer the client-supplied
+  //    resource id, else the one already persisted on the review.
+  let versionId: string | null = null;
+  let subtopicKey: string | null = null;
+  let themeId: string | null = isValidUuid(generatedThemeId) ? (generatedThemeId as string) : null;
+
+  const { data: reviewRow } = await supabase
+    .from('english_reviews')
+    .select('generated_theme_id, curriculum_version_id, curriculum_subtopic_key')
+    .eq('id', reviewId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  const rr = reviewRow as { generated_theme_id?: string | null; curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+  if (!themeId && rr?.generated_theme_id) themeId = rr.generated_theme_id;
+  if (rr?.curriculum_version_id && rr.curriculum_subtopic_key) {
+    versionId = rr.curriculum_version_id;
+    subtopicKey = rr.curriculum_subtopic_key;
+  } else if (themeId) {
+    const { data: theme } = await supabase
+      .from('generated_themes')
+      .select('curriculum_version_id, curriculum_subtopic_key')
+      .eq('id', themeId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    const t = theme as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+    if (t?.curriculum_version_id && t.curriculum_subtopic_key) {
+      versionId = t.curriculum_version_id;
+      subtopicKey = t.curriculum_subtopic_key;
+    }
+  }
+
+  const identity = versionId && subtopicKey ? { versionId, subtopicKey } : null;
+  const rec = identity
+    ? await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'writing', reviewId, identity)
+    : null;
+
+  // 2) Persist the mission link + resolved identity + credit status (marker
+  //    only — the source of truth is user_subtopic_modality_progress).
+  await supabase
+    .from('english_reviews')
+    .update({
+      ...(themeId ? { generated_theme_id: themeId } : {}),
+      ...(rec?.recorded && rec.subtopicKey ? { curriculum_version_id: rec.versionId, curriculum_subtopic_key: rec.subtopicKey } : {}),
+      curriculum_credit_status: rec?.recorded ? 'credited' : 'pending',
+    })
+    .eq('id', reviewId)
+    .eq('user_id', userId);
+  if (!rec?.recorded) safeLog('review-text', 'no_curricular_identity', 200);
+}
+
 /** Rebuilds the `feedback` response shape from a stored english_reviews row — used for an idempotent retry of an already-completed attempt (never re-calls the AI provider). */
 function feedbackFromReviewRow(row: EnglishReviewRow): Record<string, unknown> {
   return {
@@ -222,6 +287,7 @@ export default async function handler(req: any, res: any) {
     reviewCategory,
     reviewDifficulty,
     missionSnapshot,
+    generatedThemeId,
   } = req.body ?? {};
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
@@ -308,6 +374,16 @@ export default async function handler(req: any, res: any) {
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível recuperar a revisão já concluída.');
     }
     const row = existingReview as unknown as EnglishReviewRow;
+    // CONVERGENT credit (blocker 6.A): a retry after a first-attempt curricular
+    // credit failure must still land the credit — idempotently, without calling
+    // the AI provider or consuming quota again. NORMAL mode only.
+    if (mode !== 'review') {
+      try {
+        await ensureWritingCurricularCredit(supabase, userId, reservation.reviewId as string, generatedThemeId);
+      } catch (e) {
+        safeLog('review-text', 'credit_reconcile_failed', 200, { detail: String(e).slice(0, 120) });
+      }
+    }
     return res.json({
       feedback: feedbackFromReviewRow(row),
       reviewedAt: row.created_at,
@@ -613,32 +689,7 @@ export default async function handler(req: any, res: any) {
   // must never fail an already-completed, already-persisted review.
   if (!isReviewMode) {
     try {
-      // The writing binds to the recorte the MISSION was GENERATED for — read
-      // server-side from the user's latest generated_theme (never the current
-      // pointer, which may have advanced; never a client-supplied recorte). A
-      // mission without a persisted identity grants no curricular credit
-      // (blockers 5, 7). The review itself is still saved (commercial success).
-      const { data: theme } = await supabase
-        .from('generated_themes')
-        .select('curriculum_version_id, curriculum_subtopic_key')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const t = theme as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
-      const identity = t?.curriculum_version_id && t.curriculum_subtopic_key
-        ? { versionId: t.curriculum_version_id, subtopicKey: t.curriculum_subtopic_key }
-        : null;
-      const rec = await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'writing', reviewId, identity);
-      if (rec.recorded && rec.subtopicKey) {
-        await supabase
-          .from('english_reviews')
-          .update({ curriculum_version_id: rec.versionId, curriculum_subtopic_key: rec.subtopicKey })
-          .eq('id', reviewId)
-          .eq('user_id', userId);
-      } else if (!identity) {
-        safeLog('review-text', 'no_curricular_identity', 200);
-      }
+      await ensureWritingCurricularCredit(supabase, userId, reviewId, generatedThemeId);
     } catch (e) {
       safeLog('review-text', 'record_curricular_practice_failed', 500, { detail: String(e).slice(0, 150) });
     }

@@ -45,6 +45,9 @@ vi.mock('../_curriculum/service-client', () => ({
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: mockResolveActivityPrompt,
   recordCurricularPractice: mockRecordCurricularPractice,
+  // Level for the generated text comes from the active-path curriculum (blocker 8).
+  ensureUserCurriculum: vi.fn(async () => ({ currentLevelCode: 'B1', languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' }, versionId: 'version-1' })),
+  recordCurricularPracticeFromIdentity: vi.fn(async () => ({ recorded: true })),
   CurriculumConfigError: class CurriculumConfigError extends Error {},
 }));
 

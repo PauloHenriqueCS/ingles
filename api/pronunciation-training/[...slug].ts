@@ -64,6 +64,33 @@ function isAccessDenial(v: AccessDenial | { entitlements: PlanEntitlementsSnapsh
 }
 
 /**
+ * CONVERGENT curricular credit for a completed pronunciation training session
+ * (blockers 5, 6.B). Idempotent: safe on first completion AND on a retry of an
+ * already-completed assessment. Records against the recorte the session was
+ * GENERATED for (persisted on the session) — never the current pointer, never a
+ * client value. A session without a persisted identity grants no credit.
+ */
+async function reconcilePronunciationCredit(userId: string, sessionId: string): Promise<void> {
+  const svc = getCurriculumServiceClient();
+  const { data: sessionRow } = await svc
+    .from('pronunciation_training_sessions')
+    .select('curriculum_version_id, curriculum_subtopic_key')
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  const sr = sessionRow as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+  const identity = sr?.curriculum_version_id && sr.curriculum_subtopic_key
+    ? { versionId: sr.curriculum_version_id, subtopicKey: sr.curriculum_subtopic_key }
+    : null;
+  const rec = await recordCurricularPracticeFromIdentity(svc, userId, 'pronunciation', sessionId, identity);
+  if (rec.recorded) {
+    await svc.from('pronunciation_training_sessions').update({ curriculum_credit_status: 'credited' }).eq('id', sessionId).eq('user_id', userId);
+  } else if (!identity) {
+    safeLog('pronunciation-training/complete', 'no_curricular_identity', 200, { sessionId });
+  }
+}
+
+/**
  * Defense-in-depth on top of pronunciation.enabled: a plan could in theory
  * be enabled but configured with a 0/day (non-unlimited) evaluations limit.
  * Every real plan today keeps these two flags together (see the
@@ -256,14 +283,23 @@ async function handleGenerateText(req: any, res: any) {
   }
 
   // Level is the CURRICULUM PATH's current level (per learning language), NOT a
-  // global english_learning_memory level — a Spanish path never inherits an
-  // English level (blocker 8). After bootstrap, curriculum progression is the
-  // authority.
-  let userLevel = 'A2';
+  // global english_learning_memory level, and NEVER an invented 'A2' fallback
+  // (blocker 8). A misconfigured curriculum is an explicit operational error.
+  let userLevel: string | null = null;
   try {
     const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
-    if (ensured.currentLevelCode) userLevel = ensured.currentLevelCode;
-  } catch { /* Use default */ }
+    userLevel = ensured.currentLevelCode;
+  } catch (err) {
+    if (err instanceof CurriculumConfigError) {
+      safeLog('pronunciation-training/generate-text', 'curriculum_not_configured', 503);
+      return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+    }
+    throw err;
+  }
+  if (!userLevel) {
+    safeLog('pronunciation-training/generate-text', 'no_curriculum_level', 503);
+    return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O conteúdo do currículo ainda não está disponível. Tente novamente mais tarde.');
+  }
 
   const apiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!apiKey) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Serviço de IA não configurado.');
@@ -288,7 +324,13 @@ async function handleGenerateText(req: any, res: any) {
   }
 
   const systemPrompt = resolvedPrompt.system;
-  const userPrompt = resolvedPrompt.user ?? 'Write the text now.';
+  // user_body is OPTIONAL: when the template has none, send only the system
+  // message — never invent a fixed-language trigger like "Write the text now."
+  // (blocker 8). All pedagogy lives in the system prompt.
+  const userPrompt = resolvedPrompt.user ?? '';
+  const chatMessages = userPrompt
+    ? [{ role: 'system' as const, content: systemPrompt }, { role: 'user' as const, content: userPrompt }]
+    : [{ role: 'system' as const, content: systemPrompt }];
   const model = resolvedPrompt.model ?? AI_MODEL;
   const temperature = resolvedPrompt.temperature ?? 0.9;
 
@@ -316,7 +358,7 @@ async function handleGenerateText(req: any, res: any) {
       },
       () => openai.chat.completions.create({
         model,
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        messages: chatMessages,
         temperature,
         max_tokens: 400,
       }),
@@ -490,7 +532,7 @@ async function handleToken(req: any, res: any) {
   // en-US fallback, zero side effects.
   let recognitionLocale: string;
   try {
-    recognitionLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
+    recognitionLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId)).speechLocale;
   } catch (err) {
     if (err instanceof SpeechConfigError) {
       safeLog('pronunciation-training/token', 'speech_config_missing', 503);
@@ -624,7 +666,7 @@ async function handleTrainingStart(req: any, res: any) {
   // reservation stuck. Explicit error, no en-US fallback, zero side effects.
   let startLocale: string;
   try {
-    startLocale = (await resolveUserSpeechConfig(supabase, userId)).speechLocale;
+    startLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), userId)).speechLocale;
   } catch (err) {
     if (err instanceof SpeechConfigError) {
       safeLog('pronunciation-training/start', 'speech_config_missing', 503);
@@ -780,7 +822,14 @@ async function handleTrainingComplete(req: any, res: any) {
   const rpc = (rpcData ?? {}) as Record<string, unknown>;
   if (rpc.error === 'UNAUTHORIZED') return jsonError(res, 401, 'UNAUTHORIZED', 'Faça login para continuar.');
   if (rpc.error === 'NOT_FOUND') return jsonError(res, 404, 'NOT_FOUND', 'Avaliação não encontrada.');
-  if (rpc.error === 'ASSESSMENT_ALREADY_COMPLETED') return jsonError(res, 409, 'ASSESSMENT_ALREADY_COMPLETED', 'O texto de hoje já possui uma análise concluída.');
+  if (rpc.error === 'ASSESSMENT_ALREADY_COMPLETED') {
+    // CONVERGENT credit (blocker 6.B): a retry after a first-attempt credit
+    // failure still lands the credit, idempotently, WITHOUT re-running the
+    // provider (the assessment was already saved). Then keep the 409 idempotency
+    // signal the client already handles.
+    try { await reconcilePronunciationCredit(userId, sessionId); } catch { safeLog('pronunciation-training/complete', 'credit_reconcile_failed', 200); }
+    return jsonError(res, 409, 'ASSESSMENT_ALREADY_COMPLETED', 'O texto de hoje já possui uma análise concluída.');
+  }
   if (rpc.error === 'ATTEMPT_MISMATCH') return jsonError(res, 409, 'ATTEMPT_MISMATCH', 'Esta tentativa não corresponde à tentativa ativa.');
   if (rpc.error) {
     safeLog('pronunciation-training/complete', 'rpc_unexpected', 500);
@@ -789,29 +838,9 @@ async function handleTrainingComplete(req: any, res: any) {
 
   // Data-driven curriculum: a successfully completed assessment is one valid
   // pronunciation practice — recorded against the recorte the session was
-  // GENERATED for (persisted on the session), NOT the current pointer, so a
-  // session that finishes after the user advanced never marks the next recorte
-  // (blocker 8/10). Best-effort — a recording failure must never affect the
-  // assessment response the user gets.
-  try {
-    const svc = getCurriculumServiceClient();
-    const { data: sessionRow } = await svc
-      .from('pronunciation_training_sessions')
-      .select('curriculum_version_id, curriculum_subtopic_key')
-      .eq('id', sessionId)
-      .eq('user_id', userId)
-      .maybeSingle();
-    const sr = sessionRow as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
-    const identity = sr?.curriculum_version_id && sr.curriculum_subtopic_key
-      ? { versionId: sr.curriculum_version_id, subtopicKey: sr.curriculum_subtopic_key }
-      : null;
-    // Identity-REQUIRED: no fallback to the current pointer. A session without a
-    // persisted recorte simply grants no curricular credit (blocker 5).
-    const rec = await recordCurricularPracticeFromIdentity(svc, userId, 'pronunciation', sessionId, identity);
-    if (!rec.recorded && !identity) {
-      safeLog('pronunciation-training/complete', 'no_curricular_identity', 200, { sessionId });
-    }
-  } catch {
+  // GENERATED for (blockers 5, 8, 10). Idempotent + convergent (blocker 6.B).
+  // Best-effort — a recording failure must never affect the assessment response.
+  try { await reconcilePronunciationCredit(userId, sessionId); } catch {
     safeLog('pronunciation-training/complete', 'record_curricular_practice_failed', 200);
   }
 

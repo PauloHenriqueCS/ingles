@@ -13,7 +13,9 @@
 -- enquadramento imediatamente ANTES do {{session_context}} da linha en/pt-BR.
 --
 -- COMPATIBILIDADE: aditivo, idempotente (só injeta se o marcador ainda não
--- existir). Não altera nenhuma outra coluna.
+-- existir). O enquadramento aqui é em PORTUGUÊS, então SÓ se aplica às linhas de
+-- interface pt-BR (blocker 9). Uma futura linha de interface=en (ou outra) traz
+-- o seu próprio enquadramento no seed do template, nunca PT por este UPDATE.
 -- =============================================================================
 
 UPDATE public.prompt_templates
@@ -28,6 +30,7 @@ UPDATE public.prompt_templates
        ),
        updated_at = now()
  WHERE template_key = 'conversation.free'
+   AND interface_language = 'pt-BR'
    AND system_body LIKE '%{{session_context}}%'
    AND system_body NOT LIKE '%## Contexto da sessão (dados)%';
 

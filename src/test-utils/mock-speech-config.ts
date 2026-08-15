@@ -1,14 +1,15 @@
 import { vi } from 'vitest';
 
 /**
- * Shared test helper: a chainable `.from()` mock covering the two tables read by
+ * Shared test helper: a chainable `.from()` mock covering the tables read by
  * resolveUserSpeechConfig (api/_curriculum/language-speech-config):
- *   - user_curriculum_preferences → the user's learning_language
- *   - languages                   → the Speech config for that language
+ *   - user_learning_paths → the user's ACTIVE learning language (blocker 1)
+ *   - languages           → the Speech config for that language
  *
  * Defaults to English (locale 'en-US'), so the recognition/TTS locale resolves
- * to 'en-US' as before — but now DATA-DRIVEN. Pass overrides to prove a second
- * language resolves a different locale/voice with NO code change.
+ * to 'en-US' as before — but now DATA-DRIVEN from the active path. Pass overrides
+ * to prove a second active language resolves a different locale/voice with NO
+ * code change.
  */
 export interface SpeechConfigMockOptions {
   learningLanguage?: string | null;
@@ -30,7 +31,13 @@ export function makeSpeechConfigFrom(opts: SpeechConfigMockOptions = {}) {
   return (table: string) => {
     const chain: any = {};
     for (const m of ['select', 'eq', 'order', 'limit']) chain[m] = vi.fn().mockReturnValue(chain);
-    if (table === 'user_curriculum_preferences') {
+    if (table === 'user_learning_paths') {
+      // The ACTIVE learning path is the authority (blocker 1). null → no path.
+      chain.maybeSingle = vi.fn().mockResolvedValue({
+        data: learningLanguage === null ? null : { learning_language: learningLanguage, interface_language: 'pt-BR', curriculum_version_id: 'v1', initial_level_code: null },
+        error: null,
+      });
+    } else if (table === 'user_curriculum_preferences') {
       chain.maybeSingle = vi.fn().mockResolvedValue({
         data: learningLanguage === null ? null : { learning_language: learningLanguage },
         error: null,

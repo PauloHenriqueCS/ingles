@@ -15,6 +15,7 @@ import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { countTtsSsmlCharacters } from './_ai-gateway/tts-character-count';
 import { getProductConfig, resolveConfigEnvironment } from '../src/server/product-config';
 import { resolveUserSpeechConfig, SpeechConfigError, SAFE_AZURE_VOICE_RE } from './_curriculum/language-speech-config';
+import { getCurriculumServiceClient } from './_curriculum/service-client';
 
 // ── Voice configuration ───────────────────────────────────────────────────────
 // Voice + locale are NOT hardcoded to English: they come from the user's
@@ -148,7 +149,7 @@ export default async function handler(req: any, res: any) {
   // English. Only outputFormat (a global technical property) comes from config.
   let speechConfig: Awaited<ReturnType<typeof resolveUserSpeechConfig>>;
   try {
-    speechConfig = await resolveUserSpeechConfig(auth.supabase, auth.userId);
+    speechConfig = await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId);
   } catch (err) {
     if (err instanceof SpeechConfigError) {
       safeLog('tts', 'speech_config_missing', 503);

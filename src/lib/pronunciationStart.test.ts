@@ -6,6 +6,8 @@ import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitleme
 vi.mock('../../api/_auth', () => ({
   requireAuth: vi.fn(),
 }));
+// Speech config resolves via the SERVICE client (active-path authority).
+vi.mock('../../api/_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: (t: string) => makeSpeechConfigChain(t) }) }));
 
 // Partial mock: keep AzureSpeechError real so instanceof checks in the handler work
 vi.mock('../../api/_azure-speech', async (importOriginal) => {
@@ -68,7 +70,10 @@ const mockRpc = vi.fn();
 function makeSpeechConfigChain(table: string) {
   const chain: any = {};
   for (const m of ['select', 'eq', 'order', 'limit']) chain[m] = vi.fn().mockReturnValue(chain);
-  if (table === 'user_curriculum_preferences') {
+  if (table === 'user_learning_paths') {
+    // The ACTIVE learning path is the authority (blocker 1).
+    chain.maybeSingle = vi.fn().mockResolvedValue({ data: { learning_language: 'en', interface_language: 'pt-BR', curriculum_version_id: 'v1', initial_level_code: null }, error: null });
+  } else if (table === 'user_curriculum_preferences') {
     chain.maybeSingle = vi.fn().mockResolvedValue({ data: { learning_language: 'en' }, error: null });
   } else if (table === 'languages') {
     chain.maybeSingle = vi.fn().mockResolvedValue({

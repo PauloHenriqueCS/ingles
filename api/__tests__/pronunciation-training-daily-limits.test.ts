@@ -53,7 +53,8 @@ vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true
 // a best-effort no-op. Prompt composition is covered by
 // api/__tests__/pronunciation-generate-text-gateway.test.ts.
 vi.mock('../_curriculum/service-client', () => ({
-  getCurriculumServiceClient: vi.fn(() => ({})),
+  // Speech config resolves via the service client (active-path authority).
+  getCurriculumServiceClient: vi.fn(() => ({ from: makeSpeechConfigFrom() })),
 }));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: vi.fn().mockResolvedValue({
@@ -65,7 +66,10 @@ vi.mock('../_curriculum/curriculum-runtime', () => ({
     versionId: 'version-1',
     languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
   }),
-  recordCurricularPractice: vi.fn().mockResolvedValue({ recorded: true }),
+  // Active-path helpers used by the Speech resolver + the userLevel resolution.
+  resolveActiveLearningLanguage: vi.fn(async () => 'en'),
+  ensureUserCurriculum: vi.fn(async () => ({ currentLevelCode: 'B1', languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' }, versionId: 'version-1' })),
+  recordCurricularPracticeFromIdentity: vi.fn().mockResolvedValue({ recorded: true }),
   CurriculumConfigError: class CurriculumConfigError extends Error {},
 }));
 

@@ -14,13 +14,14 @@ import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/en
 import { WORD_PRACTICE_MAX_ATTEMPTS } from '../../src/domain/pronunciation/word-practice-limits';
 import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 
-const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, gw } = vi.hoisted(() => {
+const { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, speechMissing, gw } = vi.hoisted(() => {
   const mockIssueToken = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockGetCurrentUserPlanEntitlements = vi.fn();
   const mockRpc = vi.fn();          // auth.supabase.rpc — register_word_practice_attempt
   const mockServiceRpc = vi.fn();   // service-role client — release_word_practice_attempt (refund)
-  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  const speechMissing = { v: false }; // toggles the SERVICE-client Speech config presence
+  return { mockIssueToken, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc, mockServiceRpc, speechMissing, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom({ missingLanguageConfig: speechMissing.v }) }) }));
 vi.mock('openai', () => ({ default: vi.fn() }));
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
@@ -192,10 +194,12 @@ describe('LEGACY mode', () => {
   });
 
   it('missing Speech config → 503 BEFORE consuming a word attempt or minting a token (blocker 4A)', async () => {
-    // The learning language has no Speech config → resolveUserSpeechConfig throws.
-    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc, from: makeSpeechConfigFrom({ missingLanguageConfig: true }) } });
+    // The active learning language has no Speech config → resolveUserSpeechConfig
+    // throws (resolved via the SERVICE client, before any side effect).
+    speechMissing.v = true;
     const res = makeRes();
     await handler(makeReq(), res);
+    speechMissing.v = false;
     expect(res._status()).toBe(503);
     expect(mockRpc).not.toHaveBeenCalled();        // register_word_practice_attempt NEVER ran
     expect(mockIssueToken).not.toHaveBeenCalled();  // no Azure token

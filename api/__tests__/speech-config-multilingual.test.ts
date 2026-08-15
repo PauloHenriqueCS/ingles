@@ -15,28 +15,32 @@ import {
   SpeechConfigError,
 } from '../_curriculum/language-speech-config';
 
-// Minimal in-memory fixture DB: languages + user_curriculum_preferences.
+// Minimal in-memory fixture DB: languages + user_learning_paths (the active
+// learning language authority — blocker 1).
 function makeClient(fixture: {
   languages: Record<string, { speech_locale: string; default_tts_voice: string; stt_language: string; allowed_tts_voices?: string[] } | null>;
-  prefs?: Record<string, { learning_language: string }>;
+  paths?: Record<string, { learning_language: string }>;
 }) {
   return {
     from(table: string) {
       const chain: any = {
-        _eqField: null as string | null,
-        _eqVal: null as string | null,
+        _code: null as string | null,
+        _userId: null as string | null,
         select() { return chain; },
-        eq(col: string, val: string) { chain._eqField = col; chain._eqVal = val; return chain; },
+        eq(col: string, val: string) {
+          if (col === 'code') chain._code = val;
+          if (col === 'user_id') chain._userId = val;
+          return chain;
+        },
         order() { return chain; },
         limit() { return chain; },
         async maybeSingle() {
           if (table === 'languages') {
-            const row = fixture.languages[chain._eqVal as string] ?? null;
-            return { data: row, error: null };
+            return { data: fixture.languages[chain._code as string] ?? null, error: null };
           }
-          if (table === 'user_curriculum_preferences') {
-            const row = fixture.prefs?.[chain._eqVal as string] ?? null;
-            return { data: row, error: null };
+          if (table === 'user_learning_paths') {
+            const p = fixture.paths?.[chain._userId as string] ?? null;
+            return { data: p ? { ...p, interface_language: 'pt-BR', curriculum_version_id: 'v1', initial_level_code: null } : null, error: null };
           }
           return { data: null, error: null };
         },
@@ -79,28 +83,38 @@ describe('getLanguageSpeechConfig — data-driven per language', () => {
   });
 });
 
-describe('resolveUserLearningLanguage — pinned preference, product bootstrap default', () => {
-  it('uses the persisted learning_language', async () => {
-    const client = makeClient({ languages: { es: ES }, prefs: { u1: { learning_language: 'es' } } });
+describe('resolveUserLearningLanguage — ACTIVE learning path is the authority (blocker 1)', () => {
+  it('uses the ACTIVE path learning_language (not prefs.updated_at)', async () => {
+    const client = makeClient({ languages: { es: ES }, paths: { u1: { learning_language: 'es' } } });
     expect(await resolveUserLearningLanguage(client, 'u1')).toBe('es');
   });
 
-  it('falls back to the product bootstrap default only when the user never chose one', async () => {
-    const client = makeClient({ languages: { en: EN } });
-    expect(await resolveUserLearningLanguage(client, 'new-user')).toBe('en');
+  it('an active English path resolves English even if a Spanish path is not active', async () => {
+    const client = makeClient({ languages: { en: EN }, paths: { u1: { learning_language: 'en' } } });
+    expect(await resolveUserLearningLanguage(client, 'u1')).toBe('en');
+  });
+
+  it('a path READ failure fails loudly — never silently recovers to English (blocker 1)', async () => {
+    const errClient: any = {
+      from: () => ({
+        select() { return this; }, eq() { return this; }, order() { return this; }, limit() { return this; },
+        async maybeSingle() { return { data: null, error: { message: 'db down' } }; },
+      }),
+    };
+    await expect(resolveUserLearningLanguage(errClient, 'u1')).rejects.toBeTruthy();
   });
 });
 
-describe('resolveUserSpeechConfig — end to end', () => {
-  it('a configured Spanish learner resolves es config, not English', async () => {
-    const client = makeClient({ languages: { en: EN, es: ES }, prefs: { u1: { learning_language: 'es' } } });
+describe('resolveUserSpeechConfig — end to end (active path)', () => {
+  it('a Spanish ACTIVE path resolves es config, not English', async () => {
+    const client = makeClient({ languages: { en: EN, es: ES }, paths: { u1: { learning_language: 'es' } } });
     const cfg = await resolveUserSpeechConfig(client, 'u1');
     expect(cfg.learningLanguage).toBe('es');
     expect(cfg.speechLocale).toBe('es-ES');
   });
 
-  it('a configured Spanish learner whose es config is missing fails loudly (never en-US)', async () => {
-    const client = makeClient({ languages: { en: EN, es: null }, prefs: { u1: { learning_language: 'es' } } });
+  it('a Spanish ACTIVE path whose es config is missing fails loudly (never en-US)', async () => {
+    const client = makeClient({ languages: { en: EN, es: null }, paths: { u1: { learning_language: 'es' } } });
     await expect(resolveUserSpeechConfig(client, 'u1')).rejects.toBeInstanceOf(SpeechConfigError);
   });
 });

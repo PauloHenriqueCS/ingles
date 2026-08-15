@@ -50,6 +50,7 @@ vi.mock('../_azure-speech', async (importOriginal) => {
 });
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
+vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({ from: makeSpeechConfigFrom() }) }));
 
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,

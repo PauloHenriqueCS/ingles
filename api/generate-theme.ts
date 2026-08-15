@@ -649,7 +649,12 @@ export default async function handler(req: any, res: any) {
 
     const reviewModel = resolvedReviewPrompt.model ?? AI_MODEL;
     const reviewSystem = resolvedReviewPrompt.system;
-    const reviewUser = resolvedReviewPrompt.user ?? 'Gere a atividade de revisão agora.';
+    // user_body optional → system-only when absent, never a fixed-language
+    // trigger (blocker 8).
+    const reviewUser = resolvedReviewPrompt.user ?? '';
+    const reviewMessages = reviewUser
+      ? [{ role: 'system' as const, content: reviewSystem }, { role: 'user' as const, content: reviewUser }]
+      : [{ role: 'system' as const, content: reviewSystem }];
 
     const MAX_REVIEW_ATTEMPTS = 3;
     let reviewTheme: Record<string, unknown> | null = null;
@@ -661,10 +666,7 @@ export default async function handler(req: any, res: any) {
         const completion = await callTheme('review', attempt, MAX_REVIEW_ATTEMPTS, {
           model: reviewModel,
           temperature: resolvedReviewPrompt.temperature ?? (0.85 + (attempt - 1) * 0.08),
-          messages: [
-            { role: 'system', content: reviewSystem },
-            { role: 'user', content: reviewUser },
-          ],
+          messages: reviewMessages,
         });
         raw = completion.choices[0]?.message?.content ?? '';
       } catch (err) {
@@ -788,7 +790,12 @@ export default async function handler(req: any, res: any) {
 
   const normalModel = resolvedPrompt.model ?? AI_MODEL;
   const normalSystem = resolvedPrompt.system;
-  const normalUser = resolvedPrompt.user ?? 'Gere a missão de escrita agora.';
+  // user_body is OPTIONAL: when absent, send only the system message — never a
+  // fixed-language trigger like "Gere a missão…" (blocker 8).
+  const normalUser = resolvedPrompt.user ?? '';
+  const normalMessages = normalUser
+    ? [{ role: 'system' as const, content: normalSystem }, { role: 'user' as const, content: normalUser }]
+    : [{ role: 'system' as const, content: normalSystem }];
   const baseTemperature = resolvedPrompt.temperature ?? 0.88;
 
   const MAX_ATTEMPTS = 3;
@@ -803,10 +810,7 @@ export default async function handler(req: any, res: any) {
         // Bump temperature per attempt to diversify retries against the
         // history-based similarity guard below.
         temperature: baseTemperature + (attempt - 1) * 0.06,
-        messages: [
-          { role: 'system', content: normalSystem },
-          { role: 'user', content: normalUser },
-        ],
+        messages: normalMessages,
       });
       raw = completion.choices[0]?.message?.content ?? '';
     } catch (err) {

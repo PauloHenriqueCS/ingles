@@ -8,7 +8,7 @@
  * default.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
+import { resolveActiveLearningLanguage } from './curriculum-runtime';
 
 export interface LanguageSpeechConfig {
   /** BCP-47 locale for TTS SSML xml:lang AND Azure Speech recognition, e.g. 'en-US'. */
@@ -39,34 +39,28 @@ export class SpeechConfigError extends Error {
 }
 
 /**
- * Resolves the user's CURRENT learning language WITHOUT the full curriculum
- * bootstrap (cheap: one row). Uses the user's persisted curriculum preference
- * (the most recently used path, consistent with version pinning) and falls back
- * to the product bootstrap default ONLY for a user who has never chosen a
- * language. This is the language authority for every Speech (TTS/STT/recognition)
- * flow — it is NOT a pedagogical fallback: a configured Spanish learner resolves
- * 'es' here and getLanguageSpeechConfig then fails loudly if 'es' has no Speech
- * config, never silently serving English.
+ * Resolves the user's CURRENT learning language from the SAME authority the
+ * curriculum uses — the ACTIVE learning path (public.user_learning_paths), never
+ * an prefs.updated_at heuristic (blocker 1). Bootstraps a path when the user has
+ * none. A read/bootstrap failure PROPAGATES; it is never silently recovered to
+ * English. The product bootstrap default only applies inside a genuine first
+ * bootstrap (a user with no path), not as error recovery.
  */
 export async function resolveUserLearningLanguage(
   client: SupabaseClient,
   userId: string,
 ): Promise<string> {
-  const { data } = await client
-    .from('user_curriculum_preferences')
-    .select('learning_language')
-    .eq('user_id', userId)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const row = (data ?? null) as { learning_language?: string | null } | null;
-  return row?.learning_language ?? CURRICULUM_BOOTSTRAP_DEFAULT.learningLanguage;
+  // Delegates to the shared active-path resolver in curriculum-runtime so Speech
+  // and ensureUserCurriculum can never diverge on the active language.
+  return resolveActiveLearningLanguage(client, userId);
 }
 
 /**
- * One-call helper for every Speech flow: resolves the user's learning language
- * and returns its data-driven Speech config. Throws SpeechConfigError (→ explicit
- * operational error, never en-US) when the target language has no Speech config.
+ * One-call helper for every Speech flow: resolves the user's ACTIVE learning
+ * language and returns its data-driven Speech config. Throws SpeechConfigError
+ * (→ explicit operational error, never en-US) when the target language has no
+ * Speech config. Callers pass the SERVICE client (server-authoritative bootstrap
+ * honours RLS — the write policies are server-role only).
  */
 export async function resolveUserSpeechConfig(
   client: SupabaseClient,

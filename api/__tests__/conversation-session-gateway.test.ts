@@ -112,6 +112,7 @@ vi.mock('../_curriculum/language-speech-config', () => ({
 }));
 
 import handler from '../conversation/[...slug]';
+import { ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { DuplicateUsageEventError } from '../_ai-gateway/usage-repository';
 
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000031';
@@ -1734,6 +1735,18 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
     // conversation.webrtc_connect is in observe mode (never configured here).
     expect(mockSessionsFrom).toHaveBeenCalledTimes(2);
     expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
+  });
+
+  it('active-path resolution failure → 503 with NO default FREE session and NO OpenAI cost (blocker 3)', async () => {
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSessionSupabase() });
+    const fetchSpy = mockClientSecretsFetch(200, { value: 'tok', expires_at: 9999999999, session: { id: 'sess-1' } });
+    vi.stubGlobal('fetch', fetchSpy);
+    // The ACTIVE learning path can't be resolved (transient/misconfig).
+    vi.mocked(ensureUserCurriculum).mockRejectedValueOnce(new CurriculumConfigError('no active path'));
+    const res = makeRes();
+    await handler(vercelReq('session'), res);
+    expect(res._status()).toBe(503);            // explicit operational error
+    expect(fetchSpy).not.toHaveBeenCalled();     // never reached the OpenAI client_secret (no cost)
   });
 
   it('routes "session-active" (string) to handleSessionActive', async () => {

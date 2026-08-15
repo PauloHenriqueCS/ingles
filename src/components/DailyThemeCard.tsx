@@ -145,7 +145,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? data.error ?? 'Erro ao gerar missão');
 
-      onThemeReady(data.theme as EnglishDailyTheme);
+      // Carry the persisted generated_theme id ON the theme so the review can
+      // bind the writing to the EXACT mission it was generated for (blocker 2),
+      // instead of the server guessing "the latest theme".
+      onThemeReady({ ...(data.theme as EnglishDailyTheme), id: data.themeId ?? undefined });
       setCurrentThemeId(data.themeId ?? null);
       setGenState('idle');
     } catch (err) {

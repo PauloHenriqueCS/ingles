@@ -93,13 +93,37 @@ interface ActivePathRow {
 }
 
 async function readActivePath(client: SupabaseClient, userId: string): Promise<ActivePathRow | null> {
-  const { data } = await client
+  const { data, error } = await client
     .from('user_learning_paths')
     .select('learning_language, interface_language, curriculum_version_id, initial_level_code')
     .eq('user_id', userId)
     .eq('is_active', true)
     .maybeSingle();
+  // A transient READ error must NOT be mistaken for "no path" (which would
+  // trigger a bootstrap and silently pick English). Propagate it explicitly so
+  // Speech/curriculum return an operational error, never an English fallback.
+  if (error) {
+    throw new CurriculumConfigError(`Failed to read active learning path for user ${userId}: ${error.message}`);
+  }
   return (data ?? null) as ActivePathRow | null;
+}
+
+/**
+ * The user's ACTIVE learning language — the SAME single authority every runtime
+ * read shares (never inferred from prefs.updated_at). Reads the active learning
+ * path; if the user has none yet, bootstraps one (server-authoritative, via
+ * ensureUserCurriculum). A read/bootstrap FAILURE propagates — it is NEVER
+ * silently recovered to English (blocker 1). Shared by ensureUserCurriculum's
+ * callers and the Speech resolver so there is no duplicated active-path logic.
+ */
+export async function resolveActiveLearningLanguage(client: SupabaseClient, userId: string): Promise<string> {
+  const path = await readActivePath(client, userId);
+  if (path) return path.learning_language;
+  // No active path yet → genuine bootstrap (creates the path). This requires the
+  // service-role writes ensureUserCurriculum performs — callers pass the service
+  // client for Speech, so RLS is honoured, not bypassed.
+  const ensured = await ensureUserCurriculum(client, userId);
+  return ensured.languageContext.learningLanguage;
 }
 
 /**

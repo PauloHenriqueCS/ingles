@@ -207,6 +207,11 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           reviewCategory: dailyTheme?.category ?? null,
           reviewDifficulty: difficulty ?? dailyTheme?.difficulty ?? null,
           missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : null,
+          // The EXACT mission this writing was generated for. The server
+          // validates ownership + identity and binds the curricular credit to
+          // THIS recorte — never "the latest theme" (blocker 2). Client sends
+          // only the resource id; it can never forge a recorte/version.
+          generatedThemeId: dailyTheme?.id ?? null,
         }),
       });
       let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewSchedule?: ReviewScheduleResult; reviewId?: string };
