@@ -105,6 +105,10 @@ vi.mock('../../api/_curriculum/presentation-i18n', () => ({
   getLanguageDisplayName: vi.fn(async (_c: unknown, code: string) => (code === 'en' ? 'inglês' : code === 'pt-BR' ? 'português' : code)),
   getBandLabelMap: vi.fn(async () => new Map<string, string>()),
 }));
+// Conversation personalization is data-driven (conversation_pref_fragments) — stubbed.
+vi.mock('../../api/_curriculum/conversation-personalization', () => ({
+  buildConversationPersonalizationFromData: vi.fn(async () => 'PERSONALIZATION_FROM_DATA'),
+}));
 vi.mock('../../api/_curriculum/curriculum-runtime', () => ({
   ensureUserCurriculum: vi.fn().mockResolvedValue({
     versionId: 'v1',

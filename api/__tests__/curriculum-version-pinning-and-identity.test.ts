@@ -10,7 +10,7 @@
  *    never the current pointer, and ignores a foreign-version activity.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { ensureUserCurriculum, recordCurricularPractice } from '../_curriculum/curriculum-runtime';
+import { ensureUserCurriculum, recordCurricularPractice, recordCurricularPracticeFromIdentity } from '../_curriculum/curriculum-runtime';
 
 // ── Tiny in-memory Supabase mock ────────────────────────────────────────────
 interface Tables {
@@ -27,7 +27,7 @@ interface Tables {
 
 function makeClient(tables: Partial<Tables>, onRpc?: (name: string, args: any) => any) {
   const db: Tables = {
-    user_curriculum_preferences: [], curriculum_versions: [], curricula: [],
+    user_learning_paths: [], user_curriculum_preferences: [], curriculum_versions: [], curricula: [],
     curriculum_subtopics: [], curriculum_modules: [], user_curriculum_progress: [],
     english_learning_memory: [], user_subtopic_modality_progress: [], ...tables,
   } as Tables;
@@ -87,44 +87,65 @@ function baseTables(extra: Partial<Tables> = {}): Partial<Tables> {
   };
 }
 
-describe('version pinning (blocker 4)', () => {
-  it('a user pinned to V1 stays on V1 even though V2 is the latest published', async () => {
+function activePath(userId: string, versionId: string, lang = 'en', initialLevel: string | null = null) {
+  return { user_id: userId, learning_language: lang, curriculum_version_id: versionId, interface_language: 'pt-BR', initial_level_code: initialLevel, is_active: true };
+}
+function prefsRow(userId: string, versionId: string) {
+  return { user_id: userId, curriculum_version_id: versionId, learning_language: 'en', interface_language: 'pt-BR', practice_writing: true, practice_listening: false, practice_pronunciation: false, practice_conversation: false };
+}
+
+describe('version pinning via explicit active learning path (blocker 1/4)', () => {
+  it('a user whose ACTIVE PATH points at V1 stays on V1 even though V2 is the latest published', async () => {
     const client = makeClient(baseTables({
-      user_curriculum_preferences: [{
-        user_id: 'u1', curriculum_version_id: V1, learning_language: 'en', interface_language: 'pt-BR',
-        practice_writing: true, practice_listening: false, practice_pronunciation: false, practice_conversation: false,
-        updated_at: '2026-08-15T10:00:00Z',
-      }],
-      user_curriculum_progress: [{
-        user_id: 'u1', curriculum_version_id: V1, current_subtopic_id: 's2-v1', current_module_id: 'm1-v1',
-        current_level_code: 'A1', status: 'active',
-      }],
+      user_learning_paths: [activePath('u1', V1)],
+      user_curriculum_preferences: [prefsRow('u1', V1)],
+      user_curriculum_progress: [{ user_id: 'u1', curriculum_version_id: V1, current_subtopic_id: 's2-v1', current_module_id: 'm1-v1', current_level_code: 'A1', status: 'active' }],
     }));
     const ensured = await ensureUserCurriculum(client, 'u1');
-    expect(ensured.versionId).toBe(V1);              // NOT V2
+    expect(ensured.versionId).toBe(V1);              // NOT V2 (never "latest published")
     expect(ensured.currentSubtopicKey).toBe('A1.M1.S2'); // pinned progress preserved
   });
 
-  it('a brand-new user bootstraps onto the latest published version', async () => {
+  it('a brand-new user bootstraps: creates an explicit active path on the published version', async () => {
     const client = makeClient(baseTables());
     const ensured = await ensureUserCurriculum(client, 'new-user');
-    expect(ensured.versionId).toBe(V2); // latest published (version 2)
-    // A prefs row was created (bootstrap), pinned to V2.
-    expect(client._upserts.some((u: any) => u.table === 'user_curriculum_preferences' && u.row.curriculum_version_id === V2)).toBe(true);
+    expect(ensured.versionId).toBe(V2); // latest published at bootstrap
+    // The authority created is an active LEARNING PATH (not inferred by updated_at).
+    expect(client._upserts.some((u: any) => u.table === 'user_learning_paths' && u.row.curriculum_version_id === V2 && u.row.is_active === true)).toBe(true);
   });
 
-  it('multiple prefs rows (one per version) never crash — most-recent path wins', async () => {
+  it('the active path is authoritative even if a stale prefs row for a different version exists', async () => {
     const client = makeClient(baseTables({
-      user_curriculum_preferences: [
-        { user_id: 'u2', curriculum_version_id: V1, learning_language: 'en', interface_language: 'pt-BR', practice_writing: true, practice_listening: false, practice_pronunciation: false, practice_conversation: false, updated_at: '2026-08-10T10:00:00Z' },
-        { user_id: 'u2', curriculum_version_id: V2, learning_language: 'en', interface_language: 'pt-BR', practice_writing: true, practice_listening: false, practice_pronunciation: false, practice_conversation: false, updated_at: '2026-08-14T10:00:00Z' },
-      ],
-      user_curriculum_progress: [
-        { user_id: 'u2', curriculum_version_id: V2, current_subtopic_id: 's1-v2', current_module_id: 'm1-v2', current_level_code: 'A1', status: 'active' },
-      ],
+      user_learning_paths: [activePath('u2', V1)],
+      user_curriculum_preferences: [prefsRow('u2', V1), prefsRow('u2', V2)],
+      user_curriculum_progress: [{ user_id: 'u2', curriculum_version_id: V1, current_subtopic_id: 's1-v1', current_module_id: 'm1-v1', current_level_code: 'A1', status: 'active' }],
     }));
     const ensured = await ensureUserCurriculum(client, 'u2');
-    expect(ensured.versionId).toBe(V2); // most recently updated prefs row
+    expect(ensured.versionId).toBe(V1); // the active path, not any updated_at heuristic
+  });
+
+  it('editing preferences (a V1 prefs row) never changes the pinned version', async () => {
+    const client = makeClient(baseTables({
+      user_learning_paths: [activePath('u3', V1)],
+      user_curriculum_preferences: [prefsRow('u3', V1)],
+      user_curriculum_progress: [{ user_id: 'u3', curriculum_version_id: V1, current_subtopic_id: 's1-v1', current_module_id: 'm1-v1', current_level_code: 'A1', status: 'active' }],
+    }));
+    const ensured = await ensureUserCurriculum(client, 'u3');
+    expect(ensured.versionId).toBe(V1);
+    expect(ensured.curriculumId).toBe(CUR); // structural data from the pinned version
+  });
+});
+
+describe('level is per-language path, not a global english level (blocker 8)', () => {
+  it('a NEW learning path never inherits a level: bootstrap English uses the legacy English level once', async () => {
+    // english_learning_memory says B2; the bootstrap English path preserves it.
+    const client = makeClient(baseTables({
+      english_learning_memory: [{ user_id: 'u4', current_level: 'B2', created_at: '2026-01-01' }],
+    }));
+    const ensured = await ensureUserCurriculum(client, 'u4');
+    // The created active path stored initial_level_code = 'B2' (legacy preservation).
+    const pathUpsert = client._upserts.find((u: any) => u.table === 'user_learning_paths');
+    expect(pathUpsert?.row.initial_level_code).toBe('B2');
   });
 });
 
@@ -132,7 +153,8 @@ describe('curricular identity on record (blockers 8/10)', () => {
   function pinnedClient(currentSubtopicId: string) {
     const rpcCalls: any[] = [];
     const client = makeClient(baseTables({
-      user_curriculum_preferences: [{ user_id: 'u1', curriculum_version_id: V1, learning_language: 'en', interface_language: 'pt-BR', practice_writing: true, practice_listening: true, practice_pronunciation: false, practice_conversation: false, updated_at: '2026-08-15T10:00:00Z' }],
+      user_learning_paths: [activePath('u1', V1)],
+      user_curriculum_preferences: [{ user_id: 'u1', curriculum_version_id: V1, learning_language: 'en', interface_language: 'pt-BR', practice_writing: true, practice_listening: true, practice_pronunciation: false, practice_conversation: false }],
       user_curriculum_progress: [{ user_id: 'u1', curriculum_version_id: V1, current_subtopic_id: currentSubtopicId, current_module_id: 'm1-v1', current_level_code: 'A1', status: 'active' }],
     }), (name, args) => { rpcCalls.push({ name, args }); return [{ current_subtopic_id: currentSubtopicId, status: 'active' }]; });
     return { client, rpcCalls };
@@ -140,7 +162,7 @@ describe('curricular identity on record (blockers 8/10)', () => {
 
   it('records the practice on the ACTIVITY recorte (A1.M1.S1), even though the pointer is now A1.M1.S2', async () => {
     const { client, rpcCalls } = pinnedClient('s2-v1'); // current pointer = S2
-    const res = await recordCurricularPractice(client, 'u1', 'writing', 'review-1', { versionId: V1, subtopicKey: 'A1.M1.S1' });
+    const res = await recordCurricularPracticeFromIdentity(client, 'u1', 'writing', 'review-1', { versionId: V1, subtopicKey: 'A1.M1.S1' });
     expect(res.recorded).toBe(true);
     expect(res.subtopicKey).toBe('A1.M1.S1'); // the activity's recorte, not current S2
     const practiceUpsert = client._upserts.find((u: any) => u.table === 'user_subtopic_modality_progress');
@@ -150,15 +172,29 @@ describe('curricular identity on record (blockers 8/10)', () => {
 
   it('ignores a foreign-version activity (never crosses versions)', async () => {
     const { client } = pinnedClient('s1-v1');
-    const res = await recordCurricularPractice(client, 'u1', 'writing', 'review-1', { versionId: V2, subtopicKey: 'A1.M1.S1' });
+    const res = await recordCurricularPracticeFromIdentity(client, 'u1', 'writing', 'review-1', { versionId: V2, subtopicKey: 'A1.M1.S1' });
     expect(res.recorded).toBe(false);
     expect(client._upserts.some((u: any) => u.table === 'user_subtopic_modality_progress')).toBe(false);
   });
 
-  it('without explicit identity, records against the current recorte', async () => {
+  it('recordCurricularPractice (instantaneous) records against the current recorte', async () => {
     const { client } = pinnedClient('s1-v1');
     const res = await recordCurricularPractice(client, 'u1', 'writing', 'review-1');
     expect(res.recorded).toBe(true);
     expect(res.subtopicKey).toBe('A1.M1.S1');
+  });
+
+  it('identity-required path with a NULL identity grants NO credit — never falls back to current (blocker 5)', async () => {
+    const { client } = pinnedClient('s1-v1');
+    const res = await recordCurricularPracticeFromIdentity(client, 'u1', 'listening', 'story-1', null);
+    expect(res.recorded).toBe(false);
+    expect(client._upserts.some((u: any) => u.table === 'user_subtopic_modality_progress')).toBe(false);
+  });
+
+  it('identity-required path with a missing subtopicKey grants NO credit', async () => {
+    const { client } = pinnedClient('s1-v1');
+    const res = await recordCurricularPracticeFromIdentity(client, 'u1', 'listening', 'story-1', { versionId: V1, subtopicKey: '' });
+    expect(res.recorded).toBe(false);
+    expect(client._upserts.some((u: any) => u.table === 'user_subtopic_modality_progress')).toBe(false);
   });
 });

@@ -308,16 +308,17 @@ export function verifyStoryAnswer(input: {
   });
 }
 
-export async function completeStoryListening(): Promise<{ activityDate: string; saved: boolean }> {
+export async function completeStoryListening(sharedStoryId?: string | null): Promise<{ activityDate: string; saved: boolean }> {
   // Real-completion event routed through the SERVER (was a direct client write).
-  // The server marks the assignment complete AND records the curricular
-  // 'listening' practice for the recorte of the story the user actually
-  // practised — so curriculum credit is granted at REAL completion, never at
-  // "Começar a ouvir" (blocker 9). Server-authoritative: it resolves the user's
-  // consumed story identity itself, never trusting a client-supplied recorte.
+  // The client sends ONLY the id of the story it just finished; the server
+  // marks the assignment complete AND records the curricular 'listening'
+  // practice for THAT exact story's recorte (server-validated ownership +
+  // consumed + identity), granting credit at REAL completion — never at
+  // "Começar a ouvir" (blocker 9) — and never trusting a client-supplied recorte
+  // (blocker 6).
   return apiFetch<{ activityDate: string; saved: boolean }>('/api/listening/story/complete', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(sharedStoryId ? { sharedStoryId } : {}),
   });
 }
 

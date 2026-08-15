@@ -11,7 +11,7 @@ import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-mes
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { isValidUuid } from '../src/lib/pronunciationAssessment';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
-import { resolveActivityPrompt, recordCurricularPractice, CurriculumConfigError } from './_curriculum/curriculum-runtime';
+import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 
 const AI_MODEL = 'gpt-4o-mini';
 
@@ -613,17 +613,31 @@ export default async function handler(req: any, res: any) {
   // must never fail an already-completed, already-persisted review.
   if (!isReviewMode) {
     try {
-      // Writing is a SAME-REQUEST activity: submitting a text for correction IS
-      // its completion, so it binds to the current recorte at review time. The
-      // recorte it was recorded against is persisted on the review row for audit
-      // and correlation (blocker 8/10).
-      const rec = await recordCurricularPractice(getCurriculumServiceClient(), userId, 'writing', reviewId);
+      // The writing binds to the recorte the MISSION was GENERATED for — read
+      // server-side from the user's latest generated_theme (never the current
+      // pointer, which may have advanced; never a client-supplied recorte). A
+      // mission without a persisted identity grants no curricular credit
+      // (blockers 5, 7). The review itself is still saved (commercial success).
+      const { data: theme } = await supabase
+        .from('generated_themes')
+        .select('curriculum_version_id, curriculum_subtopic_key')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const t = theme as { curriculum_version_id?: string | null; curriculum_subtopic_key?: string | null } | null;
+      const identity = t?.curriculum_version_id && t.curriculum_subtopic_key
+        ? { versionId: t.curriculum_version_id, subtopicKey: t.curriculum_subtopic_key }
+        : null;
+      const rec = await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'writing', reviewId, identity);
       if (rec.recorded && rec.subtopicKey) {
         await supabase
           .from('english_reviews')
           .update({ curriculum_version_id: rec.versionId, curriculum_subtopic_key: rec.subtopicKey })
           .eq('id', reviewId)
           .eq('user_id', userId);
+      } else if (!identity) {
+        safeLog('review-text', 'no_curricular_identity', 200);
       }
     } catch (e) {
       safeLog('review-text', 'record_curricular_practice_failed', 500, { detail: String(e).slice(0, 150) });

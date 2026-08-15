@@ -2,14 +2,14 @@ import { createHash } from 'node:crypto';
 import { requireAuth } from '../_auth';
 import { ASSISTANT_NAME, REALTIME_VOICES, VOICE_PREVIEW_PHRASE, PACE_LABELS, BASE_DEFAULTS } from '../../src/lib/tutorPreferences';
 import {
-  buildConversationPersonalization,
   buildConversationContextSection,
   type ConversationStartContext,
 } from '../../src/lib/promptBuilder';
-import { getLanguageSpeechConfig } from '../_curriculum/language-speech-config';
+import { buildConversationPersonalizationFromData } from '../_curriculum/conversation-personalization';
+import { getLanguageSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
 import { getLanguageDisplayName } from '../_curriculum/presentation-i18n';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
-import { resolveActivityPrompt, recordCurricularPractice, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
@@ -521,26 +521,18 @@ async function handleSession(req: any, res: any) {
   };
 
   try {
-    const [prefsResult, memoryResult, todayReviewResult, recentReviewsResult, convTotalResult, langPrefsResult] = await Promise.all([
+    // languageContext + cefrLevel are NOT read here anymore: they come from the
+    // single ACTIVE-PATH authority (ensureUserCurriculum, resolved below), never
+    // from a global english_learning_memory level nor an ambiguous
+    // user_curriculum_preferences.maybeSingle() (blockers 8, 10).
+    const [prefsResult, todayReviewResult, recentReviewsResult, convTotalResult] = await Promise.all([
       supabase.from('ai_conversation_preferences').select('*').maybeSingle(),
-      supabase.from('english_learning_memory').select('current_level').order('updated_at', { ascending: false }).limit(1),
       supabase.from('english_reviews').select('original_text,version_2_text,main_mistakes,mission_snapshot').eq('entry_date', today).order('created_at', { ascending: false }).limit(1).maybeSingle(),
       supabase.from('english_reviews').select('main_mistakes,objective,next_practice').order('created_at', { ascending: false }).limit(5),
       supabase.from('conversation_sessions').select('duration_sec').eq('session_date', today),
-      supabase.from('user_curriculum_preferences').select('learning_language, interface_language').maybeSingle(),
     ]);
 
     if (prefsResult.data) prefs = rowToPrefs(prefsResult.data as Record<string, unknown>);
-    const memRow = memoryResult.data?.[0] as { current_level?: string } | undefined;
-    if (memRow?.current_level) cefrLevel = memRow.current_level;
-
-    const langRow = langPrefsResult.data as { learning_language?: string; interface_language?: string } | null;
-    if (langRow) {
-      languageContext = {
-        learningLanguage:  langRow.learning_language?.trim()  || CURRICULUM_BOOTSTRAP_DEFAULT.learningLanguage,
-        interfaceLanguage: langRow.interface_language?.trim() || CURRICULUM_BOOTSTRAP_DEFAULT.interfaceLanguage,
-      };
-    }
 
     ctx.conversationGoalMinutes = prefs.dailyConversationGoalMinutes;
 
@@ -619,6 +611,12 @@ async function handleSession(req: any, res: any) {
   try {
     const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
     conversationInPlan = ensured.prefs.conversation;
+    // Single authority for language + reference level of the ACTIVE learning
+    // path (blockers 8, 10): FREE conversation's level comes from the active
+    // path, not a global english_learning_memory level; a Spanish path never
+    // inherits an English level.
+    languageContext = ensured.languageContext;
+    cefrLevel = ensured.currentLevelCode ?? 'A1';
     if (ensured.currentSubtopicKey) {
       conversationCurricularIdentity = { versionId: ensured.versionId, subtopicKey: ensured.currentSubtopicKey };
     }
@@ -762,9 +760,13 @@ async function handleSession(req: any, res: any) {
       // interface language — never a hardcoded TS Record (blocker 16). A Spanish
       // learner gets "espanhol"/"Spanish" from the same code path.
       const svc = getCurriculumServiceClient();
-      const [learningLabel, interfaceLabel] = await Promise.all([
+      // Personalization TEXT is DATA (conversation_pref_fragments), localized by
+      // interface_language (blocker 2) — the enums stay in code, their prose does
+      // not. Session context is pure DATA (facts); the template frames it.
+      const [learningLabel, interfaceLabel, personalization] = await Promise.all([
         getLanguageDisplayName(svc, languageContext.learningLanguage, languageContext.interfaceLanguage),
         getLanguageDisplayName(svc, languageContext.interfaceLanguage, languageContext.interfaceLanguage),
+        buildConversationPersonalizationFromData(svc, prefs, languageContext.interfaceLanguage),
       ]);
       const freeResolved = await resolveActivityPrompt(svc, userId, {
         templateKey: 'conversation.free',
@@ -774,7 +776,7 @@ async function handleSession(req: any, res: any) {
           level: cefrLevel,
           learning_label: learningLabel,
           interface_label: interfaceLabel,
-          personalization: buildConversationPersonalization(prefs),
+          personalization,
           session_context: buildConversationContextSection(ctx),
         },
       });
@@ -791,14 +793,19 @@ async function handleSession(req: any, res: any) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
 
-  // STT language is data-driven (public.languages.stt_language) — never a
-  // hardcoded 'en'. If unavailable, omit it so the provider auto-detects rather
-  // than forcing English.
-  let sttLanguage: string | null = null;
+  // STT language is data-driven (public.languages.stt_language). A configured
+  // learning language with NO stt_language is an explicit operational error —
+  // NEVER a silent auto-detect fallback that could recognise the wrong language
+  // (blocker 11). Auto-detect, if ever supported, must be an explicit data flag.
+  let sttLanguage: string;
   try {
     sttLanguage = (await getLanguageSpeechConfig(getCurriculumServiceClient(), languageContext.learningLanguage)).sttLanguage;
-  } catch {
-    sttLanguage = null;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('conversation/session', 'stt_config_missing', 503, { lang: languageContext.learningLanguage });
+      return jsonError(res, 503, 'SPEECH_NOT_CONFIGURED', 'O reconhecimento de fala ainda não está configurado para este idioma.');
+    }
+    throw err;
   }
   const transcriptionConfig = sttLanguage
     ? { model: 'gpt-4o-mini-transcribe', language: sttLanguage }
@@ -1012,17 +1019,23 @@ async function handleSession(req: any, res: any) {
     // it silently.
     await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'authorization_row_insert_failed');
   }
-  // Persist the start-time curricular identity on the authorization row (both
-  // trial and commercial paths converge here). Best-effort — never blocks the
-  // token response. Completion reads it back to record the practice on the
-  // recorte the session started on (blocker 10).
-  if (recordingAuthorizationId && conversationCurricularIdentity) {
+  // FREEZE the curricular eligibility + identity at session START on the
+  // authorization row (both trial and commercial paths converge here). The
+  // decision (guided ⇒ eligible; free ⇒ never) is taken NOW and read back at
+  // completion — the completion never re-consults the CURRENT preference, so
+  // toggling the modality mid-session can never change whether this session
+  // counts (blocker 3). Best-effort — never blocks the token response.
+  if (recordingAuthorizationId) {
     try {
+      const eligible = sessionMode === 'guided';
       await getSharedServiceClient()
         .from('conversation_session_authorizations')
         .update({
-          curriculum_version_id: conversationCurricularIdentity.versionId,
-          curriculum_subtopic_key: conversationCurricularIdentity.subtopicKey,
+          session_mode: sessionMode,
+          curriculum_practice_eligible: eligible,
+          // Identity only for guided (the mode that can count); null otherwise.
+          curriculum_version_id: eligible ? conversationCurricularIdentity?.versionId ?? null : null,
+          curriculum_subtopic_key: eligible ? conversationCurricularIdentity?.subtopicKey ?? null : null,
         })
         .eq('id', recordingAuthorizationId)
         .eq('user_id', userId);
@@ -1089,7 +1102,7 @@ async function handleSessionComplete(req: any, res: any) {
     const client = getSharedServiceClient();
     const { data: authRow, error: fetchErr } = await client
       .from('conversation_session_authorizations')
-      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id, curriculum_version_id, curriculum_subtopic_key')
+      .select('id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id, curriculum_version_id, curriculum_subtopic_key, curriculum_practice_eligible')
       .eq('id', recordingAuthorizationId)
       .eq('user_id', userId)
       .eq('status', 'authorized')
@@ -1104,6 +1117,7 @@ async function handleSessionComplete(req: any, res: any) {
       id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
       gateway_budget_reservation_id: string | null; gateway_session_id: string | null;
       curriculum_version_id: string | null; curriculum_subtopic_key: string | null;
+      curriculum_practice_eligible: boolean | null;
     };
     const elapsedSeconds = (nowMs - new Date(row.authorized_at).getTime()) / 1000;
     const durationSeconds = Math.floor(Math.max(0, Math.min(elapsedSeconds, row.authorized_max_seconds)));
@@ -1174,15 +1188,17 @@ async function handleSessionComplete(req: any, res: any) {
     // "practised".
     if (durationSeconds > 0) {
       try {
-        const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
-        if (ensured.prefs.conversation) {
-          // Record against the recorte the session STARTED on (persisted on the
-          // auth row), not the current pointer — a session that ends after the
-          // user advanced counts for its own recorte, never the next (blocker 10).
-          const identity = row.curriculum_version_id && row.curriculum_subtopic_key
-            ? { versionId: row.curriculum_version_id, subtopicKey: row.curriculum_subtopic_key }
-            : null;
-          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'conversation', row.id, identity);
+        // Eligibility was FROZEN at session start (blocker 3): only a session
+        // that STARTED as guided counts, regardless of the CURRENT preference.
+        // A FREE session never counts even if the user later enabled the
+        // modality; a GUIDED session stays eligible even if later disabled. The
+        // recorte identity is the one persisted at start (blocker 10), and it is
+        // MANDATORY — no fallback to the current pointer (blocker 5).
+        if (row.curriculum_practice_eligible === true && row.curriculum_version_id && row.curriculum_subtopic_key) {
+          await recordCurricularPracticeFromIdentity(
+            getCurriculumServiceClient(), userId, 'conversation', row.id,
+            { versionId: row.curriculum_version_id, subtopicKey: row.curriculum_subtopic_key },
+          );
         }
       } catch (practiceErr) {
         if (!(practiceErr instanceof CurriculumConfigError)) {

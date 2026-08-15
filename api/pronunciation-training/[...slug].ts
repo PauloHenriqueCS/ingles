@@ -8,7 +8,7 @@ import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
-import { resolveActivityPrompt, recordCurricularPractice, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
 import { checkFeatureConfigError, checkRecordingDuration } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
@@ -255,10 +255,14 @@ async function handleGenerateText(req: any, res: any) {
     return jsonError(res, 403, 'DAILY_LIMIT_REACHED', ENTITLEMENT_MESSAGES.pronunciationTrainingDailyEvaluationCompleted, dailyMeta);
   }
 
+  // Level is the CURRICULUM PATH's current level (per learning language), NOT a
+  // global english_learning_memory level — a Spanish path never inherits an
+  // English level (blocker 8). After bootstrap, curriculum progression is the
+  // authority.
   let userLevel = 'A2';
   try {
-    const { data } = await supabase.from('english_learning_memory').select('current_level').eq('user_id', userId).order('updated_at', { ascending: false }).limit(1).maybeSingle();
-    if (data?.current_level && typeof data.current_level === 'string') userLevel = data.current_level;
+    const ensured = await ensureUserCurriculum(getCurriculumServiceClient(), userId);
+    if (ensured.currentLevelCode) userLevel = ensured.currentLevelCode;
   } catch { /* Use default */ }
 
   const apiKey = (process.env.OPENAI_API_KEY ?? '').trim();
@@ -480,6 +484,21 @@ async function handleToken(req: any, res: any) {
     return jsonError(res, 400, 'INVALID_OWNER_ID', 'Identificador de contexto inválido.');
   }
 
+  // Resolve the recognition locale (data-driven, from the learning language)
+  // BEFORE registering a word-practice attempt (blocker 4A): a missing Speech
+  // config must never burn one of the user's 3 attempts. Explicit error, no
+  // en-US fallback, zero side effects.
+  let recognitionLocale: string;
+  try {
+    recognitionLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/token', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
   const { data: attemptData, error: attemptError } = await auth.supabase.rpc('register_word_practice_attempt', {
     p_owner_type: ownerType,
     p_owner_id: ownerId,
@@ -507,21 +526,6 @@ async function handleToken(req: any, res: any) {
     return jsonError(res, status, attempt.error, 'Não foi possível registrar a tentativa.');
   }
   const attemptsUsed = typeof attempt.attemptsUsed === 'number' ? attempt.attemptsUsed : 1;
-
-  // Recognition locale is data-driven from the user's learning language
-  // (public.languages.speech_locale), never the global audio.azure.defaultLocale.
-  // A configured language with no Speech config fails explicitly — never falls
-  // back to en-US.
-  let recognitionLocale: string;
-  try {
-    recognitionLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
-  } catch (err) {
-    if (err instanceof SpeechConfigError) {
-      safeLog('pronunciation-training/token', 'speech_config_missing', 503);
-      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
-    }
-    throw err;
-  }
 
   const gatewayDeps = getProductionDeps();
   try {
@@ -615,6 +619,20 @@ async function handleTrainingStart(req: any, res: any) {
 
   if (!await applyRateLimit(res, userId, 'pronunciation-training-start')) return;
 
+  // Resolve the recognition locale BEFORE reserving the assessment or minting an
+  // Azure token (blocker 4B): a missing Speech config must never leave a
+  // reservation stuck. Explicit error, no en-US fallback, zero side effects.
+  let startLocale: string;
+  try {
+    startLocale = (await resolveUserSpeechConfig(supabase, userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/start', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
   const practiceDate = getTodaySP();
   // The effective daily limit + unlimited flag come from the already-resolved
   // plan entitlement; the RPC enforces N atomically (no number hardcoded in SQL
@@ -680,18 +698,6 @@ async function handleTrainingStart(req: any, res: any) {
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao preparar a análise.');
   }
 
-  // Recognition locale is data-driven from the user's learning language, never
-  // the global audio.azure.defaultLocale. Missing config → explicit error.
-  let startLocale: string;
-  try {
-    startLocale = (await resolveUserSpeechConfig(supabase, userId)).speechLocale;
-  } catch (err) {
-    if (err instanceof SpeechConfigError) {
-      safeLog('pronunciation-training/start', 'speech_config_missing', 503);
-      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
-    }
-    throw err;
-  }
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     sessionId, attemptId, token: tokenResult.token, region: tokenResult.region,
@@ -799,7 +805,12 @@ async function handleTrainingComplete(req: any, res: any) {
     const identity = sr?.curriculum_version_id && sr.curriculum_subtopic_key
       ? { versionId: sr.curriculum_version_id, subtopicKey: sr.curriculum_subtopic_key }
       : null;
-    await recordCurricularPractice(svc, userId, 'pronunciation', sessionId, identity);
+    // Identity-REQUIRED: no fallback to the current pointer. A session without a
+    // persisted recorte simply grants no curricular credit (blocker 5).
+    const rec = await recordCurricularPracticeFromIdentity(svc, userId, 'pronunciation', sessionId, identity);
+    if (!rec.recorded && !identity) {
+      safeLog('pronunciation-training/complete', 'no_curricular_identity', 200, { sessionId });
+    }
   } catch {
     safeLog('pronunciation-training/complete', 'record_curricular_practice_failed', 200);
   }

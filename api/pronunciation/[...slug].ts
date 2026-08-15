@@ -447,6 +447,21 @@ async function handleStart(req: any, res: any) {
     return res.status(403).json({ code, message: ENTITLEMENT_MESSAGES.pronunciationEvaluationsExhausted });
   }
 
+  // Resolve the recognition locale (data-driven) BEFORE any side effect — the
+  // quota reservation, the AI-Gateway budget reservation, the Azure token, and
+  // the ai_provider_session all come after this (blocker 4C). A missing Speech
+  // config → explicit 503 with ZERO side effects; never an en-US fallback.
+  let assessLocale: string;
+  try {
+    assessLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation/assess-text-start', 'speech_config_missing', 503);
+      return res.status(503).json({ code: 'AZURE_SPEECH_UNAVAILABLE', message: AZURE_ERROR_MESSAGES.AZURE_SPEECH_UNAVAILABLE });
+    }
+    throw err;
+  }
+
   const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_assessment', {
     p_text_version_id: textVersionId, p_azure_region: azureRegion, p_attempt_id: attemptId,
   });
@@ -549,18 +564,6 @@ async function handleStart(req: any, res: any) {
     gatewayBudgetReservationId,
   );
 
-  // Recognition locale is data-driven from the user's learning language, never
-  // the global audio.azure.defaultLocale. Missing config → explicit error.
-  let assessLocale: string;
-  try {
-    assessLocale = (await resolveUserSpeechConfig(auth.supabase, auth.userId)).speechLocale;
-  } catch (err) {
-    if (err instanceof SpeechConfigError) {
-      safeLog('pronunciation/assess-text-start', 'speech_config_missing', 503);
-      return res.status(503).json({ code: 'AZURE_SPEECH_UNAVAILABLE', message: AZURE_ERROR_MESSAGES.AZURE_SPEECH_UNAVAILABLE });
-    }
-    throw err;
-  }
   res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     assessmentId, attemptId, token: tokenResult.token, region: tokenResult.region,

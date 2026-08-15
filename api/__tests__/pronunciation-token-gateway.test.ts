@@ -190,6 +190,16 @@ describe('LEGACY mode', () => {
     expect(body.maxAttempts).toBe(WORD_PRACTICE_MAX_ATTEMPTS);
     expect(body.maxDurationSeconds).toBe(5);
   });
+
+  it('missing Speech config → 503 BEFORE consuming a word attempt or minting a token (blocker 4A)', async () => {
+    // The learning language has no Speech config → resolveUserSpeechConfig throws.
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: { rpc: mockRpc, from: makeSpeechConfigFrom({ missingLanguageConfig: true }) } });
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(503);
+    expect(mockRpc).not.toHaveBeenCalled();        // register_word_practice_attempt NEVER ran
+    expect(mockIssueToken).not.toHaveBeenCalled();  // no Azure token
+  });
 });
 
 describe('OBSERVE mode', () => {

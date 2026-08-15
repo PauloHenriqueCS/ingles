@@ -23,6 +23,11 @@ export interface ResolveCurriculumPromptInput {
   activityType: string;
   /** The recorte to practise. When null, the caller wants a level-only prompt. */
   subtopicKey: string | null;
+  /**
+   * The PINNED curriculum version to load content from. Required so a V1 user
+   * never gets V2 content after V2 is published (version pinning, blocker 1).
+   */
+  versionId: string;
   transversalTargets?: string[];
   userContext?: Record<string, string | number>;
 }
@@ -30,10 +35,11 @@ export interface ResolveCurriculumPromptInput {
 export async function resolveCurriculumPrompt(input: ResolveCurriculumPromptInput): Promise<ComposedPrompt> {
   const { repository, languageContext, templateKey, activityType, subtopicKey } = input;
 
-  const version = await repository.getPublishedVersion(languageContext.learningLanguage);
+  // Load the PINNED version by id — never "latest published" (blocker 1).
+  const version = await repository.getVersionById(input.versionId);
   if (!version) {
     throw new CurriculumConfigError(
-      `No published curriculum for learning_language="${languageContext.learningLanguage}"`,
+      `Pinned curriculum version ${input.versionId} not found (learning_language="${languageContext.learningLanguage}")`,
     );
   }
 

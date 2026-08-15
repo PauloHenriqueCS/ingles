@@ -206,13 +206,15 @@ async function handleTree(res: any, userId: string, service: any): Promise<void>
   // All framework levels (A1..C2) — data-driven from proficiency_levels, so the
   // whole ladder is shown even for levels that currently have no modules.
   const bandLabels = await getBandLabelMap(service, interfaceLanguage);
-  const version = await repo.getPublishedVersion(ensured.languageContext.learningLanguage);
+  // Structural data comes from the user's PINNED version (ensured.curriculumId),
+  // never "latest published" — a V1 user's tree is built from V1's framework
+  // even after V2 is published (blocker 9).
   let levelInputs: Array<{ code: string; sortOrder: number; label: string | null; bandLabel: string }> = [];
-  if (version) {
+  {
     const { data: curRow } = await service
       .from('curricula')
       .select('framework_id')
-      .eq('id', version.curriculumId)
+      .eq('id', ensured.curriculumId)
       .maybeSingle();
     const frameworkId = (curRow as { framework_id?: string } | null)?.framework_id ?? null;
     if (frameworkId) {

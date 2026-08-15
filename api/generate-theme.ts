@@ -865,6 +865,11 @@ export default async function handler(req: any, res: any) {
         difficulty: theme.difficulty,
         vocabulary: theme.useTheseWords,
         status: 'generated',
+        // Curricular identity the writing mission was GENERATED for — read at
+        // review time so the writing practice binds to THIS recorte, never the
+        // current pointer if it advanced meanwhile (blocker 7).
+        curriculum_version_id: resolvedPrompt.versionId,
+        curriculum_subtopic_key: resolvedPrompt.subtopicKey,
       })
       .select('id')
       .single();

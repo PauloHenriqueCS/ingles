@@ -28,10 +28,14 @@ export { CurriculumConfigError };
 
 interface EnsuredCurriculum {
   versionId: string;
+  /** curriculum id of the pinned version (for framework lookups) — no "latest published". */
+  curriculumId: string;
   languageContext: LanguageContext;
   prefs: ModalityPreferences;
   currentSubtopicKey: string | null;
   currentSubtopicId: string | null;
+  /** Current level of the PINNED path (authority for this language, not english_learning_memory). */
+  currentLevelCode: string | null;
   status: 'active' | 'curriculum_completed';
   ordered: OrderedSubtopic[];
   keyToId: Map<string, string>;
@@ -63,7 +67,13 @@ const DEFAULT_PREFS: ModalityPreferences = {
   conversation: false,
 };
 
-async function resolveUserLevel(client: SupabaseClient, userId: string): Promise<string | null> {
+/**
+ * LEGACY English-V1 ONLY: the user's pre-curriculum English level, read once at
+ * path CREATION to preserve an existing learner's level. NOT a generic runtime
+ * level authority — a new language never consults it (blocker 8). After
+ * bootstrap the authority is user_curriculum_progress.current_level_code.
+ */
+async function resolveLegacyEnglishLevel(client: SupabaseClient, userId: string): Promise<string | null> {
   const { data } = await client
     .from('english_learning_memory')
     .select('current_level')
@@ -75,47 +85,55 @@ async function resolveUserLevel(client: SupabaseClient, userId: string): Promise
   return row?.current_level ?? null;
 }
 
+interface ActivePathRow {
+  learning_language: string;
+  interface_language: string;
+  curriculum_version_id: string;
+  initial_level_code: string | null;
+}
+
+async function readActivePath(client: SupabaseClient, userId: string): Promise<ActivePathRow | null> {
+  const { data } = await client
+    .from('user_learning_paths')
+    .select('learning_language, interface_language, curriculum_version_id, initial_level_code')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .maybeSingle();
+  return (data ?? null) as ActivePathRow | null;
+}
+
 /**
- * Ensures preferences + progress exist for the user against the CURRENT published
- * curriculum for their learning language. Idempotent and safe for existing users.
+ * Ensures the user's ACTIVE LEARNING PATH (explicit pointer to the pinned
+ * curriculum version + language + interface + per-language initial level),
+ * preferences and progress. Idempotent and safe for existing users. The active
+ * path — NOT "latest published" and NOT an updated_at heuristic — is the single
+ * authority every runtime read shares (blockers 1, 8).
  */
 export async function ensureUserCurriculum(client: SupabaseClient, userId: string): Promise<EnsuredCurriculum> {
   const repo = new SupabaseCurriculumRepository(client);
 
-  // 1) VERSION PINNING. The schema allows one prefs row per (user, version), so
-  //    NEVER `.maybeSingle()` by user_id alone — that throws once a second
-  //    version exists. Read the user's CURRENT path deterministically: the most
-  //    recently used prefs row. Its curriculum_version_id is the AUTHORITY for
-  //    this user until an explicit V→V migration writes a newer row. Publishing
-  //    a new version does NOT touch this row, so it never silently migrates the
-  //    user (that is a separate, explicit operation, out of scope here).
-  const { data: prefsData } = await client
-    .from('user_curriculum_preferences')
-    .select('learning_language, interface_language, practice_writing, practice_listening, practice_pronunciation, practice_conversation, curriculum_version_id')
-    .eq('user_id', userId)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const existingPrefs = (prefsData ?? null) as (PrefsRow & { curriculum_version_id: string }) | null;
-
+  let activePath = await readActivePath(client, userId);
   let version;
   let languageContext: LanguageContext;
-  let prefs: ModalityPreferences;
+  let initialLevelCode: string | null;
 
-  if (existingPrefs) {
-    // Honour the PINNED version — load it by id, not the latest published one.
-    version = await repo.getVersionById(existingPrefs.curriculum_version_id);
+  if (activePath) {
+    // Honour the PINNED version of the active path — load it by id, never the
+    // latest published one. Publishing V2 leaves this path untouched.
+    version = await repo.getVersionById(activePath.curriculum_version_id);
     if (!version) {
       throw new CurriculumConfigError(
-        `Pinned curriculum version ${existingPrefs.curriculum_version_id} for user ${userId} not found`,
+        `Pinned curriculum version ${activePath.curriculum_version_id} for user ${userId} not found`,
       );
     }
-    languageContext = { learningLanguage: existingPrefs.learning_language, interfaceLanguage: existingPrefs.interface_language };
-    prefs = rowToPrefs(existingPrefs);
+    languageContext = { learningLanguage: activePath.learning_language, interfaceLanguage: activePath.interface_language };
+    initialLevelCode = activePath.initial_level_code;
   } else {
-    // BOOTSTRAP (never started): product default language + its published
-    // version. This is the ONLY place we resolve "latest published" and the
-    // only place a language literal enters — product config, not pedagogy.
+    // BOOTSTRAP a NEW active path. The product default language (English V1
+    // today) is the ONLY place "latest published" is resolved and the only place
+    // a language literal enters — product config, not pedagogy. The legacy
+    // English level is consulted ONCE here purely to preserve an existing
+    // learner; a genuinely new language would NOT inherit any English level.
     languageContext = { ...CURRICULUM_BOOTSTRAP_DEFAULT };
     const published = await repo.getPublishedVersion(languageContext.learningLanguage);
     if (!published) {
@@ -124,9 +142,52 @@ export async function ensureUserCurriculum(client: SupabaseClient, userId: strin
       );
     }
     version = published;
+    initialLevelCode = languageContext.learningLanguage === CURRICULUM_BOOTSTRAP_DEFAULT.learningLanguage
+      ? await resolveLegacyEnglishLevel(client, userId)
+      : null;
+    // Create the active path (race-safe: one active per user + one per language).
+    // ignoreDuplicates → a concurrent bootstrap is a harmless no-op.
+    await client.from('user_learning_paths').upsert(
+      {
+        user_id: userId,
+        learning_language: languageContext.learningLanguage,
+        curriculum_version_id: version.id,
+        interface_language: languageContext.interfaceLanguage,
+        initial_level_code: initialLevelCode,
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,learning_language', ignoreDuplicates: true },
+    );
+    // Re-read the AUTHORITATIVE active path (ours, or a concurrent winner's).
+    activePath = (await readActivePath(client, userId)) ?? {
+      learning_language: languageContext.learningLanguage,
+      interface_language: languageContext.interfaceLanguage,
+      curriculum_version_id: version.id,
+      initial_level_code: initialLevelCode,
+    };
+    version = (await repo.getVersionById(activePath.curriculum_version_id)) ?? version;
+    languageContext = { learningLanguage: activePath.learning_language, interfaceLanguage: activePath.interface_language };
+    initialLevelCode = activePath.initial_level_code;
+  }
+
+  // 2) Ensure the prefs row for THIS (user, pinned version). Scoped read — no
+  //    ambiguity across versions.
+  const { data: prefsData } = await client
+    .from('user_curriculum_preferences')
+    .select('practice_writing, practice_listening, practice_pronunciation, practice_conversation')
+    .eq('user_id', userId)
+    .eq('curriculum_version_id', version.id)
+    .maybeSingle();
+  let prefs: ModalityPreferences;
+  if (prefsData) {
+    prefs = rowToPrefs({
+      ...(prefsData as Record<string, boolean>),
+      learning_language: languageContext.learningLanguage,
+      interface_language: languageContext.interfaceLanguage,
+    } as PrefsRow);
+  } else {
     prefs = DEFAULT_PREFS;
-    // INSERT-IF-ABSENT (race-safe): a concurrent first-access must not create a
-    // duplicate prefs row nor clobber one that may already exist.
     await client.from('user_curriculum_preferences').upsert(
       {
         user_id: userId,
@@ -160,8 +221,10 @@ export async function ensureUserCurriculum(client: SupabaseClient, userId: strin
     | null;
 
   if (!prog) {
-    // Bootstrap: first recorte of the user's current level (fallback: very first).
-    const level = (await resolveUserLevel(client, userId)) ?? ordered[0]?.levelCode ?? null;
+    // Bootstrap: first recorte of the PATH's initial level (per-language, NOT a
+    // global english_learning_memory level). New-language paths have a null
+    // initial level → start at the very first recorte (blocker 8).
+    const level = initialLevelCode ?? ordered[0]?.levelCode ?? null;
     const firstOfLevel = ordered.find((s) => s.levelCode === level) ?? ordered[0] ?? null;
     const currentKey = firstOfLevel?.subtopicKey ?? null;
     const currentId = currentKey ? keyToId.get(currentKey) ?? null : null;
@@ -209,10 +272,12 @@ export async function ensureUserCurriculum(client: SupabaseClient, userId: strin
 
   return {
     versionId: version.id,
+    curriculumId: version.curriculumId,
     languageContext,
     prefs,
     currentSubtopicKey,
     currentSubtopicId,
+    currentLevelCode: prog.current_level_code,
     status: prog.status,
     ordered,
     keyToId,
@@ -265,6 +330,7 @@ export async function resolveActivityPrompt(
     templateKey: opts.templateKey,
     activityType: opts.activityType,
     subtopicKey,
+    versionId: ensured.versionId, // PINNED version — never "latest published"
     transversalTargets: opts.transversalTargets,
     userContext: opts.userContext,
   });
@@ -300,48 +366,21 @@ export interface CurricularActivityIdentity {
   subtopicKey: string;
 }
 
-/**
- * Records ONE valid practice of `modality` and atomically resyncs progression.
- *
- * The practice is recorded against the ACTIVITY'S recorte (`identity`, read
- * server-side from the owned resource) — NOT the current pointer — so an activity
- * generated for recorte A that completes after the user already advanced to B is
- * recorded on A and can never mark/advance B. When `identity` is omitted (e.g. a
- * same-request writing review whose recorte is trivially the current one) the
- * current recorte is used.
- *
- * Completion + pointer advance happen in the atomic, advisory-locked
- * resync_curriculum_progress RPC (idempotent; safe under concurrent completions,
- * tabs, retries and devices — blocker 11). Never regresses history.
- */
-export async function recordCurricularPractice(
+// Shared core: upsert the practice on an ALREADY-RESOLVED recorte + atomic
+// resync. Never resolves "current" itself — the caller decides the target.
+async function recordPracticeOnSubtopic(
   client: SupabaseClient,
   userId: string,
   modality: CurricularModality,
-  sourceRef?: string | null,
-  identity?: CurricularActivityIdentity | null,
+  sourceRef: string | null | undefined,
+  ensured: Awaited<ReturnType<typeof ensureUserCurriculum>>,
+  targetSubtopicKey: string,
 ): Promise<RecordPracticeResult> {
-  const ensured = await ensureUserCurriculum(client, userId);
-
-  // Resolve the recorte to record the practice against.
-  let targetSubtopicKey: string | null;
-  if (identity) {
-    // Foreign-version activity (e.g. generated under a version the user is no
-    // longer pinned to): ignore — never cross versions.
-    if (identity.versionId !== ensured.versionId) {
-      return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: ensured.currentSubtopicKey, status: ensured.status };
-    }
-    targetSubtopicKey = identity.subtopicKey;
-  } else {
-    targetSubtopicKey = ensured.currentSubtopicKey;
-  }
-  const targetSubtopicId = targetSubtopicKey ? ensured.keyToId.get(targetSubtopicKey) ?? null : null;
-  if (!targetSubtopicId || !targetSubtopicKey) {
+  const targetSubtopicId = ensured.keyToId.get(targetSubtopicKey) ?? null;
+  if (!targetSubtopicId) {
     return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: ensured.currentSubtopicKey, status: ensured.status };
   }
-
-  // 1) Upsert the practice on the ACTIVITY'S recorte (idempotent per
-  //    user+subtopic+modality — a retry/refresh never duplicates).
+  // Idempotent per (user, subtopic, modality) — a retry/refresh never duplicates.
   await client.from('user_subtopic_modality_progress').upsert(
     {
       user_id: userId,
@@ -353,12 +392,9 @@ export async function recordCurricularPractice(
     },
     { onConflict: 'user_id,subtopic_id,modality' },
   );
-
-  // 2) Atomic, advisory-locked recompute of completion + pointer from persisted
-  //    facts. Safe under concurrency; never advances more than one recorte per
-  //    real completion and never regresses.
+  // Atomic, advisory-locked recompute of completion + pointer from persisted
+  // facts (safe under concurrency; never double-advances, never regresses).
   const resync = await resyncCurriculumProgress(client, userId, ensured.versionId);
-
   return {
     recorded: true,
     subtopicKey: targetSubtopicKey,
@@ -366,6 +402,50 @@ export async function recordCurricularPractice(
     currentSubtopicKey: resync.currentSubtopicKey,
     status: resync.status,
   };
+}
+
+/**
+ * IDENTITY-REQUIRED recording for activities with their OWN lifecycle
+ * (pronunciation, listening, conversation, writing mission). The practice is
+ * recorded against the recorte the activity was ORIGINATED for — NEVER the
+ * current pointer. If the identity is absent/incomplete (legacy resource,
+ * missing/failed persistence) or points at a different version, NO curricular
+ * credit is granted (blocker 5): the activity may still complete
+ * commercially/functionally, but it never silently marks the current recorte.
+ */
+export async function recordCurricularPracticeFromIdentity(
+  client: SupabaseClient,
+  userId: string,
+  modality: CurricularModality,
+  sourceRef: string | null | undefined,
+  identity: CurricularActivityIdentity | null | undefined,
+): Promise<RecordPracticeResult> {
+  const ensured = await ensureUserCurriculum(client, userId);
+  // No fallback to the current pointer — identity is mandatory and must match
+  // the user's pinned version.
+  if (!identity || !identity.versionId || !identity.subtopicKey || identity.versionId !== ensured.versionId) {
+    return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: ensured.currentSubtopicKey, status: ensured.status };
+  }
+  return recordPracticeOnSubtopic(client, userId, modality, sourceRef, ensured, identity.subtopicKey);
+}
+
+/**
+ * INSTANTANEOUS recording for a same-request activity whose recorte is trivially
+ * the CURRENT one (there is no persisted resource whose identity could drift —
+ * the practice IS its own completion in the same request). Do NOT use this for
+ * activities with their own lifecycle; use recordCurricularPracticeFromIdentity.
+ */
+export async function recordCurricularPractice(
+  client: SupabaseClient,
+  userId: string,
+  modality: CurricularModality,
+  sourceRef?: string | null,
+): Promise<RecordPracticeResult> {
+  const ensured = await ensureUserCurriculum(client, userId);
+  if (!ensured.currentSubtopicKey) {
+    return { recorded: false, subtopicKey: null, versionId: ensured.versionId, currentSubtopicKey: null, status: ensured.status };
+  }
+  return recordPracticeOnSubtopic(client, userId, modality, sourceRef, ensured, ensured.currentSubtopicKey);
 }
 
 export interface ResyncResult {

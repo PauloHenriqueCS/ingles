@@ -232,32 +232,11 @@ export function buildSystemPrompt(prefs: AIPreferences): string {
   return buildTutorInstructions(prefs, 'A1');
 }
 
-/**
- * The user's conversation-STYLE personalization block (pace, accent, formality,
- * humour, roast, initiative, correction timing/scope/detail/language). This is
- * language-NEUTRAL conversation-style config written in the interface language —
- * NOT target-language pedagogy — so it is injected as {{personalization}} into
- * the data-driven `conversation.free` / guided templates rather than living in
- * the prompt body. Uses the same validated enum→text maps as buildTutorInstructions.
- */
-export function buildConversationPersonalization(prefs: AIPreferences): string {
-  const profanityLine = prefs.profanityEnabled
-    ? 'Palavrões e linguagem crua são PERMITIDOS quando naturais para o contexto e para o preset.'
-    : 'Não use palavrões ou linguagem ofensiva.';
-  return [
-    '## Ritmo', PACE_INSTRUCTIONS[prefs.speechPace], '',
-    '## Sotaque e vocabulário', ACCENT_INSTRUCTIONS[prefs.accent], '',
-    '## Tom e formalidade', FORMALITY_INSTRUCTIONS[prefs.formality], profanityLine, '',
-    '## Humor', HUMOR_INSTRUCTIONS[prefs.humorLevel], '',
-    '## Zoação', ROAST_INSTRUCTIONS[prefs.roastIntensity], '',
-    '## Iniciativa de tópicos', INITIATIVE_INSTRUCTIONS[prefs.topicInitiative], '',
-    '## Ajustes de correção',
-    `- Quando corrigir: ${TIMING_INSTRUCTIONS[prefs.correctionTiming]}`,
-    `- O que corrigir: ${SCOPE_INSTRUCTIONS[prefs.correctionScope]}`,
-    `- Idioma da explicação: ${LANG_CORRECTION_INSTRUCTION[prefs.correctionLanguage]}`,
-    `- Nível de detalhe: ${DETAIL_INSTRUCTIONS[prefs.correctionDetail]}`,
-  ].join('\n');
-}
+// NOTE: the former buildConversationPersonalization (pt-BR enum→text block) was
+// REMOVED. The live conversation FREE path now composes personalization from
+// DATA (public.conversation_pref_fragments, localized by interface_language) via
+// api/_curriculum/conversation-personalization — see blocker 2. The enum→text
+// maps above remain only for the legacy, runtime-unused buildTutorInstructions.
 
 // ── Conversation context ───────────────────────────────────────────────────────
 
@@ -284,88 +263,33 @@ export function buildTutorInstructionsWithContext(
   return `${base}\n\n${buildContextSection(ctx)}`;
 }
 
+// Emits the session context as pure DATA (facts only) — NO pedagogical prose,
+// NO framing, NO directives, NO language-specific text (blocker 2). Each present
+// fact is a neutral `key: value` line; absent facts are omitted. The DB
+// conversation template owns HOW to describe these to the model (framing, "speak
+// first", how to open/close), localized per interface_language — so a Spanish/en
+// learner gets coherent instructions with zero Portuguese text from this code.
 function buildContextSection(ctx: ConversationStartContext): string {
   const lines: string[] = [];
-  lines.push('## Contexto da sessão de hoje');
-  lines.push('');
-  lines.push('Use este contexto para conduzir a conversa de forma natural. NUNCA diga ao aluno que possui um "contexto" ou "briefing" — use as informações organicamente, como se fossem sua memória natural.');
-  lines.push('');
+  const push = (key: string, value: string) => lines.push(`${key}: ${value}`);
 
-  if (ctx.missionTitle) {
-    lines.push('### Missão de escrita do aluno hoje');
-    lines.push(`Título: ${ctx.missionTitle}`);
-    if (ctx.missionDescription) lines.push(`Tema: ${ctx.missionDescription}`);
-    lines.push('');
-  }
-
+  if (ctx.missionTitle) push('mission_title', ctx.missionTitle);
+  if (ctx.missionDescription) push('mission_theme', ctx.missionDescription);
   if (ctx.studentText) {
-    const excerpt = ctx.studentText.length > 400
-      ? ctx.studentText.slice(0, 400) + '...'
-      : ctx.studentText;
-    lines.push('### Texto que o aluno escreveu hoje');
-    lines.push(`"${excerpt}"`);
-    lines.push('');
+    push('student_text', JSON.stringify(ctx.studentText.length > 400 ? ctx.studentText.slice(0, 400) + '...' : ctx.studentText));
   }
-
   if (ctx.version2) {
-    const excerpt = ctx.version2.length > 300
-      ? ctx.version2.slice(0, 300) + '...'
-      : ctx.version2;
-    lines.push('### Versão 2 do aluno (reescrita após correção)');
-    lines.push(`"${excerpt}"`);
-    lines.push('');
+    push('student_text_rewritten', JSON.stringify(ctx.version2.length > 300 ? ctx.version2.slice(0, 300) + '...' : ctx.version2));
   }
-
-  if (ctx.mandatoryWords.length > 0) {
-    lines.push('### Palavras obrigatórias da missão');
-    lines.push('Use naturalmente durante a conversa (nunca liste-as explicitamente): ' + ctx.mandatoryWords.join(', '));
-    lines.push('');
-  }
-
-  if (ctx.recentMistakes.length > 0) {
-    lines.push('### Erros recentes do aluno (pontos fracos a trabalhar)');
-    ctx.recentMistakes.forEach((m) => lines.push(`- ${m}`));
-    lines.push('');
-  }
-
-  if (ctx.currentGrammarObjectives.length > 0) {
-    lines.push('### Objetivos gramaticais atuais');
-    ctx.currentGrammarObjectives.forEach((o) => lines.push(`- ${o}`));
-    lines.push('');
-  }
-
-  const remaining = Math.max(0, ctx.remainingConversationMinutes);
-  lines.push('### Meta de conversação');
-  lines.push(`Meta diária: ${ctx.conversationGoalMinutes} min | Restante hoje: ${remaining} min`);
-  if (remaining > 0 && remaining <= 3) {
-    // Language-NEUTRAL directive — NO English example sentence. The model
-    // produces the closing in the TARGET language per the template's language
-    // rule (blocker 15: no authoritative English prose in the builder).
-    lines.push('ATENÇÃO: Pouquíssimos minutos restantes. Encerre a conversa naturalmente em breve, no idioma-alvo.');
-  } else if (remaining > 0 && remaining <= 5) {
-    lines.push('Poucos minutos restantes. Comece a preparar um encerramento natural.');
-  }
-  lines.push('');
-
-  // "Como iniciar" — DATA + LANGUAGE-NEUTRAL directives only. No hardcoded
-  // English (or any target-language) example sentences: the model greets in the
-  // TARGET language (the template's "responda sempre em {learning_label}" rule).
-  lines.push('### Como iniciar a conversa');
-  lines.push('IMPORTANTE: Você DEVE falar primeiro, no idioma-alvo. Não espere o aluno. Inicie imediatamente ao conectar.');
-  lines.push('');
-  if (ctx.studentText) {
-    const ref = ctx.missionTitle ? ` (missão: "${ctx.missionTitle}")` : '';
-    lines.push(`Inicie referenciando, no idioma-alvo, o texto que o aluno escreveu hoje${ref}: comente algo específico dele e peça que fale mais sobre um aspecto concreto.`);
-    lines.push('Depois, migre naturalmente para outros ângulos: hipóteses, conflitos, roleplay, pedidos de opinião, comparações.');
-  } else if (ctx.missionTitle) {
-    lines.push(`Inicie, no idioma-alvo, pelo tema da missão ("${ctx.missionTitle}"): apresente o tema de forma acolhedora e convide o aluno a dar sua opinião.`);
-  } else {
-    lines.push('Inicie de forma acolhedora e natural, no idioma-alvo, com uma saudação breve e uma pergunta aberta sobre o dia do aluno.');
-  }
+  if (ctx.mandatoryWords.length > 0) push('mandatory_words', ctx.mandatoryWords.join(', '));
+  if (ctx.recentMistakes.length > 0) push('recent_mistakes', ctx.recentMistakes.join(' | '));
+  if (ctx.currentGrammarObjectives.length > 0) push('grammar_objectives', ctx.currentGrammarObjectives.join(' | '));
+  push('conversation_goal_minutes', String(ctx.conversationGoalMinutes));
+  push('remaining_minutes', String(Math.max(0, ctx.remainingConversationMinutes)));
 
   return lines.join('\n');
 }
 
-// Exported for the data-driven conversation templates (guided + free): the
-// session-context block, injected as {{session_context}}.
+// Exported for the data-driven conversation FREE template: the session-context
+// DATA block, injected as {{session_context}}.
 export { buildContextSection as buildConversationContextSection };

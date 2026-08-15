@@ -8,6 +8,10 @@ function makeRepo(over: Partial<CurriculumRepository> = {}): CurriculumRepositor
     async getPublishedVersion(lang) {
       return lang === 'en' ? { id: 'v1', curriculumId: 'c1', version: 1, status: 'published' } : null;
     },
+    async getVersionById(id) {
+      // The resolver now loads the PINNED version by id (blocker 1).
+      return id === 'v1' ? { id: 'v1', curriculumId: 'c1', version: 1, status: 'published' } : null;
+    },
     async listOrderedSubtopics() {
       return [{ subtopicKey: 'B1.OPINION.AGREE_DISAGREE', moduleKey: 'B1.OPINION', levelCode: 'B1' }];
     },
@@ -46,18 +50,20 @@ describe('resolveCurriculumPrompt', () => {
       templateKey: 'writing.generate_topic',
       activityType: 'writing',
       subtopicKey: 'B1.OPINION.AGREE_DISAGREE',
+      versionId: 'v1',
     });
     expect(out.system).toBe('lang=en level=B1 cap=Concordar ou discordar targets=agreement / disagreement');
   });
 
-  it('throws (no silent fallback) when no published curriculum for the language', async () => {
+  it('throws (no silent fallback) when the PINNED version is not found', async () => {
     await expect(
       resolveCurriculumPrompt({
         repository: makeRepo(),
-        languageContext: { learningLanguage: 'zz', interfaceLanguage: 'pt-BR' },
+        languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
         templateKey: 'writing.generate_topic',
         activityType: 'writing',
         subtopicKey: null,
+        versionId: 'missing-version',
       }),
     ).rejects.toBeInstanceOf(CurriculumConfigError);
   });
@@ -70,6 +76,7 @@ describe('resolveCurriculumPrompt', () => {
         templateKey: 'writing.generate_topic',
         activityType: 'writing',
         subtopicKey: null,
+        versionId: 'v1',
       }),
     ).rejects.toBeInstanceOf(CurriculumConfigError);
   });

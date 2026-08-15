@@ -85,6 +85,9 @@ vi.mock('../_curriculum/presentation-i18n', () => ({
   getLanguageDisplayName: vi.fn(async (_c: unknown, code: string) => (code === 'en' ? 'inglês' : code === 'pt-BR' ? 'português' : code)),
   getBandLabelMap: vi.fn(async () => new Map<string, string>()),
 }));
+vi.mock('../_curriculum/conversation-personalization', () => ({
+  buildConversationPersonalizationFromData: vi.fn(async () => 'PERSONALIZATION_FROM_DATA'),
+}));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   ensureUserCurriculum: vi.fn().mockResolvedValue({
     versionId: 'v1',

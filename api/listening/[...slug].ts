@@ -47,7 +47,7 @@ import { getOrCreateSharedListeningStory, getPendingListeningStoryForToday } fro
 import { SharedStoryGeneratingError } from '../../src/services/listening/shared-story/listening-shared-story-types';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
-import { recordCurricularPractice, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { recordCurricularPracticeFromIdentity, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 
 const ALLOWED_STORY_THEMES = new Set([
   'travel', 'work_career', 'daily_life', 'movies_series', 'music',
@@ -499,15 +499,22 @@ async function handleStoryComplete(req: any, res: any) {
     return;
   }
   const { userId } = auth;
-  console.log('[6] Usuário autenticado', { userId });
-  console.log('[7] Payload recebido', { body: req.body });
+  // The client sends the EXACT story it just finished (blocker 6). Absent/invalid
+  // (older bundle) → assignment still completes, but NO curricular credit (never
+  // guesses "the last consumed story"). Never trusts a client version/recorte.
+  const sharedStoryId = typeof req.body?.sharedStoryId === 'string' && UUID_RE.test(req.body.sharedStoryId)
+    ? req.body.sharedStoryId
+    : null;
   try {
     const serviceClient = getListeningServiceClient();
     const activityDate = resolveListeningActivityDate();
     const now = new Date().toISOString();
-    console.log('[8] Executando select em user_listening_assignments', { userId, activityDate });
 
-    const { data: existing, error: selectError } = await serviceClient
+    // (1) Mark today's assignment complete — IDEMPOTENT. An already-completed
+    //     assignment is NOT an early return: a retry (e.g. after a transient
+    //     curricular failure) must still reach the curricular reconciliation
+    //     below (blocker 6).
+    const { data: existing } = await serviceClient
       .from('user_listening_assignments')
       .select('id, status')
       .eq('user_id', userId)
@@ -515,83 +522,66 @@ async function handleStoryComplete(req: any, res: any) {
       .is('episode_id', null)
       .maybeSingle();
 
-    console.log('[9] Resultado do select', { existing, selectError });
-
     if (existing) {
-      if (existing.status === 'completed') {
-        console.log('[8] Já estava completed — retornando sem alterar');
-        safeLog('listening/story/complete', 'already_completed', 200, { userId, activityDate });
-        console.log('[11] Retorno enviado ao frontend → 200 already_completed');
-        return res.status(200).json({ activityDate, saved: true });
+      if (existing.status !== 'completed') {
+        const { error } = await serviceClient
+          .from('user_listening_assignments')
+          .update({ status: 'completed', completed_at: now, updated_at: now })
+          .eq('id', existing.id);
+        if (error) throw error;
       }
-      console.log('[8] Executando UPDATE em user_listening_assignments', { id: existing.id });
-      const { error } = await serviceClient
-        .from('user_listening_assignments')
-        .update({ status: 'completed', completed_at: now, updated_at: now })
-        .eq('id', existing.id);
-      console.log('[9] Resultado do UPDATE', { error });
-      if (error) throw error;
     } else {
-      console.log('[8] Executando INSERT em user_listening_assignments', {
-        user_id: userId,
-        episode_id: null,
-        activity_date: activityDate,
-        status: 'completed',
-      });
       const { error } = await serviceClient
         .from('user_listening_assignments')
         .insert({
-          user_id: userId,
-          episode_id: null,
-          activity_date: activityDate,
-          status: 'completed',
-          assigned_at: now,
-          completed_at: now,
-          created_at: now,
-          updated_at: now,
+          user_id: userId, episode_id: null, activity_date: activityDate, status: 'completed',
+          assigned_at: now, completed_at: now, created_at: now, updated_at: now,
         });
-      console.log('[9] Resultado do INSERT', { error });
       if (error) throw error;
     }
 
-    // ── Curricular practice at REAL completion (blocker 9) ────────────────────
-    // Listening counts as curriculum practice ONLY here — the genuine completion
-    // event — never at "Começar a ouvir" (consume) which merely started it. The
-    // recorte identity is resolved SERVER-SIDE from the story the user actually
-    // consumed today (never trusting a client-supplied recorte), so an activity
-    // for recorte A completing after the user advanced to B is recorded on A and
-    // never marks B (blocker 10). Best-effort + idempotent.
-    try {
-      const { data: prog } = await serviceClient
-        .from('user_listening_shared_progress')
-        .select('shared_story_id')
-        .eq('user_id', userId)
-        .eq('activity_date', activityDate)
-        .eq('completed', true)
-        .order('completed_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const sid = (prog as { shared_story_id?: string } | null)?.shared_story_id ?? null;
-      if (sid) {
-        const { data: story } = await serviceClient
-          .from('listening_shared_stories')
-          .select('curriculum_version_id, subtopic_key')
-          .eq('id', sid)
+    // (2) Curricular reconciliation — ALWAYS attempted (idempotent), keyed to the
+    //     EXACT story the user finished. Server-validated: the story must be
+    //     THIS user's association, actually consumed (completed=true), for the
+    //     SAME activity_date, and carry a real curricular identity. Recorded via
+    //     the identity-required path (no current-pointer fallback — blocker 5),
+    //     so story A finished after story B still credits A's recorte, never B.
+    if (sharedStoryId) {
+      try {
+        const { data: assoc } = await serviceClient
+          .from('user_listening_shared_progress')
+          .select('completed, activity_date')
+          .eq('user_id', userId)
+          .eq('shared_story_id', sharedStoryId)
           .maybeSingle();
-        const s = story as { curriculum_version_id?: string | null; subtopic_key?: string | null } | null;
-        if (s?.curriculum_version_id && s.subtopic_key) {
-          await recordCurricularPractice(getCurriculumServiceClient(), userId, 'listening', sid, {
-            versionId: s.curriculum_version_id,
-            subtopicKey: s.subtopic_key,
-          });
+        const a = assoc as { completed?: boolean; activity_date?: string } | null;
+        if (a && a.completed === true && a.activity_date === activityDate) {
+          const { data: story } = await serviceClient
+            .from('listening_shared_stories')
+            .select('curriculum_version_id, subtopic_key')
+            .eq('id', sharedStoryId)
+            .maybeSingle();
+          const s = story as { curriculum_version_id?: string | null; subtopic_key?: string | null } | null;
+          if (s?.curriculum_version_id && s.subtopic_key) {
+            await recordCurricularPracticeFromIdentity(getCurriculumServiceClient(), userId, 'listening', sharedStoryId, {
+              versionId: s.curriculum_version_id,
+              subtopicKey: s.subtopic_key,
+            });
+          } else {
+            safeLog('listening/story/complete', 'no_curricular_identity', 200, { userId });
+          }
+        } else {
+          // Foreign story, not consumed, or a different day → never credited.
+          safeLog('listening/story/complete', 'story_not_creditable', 200, { userId });
         }
+      } catch {
+        safeLog('listening/story/complete', 'record_curricular_practice_failed', 200, { userId });
       }
-    } catch {
-      safeLog('listening/story/complete', 'record_curricular_practice_failed', 200, { userId });
+    } else {
+      safeLog('listening/story/complete', 'no_shared_story_id', 200, { userId });
     }
 
     safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
-    console.log('[11] Retorno enviado ao frontend → 200 saved');
     return res.status(200).json({ activityDate, saved: true });
   } catch (err) {
     console.error('[10] Erro completo', err);
