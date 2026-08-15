@@ -16,6 +16,7 @@ import { handleSubscriptionStatusRoute } from './_entitlements/subscription-stat
 import { handleRevenueCatWebhookRoute } from './_billing/revenuecat-webhook-route-handler';
 import { handleSubscriptionSyncRoute } from './_billing/subscription-sync-route-handler';
 import { handleCurriculumRoute } from './_curriculum/route-handler';
+import { handlePlacementRoute } from './_placement/route-handler';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
@@ -144,6 +145,12 @@ export default async function handler(req: any, res: any) {
   // explanations. Data-driven curriculum plan/preferences/progress endpoints.
   if (typeof req.query?.__lemonRoute === 'string' && req.query.__lemonRoute.startsWith('curriculum-')) {
     return handleCurriculumRoute(req, res, req.query.__lemonRoute.slice('curriculum-'.length));
+  }
+  // Rewritten here from /api/placement/* (see vercel.json) — same function-budget
+  // reuse as the branches above. Adaptive level-classification onboarding; the
+  // answer key stays server-side (service_role), never sent to the client.
+  if (typeof req.query?.__lemonRoute === 'string' && req.query.__lemonRoute.startsWith('placement-')) {
+    return handlePlacementRoute(req, res, req.query.__lemonRoute.slice('placement-'.length));
   }
 
   if (!methodGuard(req, res, ['POST'])) return;

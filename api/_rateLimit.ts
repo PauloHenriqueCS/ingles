@@ -67,6 +67,9 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   // pure burst/abuse protection over the shared-story/TTS-retry entry points.
   'listening-generate':           { windowSeconds: 3600, maxRequests: 25, failClosed: true },
   'listening-generation-start':   { windowSeconds: 3600, maxRequests: 25, failClosed: true },
+  // Placement C2 gate evaluation (OpenAI). One-time onboarding step; the ceiling
+  // sits far above any legitimate use and is pure burst/abuse protection.
+  'placement-c2':                 { windowSeconds: 3600, maxRequests: 20, failClosed: true },
 
   // ── Non-cost routes — fail OPEN (never lock a user out of these on a blip) ──
   'plan-entitlements':    { windowSeconds: 60,   maxRequests: 30 },
