@@ -2172,6 +2172,62 @@ async function handleMinutePackages(req: any, res: any) {
   return res.status(200).json({ purchaseAvailable, packages, balance });
 }
 
+// Accent/variant OPTIONS for the tutor-personalization UI, resolved from DATA
+// for the user's ACTIVE learning language — never a hardcoded english list
+// (ROOT-2, item 3). English returns american/british/neutral because that is
+// what public.conversation_language_variants holds for 'en'; a future language
+// returns ITS OWN variants with no code change. Labels are localized by the
+// active interface_language (pt-BR fallback), ordered by sort_order.
+async function handleVariants(req: any, res: any) {
+  if (!methodGuard(req, res, ['GET'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const svc = getCurriculumServiceClient();
+  let learningLanguage: string;
+  let interfaceLanguage: string;
+  try {
+    const ensured = await ensureUserCurriculum(svc, userId);
+    learningLanguage = ensured.languageContext.learningLanguage;
+    interfaceLanguage = ensured.languageContext.interfaceLanguage;
+  } catch (err) {
+    const isConfig = err instanceof CurriculumConfigError;
+    safeLog('conversation/variants', isConfig ? 'active_path_not_configured' : 'active_path_read_failed', isConfig ? 503 : 500);
+    return jsonError(res, isConfig ? 503 : 500, isConfig ? 'CURRICULUM_NOT_CONFIGURED' : 'INTERNAL_ERROR', 'Não foi possível carregar as opções de sotaque agora. Tente novamente.');
+  }
+
+  const { data, error } = await svc
+    .from('conversation_language_variants')
+    .select('variant_key, display_label, is_default, sort_order, interface_language')
+    .eq('learning_language', learningLanguage)
+    .in('interface_language', Array.from(new Set([interfaceLanguage, 'pt-BR'])));
+  if (error) {
+    safeLog('conversation/variants', 'catalog_read_failed', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar as opções de sotaque agora. Tente novamente.');
+  }
+  const rows = (data ?? []) as Array<{ variant_key: string; display_label: string | null; is_default: boolean; sort_order: number | null; interface_language: string }>;
+
+  // Collapse to one row per variant_key, preferring the exact interface language
+  // over the pt-BR fallback for the label.
+  const byKey = new Map<string, { key: string; label: string; isDefault: boolean; sortOrder: number }>();
+  const put = (r: typeof rows[number]) => byKey.set(r.variant_key, {
+    key: r.variant_key,
+    label: r.display_label ?? r.variant_key,
+    isDefault: r.is_default === true,
+    sortOrder: r.sort_order ?? 0,
+  });
+  for (const r of rows) if (r.interface_language === 'pt-BR') put(r);
+  for (const r of rows) if (r.interface_language === interfaceLanguage) put(r);
+
+  const variants = Array.from(byKey.values())
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.key.localeCompare(b.key))
+    .map(({ key, label, isDefault }) => ({ key, label, isDefault }));
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).json({ learningLanguage, variants });
+}
+
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any) {
@@ -2180,6 +2236,7 @@ export default async function handler(req: any, res: any) {
     case 'preview':        return handlePreview(req, res);
     case 'session':        return handleSession(req, res);
     case 'minute-packages': return handleMinutePackages(req, res);
+    case 'variants':        return handleVariants(req, res);
     case 'webrtc-connect': return handleWebrtcConnect(req, res);
     // Flat, single-segment routes — NOT nested (session/active etc.). A
     // nested sub-path under this catch-all 404'd in production: Vercel

@@ -35,8 +35,14 @@ function wantedFragments(prefs: AIPreferences): WantedFragment[] {
 }
 
 // Resolve the accent/variant instruction from the per-learning-language variant
-// catalog, preferring the requested interface language then pt-BR. Returns null
-// when the language has no such variant (caller falls back to a generic fragment).
+// catalog. The stored variant_key is VALIDATED against the catalog for THIS
+// learning_language: if it applies, it is used; if it does NOT (e.g. an English
+// key like 'american' stored while the active path is Spanish), we fall back to
+// the language's is_default variant — never a blind reuse of a key that belongs
+// to another language, and never a hardcoded american/british/neutral (ROOT-2,
+// items 2 & 5). Prefers the requested interface language, then pt-BR. Returns
+// null only when the language defines NO variants at all (caller then uses the
+// generic accent fragment).
 async function resolveVariantText(
   client: SupabaseClient,
   learningLanguage: string,
@@ -45,13 +51,22 @@ async function resolveVariantText(
 ): Promise<string | null> {
   const { data } = await client
     .from('conversation_language_variants')
-    .select('interface_language, prompt_text')
+    .select('variant_key, is_default, interface_language, prompt_text')
     .eq('learning_language', learningLanguage)
-    .eq('variant_key', variantKey)
     .in('interface_language', Array.from(new Set([interfaceLanguage, FALLBACK_INTERFACE])));
-  const rows = (data ?? []) as Array<{ interface_language: string; prompt_text: string }>;
-  const exact = rows.find((r) => r.interface_language === interfaceLanguage);
-  const fallback = rows.find((r) => r.interface_language === FALLBACK_INTERFACE);
+  const rows = (data ?? []) as Array<{ variant_key: string; is_default: boolean; interface_language: string; prompt_text: string }>;
+  if (rows.length === 0) return null;
+
+  // Validate the requested key against THIS language's catalog; otherwise use
+  // the data-driven default (is_default), then the first available key.
+  const availableKeys = new Set(rows.map((r) => r.variant_key));
+  const effectiveKey = availableKeys.has(variantKey)
+    ? variantKey
+    : (rows.find((r) => r.is_default)?.variant_key ?? rows[0].variant_key);
+
+  const forKey = rows.filter((r) => r.variant_key === effectiveKey);
+  const exact = forKey.find((r) => r.interface_language === interfaceLanguage);
+  const fallback = forKey.find((r) => r.interface_language === FALLBACK_INTERFACE);
   return exact?.prompt_text ?? fallback?.prompt_text ?? null;
 }
 

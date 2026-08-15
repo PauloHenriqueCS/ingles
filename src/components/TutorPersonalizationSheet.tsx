@@ -96,6 +96,33 @@ function useVoicePreview() {
 
 // ── Shared UI primitives ──────────────────────────────────────────────────────
 
+// Accent/variant options are DATA for the user's ACTIVE learning language
+// (GET /api/conversation/variants) — never a hardcoded English list (ROOT-2,
+// item 3). For English the server returns american/british/neutral because that
+// is what conversation_language_variants holds for 'en'; a different learning
+// language returns ITS OWN variants with no UI change. The built-in ACCENT_LABELS
+// remain ONLY as an offline fallback so the sheet never blocks on the network.
+function useAccentVariants() {
+  const [options, setOptions] = useState<{ id: string; label: string }[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const headers = await getAuthHeader();
+        const resp = await fetch(apiUrl('/api/conversation/variants'), { headers });
+        if (!resp.ok) return;
+        const body = await resp.json();
+        const variants = Array.isArray(body?.variants) ? body.variants : [];
+        if (alive && variants.length > 0) {
+          setOptions(variants.map((v: { key: string; label: string }) => ({ id: String(v.key), label: String(v.label) })));
+        }
+      } catch { /* keep the offline fallback */ }
+    })();
+    return () => { alive = false; };
+  }, []);
+  return options;
+}
+
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">{children}</h3>;
 }
@@ -146,6 +173,7 @@ function VozSection({
   sessionActive: boolean;
 }) {
   const vp = useVoicePreview();
+  const accentOptions = useAccentVariants();
 
   return (
     <div className="space-y-6">
@@ -209,7 +237,7 @@ function VozSection({
         <OptionGroup
           value={prefs.accent}
           onChange={(v) => update({ accent: v })}
-          options={(Object.entries(ACCENT_LABELS) as [AIPreferences['accent'], string][]).map(([id, label]) => ({ id, label }))}
+          options={accentOptions ?? (Object.entries(ACCENT_LABELS) as [string, string][]).map(([id, label]) => ({ id, label }))}
         />
         <p className="text-xs text-slate-600 mt-2">O sotaque é aplicado por instruções de conversa, não por troca de voz.</p>
       </div>

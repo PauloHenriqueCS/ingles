@@ -371,12 +371,21 @@ async function handleGenerateText(req: any, res: any) {
     // Atomic get-or-create: if a concurrent request already created today's
     // row first, this returns THAT row and discards the text generated
     // here — never two sessions for the same user+day, even under a real
-    // race between two simultaneous requests.
+    // race between two simultaneous requests. The curricular identity
+    // (version + recorte) is persisted IN THE SAME atomic operation that creates
+    // the session (ROOT-1) — no best-effort post-RPC UPDATE. A NEW session can
+    // never be delivered without a durable identity; a reused row keeps its
+    // ORIGINAL identity (never the current pointer).
     const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
       p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
       p_start_new_round: forceNew, p_effective_limit: dailyLimit, p_unlimited: dailyUnlimited,
+      p_curriculum_version_id: resolvedPrompt.versionId,
+      p_curriculum_subtopic_key: resolvedPrompt.subtopicKey,
     });
     if (createError) {
+      // Critical write: the `{ error }` returned by Supabase is checked
+      // explicitly (never relied on a catch alone) — a persistence failure
+      // NEVER delivers a curricular session.
       safeLog('pronunciation-training/generate-text', 'persist_rpc_error', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
@@ -392,22 +401,6 @@ async function handleGenerateText(req: any, res: any) {
       }
       safeLog('pronunciation-training/generate-text', 'persist_rejected', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
-    }
-    // Persist the curricular identity the activity was GENERATED for, ONCE
-    // (only when still null), so completion records the practice on THIS recorte
-    // even if the pointer advances before the user finishes (blocker 8/10).
-    // Best-effort — never fails the (already-generated) text response.
-    if (result.sessionId && resolvedPrompt.subtopicKey) {
-      try {
-        await supabase
-          .from('pronunciation_training_sessions')
-          .update({ curriculum_version_id: resolvedPrompt.versionId, curriculum_subtopic_key: resolvedPrompt.subtopicKey })
-          .eq('id', result.sessionId as string)
-          .eq('user_id', userId)
-          .is('curriculum_subtopic_key', null);
-      } catch {
-        safeLog('pronunciation-training/generate-text', 'identity_persist_failed', 200);
-      }
     }
 
     safeLog('pronunciation-training/generate-text', 'success', 200);

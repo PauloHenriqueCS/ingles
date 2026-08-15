@@ -7,7 +7,14 @@ export interface AIPreferences {
   teacherName: string;
   // Voice
   voice: string;
-  accent: 'american' | 'british' | 'neutral';
+  // accent is an OPEN data-driven variant_key, NOT a closed English union: each
+  // learning_language defines its OWN variants as DATA in
+  // public.conversation_language_variants (e.g. en → american/british/neutral,
+  // es → latin_american/spain/neutral). The server validates the stored key
+  // against that per-language catalog and falls back to the language's
+  // is_default when it does not apply — so widening this to `string` never
+  // delivers an unvalidated accent. (ROOT-2)
+  accent: string;
   speechPace: 'slow' | 'normal' | 'natural';
   // Personality
   personalityPreset: 'patient' | 'friend' | 'teacher' | 'unfiltered_friend' | 'custom';

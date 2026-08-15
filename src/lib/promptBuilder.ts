@@ -190,7 +190,7 @@ Nível de referência do aprendiz (CEFR): ${level}. Ajuste a complexidade da sua
 ${PACE_INSTRUCTIONS[prefs.speechPace]}
 
 ## Sotaque e vocabulário
-${ACCENT_INSTRUCTIONS[prefs.accent]}
+${ACCENT_INSTRUCTIONS[prefs.accent] ?? ''}
 
 ## Tom e formalidade
 ${FORMALITY_INSTRUCTIONS[prefs.formality]}
