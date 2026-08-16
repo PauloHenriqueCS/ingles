@@ -660,17 +660,27 @@ export async function submitAnswer(
     .eq('question_id', q.id)
     .maybeSingle();
   const correctKey = (keyRow as { correct_option_key?: string } | null)?.correct_option_key ?? null;
-  const isCorrect = correctKey != null && optionKey === correctKey;
+  // A single_choice question with no private key is a seed/config error — fail
+  // loudly (retryable 503) rather than silently scoring a real answer as wrong.
+  if (correctKey == null) {
+    throw new PlacementConfigError(`no answer key for question ${q.questionKey}`);
+  }
+  const isCorrect = optionKey === correctKey;
 
-  await service.from('placement_attempt_answers').insert({
+  const { error: insertError } = await service.from('placement_attempt_answers').insert({
     attempt_id: attempt.id,
     question_id: q.id,
     checkpoint_key: cpKey,
     selected_option_key: optionKey,
     is_correct: isCorrect,
   });
-  // Ignore duplicate-insert errors (unique attempt+question) — the answer is
-  // final and unchangeable (§16); we just re-advance.
+  // Idempotent (§5, §16): a duplicate (unique attempt+question — e.g. a double
+  // tap on "Confirmar") is absorbed as a no-op; the answer is final and never
+  // re-counted. Any OTHER insert error is a real failure → surface it retryably
+  // instead of advancing without having recorded the answer.
+  if (insertError && insertError.code !== '23505') {
+    throw new PlacementConfigError(`failed to record answer: ${insertError.message}`);
+  }
 
   return await advanceInProgress(ctx, attempt);
 }
