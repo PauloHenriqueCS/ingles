@@ -1,9 +1,10 @@
-import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock } from 'lucide-react';
+import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock, Repeat2 } from 'lucide-react';
 import type { View } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { usePublicConfig, type PublicConfigValues } from '../hooks/usePublicConfig';
+import { useErrorReviewSummary } from '../hooks/useErrorReviewSummary';
 
 interface Props {
   onNavigate: (v: View) => void;
@@ -55,6 +56,7 @@ function conversationCardState(entitlements: PlanEntitlementsSnapshot | null, co
 export default function HomePage({ onNavigate, onStartPractice }: Props) {
   const { data: entitlements, isLoading } = usePlanEntitlements();
   const { config } = usePublicConfig();
+  const errorReview = useErrorReviewSummary();
   // Loading and "not yet resolved" both render the neutral loading state —
   // never a flash of a card looking available before the plan is known.
   const resolved = isLoading ? null : entitlements;
@@ -125,8 +127,65 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           exhaustedBadge="Limite de hoje atingido"
         />
 
+        {/* Revisão de erros — atividade independente e complementar. Nunca
+            gateada por plano nem parte da progressão curricular (item #3). */}
+        <ErrorReviewCard
+          available={errorReview.available}
+          loading={errorReview.loading}
+          onClick={() => onNavigate('error-review')}
+        />
+
       </div>
     </div>
+  );
+}
+
+// ── Error-review card ─────────────────────────────────────────────────────────
+
+function estimateMinutes(count: number): number {
+  return Math.max(1, Math.round(count * 0.4));
+}
+
+function ErrorReviewCard({ available, loading, onClick }: { available: number | null; loading: boolean; onClick: () => void }) {
+  const a = ACCENTS.emerald;
+  const hasReviews = !loading && (available ?? 0) > 0;
+  const isDimmed = loading;
+
+  const description = loading
+    ? 'Verificando seus erros...'
+    : hasReviews
+      ? `${available} ${available === 1 ? 'exercício' : 'exercícios'} para hoje · ≈ ${estimateMinutes(available!)} min`
+      : 'Tudo em dia. Novos erros importantes aparecerão aqui para revisão.';
+
+  const cta = hasReviews ? 'Começar' : 'Ver revisão';
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group text-left bg-slate-800 border border-slate-700 rounded-2xl p-6 transition-all duration-200 focus:outline-none focus:ring-2 ${a.ring} focus:ring-offset-2 focus:ring-offset-slate-900 ${
+        isDimmed ? 'opacity-60' : `${a.border} hover:bg-slate-700/60`
+      }`}
+    >
+      <div className="flex items-center justify-between mb-5">
+        <div className={`flex items-center justify-center w-14 h-14 rounded-xl bg-gradient-to-br ${a.grad} shadow-lg ${a.shadow} ${isDimmed ? 'grayscale' : ''}`}>
+          <Repeat2 className="w-6 h-6 text-white shrink-0 transition-transform duration-150 group-hover:scale-105" strokeWidth={2} aria-hidden="true" />
+        </div>
+        {hasReviews && (
+          <span className="px-2 py-0.5 rounded bg-emerald-900/40 border border-emerald-800/40 text-emerald-300 text-xs font-medium tabular-nums">
+            {available} para hoje
+          </span>
+        )}
+      </div>
+
+      <h2 className="text-base font-semibold text-slate-100 mb-2">Revisar meus erros</h2>
+      <p className="text-sm text-slate-400 leading-relaxed mb-6">{description}</p>
+
+      <span className={`inline-flex items-center gap-1 text-sm font-medium transition-colors ${isDimmed ? 'text-slate-500' : a.text}`}>
+        {cta}
+        <span aria-hidden="true">→</span>
+      </span>
+    </button>
   );
 }
 
@@ -137,6 +196,7 @@ const ACCENTS = {
   teal:   { border: 'hover:border-teal-600', ring: 'focus:ring-teal-500', grad: 'from-teal-500 to-teal-700', shadow: 'shadow-teal-900/40', text: 'text-teal-400 group-hover:text-teal-300' },
   purple: { border: 'hover:border-purple-600', ring: 'focus:ring-purple-500', grad: 'from-purple-500 to-purple-700', shadow: 'shadow-purple-900/40', text: 'text-purple-400 group-hover:text-purple-300' },
   orange: { border: 'hover:border-orange-600', ring: 'focus:ring-orange-500', grad: 'from-orange-500 to-orange-700', shadow: 'shadow-orange-900/40', text: 'text-orange-400 group-hover:text-orange-300' },
+  emerald: { border: 'hover:border-emerald-600', ring: 'focus:ring-emerald-500', grad: 'from-emerald-500 to-emerald-700', shadow: 'shadow-emerald-900/40', text: 'text-emerald-400 group-hover:text-emerald-300' },
 } as const;
 
 interface ActivityCardProps {
