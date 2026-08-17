@@ -394,6 +394,57 @@ describe('getCurrentUserPlanEntitlements', () => {
     expect(snapshot.conversation.monthlyTime.consumed).toBe(1800);
   });
 
+  it('abandon hotfix: a STALE-heartbeat open authorization is clamped to the last heartbeat, not the live elapsed', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
+        conversation_session_authorizations: {
+          // Present for ~102s (last heartbeat at 12:01:42), then the user left;
+          // "now" is 20 minutes later. Consumption must STOP climbing at the last
+          // heartbeat + the stale window (75s) = 177s — never the live 20 min.
+          data: [{ status: 'authorized', authorized_at: '2026-07-18T12:00:00Z', authorized_max_seconds: 1800, duration_seconds: null, last_seen_at: '2026-07-18T12:01:42Z' }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:20:00Z') });
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(177); // 102s real + 75s stale window
+  });
+
+  it('abandon hotfix: an actively-heartbeating open authorization still counts full live elapsed (never under-counted)', async () => {
+    const supabase = makeMockSupabase({
+      planRow: RESOLVED_PLAN,
+      tableResults: {
+        plan_capability_values: {
+          data: [
+            { capability_key: 'conversation.enabled', value: true },
+            { capability_key: 'conversation.realtime.seconds.monthly', value: 600 },
+            { capability_key: 'conversation.max_recording_seconds.unlimited', value: true },
+            { capability_key: 'conversation.extra_purchase_enabled', value: true },
+          ],
+          error: null,
+        },
+        conversation_session_authorizations: {
+          // Heartbeat 10s ago (still well within the stale window) → the session
+          // is genuinely live, so consumption is the full elapsed 1200s.
+          data: [{ status: 'authorized', authorized_at: '2026-07-18T11:40:00Z', authorized_max_seconds: 1800, duration_seconds: null, last_seen_at: '2026-07-18T11:59:50Z' }],
+          error: null,
+        },
+      },
+    });
+    const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T12:00:00Z') });
+    expect(snapshot.conversation.monthlyTime.consumed).toBe(1200);
+  });
+
   it('respects an explicit writing.enabled=false plan value (disabled_by_plan, not unlimited)', async () => {
     const supabase = makeMockSupabase({
       planRow: RESOLVED_PLAN,

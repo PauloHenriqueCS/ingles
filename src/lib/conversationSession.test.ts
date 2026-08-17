@@ -550,3 +550,66 @@ describe('client-side gatewaySessionId chain (useRealtimeSession.ts)', () => {
     expect(reportingCode).not.toMatch(/console\.(log|error)\([^)]*\btoken\b/i);
   });
 });
+
+// ── Abandon fail-safe: leaving the screen / background ends the session ────────
+// The bug: an AI conversation kept consuming minutes after the user left the
+// screen without pressing "Encerrar". These lock in that EVERY end path — the
+// button, dc.onclose, connection loss, max, UNMOUNT, and app background/pagehide
+// — tears down the WebRTC connection AND finalizes the server authorization, so
+// the minute consumption actually stops.
+describe('conversationSession — abandon cleanup (leaving the screen ends the session)', () => {
+  async function hookSrc(): Promise<string> {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    return (src as unknown as { default: string }).default;
+  }
+
+  it('cleanup() tears down the WebRTC connection and the mic tracks', async () => {
+    const code = await hookSrc();
+    const cleanup = code.slice(code.indexOf('const cleanup ='), code.indexOf('useEffect(() => () => { cleanup'));
+    expect(cleanup).toContain('dcRef.current.close()');   // data channel
+    expect(cleanup).toContain('pcRef.current.close()');   // peer connection
+    expect(cleanup).toContain('stopStream(streamRef.current)'); // mic tracks .stop()
+  });
+
+  it('cleanup() finalizes the server authorization exactly once, with keepalive so it survives unload', async () => {
+    const code = await hookSrc();
+    // Guarded single-finalize per authorization id.
+    expect(code).toMatch(/finalizedAuthIdRef\.current !== authId/);
+    expect(code).toMatch(/finalizedAuthIdRef\.current = authId/);
+    expect(code).toMatch(/completeConversationSession\(authId, \{ keepalive: true \}\)/);
+  });
+
+  it('the UNMOUNT effect routes through cleanup (leaving the view ends the session)', async () => {
+    const code = await hookSrc();
+    expect(code).toContain("useEffect(() => () => { cleanup(undefined, 'unmounted'); }, [cleanup]);");
+  });
+
+  it('a periodic authorization heartbeat runs while active and is cleared on cleanup', async () => {
+    const code = await hookSrc();
+    expect(code).toContain('sendConversationHeartbeat');
+    expect(code).toMatch(/heartbeatTimerRef\.current = setInterval/);
+    // started inside dc.onopen (only while genuinely connected)
+    const onopen = code.slice(code.indexOf('dc.onopen = () => {'), code.indexOf('dc.onmessage = (e) => {'));
+    expect(onopen).toContain('sendConversationHeartbeat');
+    // cleared in cleanup
+    const cleanup = code.slice(code.indexOf('const cleanup ='), code.indexOf('useEffect(() => () => { cleanup'));
+    expect(cleanup).toMatch(/clearInterval\(heartbeatTimerRef\.current\)/);
+  });
+
+  it('backgrounding / page unload ends a live session (visibilitychange, pagehide, native appStateChange)', async () => {
+    const code = await hookSrc();
+    expect(code).toContain("addEventListener('visibilitychange'");
+    expect(code).toContain("addEventListener('pagehide'");
+    expect(code).toContain("appStateChange");
+    // only ends a genuinely in-progress session
+    expect(code).toMatch(/endCalledRef\.current\) return;[\s\S]*pcRef\.current[\s\S]*cleanup\('ended'/);
+  });
+
+  it('the finalize helper posts to session-complete with keepalive support', async () => {
+    const src = await import('./conversationSessions?raw');
+    const code = (src as unknown as { default: string }).default;
+    expect(code).toContain("apiUrl('/api/conversation/session-complete')");
+    expect(code).toMatch(/keepalive:/);
+    expect(code).toContain("apiUrl('/api/conversation/session-heartbeat')");
+  });
+});

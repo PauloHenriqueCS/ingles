@@ -19,15 +19,19 @@ import { checkCronAuth } from '../_auth';
 import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
 import { handleProductConfigStatusRoute } from '../_product-config-status-route-handler';
 import {
-  getSharedServiceClient, getProductionDeps, reconcileSessionReservation, releaseSessionReservation,
+  getSharedServiceClient, getProductionDeps, reconcileSessionReservation,
   releaseExpiredPendingReservations, runRecoverySweep, getProductionAlertDeps,
 } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
-import { settleConversationExtraCreditsDebit } from '../../_entitlements/conversation-extra-credits-debit';
 import {
-  WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS,
-  REALTIME_HEARTBEAT_STALE_SECONDS, AUTHORIZATION_SWEEP_GRACE_SECONDS,
+  WEBRTC_CONNECT_FEATURE_KEY,
+  REALTIME_HEARTBEAT_STALE_SECONDS,
+  AUTHORIZATION_HEARTBEAT_STALE_SECONDS,
 } from '../../_realtime-constants';
+import {
+  isHeartbeatStale, abandonedEffectiveEndMs, computeAuthorizationDurationSeconds, closeAuthorizationRow,
+  type AuthorizationRow,
+} from '../../conversation/_session-accounting';
 import { getJobsServiceClient } from '../../../src/services/listening/jobs/_supabase';
 import { recoverStuckListeningJobs } from '../../../src/services/listening/jobs/recover-stuck-listening-jobs';
 import { recoverStuckListeningGroupJobs } from '../../../src/services/listening/group-generation/recover-stuck-listening-group-jobs';
@@ -467,76 +471,32 @@ async function handleConversationSweep(req: any, res: any): Promise<void> {
       expiredSessions++;
     }
 
-    // ── 2. conversation_session_authorizations abandoned past their grace ──
-    // DB-side filter is a safe superset (authorized_max_seconds can never
-    // exceed REALTIME_MAX_SESSION_SECONDS — see computeAuthorizedRecording
-    // in api/conversation/[...slug].ts); the exact per-row deadline
-    // (authorized_at + its own authorized_max_seconds + grace) is checked
-    // in JS below before any row is actually closed.
-    const csaOuterCutoff = new Date(Date.now() - (REALTIME_MAX_SESSION_SECONDS + AUTHORIZATION_SWEEP_GRACE_SECONDS) * 1000).toISOString();
+    // ── 2. conversation_session_authorizations abandoned (heartbeat stale) ──
+    // A row is abandoned as soon as its client heartbeat (last_seen_at, renewed
+    // ~every 20s while genuinely open) goes quiet beyond the stale window — no
+    // longer waiting out the entire authorized_max_seconds + grace. The DB
+    // filter is a safe superset (last_seen_at stale, OR no heartbeat yet and
+    // authorized_at old); isHeartbeatStale re-checks exactly in JS. Rows with no
+    // heartbeat keep their previous close semantics (charged up to `now`, no
+    // refund). All the accounting (duration formula, quota mirror, reservation
+    // reconcile, extra-credits debit) is shared with /session-complete and
+    // reconcile-on-start via closeAuthorizationRow — one billing formula only.
+    const staleCutoffIso = new Date(Date.now() - AUTHORIZATION_HEARTBEAT_STALE_SECONDS * 1000).toISOString();
     const { data: staleAuthRows } = await supabase
       .from('conversation_session_authorizations')
-      .select('id, user_id, session_date, authorized_at, authorized_max_seconds, gateway_budget_reservation_id, gateway_session_id')
+      .select('id, user_id, session_date, authorized_at, authorized_max_seconds, last_seen_at, gateway_budget_reservation_id, gateway_session_id')
       .eq('status', 'authorized')
-      .lt('authorized_at', csaOuterCutoff);
+      .or(`last_seen_at.lt.${staleCutoffIso},and(last_seen_at.is.null,authorized_at.lt.${staleCutoffIso})`);
 
-    for (const row of (staleAuthRows ?? []) as Array<{
-      id: string; user_id: string; session_date: string; authorized_at: string; authorized_max_seconds: number;
-      gateway_budget_reservation_id: string | null; gateway_session_id: string | null;
-    }>) {
-      const authorizedAtMs = new Date(row.authorized_at).getTime();
-      const graceDeadlineMs = authorizedAtMs + row.authorized_max_seconds * 1000 + AUTHORIZATION_SWEEP_GRACE_SECONDS * 1000;
-      if (Date.now() < graceDeadlineMs) continue; // DB filter was a safe superset — not actually past grace yet
-
-      const durationSeconds = Math.floor(Math.max(0, Math.min((Date.now() - authorizedAtMs) / 1000, row.authorized_max_seconds)));
-      const { data: updated } = await supabase
-        .from('conversation_session_authorizations')
-        .update({ status: 'completed', completed_at: new Date().toISOString(), duration_seconds: durationSeconds })
-        .eq('id', row.id)
-        .eq('status', 'authorized')
-        .select('id')
-        .maybeSingle();
-
-      if (!updated) continue; // another path (or a concurrent sweep tick) already closed it — no-op
-      closedAuthorizations++;
-
-      if (durationSeconds > 0) {
-        const { error: insertErr } = await supabase
-          .from('conversation_sessions')
-          .insert({ user_id: row.user_id, session_date: row.session_date, duration_sec: durationSeconds });
-        if (insertErr) {
-          safeLog('internal/listening/conversation-sweep', 'mirror_duration_failed', 200, { error: insertErr.message });
-        }
-      }
-
-      // Reconcile the upfront conversation.realtime_usage budget reservation
-      // (see api/_ai-gateway/reservation-reconciliation.ts) for a session
-      // nobody was left to call /session-complete for — this is the "safe
-      // expiration/finalization strategy" for an incomplete session: it
-      // commits whatever real cost genuinely accrued (never guesses, never
-      // silently returns budget for spend that already happened), the same
-      // reconciliation /session-complete itself would have run.
-      if (row.gateway_budget_reservation_id) {
-        try {
-          const gatewayDeps = getProductionDeps();
-          if (row.gateway_session_id) {
-            await reconcileSessionReservation(gatewayDeps, 'conversation.realtime_usage', row.gateway_budget_reservation_id, row.gateway_session_id);
-          } else {
-            await releaseSessionReservation(gatewayDeps, row.gateway_budget_reservation_id, 'no_gateway_session_to_reconcile_against');
-          }
-        } catch (e) {
-          safeLog('internal/listening/conversation-sweep', 'budget_reconcile_failed', 200, { error: e instanceof Error ? e.message : String(e) });
-        }
-      }
-
-      // Debit purchased extra-minute credits for the OVER-PLAN portion of this
-      // abandoned session too — same idempotent RPC as /session-complete, so a
-      // session finalized by the sweep still burns credits exactly once.
-      try {
-        await settleConversationExtraCreditsDebit(row.user_id, row.id, durationSeconds, { supabase });
-      } catch (e) {
-        safeLog('internal/listening/conversation-sweep', 'extra_credits_debit_failed', 200, { error: e instanceof Error ? e.message : String(e) });
-      }
+    for (const row of (staleAuthRows ?? []) as AuthorizationRow[]) {
+      const nowMs = Date.now();
+      if (!isHeartbeatStale(row, nowMs)) continue; // DB filter was a safe superset — still live
+      const durationSeconds = computeAuthorizationDurationSeconds(row, abandonedEffectiveEndMs(row, nowMs));
+      const closed = await closeAuthorizationRow(
+        supabase, row, durationSeconds, nowMs,
+        (event, detail) => safeLog('internal/listening/conversation-sweep', event, 200, { error: String(detail) }),
+      );
+      if (closed) closedAuthorizations++;
     }
 
     // ── 3. pronunciation.assess_text abandoned ai_provider_sessions ────────

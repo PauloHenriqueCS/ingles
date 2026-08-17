@@ -24,16 +24,45 @@ export function isConversationGoalMet(totalSeconds: number, goalMinutes: number)
  * a failure just means this call's time doesn't land in the calendar/quota
  * this time — never surfaced to the student, never retried destructively.
  */
-export async function completeConversationSession(recordingAuthorizationId: string): Promise<void> {
+export async function completeConversationSession(
+  recordingAuthorizationId: string,
+  opts?: { keepalive?: boolean },
+): Promise<void> {
   try {
     const headers = await getAuthHeader();
     await fetch(apiUrl('/api/conversation/session-complete'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ recordingAuthorizationId }),
+      // keepalive lets this finalize survive the page being unloaded /
+      // backgrounded (pagehide, app kill) — the exact moments the user leaves a
+      // conversation without pressing "Encerrar". Body is tiny, well within the
+      // keepalive limit.
+      keepalive: opts?.keepalive ?? false,
     });
   } catch (error) {
     console.error('[conversation] failed to complete session', { recordingAuthorizationId, error });
+  }
+}
+
+/**
+ * Lightweight liveness ping for the open conversation authorization. Called
+ * periodically by useRealtimeSession while a session is genuinely connected, so
+ * the server can tell a real, present user apart from an abandoned session. When
+ * the user leaves and the pings stop, the server clamps consumption to the last
+ * ping and closes the row (see api/conversation/[...slug].ts's
+ * handleSessionHeartbeat). Best-effort: never throws, never blocks the call.
+ */
+export async function sendConversationHeartbeat(recordingAuthorizationId: string): Promise<void> {
+  try {
+    const headers = await getAuthHeader();
+    await fetch(apiUrl('/api/conversation/session-heartbeat'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ recordingAuthorizationId }),
+    });
+  } catch {
+    // A dropped heartbeat just lets the stale window elapse — never surfaced.
   }
 }
 
