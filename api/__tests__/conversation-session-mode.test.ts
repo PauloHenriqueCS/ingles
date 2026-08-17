@@ -5,7 +5,7 @@
  * is a SELECTED modality (menu = regra) and that a real recorte exists.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveSessionMode, computeGuidedEligible } from '../conversation/session-mode';
+import { resolveSessionMode, computeGuidedEligible } from '../conversation/_session-mode';
 
 describe('resolveSessionMode', () => {
   it('honors an explicit client "free" even when Conversation is in the plan', () => {

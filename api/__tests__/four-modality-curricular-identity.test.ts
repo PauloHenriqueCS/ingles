@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ensureUserCurriculum, recordCurricularPracticeFromIdentity } from '../_curriculum/curriculum-runtime';
-import { computeGuidedEligible } from '../conversation/session-mode';
+import { computeGuidedEligible } from '../conversation/_session-mode';
 
 // ── In-memory Supabase mock (mirrors curriculum-version-pinning test) ─────────
 function makeClient(tables: Record<string, any[]>, onRpc?: (name: string, args: any) => any) {
