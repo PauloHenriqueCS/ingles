@@ -554,7 +554,15 @@ export default async function handler(req: any, res: any) {
     return { code, message: ENTITLEMENT_MESSAGES.writingGenerationsExhausted };
   }
 
-  const { mode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
+  const { mode: _clientMode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
+  // SECURITY: legacy review-mission generation is discontinued and can no longer
+  // be initiated by ANY client request. Normalize the client-supplied mode to
+  // 'normal' server-side, so no modified client can reactivate the old review
+  // branch (special review theme + required words) by sending mode:'review' with
+  // a reviewGroup payload. The dormant review code below stays for history/tests
+  // but is unreachable at runtime. Error review is a separate activity now.
+  const mode: string = 'normal';
+  void _clientMode;
   // The client sends the raw technical value from the theme select (e.g.
   // 'football_sports'); it is resolved to a display label from the single
   // canonical writing-themes list (a UI option list of SURFACE topics — never

@@ -279,7 +279,7 @@ export default async function handler(req: any, res: any) {
     theme,
     grammarGoal,
     mainTense,
-    mode,
+    mode: _clientMode,
     reviewGroupId,
     missionTitle,
     studentLevel,
@@ -289,6 +289,16 @@ export default async function handler(req: any, res: any) {
     missionSnapshot,
     generatedThemeId,
   } = req.body ?? {};
+
+  // SECURITY: the legacy "spaced review inside Escrita" flow is discontinued
+  // and can no longer be initiated by ANY client request. Error review is now a
+  // separate activity (RPC submit_error_review_item). We normalize the
+  // client-supplied mode to 'normal' server-side, so no modified client can
+  // reactivate the old review branch (required-word evaluation, review_attempts,
+  // apply_review_schedule) by sending mode:'review' + reviewGroupId. The dormant
+  // review code below stays for history/telemetry/tests but is unreachable.
+  const mode: string = 'normal';
+  void _clientMode;
 
   if (!originalText || typeof originalText !== 'string' || !originalText.trim()) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'originalText é obrigatório');

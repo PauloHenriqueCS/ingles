@@ -919,7 +919,12 @@ const REVIEW_GROUP_JSON = JSON.stringify({
   reviewGroupId: 'group-uuid-123',
 });
 
-describe('handler — modo revisão', () => {
+describe('handler — modo revisão legado desativado', () => {
+  // SEGURANÇA: a geração de missão de revisão legada foi descontinuada e não
+  // pode mais ser iniciada por um request de cliente. O servidor normaliza
+  // mode:'review' para 'normal', então o ramo legado (tema especial + palavras
+  // obrigatórias + template writing.generate_review_activity) é inalcançável.
+  // A revisão de erros agora é uma atividade separada.
   const validReviewGroup = {
     group: { id: 'group-uuid-123', originalTheme: 'Missão original', sourceEntryDate: '2026-01-15', reviewLevel: 0 },
     items: [
@@ -929,159 +934,55 @@ describe('handler — modo revisão', () => {
   };
 
   beforeEach(() => {
-    mockCreate.mockImplementation(() => aiResponse(REVIEW_GROUP_JSON));
+    mockCreate.mockImplementation(() => aiResponse(VALID_THEME_JSON));
   });
 
-  it('retorna 400 quando group.id está ausente', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: { group: { id: '' }, items: [{ correctedValue: 'test' }] } } });
-    const res = makeRes();
-    await handler(req, res);
-    expect(res._status).toBe(400);
-  });
-
-  it('retorna 400 quando items está vazio', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: { group: { id: 'g-1' }, items: [] } } });
-    const res = makeRes();
-    await handler(req, res);
-    expect(res._status).toBe(400);
-  });
-
-  it('fluxo feliz retorna mode: review com tema e themeId', async () => {
+  it('um request com mode:"review" é tratado como normal (body.mode === "normal")', async () => {
     const req = makeReq({ body: { mode: 'review', reviewGroup: validReviewGroup } });
     const res = makeRes();
     await handler(req, res);
     expect(res._status).toBe(200);
-    const body = res._body as Record<string, unknown>;
-    expect(body.mode).toBe('review');
-    expect(body).toHaveProperty('theme');
-    expect(body).toHaveProperty('themeId');
+    expect((res._body as Record<string, unknown>).mode).toBe('normal');
   });
 
-  it('tema de revisão tem mode=review e reviewGroupId correto', async () => {
+  it('o tema retornado NÃO é um tema de revisão (sem mode=review / reviewGroupId)', async () => {
     const req = makeReq({ body: { mode: 'review', reviewGroup: validReviewGroup } });
     const res = makeRes();
     await handler(req, res);
     const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
-    expect(theme.mode).toBe('review');
-    expect(theme.reviewGroupId).toBe(validReviewGroup.group.id);
+    expect(theme.mode).not.toBe('review');
+    expect(theme.reviewGroupId).toBeUndefined();
   });
 
-  it('AI inválida em todos os retries → 500', async () => {
-    mockCreate.mockImplementation(() => aiResponse('invalid json'));
-    const req = makeReq({ body: { mode: 'review', reviewGroup: validReviewGroup } });
-    const res = makeRes();
-    await handler(req, res);
-    expect(res._status).toBe(500);
-  });
-
-  it('falha do provider → 500', async () => {
-    mockCreate.mockRejectedValue(new Error('AI down'));
-    const req = makeReq({ body: { mode: 'review', reviewGroup: validReviewGroup } });
-    const res = makeRes();
-    await handler(req, res);
-    expect(res._status).toBe(500);
-  });
-});
-
-// ── handler — modo revisão IGNORAVA o tema selecionado (bug real) ────────────
-//
-// Bug real: quando uma revisão espaçada está pendente, o frontend força
-// mode='review' em toda solicitação, independente do tema escolhido pelo
-// usuário no seletor. O branch de revisão do endpoint nunca lia o campo
-// `theme` — a missão era construída só a partir dos erros corrigidos e do
-// `reviewGroup.group.originalTheme` (ex: uma entrada antiga sobre viagem),
-// ignorando silenciosamente "Música". Corrigido: buildReviewUserMessage
-// agora recebe o tema selecionado e injeta um bloco TEMA OBRIGATÓRIO, e o
-// context final da missão é forçado deterministicamente no servidor.
-
-describe('handler — modo revisão com tema selecionado (Missão do dia ignorava o tema)', () => {
-  const oldTravelReviewGroup = {
-    group: {
-      id: 'group-uuid-456',
-      originalTheme: 'Planejando uma viagem para Paris',
-      sourceEntryDate: '2026-01-10',
-      reviewLevel: 1,
-    },
-    items: [
-      { originalValue: 'therefor', correctedValue: 'therefore', explanation: 'Conector causal', originalSentence: null },
-      { originalValue: 'altough', correctedValue: 'although', explanation: 'Conector de contraste', originalSentence: null },
-    ],
-  };
-
-  beforeEach(() => {
-    // Simula a IA ainda se apoiando no contexto de viagem do grupo de
-    // revisão (title/context) — prova que é o override determinístico, e
-    // não apenas o prompt, que garante o resultado final.
-    mockCreate.mockImplementation(() =>
-      aiResponse(JSON.stringify({
-        ...JSON.parse(REVIEW_GROUP_JSON),
-        title: 'Planejando uma Viagem dos Sonhos',
-        context: 'viagens',
-      })),
-    );
-  });
-
-  // Data-driven: the review prompt now lives in the DB template
-  // `writing.generate_review_activity`. The dynamically-built review context
-  // (which carries the TEMA OBRIGATÓRIO block when a theme is selected) flows to
-  // the curriculum engine via userContext.review_context — not as raw text
-  // injected into the OpenAI user message. So we assert on what the handler
-  // hands to resolveActivityPrompt.
-  it('injeta TEMA OBRIGATÓRIO no review_context de revisão quando um tema é selecionado', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+  it('nunca usa o template legado writing.generate_review_activity para um request com mode:"review"', async () => {
+    const req = makeReq({ body: { mode: 'review', reviewGroup: validReviewGroup, theme: 'music' } });
     await handler(req, makeRes());
-
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { templateKey: string; userContext?: Record<string, string> };
-    expect(opts.templateKey).toBe('writing.generate_review_activity');
-    const reviewContext = opts.userContext?.review_context ?? '';
-    expect(reviewContext).toContain('TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: Música.');
-    expect(reviewContext).toContain('mesmo que o tema original do grupo de revisão abaixo seja outro');
+    const usedTemplates = mockResolveActivityPrompt.mock.calls.map((c) => (c[2] as { templateKey?: string })?.templateKey);
+    expect(usedTemplates).not.toContain('writing.generate_review_activity');
   });
 
-  it('deixa explícito no review_context que requiredWords não é afetado pelo tema', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
-    await handler(req, makeRes());
+  it('um reviewGroup inválido (group.id ausente / items vazio) NÃO dispara 400 do ramo legado', async () => {
+    const req1 = makeReq({ body: { mode: 'review', reviewGroup: { group: { id: '' }, items: [{ correctedValue: 'test' }] } } });
+    const res1 = makeRes();
+    await handler(req1, res1);
+    expect(res1._status).toBe(200);
 
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
-    expect(opts.userContext?.review_context ?? '').toContain('Isso NUNCA afeta requiredWords');
+    const req2 = makeReq({ body: { mode: 'review', reviewGroup: { group: { id: 'g-1' }, items: [] } } });
+    const res2 = makeRes();
+    await handler(req2, res2);
+    expect(res2._status).toBe(200);
   });
 
-  it('a missão antiga de viagem não é reaproveitada: a tag final reflete Música, não o tema original do grupo', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
+  it('o fluxo normal continua intacto (sem mode → normal)', async () => {
     const res = makeRes();
-    await handler(req, res);
-
+    await handler(makeReq(), res);
     expect(res._status).toBe(200);
-    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
-    expect(theme.context).toBe('Música');
-    expect(theme.context).not.toBe('viagens');
-  });
-
-  it('requiredWords continua vindo exatamente dos erros do aluno mesmo com tema selecionado', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: 'music' } });
-    const res = makeRes();
-    await handler(req, res);
-
-    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
-    expect(theme.requiredWords).toEqual(['therefore', 'although']);
-  });
-
-  it('sem tema selecionado, o modo revisão mantém o comportamento anterior (sem bloco de tema obrigatório)', async () => {
-    const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup } });
-    await handler(req, makeRes());
-
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
-    expect(opts.userContext?.review_context ?? '').not.toContain('TEMA OBRIGATÓRIO');
-  });
-
-  it('funciona para todo o catálogo canônico de temas também no modo revisão', async () => {
-    for (const t of WRITING_THEMES) {
-      mockCreate.mockClear();
-      mockResolveActivityPrompt.mockClear();
-      const req = makeReq({ body: { mode: 'review', reviewGroup: oldTravelReviewGroup, theme: t.value } });
-      await handler(req, makeRes());
-      const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, string> };
-      expect(opts.userContext?.review_context ?? '').toContain(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${t.label}.`);
-    }
+    expect((res._body as Record<string, unknown>).mode).toBe('normal');
   });
 });
+
+// ── (removido) handler — modo revisão com tema selecionado ───────────────────
+// Este bloco testava a injeção de TEMA OBRIGATÓRIO no prompt de revisão legado.
+// Esse fluxo foi descontinuado e agora é bloqueado no servidor (ver o describe
+// "handler — modo revisão legado desativado" acima), então o cenário não existe
+// mais. A revisão de erros virou uma atividade separada.

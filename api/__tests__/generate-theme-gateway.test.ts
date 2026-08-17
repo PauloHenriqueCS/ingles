@@ -706,25 +706,28 @@ describe('auth and rate limit still gate the request', () => {
   });
 });
 
-// ── Review phase uses the same featureKey and its own MAX_REVIEW_ATTEMPTS ─────
+// ── Legacy review-mission generation is discontinued (server-side gate) ──────
+// A client request with mode:'review' + reviewGroup no longer initiates the old
+// review theme; it is normalized to 'normal' server-side. The telemetry proves
+// the request runs as the normal phase/flowType, never as 'review'.
 
-describe('review phase', () => {
-  const REVIEW_JSON = JSON.stringify({
-    title: 'Revisão', missionSetup: 'x', missionTask: 'y', mission: 'x y', themeEn: 'z',
+describe('legacy review mode is blocked server-side', () => {
+  const NORMAL_JSON = JSON.stringify({
+    title: 'Missão', missionSetup: 'x', missionTask: 'y', mission: 'x y', themeEn: 'z',
     objective: 'practice', activityType: 'narrative', format: 'narrative', context: 'work',
     conflict: '', semanticSummary: 'Formato: narrative | Objetivo: practice', level: 'B1',
-    difficulty: 'easy', estimatedTimeMinutes: 15, requiredGrammar: [], requiredWords: ['therefore'],
+    difficulty: 'easy', estimatedTimeMinutes: 15, requiredGrammar: [], requiredWords: [],
     suggestedVocabulary: [], useTheseWords: [], instructions: [], exampleSentence: '',
-    successCriteria: [], extraChallenge: '', category: 'review', grammarTips: {},
-    responseExamples: [], mode: 'review', reviewGroupId: 'group-1',
+    successCriteria: [], extraChallenge: '', category: 'work', grammarTips: {},
+    responseExamples: [],
   });
 
   beforeEach(() => {
     mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
-    mockCreate.mockImplementation(() => aiOk(REVIEW_JSON));
+    mockCreate.mockImplementation(() => aiOk(NORMAL_JSON));
   });
 
-  it('uses featureKey writing.generate_topic with phase "review" and flowType "review"', async () => {
+  it('a mode:"review" request is normalized to the normal phase (never "review")', async () => {
     await handler(
       makeReq({
         body: {
@@ -737,10 +740,13 @@ describe('review phase', () => {
     );
 
     expect(mockStartEvent).toHaveBeenCalledWith(expect.objectContaining({ featureKey: 'writing.generate_topic' }));
-    const meta = (mockStartEvent.mock.calls[0][0] as any).metadata;
-    expect(meta.phase).toBe('review');
-    expect(meta.flowType).toBe('review');
-    expect(meta.maxPhysicalAttempts).toBe(3);
+    // Every physical call ran as the normal phase — the legacy review branch
+    // never emitted a phase:'review' / flowType:'review' event.
+    for (const call of mockStartEvent.mock.calls) {
+      const meta = (call[0] as any).metadata;
+      expect(meta.phase).not.toBe('review');
+      expect(meta.flowType).toBe('normal');
+    }
   });
 });
 

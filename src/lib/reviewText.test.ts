@@ -547,28 +547,14 @@ describe('handler — modo normal', () => {
 
 // ── handler — modo revisão ────────────────────────────────────────────────────
 
-const REVIEW_AI_RESPONSE = JSON.stringify({
-  score: 82,
-  level: 'B1',
-  grammar: 85,
-  vocabulary: 80,
-  naturalness: 82,
-  fluency: 78,
-  summary: 'Bom uso dos conectores!',
-  correctedText: 'Although I was tired, I finished the task. Therefore, I was proud.',
-  mainMistakes: [],
-  newVocabulary: [{ word: 'proud', meaningPtBr: 'orgulhoso', example: 'I am proud of you.' }],
-  objectiveFeedback: 'Usou although e therefore corretamente.',
-  nextPractice: 'Tente usar moreover e however.',
-  requiredWordEvaluation: [
-    { requiredWord: 'therefore', status: 'correct', usedExcerpt: 'Therefore, I was proud.', explanation: 'Usou corretamente.', suggestedCorrection: null },
-    { requiredWord: 'although', status: 'correct', usedExcerpt: 'Although I was tired', explanation: 'Usou corretamente.', suggestedCorrection: null },
-  ],
-});
-
-describe('handler — modo revisão', () => {
+describe('handler — modo revisão legado desativado', () => {
+  // A Escrita nunca mais entra em review mode: qualquer request com
+  // mode:'review' é normalizado para 'normal' no servidor. O mock da IA
+  // devolve uma resposta normal — o fluxo legado (avaliação de palavras
+  // obrigatórias + review_attempts + apply_review_schedule) nunca é acionado,
+  // nem por um cliente modificado que envie mode:'review' + reviewGroupId.
   beforeEach(() => {
-    mockCreate.mockImplementation(() => aiOk(REVIEW_AI_RESPONSE));
+    mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
   });
 
   const reviewBody = {
@@ -580,30 +566,27 @@ describe('handler — modo revisão', () => {
     studentLevel: 'B1',
   };
 
-  it('retorna 200 com feedback contendo requiredWordEvaluation', async () => {
+  it('trata mode:"review" como normal: 200, sem apply_review_schedule, reviewSchedule null', async () => {
+    const calls: string[] = [];
+    const base = makeDefaultSupabase();
+    const supabase = {
+      ...base,
+      rpc: vi.fn((name: string, params: unknown) => { calls.push(name); return base.rpc(name, params); }),
+    };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
     const res = makeRes();
     await handler(makeReq({ body: reviewBody }), res);
+
     expect(res._status).toBe(200);
-    const fb = (res._body as Record<string, unknown>).feedback as Record<string, unknown>;
-    expect(Array.isArray(fb.requiredWordEvaluation)).toBe(true);
+    expect(calls).not.toContain('apply_review_schedule');
+    expect((res._body as any).reviewSchedule).toBeNull();
   });
 
-  it('retorna 403 quando grupo de revisão não pertence ao usuário', async () => {
+  it('mesmo com grupo inexistente/não-possuído, NÃO retorna 403/400 do fluxo legado', async () => {
     const mockSupa = makeDefaultSupabase();
     vi.spyOn(mockSupa, 'from').mockImplementation((table: string) => {
       if (table === 'review_groups') return makeChain({ data: null, error: null });
-      return makeDefaultSupabase().from(table);
-    });
-    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: mockSupa as any });
-
-    const res = makeRes();
-    await handler(makeReq({ body: reviewBody }), res);
-    expect(res._status).toBe(403);
-  });
-
-  it('retorna 400 quando itens do grupo não existem', async () => {
-    const mockSupa = makeDefaultSupabase();
-    vi.spyOn(mockSupa, 'from').mockImplementation((table: string) => {
       if (table === 'review_group_items') return makeChain({ data: [], error: null });
       return makeDefaultSupabase().from(table);
     });
@@ -611,16 +594,26 @@ describe('handler — modo revisão', () => {
 
     const res = makeRes();
     await handler(makeReq({ body: reviewBody }), res);
-    expect(res._status).toBe(400);
+    // O ramo legado (que retornaria 403/400) é inalcançável — corrige normal.
+    expect(res._status).toBe(200);
   });
 
-  it('palavras obrigatórias vêm do banco, não do body', async () => {
-    // AI response matches the DB words (therefore, although)
-    // If body tried to inject different words, they're ignored
-    const res = makeRes();
-    await handler(makeReq({ body: { ...reviewBody, requiredWords: ['injected', 'evil'] } }), res);
-    expect(res._status).toBe(200);
-    // The review still proceeded with DB words, not injected words
+  it('nunca insere em review_attempts para um request com mode:"review"', async () => {
+    const insertSpy = vi.fn().mockReturnValue({
+      select: vi.fn().mockReturnValue({ single: vi.fn().mockResolvedValue({ data: { id: 'attempt-1' }, error: null }) }),
+    });
+    const base = makeDefaultSupabase();
+    const supabase = {
+      ...base,
+      from: vi.fn((table: string) => {
+        if (table === 'review_attempts') return { insert: insertSpy };
+        return base.from(table);
+      }),
+    };
+    vi.mocked(requireAuth).mockResolvedValue({ userId: USER_ID, supabase: supabase as any });
+
+    await handler(makeReq({ body: reviewBody }), makeRes());
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 });
 
