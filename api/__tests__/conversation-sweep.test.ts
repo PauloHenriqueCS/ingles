@@ -67,7 +67,7 @@ function makeRes() {
 
 function makeChain(result: { data: unknown; error: unknown }) {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'in', 'not', 'lt', 'update', 'insert']) chain[m] = vi.fn().mockReturnValue(chain);
+  for (const m of ['select', 'eq', 'in', 'not', 'lt', 'or', 'update', 'insert']) chain[m] = vi.fn().mockReturnValue(chain);
   chain.maybeSingle = vi.fn().mockResolvedValue(result);
   chain.then = (resolve: (v: unknown) => void) => resolve(result);
   return chain;
@@ -233,6 +233,60 @@ describe('GET /conversation-sweep — conversation_session_authorizations abando
     const res = makeRes();
     await handler(makeReq(), res);
     expect((res._body() as any).closedAuthorizations).toBe(0);
+  });
+
+  it('NEVER closes a genuinely live session — a fresh heartbeat protects it even if authorized long ago', async () => {
+    // Authorized an hour ago (would be "past grace" under the old rule) BUT the
+    // client heartbeat is only 5s old → the user is present → must be left alone.
+    const updateChain = makeChain({ data: { id: 'auth-live' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-live', user_id: 'user-1', session_date: '2026-07-20',
+            authorized_at: AUTHORIZED_AT, authorized_max_seconds: MAX_SECONDS,
+            last_seen_at: new Date(Date.now() - 5_000).toISOString(), // fresh beat
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(updateChain.update).not.toHaveBeenCalled();
+    expect((res._body() as any).closedAuthorizations).toBe(0);
+  });
+
+  it('closes a STALE-heartbeat session clamped to the last heartbeat (real usage, never the ceiling)', async () => {
+    // Present ~40s (last beat 40s after authorized_at), then abandoned; the row
+    // is well past any wall-clock grace, but duration must reflect the heartbeat,
+    // not (now - authorized_at). last beat at authorized_at + 40s → duration is
+    // ~40s + one stale window (75s) = 115s, comfortably under the 120s ceiling.
+    const authorizedMs = Date.now() - 3600_000;
+    const updateChain = makeChain({ data: { id: 'auth-stale' }, error: null });
+    queueFrom({
+      ai_provider_sessions: [makeChain({ data: [], error: null }), makeChain({ data: [], error: null })],
+      conversation_session_authorizations: [
+        makeChain({
+          data: [{
+            id: 'auth-stale', user_id: 'user-1', session_date: '2026-07-20',
+            authorized_at: new Date(authorizedMs).toISOString(), authorized_max_seconds: MAX_SECONDS,
+            last_seen_at: new Date(authorizedMs + 40_000).toISOString(),
+          }],
+          error: null,
+        }),
+        updateChain,
+      ],
+      conversation_sessions: [makeChain({ data: null, error: null })],
+    });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', duration_seconds: 115 }));
+    expect((res._body() as any).closedAuthorizations).toBe(1);
   });
 
   it('idempotent — a row another path (or a concurrent sweep tick) already closed first (UPDATE matches 0 rows) is not double-counted or mirrored', async () => {

@@ -43,6 +43,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
+import { AUTHORIZATION_HEARTBEAT_STALE_SECONDS } from '../_realtime-constants';
 import { computeFeatureState } from '../../src/domain/entitlements/compute-feature-state';
 import type {
   ConversationEntitlements,
@@ -312,7 +313,7 @@ export async function getCurrentUserPlanEntitlements(
       .eq('completed', true)
       .eq('listening_shared_stories.practice_date', todaySpDate),
     (() => {
-      let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds').eq('user_id', userId);
+      let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds, last_seen_at').eq('user_id', userId);
       if (trialWindow) {
         // Filtered on authorized_at (a precise timestamp), not session_date
         // (a calendar date) — required so a session started just before the
@@ -363,15 +364,29 @@ export async function getCurrentUserPlanEntitlements(
     authorized_at: string;
     authorized_max_seconds: number;
     duration_seconds: number | null;
+    last_seen_at: string | null;
   }
   // Named generically: this window is the calendar month for a commercial
   // plan, but the trial's own [assignment.starts_at, assignment.ends_at)
   // window when isTrial (see conversationSecondsResult's query above) — the
   // reduction itself (live-elapsed-clamped vs completed) is identical either way.
+  //
+  // For a still-'authorized' (open) row the live elapsed is CLAMPED to the last
+  // client heartbeat + the stale window when a heartbeat exists: the moment the
+  // user leaves the screen / backgrounds / crashes, the pings stop and this
+  // stops climbing (bounded to at most one stale window past their real
+  // presence) instead of running up to authorized_max_seconds. A row with NO
+  // heartbeat (created before the feature) keeps the previous unclamped behavior
+  // — a heartbeat is EVIDENCE that lets us clamp; without it we never refund.
+  const nowMs = now.getTime();
   const conversationSecondsConsumed = ((conversationSecondsResult.data ?? []) as ConversationAuthorizationRow[]).reduce(
     (sum, r) => {
       if (r.status === 'completed') return sum + (r.duration_seconds ?? 0);
-      const elapsedSeconds = (now.getTime() - new Date(r.authorized_at).getTime()) / 1000;
+      const authorizedAtMs = new Date(r.authorized_at).getTime();
+      const effectiveEndMs = r.last_seen_at
+        ? Math.min(nowMs, new Date(r.last_seen_at).getTime() + AUTHORIZATION_HEARTBEAT_STALE_SECONDS * 1000)
+        : nowMs;
+      const elapsedSeconds = (effectiveEndMs - authorizedAtMs) / 1000;
       return sum + Math.max(0, Math.min(elapsedSeconds, r.authorized_max_seconds));
     },
     0,

@@ -1720,6 +1720,11 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
           single: vi.fn().mockResolvedValue({ data: { id: 'eeeeeeee-0000-0000-0000-000000000099' }, error: null }),
         }),
       }),
+      // Reconcile-on-start read (abandon fail-safe): closes any of THIS user's
+      // stale prior authorizations before opening a new one. Here it finds none.
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ data: [], error: null }) }),
+      }),
       // Best-effort UPDATE that persists the start-time curricular identity on
       // the authorization row (recorte the conversation practices toward).
       update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: identityUpdateEq2 }) }),
@@ -1728,12 +1733,13 @@ describe('dispatcher — Vercel-shaped req.query.slug (string AND array), flat r
     await handler(vercelReq('session'), res);
     expect(res._status()).toBe(200);
     expect((res._body() as any).token).toBe('tok');
-    // Touches conversation_session_authorizations twice — the best-effort
-    // authorization-row INSERT (opened here, closed by /session-complete) AND
+    // Touches conversation_session_authorizations three times — the
+    // reconcile-on-start SELECT (abandon fail-safe), the best-effort
+    // authorization-row INSERT (opened here, closed by /session-complete), and
     // the best-effort curricular-identity UPDATE — but never the webrtc bridge
     // tables (ai_provider_sessions/ai_usage_events), which stay untouched unless
     // conversation.webrtc_connect is in observe mode (never configured here).
-    expect(mockSessionsFrom).toHaveBeenCalledTimes(2);
+    expect(mockSessionsFrom).toHaveBeenCalledTimes(3);
     expect(mockSessionsFrom).toHaveBeenCalledWith('conversation_session_authorizations');
   });
 

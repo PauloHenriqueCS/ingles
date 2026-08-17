@@ -47,6 +47,7 @@ import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-
 import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
 import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
+import { reconcileUserStaleAuthorizations } from './_session-accounting';
 import { reserveRealtimeSessionBudget } from '../_realtime-budget';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
@@ -441,6 +442,23 @@ async function handleSession(req: any, res: any) {
   const auth = await requireAuth(req, res);
   if (!auth) return;
   const { supabase, userId } = auth;
+
+  // ── Reconcile-on-start (abandon fail-safe) ─────────────────────────────────
+  // Before authorizing a NEW session, close any of THIS user's previous
+  // authorizations whose heartbeat has gone stale (they left the screen / the
+  // app was backgrounded or killed and /session-complete never ran). This closes
+  // the row with the real, heartbeat-clamped duration and frees its reservation
+  // — so a returning user's balance already reflects only real use, and an
+  // abandoned session can never stay "active" indefinitely, independent of any
+  // background cron. Best-effort: never blocks starting a new session.
+  try {
+    await reconcileUserStaleAuthorizations(
+      getSharedServiceClient(), userId, getProductionDeps().clock(),
+      (event, detail) => safeLog('conversation/session', `reconcile_on_start_${event}`, 200, { detail: String(detail).slice(0, 150) }),
+    );
+  } catch (e) {
+    safeLog('conversation/session', 'reconcile_on_start_failed', 200, { message: String(e).slice(0, 150) });
+  }
 
   const openaiKey = (process.env.OPENAI_API_KEY ?? '').trim();
   if (!openaiKey) {
@@ -1271,6 +1289,44 @@ async function handleSessionComplete(req: any, res: any) {
     console.error('[conversation/session-complete] failed', e instanceof Error ? e.message : 'unknown');
     return res.status(200).json({ status: 'ignored' }); // fail-open — never surfaced to the student
   }
+}
+
+// ─── POST /api/conversation/session-heartbeat ───────────────────────────────
+// Lightweight liveness ping for the QUOTA authorization row itself. The client
+// (src/hooks/useRealtimeSession.ts) calls this every ~20s while the conversation
+// is genuinely open, INDEPENDENT of gateway observe-mode (unlike session-control
+// which only runs in that mode). It only bumps last_seen_at for the caller's own
+// still-'authorized' row — so when the user leaves the screen / backgrounds /
+// crashes and the pings stop, the row's consumption is clamped to the last
+// heartbeat and it is closed as abandoned (see reconcileUserStaleAuthorizations
+// and plan-entitlements-service's live clamp). Never trusts a duration. Idempotent.
+async function handleSessionHeartbeat(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  if (!sizeGuard(req, res, PAYLOAD_LIMITS.CONVERSATION)) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { userId } = auth;
+
+  const recordingAuthorizationId = (req.body ?? {}).recordingAuthorizationId;
+  if (!isValidUuid(recordingAuthorizationId)) {
+    return jsonError(res, 400, 'INVALID_RECORDING_AUTHORIZATION_ID', 'recordingAuthorizationId inválido.');
+  }
+  try {
+    // Scoped to the caller's own OPEN row (ownership + status guarded). A
+    // completed/foreign row simply matches nothing — a harmless no-op that can
+    // never resurrect or extend a finished session.
+    await getSharedServiceClient()
+      .from('conversation_session_authorizations')
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq('id', recordingAuthorizationId)
+      .eq('user_id', userId)
+      .eq('status', 'authorized');
+  } catch (e) {
+    // Best-effort: a failed heartbeat just lets the stale window elapse; it must
+    // never surface to the student or affect the live conversation.
+    safeLog('conversation/session-heartbeat', 'update_failed', 200, { message: String(e).slice(0, 150) });
+  }
+  return res.status(200).json({ ok: true });
 }
 
 // ─── POST /api/conversation/session-{active,failed,usage,end} ───────────────
@@ -2269,6 +2325,7 @@ export default async function handler(req: any, res: any) {
     case 'session-end':    return handleSessionEnd(req, res);
     case 'session-control': return handleSessionControl(req, res);
     case 'session-complete': return handleSessionComplete(req, res);
+    case 'session-heartbeat': return handleSessionHeartbeat(req, res);
     default:                return res.status(404).json({ code: 'NOT_FOUND', message: 'Route not found' });
   }
 }

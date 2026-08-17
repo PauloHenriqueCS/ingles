@@ -12,6 +12,13 @@ import {
 } from '../lib/realtimeGatewayReporting';
 import { shouldAutoStopForCommercialLimit, pickStopMessage, pickStopEndReason, scheduleGracefulFinish } from './realtimeAutoStop';
 import { getMicPermissionDeniedMessage } from '../lib/micPermissionGuidance';
+import { completeConversationSession, sendConversationHeartbeat } from '../lib/conversationSessions';
+
+// How often to renew the server-side authorization heartbeat while a session is
+// genuinely open. Must stay comfortably below the server's stale window
+// (AUTHORIZATION_HEARTBEAT_STALE_SECONDS in api/_realtime-constants.ts) so a
+// healthy session is never mistaken for abandoned.
+const AUTHORIZATION_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export type SessionStatus = 'idle' | 'connecting' | 'active' | 'error' | 'ended';
 
@@ -159,6 +166,13 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const authorizedMaxSecondsRef  = useRef<number | null>(null);
   const recordingLimitReasonRef  = useRef<RecordingLimitReason | null>(null);
   const limitStopTriggeredRef    = useRef(false);
+  // Abandon fail-safe: mirror the authorization id into a ref (cleanup() is a
+  // stable callback and can't read the state directly), guard so the server
+  // finalize fires exactly once per authorization, and drive the liveness
+  // heartbeat while genuinely connected.
+  const recordingAuthIdRef       = useRef<string | null>(null);
+  const finalizedAuthIdRef       = useRef<string | null>(null);
+  const heartbeatTimerRef        = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -205,6 +219,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
     if (sessionControlTimerRef.current) { clearInterval(sessionControlTimerRef.current); sessionControlTimerRef.current = null; }
+    if (heartbeatTimerRef.current) { clearInterval(heartbeatTimerRef.current); heartbeatTimerRef.current = null; }
     if (dcRef.current) { try { dcRef.current.close(); } catch { /* ignore */ } dcRef.current = null; }
     if (pcRef.current) { try { pcRef.current.close(); } catch { /* ignore */ } pcRef.current = null; }
     stopStream(streamRef.current);
@@ -231,9 +246,66 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         reportSessionFailed(gatewaySessionId, toSessionEndReason(endReason));
       }
     }
+
+    // ABANDON FAIL-SAFE — close the QUOTA authorization on EVERY end path
+    // (button, dc.onclose, connection lost, max, unmount, background/pagehide),
+    // exactly once per authorization. This is what makes leaving the screen
+    // actually stop the minute consumption: the server records the real
+    // (heartbeat-clamped) duration and closes the row, instead of it lingering
+    // 'authorized' and counting live up to the ceiling. keepalive lets it
+    // survive a page being unloaded/backgrounded. Fire-and-forget, idempotent
+    // (guarded here + status-guarded server-side); a missing authId (session
+    // never started) is a no-op. The gateway session-end report above closes
+    // only the separate telemetry row, never this quota authorization.
+    const authId = recordingAuthIdRef.current;
+    if (authId && finalizedAuthIdRef.current !== authId) {
+      finalizedAuthIdRef.current = authId;
+      void completeConversationSession(authId, { keepalive: true });
+    }
   }, []);
 
   useEffect(() => () => { cleanup(undefined, 'unmounted'); }, [cleanup]);
+
+  // ── End the session when the app/screen leaves the ACTIVE state ─────────────
+  // For this product a conversation must NOT keep running (and consuming
+  // minutes) in the background: leaving the tab/app, locking the screen,
+  // minimizing, or the page unloading all end the session immediately and
+  // finalize the authorization (cleanup → keepalive complete). Unmount is
+  // handled separately above; this covers the cases where the component stays
+  // mounted but the app is no longer in the foreground. Only acts on a genuinely
+  // in-progress session — never resurrects or double-ends a finished one.
+  useEffect(() => {
+    const endIfLive = (reason: string) => {
+      if (endCalledRef.current) return;
+      if (!pcRef.current && !streamRef.current && !recordingAuthIdRef.current) return;
+      cleanup('ended', reason);
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') endIfLive('backgrounded'); };
+    const onPageHide = () => endIfLive('pagehide');
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+
+    // Native (Capacitor) background — optional plugin; window events already
+    // cover web/PWA. Best-effort: absence on web is a harmless no-op.
+    let removeAppListener: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { App } = await import('@capacitor/app');
+        const handle = await App.addListener('appStateChange', ({ isActive }) => {
+          if (!isActive) endIfLive('backgrounded');
+        });
+        if (cancelled) { void handle.remove(); } else { removeAppListener = () => { void handle.remove(); }; }
+      } catch { /* plugin unavailable — window events suffice */ }
+    })();
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+      if (removeAppListener) removeAppListener();
+    };
+  }, [cleanup]);
 
   // Fase 12 — auto-stop when the authorized recording ceiling is reached.
   // Never abruptly kills the WebRTC connection: it stops CAPTURING new
@@ -281,6 +353,8 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     setRecordingLimitReason(null);
     setStopMessage(null);
     setRecordingAuthorizationId(null);
+    recordingAuthIdRef.current = null;
+    finalizedAuthIdRef.current = null;
 
     // ── Step 1: Mic first (must be in user gesture context, especially on Safari/iPhone) ─
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -347,6 +421,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       // this call's time simply won't be credited toward monthlyTime that time.
       if (typeof body.recordingAuthorizationId === 'string' && body.recordingAuthorizationId) {
         setRecordingAuthorizationId(body.recordingAuthorizationId);
+        recordingAuthIdRef.current = body.recordingAuthorizationId;
       }
       // Additive/optional — only present when conversation.webrtc_connect is
       // in observe mode. Absent (legacy, always at this stage) means every
@@ -414,6 +489,21 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       if (endCalledRef.current) return;
       setStatus('active');
       startTimeRef.current = Date.now();
+
+      // Liveness heartbeat for the quota authorization — always on (not gated on
+      // gateway observe-mode, unlike the session-control poll below). While this
+      // keeps firing the server knows the user is genuinely present; once they
+      // leave and it stops, the server clamps consumption to the last beat and
+      // closes the row. Fires immediately, then every interval.
+      const heartbeatAuthId = recordingAuthIdRef.current;
+      if (heartbeatAuthId) {
+        void sendConversationHeartbeat(heartbeatAuthId);
+        heartbeatTimerRef.current = setInterval(() => {
+          if (endCalledRef.current) return;
+          const id = recordingAuthIdRef.current;
+          if (id) void sendConversationHeartbeat(id);
+        }, AUTHORIZATION_HEARTBEAT_INTERVAL_MS);
+      }
       timerRef.current = setInterval(() => {
         const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
         setElapsedMs(elapsed);
