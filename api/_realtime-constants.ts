@@ -41,3 +41,20 @@ export const REALTIME_HEARTBEAT_STALE_SECONDS = 60;
 // never be closed out from under it while it may still complete normally
 // through the cooperative /session-complete path.
 export const AUTHORIZATION_SWEEP_GRACE_SECONDS = 120;
+
+// Heartbeat window for the conversation QUOTA authorization row itself
+// (conversation_session_authorizations.last_seen_at) — distinct from the
+// ai_provider_sessions telemetry heartbeat above. While a conversation is
+// genuinely open the client renews last_seen_at every
+// ~AUTHORIZATION_HEARTBEAT_INTERVAL_SECONDS (see src/hooks/useRealtimeSession.ts),
+// independent of gateway observe-mode. When the client leaves the screen,
+// backgrounds, crashes or is killed, the heartbeat stops; beyond this window
+// the authorization is treated as abandoned and (a) its live minute
+// consumption is CLAMPED to the last heartbeat (so the balance stops climbing
+// the moment the user leaves) and (b) the row is force-closed by
+// reconcile-on-start / the sweep. Set to a few missed beats so ordinary
+// jitter never closes a healthy session. Rows created before this feature
+// carry last_seen_at = NULL and keep the previous (unclamped) behavior — a
+// heartbeat is EVIDENCE that lets us clamp; without it we never refund.
+export const AUTHORIZATION_HEARTBEAT_INTERVAL_SECONDS = 20;
+export const AUTHORIZATION_HEARTBEAT_STALE_SECONDS = 75;
