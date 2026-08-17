@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock, Target, MessageCircle } from 'lucide-react';
+import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
 import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
@@ -13,7 +13,7 @@ import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
-import { getPrefsSummaryChips, REALTIME_VOICES, PACE_LABELS, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
+import { getPrefsSummaryChips, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
 import { completeConversationSession, getDayTotalSeconds, isConversationGoalMet } from '../lib/conversationSessions';
 import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
@@ -139,25 +139,6 @@ function ConversationBalanceIndicator({ conversation, onBuyMinutes }: { conversa
   );
 }
 
-// ── Summary chips ─────────────────────────────────────────────────────────────
-
-function SummaryChips({ chips, onChipClick }: { chips: string[]; onChipClick: () => void }) {
-  return (
-    <div className="flex flex-wrap gap-1.5 justify-center mt-2">
-      {chips.map((chip) => (
-        <button
-          key={chip}
-          onClick={onChipClick}
-          className="px-2.5 py-1 rounded-full bg-slate-700 text-slate-300 text-xs hover:bg-slate-600 transition-colors focus:outline-none focus:ring-1 focus:ring-blue-500"
-          aria-label={`Configuração: ${chip}. Toque para personalizar.`}
-        >
-          {chip}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 // ── First-access banner ───────────────────────────────────────────────────────
 
 function FirstAccessBanner({ onPersonalize, onDismiss }: { onPersonalize: () => void; onDismiss: () => void }) {
@@ -209,18 +190,24 @@ interface Props {
 interface ModeChooserProps {
   t: ReturnType<typeof curriculumUiStrings>;
   selected: 'guided' | 'free';
-  /** Which mode is recommended/default (guided iff Conversation is in the plan). */
-  recommended: 'guided' | 'free';
+  /** Show the "Recomendado" badge on GUIDED — true iff Conversation is a
+   *  selected modality in the teaching plan. Free never carries the badge. */
+  recommendGuided: boolean;
   /** Localized current recorte title, or null when not resolvable. */
   currentFocus: string | null;
   onSelect: (mode: 'guided' | 'free') => void;
 }
 
-function ModeOptionCard({
-  active, icon, title, description, sub, badge, onClick,
+/**
+ * One full-width, compact selectable row (radio semantics). Selected vs
+ * unselected differ only subtly (blue border + a light blue tint + a filled
+ * radio) — the SAME treatment for both options, so color never signals
+ * "recommended". Recommendation is communicated solely by the badge.
+ */
+function ModeOptionRow({
+  active, title, description, sub, badge, onClick,
 }: {
   active: boolean;
-  icon: React.ReactNode;
   title: string;
   description: string;
   sub?: string | null;
@@ -230,54 +217,62 @@ function ModeOptionCard({
   return (
     <button
       type="button"
+      role="radio"
+      aria-checked={active}
       onClick={onClick}
-      aria-pressed={active}
-      className={`flex-1 text-left rounded-xl border p-3.5 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+      className={`w-full text-left rounded-xl border p-3.5 flex items-start gap-3 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
         active
-          ? 'border-blue-500 bg-blue-950/40'
+          ? 'border-blue-500 bg-blue-500/10'
           : 'border-slate-700 bg-slate-800 hover:border-slate-600'
       }`}
     >
-      <div className="flex items-center gap-2">
-        <span className={active ? 'text-blue-300' : 'text-slate-400'}>{icon}</span>
-        <span className="text-sm font-semibold text-slate-100">{title}</span>
-        {badge && (
-          <span className="ml-auto px-1.5 py-0.5 rounded bg-blue-900/50 border border-blue-800/50 text-blue-300 text-[10px] font-medium">
-            {badge}
-          </span>
-        )}
+      <span
+        aria-hidden="true"
+        className={`mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${active ? 'border-blue-500' : 'border-slate-500'}`}
+      >
+        {active && <span className="w-2 h-2 rounded-full bg-blue-500" />}
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-slate-100">{title}</span>
+          {badge && (
+            <span className="ml-auto shrink-0 px-1.5 py-0.5 rounded bg-blue-900/50 border border-blue-800/50 text-blue-300 text-[10px] font-medium">
+              {badge}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-slate-400 mt-1 leading-relaxed">{description}</p>
+        {sub && <p className="text-xs text-blue-300/90 mt-1 break-words">{sub}</p>}
       </div>
-      <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">{description}</p>
-      {sub && <p className="text-xs text-blue-300/90 mt-1.5 break-words">{sub}</p>}
     </button>
   );
 }
 
 /**
  * Lets the user explicitly pick Guided (practise the current curriculum focus)
- * or Free (talk about anything) BEFORE starting a session. The recommended
- * option is highlighted with a badge; the guided card surfaces the localized
- * current recorte when available. The chosen mode is passed to session.start()
- * and the server remains the authority on mode + curricular credit.
+ * or Free (talk about anything) BEFORE starting a session. Options are STACKED
+ * full-width (never two columns), compact, with a clear radio. Only Guided can
+ * show the "Recomendado" badge, and only when Conversation is a selected
+ * modality — Free never does. The chosen mode is passed to session.start(); the
+ * server remains the sole authority on mode + curricular credit.
  */
-function ConversationModeChooser({ t, selected, recommended, currentFocus, onSelect }: ModeChooserProps) {
+function ConversationModeChooser({ t, selected, recommendGuided, currentFocus, onSelect }: ModeChooserProps) {
   return (
-    <div className="flex gap-2.5">
-      <ModeOptionCard
+    <div className="space-y-2.5" role="radiogroup" aria-label={t.conversationChooserTitle}>
+      <p className="text-sm font-semibold text-slate-200">{t.conversationChooserTitle}</p>
+      <ModeOptionRow
         active={selected === 'guided'}
-        icon={<Target className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />}
         title={t.conversationGuidedTitle}
         description={t.conversationGuidedDesc}
         sub={currentFocus ? t.conversationFocusLabel(currentFocus) : null}
-        badge={recommended === 'guided' ? t.conversationRecommended : null}
+        badge={recommendGuided ? t.conversationRecommended : null}
         onClick={() => onSelect('guided')}
       />
-      <ModeOptionCard
+      <ModeOptionRow
         active={selected === 'free'}
-        icon={<MessageCircle className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />}
         title={t.conversationFreeTitle}
         description={t.conversationFreeDesc}
-        badge={recommended === 'free' ? t.conversationRecommended : null}
+        badge={null}
         onClick={() => onSelect('free')}
       />
     </div>
@@ -413,9 +408,9 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
     setFirstAccessChecked(true);
   }
 
-  const chips      = getPrefsSummaryChips(hp.prefs);
-  const voiceLabel = REALTIME_VOICES.find((v) => v.id === hp.prefs.voice)?.label ?? hp.prefs.voice;
-  const paceLabel  = PACE_LABELS[hp.prefs.speechPace]?.label ?? hp.prefs.speechPace;
+  // One compact preferences line ("Coral · Americano · Superdevagar · Paciente")
+  // — the voice/pace are shown once here, never duplicated as separate chips.
+  const prefsLine = getPrefsSummaryChips(hp.prefs).map((c) => c.replace(/^Voz:\s*/, '')).join(' · ');
 
   // Error visual helpers
   const isMicError    = isError && (session.errorCode?.startsWith('MIC') ?? false);
@@ -479,12 +474,18 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
                 <div>
                   <p className="text-slate-200 font-semibold text-base">{hp.prefs.teacherName}</p>
                   <p className="text-xs text-slate-400">Seu tutor de inglês</p>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {voiceLabel} · {paceLabel}
-                  </p>
                 </div>
 
-                <SummaryChips chips={chips} onChipClick={() => setShowSheet(true)} />
+                {/* One compact, tappable preferences line — no redundant voice/pace
+                    repetition. Tapping opens the personalization sheet. */}
+                <button
+                  type="button"
+                  onClick={() => setShowSheet(true)}
+                  className="mx-auto block max-w-full rounded-full px-3 py-1 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 transition-colors focus:outline-none focus:ring-1 focus:ring-blue-500 break-words"
+                  aria-label={`Preferências do tutor: ${prefsLine}. Toque para personalizar.`}
+                >
+                  {prefsLine}
+                </button>
               </div>
             )}
 
@@ -584,7 +585,7 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
                 <ConversationModeChooser
                   t={focusStrings}
                   selected={effectiveMode}
-                  recommended={defaultMode}
+                  recommendGuided={conversationInPlan}
                   currentFocus={currentFocus}
                   onSelect={setSelectedMode}
                 />

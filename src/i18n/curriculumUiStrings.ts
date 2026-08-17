@@ -65,6 +65,7 @@ export interface CurriculumUiStrings {
   focusCompleted: string;      // curriculum fully completed
   focusUnavailable: string;    // legitimate absence / config issue
   // Conversation mode chooser (guided vs free)
+  conversationChooserTitle: string; // "Como você quer conversar?"
   conversationGuidedTitle: string;
   conversationFreeTitle: string;
   conversationGuidedDesc: string;
@@ -119,9 +120,10 @@ const PT_BR: CurriculumUiStrings = {
   focusInitializing: 'Preparando seu plano de ensino…',
   focusCompleted: 'Currículo concluído — continue praticando para refinar seu domínio.',
   focusUnavailable: 'Seu foco de estudo aparecerá aqui.',
+  conversationChooserTitle: 'Como você quer conversar?',
   conversationGuidedTitle: 'Conversa guiada',
   conversationFreeTitle: 'Conversa livre',
-  conversationGuidedDesc: 'Pratique o foco atual do seu plano de ensino.',
+  conversationGuidedDesc: 'Pratique o foco atual do seu plano.',
   conversationFreeDesc: 'Converse livremente sobre qualquer assunto.',
   conversationFocusLabel: (focus) => `Foco: ${focus}`,
   conversationRecommended: 'Recomendado',
@@ -172,9 +174,10 @@ const EN: CurriculumUiStrings = {
   focusInitializing: 'Setting up your teaching plan…',
   focusCompleted: 'Curriculum completed — keep practising to refine your mastery.',
   focusUnavailable: 'Your study focus will appear here.',
+  conversationChooserTitle: 'How do you want to talk?',
   conversationGuidedTitle: 'Guided conversation',
   conversationFreeTitle: 'Free conversation',
-  conversationGuidedDesc: 'Practise the current focus of your teaching plan.',
+  conversationGuidedDesc: "Practise your plan's current focus.",
   conversationFreeDesc: 'Talk freely about any topic.',
   conversationFocusLabel: (focus) => `Focus: ${focus}`,
   conversationRecommended: 'Recommended',
