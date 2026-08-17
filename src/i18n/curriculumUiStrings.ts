@@ -59,6 +59,19 @@ export interface CurriculumUiStrings {
   warnConversation: string;
   includeInPlan: string;   // aria: include
   removeFromPlan: string;  // aria: remove
+  // Home "Foco atual" block (current curriculum recorte)
+  focusEyebrow: string;        // "Foco atual"
+  focusInitializing: string;   // curriculum still bootstrapping
+  focusCompleted: string;      // curriculum fully completed
+  focusUnavailable: string;    // legitimate absence / config issue
+  // Conversation mode chooser (guided vs free)
+  conversationGuidedTitle: string;
+  conversationFreeTitle: string;
+  conversationGuidedDesc: string;
+  conversationFreeDesc: string;
+  /** "Foco: <recorte>" — parameterized by the localized recorte title (data). */
+  conversationFocusLabel: (focus: string) => string;
+  conversationRecommended: string;   // badge on the recommended (guided) option
 }
 
 const PT_BR: CurriculumUiStrings = {
@@ -102,6 +115,16 @@ const PT_BR: CurriculumUiStrings = {
   warnConversation: 'Ao incluir Conversação IA no seu plano de ensino, uma conversa guiada fará parte das práticas necessárias para avançar em cada etapa e utilizará seus minutos disponíveis.',
   includeInPlan: 'Incluir',
   removeFromPlan: 'Remover',
+  focusEyebrow: 'Foco atual',
+  focusInitializing: 'Preparando seu plano de ensino…',
+  focusCompleted: 'Currículo concluído — continue praticando para refinar seu domínio.',
+  focusUnavailable: 'Seu foco de estudo aparecerá aqui.',
+  conversationGuidedTitle: 'Conversa guiada',
+  conversationFreeTitle: 'Conversa livre',
+  conversationGuidedDesc: 'Pratique o foco atual do seu plano de ensino.',
+  conversationFreeDesc: 'Converse livremente sobre qualquer assunto.',
+  conversationFocusLabel: (focus) => `Foco: ${focus}`,
+  conversationRecommended: 'Recomendado',
 };
 
 const EN: CurriculumUiStrings = {
@@ -145,6 +168,16 @@ const EN: CurriculumUiStrings = {
   warnConversation: 'Adding AI Conversation to your teaching plan makes a guided conversation one of the practices required to advance at every step, and it uses your available minutes.',
   includeInPlan: 'Include',
   removeFromPlan: 'Remove',
+  focusEyebrow: 'Current focus',
+  focusInitializing: 'Setting up your teaching plan…',
+  focusCompleted: 'Curriculum completed — keep practising to refine your mastery.',
+  focusUnavailable: 'Your study focus will appear here.',
+  conversationGuidedTitle: 'Guided conversation',
+  conversationFreeTitle: 'Free conversation',
+  conversationGuidedDesc: 'Practise the current focus of your teaching plan.',
+  conversationFreeDesc: 'Talk freely about any topic.',
+  conversationFocusLabel: (focus) => `Focus: ${focus}`,
+  conversationRecommended: 'Recommended',
 };
 
 const STRINGS: Record<string, CurriculumUiStrings> = { 'pt-BR': PT_BR, en: EN };

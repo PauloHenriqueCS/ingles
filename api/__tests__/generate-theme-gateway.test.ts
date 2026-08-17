@@ -797,3 +797,75 @@ describe('plan entitlements enforcement', () => {
     expect(res._status()).toBe(500);
   });
 });
+
+// ── Normal-mode SEMANTIC validation (empty missions never persisted) ──────────
+
+describe('normal-mode semantic validation', () => {
+  // A supabase mock that CAPTURES generated_themes inserts so we can assert an
+  // invalid mission is never persisted, and a valid one carries the curricular
+  // identity of the recorte it was generated for.
+  function makeCapturingSupabase(recentThemes: unknown[] = []) {
+    const inserted: any[] = [];
+    const from = vi.fn((table: string) => {
+      if (table === 'generated_themes') {
+        return {
+          update: vi.fn().mockReturnValue({ eq: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }) }),
+          select: vi.fn().mockReturnValue({
+            eq: () => ({ order: () => ({ limit: () => Promise.resolve({ data: recentThemes, error: null }) }) }),
+          }),
+          insert: vi.fn((row: any) => {
+            inserted.push(row);
+            return { select: () => ({ single: () => Promise.resolve({ data: { id: 'theme-1' }, error: null }) }) };
+          }),
+        };
+      }
+      return makeChain({ data: null, error: null });
+    });
+    return { supabase: { from }, inserted };
+  }
+
+  it('retries when the AI returns semantically-invalid JSON, then persists the valid mission', async () => {
+    // 1st: parses but has NO mission → rejected. 2nd: valid.
+    mockCreate
+      .mockImplementationOnce(() => aiOk('{"title":"Algum título"}'))
+      .mockImplementationOnce(() => aiOk(VALID_THEME_JSON));
+    const { supabase, inserted } = makeCapturingSupabase();
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(2);           // it retried
+    expect(inserted).toHaveLength(1);                       // exactly one row
+    expect(String(inserted[0].description || '')).not.toBe(''); // real mission body
+    expect((res._body() as any).theme.mission).toBeTruthy();
+  });
+
+  it('NEVER persists a row in generated_themes when every attempt is semantically invalid (returns 500)', async () => {
+    mockCreate.mockImplementation(() => aiOk('{}')); // all-defaults, empty mission
+    const { supabase, inserted } = makeCapturingSupabase();
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(500);
+    expect(inserted).toHaveLength(0); // nenhuma linha inválida em generated_themes
+  });
+
+  it('persists the curricular identity (version + subtopic) the mission was generated for', async () => {
+    mockCreate.mockImplementation(() => aiOk(VALID_THEME_JSON));
+    const { supabase, inserted } = makeCapturingSupabase();
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+
+    const res = makeRes();
+    await handler(makeReq(), res);
+
+    expect(res._status()).toBe(200);
+    expect(inserted).toHaveLength(1);
+    // resolveActivityPrompt is mocked to versionId 'ver-1' + subtopicKey 'recorte-1'.
+    expect(inserted[0].curriculum_version_id).toBe('ver-1');
+    expect(inserted[0].curriculum_subtopic_key).toBe('recorte-1');
+  });
+});
