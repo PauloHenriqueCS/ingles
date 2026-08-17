@@ -912,6 +912,12 @@ async function handlePlanEntitlements(req: any, res: any) {
   if (!auth) return;
   const { userId } = auth;
   if (!(await applyRateLimit(res, userId, 'plan-entitlements'))) return;
+  // The resolved plan/entitlements snapshot must NEVER be served from a stale
+  // HTTP cache — a plan change (e.g. an admin granting an unlimited plan) has to
+  // take effect on the very next fetch. Without this, the app could keep showing
+  // an older commercial snapshot even though the server resolves the new plan
+  // correctly. Matches every sibling handler in this file (all set no-store).
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const snapshot = await getCurrentUserPlanEntitlements(userId);
     return res.json(snapshot);
