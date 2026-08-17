@@ -1,10 +1,13 @@
-import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock, Repeat2 } from 'lucide-react';
+import { PenSquare, MessagesSquare, Headphones, AudioLines, Lock, Repeat2, Target } from 'lucide-react';
 import type { View } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlement-types';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { usePublicConfig, type PublicConfigValues } from '../hooks/usePublicConfig';
 import { useErrorReviewSummary } from '../hooks/useErrorReviewSummary';
+import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
+import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
+import type { CurriculumProgress } from '../lib/curriculumApi';
 
 interface Props {
   onNavigate: (v: View) => void;
@@ -65,12 +68,15 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
     <div className="p-4 pt-8 max-w-2xl mx-auto">
 
       {/* Page header */}
-      <div className="mb-8">
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-100">O que você quer praticar hoje?</h1>
         <p className="text-slate-400 text-sm mt-2 leading-relaxed">
           Escolha uma atividade e continue sua evolução no inglês.
         </p>
       </div>
+
+      {/* Foco atual — the CURRENT curriculum recorte, front and center */}
+      <CurriculumFocusBanner />
 
       {/* Activity cards — always all four, regardless of plan */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -135,6 +141,69 @@ export default function HomePage({ onNavigate, onStartPractice }: Props) {
           onClick={() => onNavigate('error-review')}
         />
 
+      </div>
+    </div>
+  );
+}
+
+// ── Foco atual (current curriculum recorte) ───────────────────────────────────
+
+function isCompletedStatus(status: CurriculumProgress['status']): boolean {
+  return status === 'curriculum_completed' || status === 'completed';
+}
+
+/**
+ * Prominent top-of-Home block making the CURRENT learning focus explicit, using
+ * the server-resolved active curriculum recorte (localized, never the technical
+ * key). It shows exactly the same recorte the four curricular modalities
+ * (Writing / Listening / Pronunciation / Conversation Guided) resolve toward,
+ * and advances on its own when progression moves the pointer (the hook refetches
+ * on mount / navigation back to Home).
+ *
+ * States handled without ever inventing a recorte:
+ *  - loading / backend error → render nothing (neutral, non-blocking).
+ *  - active with a recorte → the focus card + compact "A1 · <module>" line.
+ *  - curriculum completed → a completion message.
+ *  - initializing / legitimate absence → a neutral placeholder line.
+ */
+function CurriculumFocusBanner() {
+  const { data, loading, error } = useCurriculumFocus();
+
+  // Never turn a loading/error state into a fabricated focus.
+  if (loading || error || !data) return null;
+
+  const t = curriculumUiStrings(data.interfaceLanguage);
+  const completed = isCompletedStatus(data.status);
+  const focus = data.currentFocus?.trim() || null;
+
+  // The primary line: the recorte itself, or a state-appropriate message.
+  const primary = focus
+    ? focus
+    : completed
+      ? t.focusCompleted
+      : t.focusInitializing;
+
+  // Compact macro position ("A1 · Falar sobre si mesmo") only when we truly
+  // have a focused recorte to contextualize.
+  const compact = focus
+    ? [data.currentLevel, data.currentModuleTitle].filter(Boolean).join(' · ')
+    : '';
+
+  return (
+    <div className="mb-8 rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
+      <div className="flex items-start gap-3">
+        <div className="flex items-center justify-center w-11 h-11 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-700 shadow-lg shadow-blue-900/40 shrink-0">
+          <Target className="w-5 h-5 text-white" strokeWidth={2} aria-hidden="true" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-300/90">
+            {t.focusEyebrow}
+          </p>
+          <h2 className="text-lg font-bold text-slate-100 leading-snug mt-0.5 break-words">
+            {primary}
+          </h2>
+          {compact && <p className="text-xs text-slate-400 mt-1 break-words">{compact}</p>}
+        </div>
       </div>
     </div>
   );

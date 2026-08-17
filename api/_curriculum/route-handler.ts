@@ -438,25 +438,81 @@ async function handlePutPreferences(req: any, res: any, userId: string, service:
   });
 }
 
+/**
+ * Pure assembly of the /api/curriculum/progress payload (unit-tested; no I/O).
+ * Guarantees the technical subtopic_key never leaks: currentFocus is ONLY ever
+ * the localized capability, never the key, and is null unless a non-empty
+ * localized capability is available.
+ */
+export interface CurriculumProgressPayloadInput {
+  status: 'active' | 'curriculum_completed' | string;
+  currentSubtopicKey: string | null;
+  /** Localized recorte capability (title) — NEVER the subtopic_key. */
+  currentFocusCapability: string | null;
+  currentModuleTitle: string | null;
+  interfaceLanguage: string;
+  conversationInPlan: boolean;
+  completedRecortes: number;
+  totalRecortes: number;
+}
+
+export function buildCurriculumProgressPayload(input: CurriculumProgressPayloadInput) {
+  const capability = input.currentFocusCapability?.trim();
+  // Defense-in-depth: never surface the raw key as the focus, even if a caller
+  // mistakenly passed it in as the capability.
+  const currentFocus =
+    capability && capability !== input.currentSubtopicKey ? capability : null;
+  return {
+    status: input.status,
+    currentLevel: input.currentSubtopicKey ? input.currentSubtopicKey.slice(0, 2) : null,
+    currentModuleTitle: input.currentModuleTitle, // friendly, macro-level
+    currentFocus,       // localized recorte title; technical key intentionally NOT exposed
+    interfaceLanguage: input.interfaceLanguage,
+    conversationInPlan: input.conversationInPlan,
+    completedRecortes: input.completedRecortes,
+    totalRecortes: input.totalRecortes,
+  };
+}
+
 async function handleProgress(res: any, userId: string, service: any): Promise<void> {
   const ensured = await ensureUserCurriculum(service, userId);
   const completed = await completedKeySet(service, userId, ensured.idToKey);
   const total = ensured.ordered.length;
   const done = ensured.ordered.filter((s) => completed.has(s.subtopicKey)).length;
   const currentModuleKey = ensured.currentSubtopicKey ? moduleKeyOf(ensured.currentSubtopicKey) : null;
+  const interfaceLanguage = ensured.languageContext.interfaceLanguage;
 
+  // currentFocus is the LOCALIZED capability (recorte title) the four curricular
+  // modalities all resolve toward — e.g. "Cumprimentar e apresentar-se". It is
+  // the human, interface-language label from curriculum_subtopic_i18n, NEVER the
+  // technical subtopic_key (e.g. "A1.SELFINTRO.GREET"), which stays server-side.
+  // Exposed so the Home "Foco atual" block can make the current learning focus
+  // explicit; it advances automatically when progression moves the pointer.
   let currentModuleTitle: string | null = null;
-  if (currentModuleKey) {
+  let currentFocusCapability: string | null = null;
+  if (ensured.currentSubtopicKey) {
     const repo = new SupabaseCurriculumRepository(service);
-    const mod = await repo.getModuleByKey(ensured.versionId, currentModuleKey, ensured.languageContext.interfaceLanguage);
+    const [mod, sub] = await Promise.all([
+      currentModuleKey
+        ? repo.getModuleByKey(ensured.versionId, currentModuleKey, interfaceLanguage)
+        : Promise.resolve(null),
+      repo.getSubtopicByKey(ensured.versionId, ensured.currentSubtopicKey, interfaceLanguage),
+    ]);
     currentModuleTitle = mod?.title ?? null;
+    currentFocusCapability = sub?.capability ?? null;
   }
 
-  res.status(200).json({
+  res.status(200).json(buildCurriculumProgressPayload({
     status: ensured.status,
-    currentLevel: ensured.currentSubtopicKey ? ensured.currentSubtopicKey.slice(0, 2) : null,
-    currentModuleTitle, // friendly, macro-level; recorte key intentionally NOT exposed
+    currentSubtopicKey: ensured.currentSubtopicKey,
+    currentFocusCapability,
+    currentModuleTitle,
+    interfaceLanguage,
+    // The user's own modality selection — lets the conversation screen default
+    // to Guided when Conversation is a required modality (menu = regra). It is
+    // the user's preference, not a curricular secret.
+    conversationInPlan: ensured.prefs.conversation === true,
     completedRecortes: done,
     totalRecortes: total,
-  });
+  }));
 }
