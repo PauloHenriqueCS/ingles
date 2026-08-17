@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
+import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock, Target, MessageCircle } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
+import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
+import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
 import { isAndroidApp } from '../lib/runtimeEnvironment';
 import { openAndroidAppSettings } from '../lib/lemonNative';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
@@ -202,6 +204,86 @@ interface Props {
   onNavigateToMinutePackages?: () => void;
 }
 
+// ── Guided vs Free chooser ─────────────────────────────────────────────────────
+
+interface ModeChooserProps {
+  t: ReturnType<typeof curriculumUiStrings>;
+  selected: 'guided' | 'free';
+  /** Which mode is recommended/default (guided iff Conversation is in the plan). */
+  recommended: 'guided' | 'free';
+  /** Localized current recorte title, or null when not resolvable. */
+  currentFocus: string | null;
+  onSelect: (mode: 'guided' | 'free') => void;
+}
+
+function ModeOptionCard({
+  active, icon, title, description, sub, badge, onClick,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  sub?: string | null;
+  badge?: string | null;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex-1 text-left rounded-xl border p-3.5 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+        active
+          ? 'border-blue-500 bg-blue-950/40'
+          : 'border-slate-700 bg-slate-800 hover:border-slate-600'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={active ? 'text-blue-300' : 'text-slate-400'}>{icon}</span>
+        <span className="text-sm font-semibold text-slate-100">{title}</span>
+        {badge && (
+          <span className="ml-auto px-1.5 py-0.5 rounded bg-blue-900/50 border border-blue-800/50 text-blue-300 text-[10px] font-medium">
+            {badge}
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">{description}</p>
+      {sub && <p className="text-xs text-blue-300/90 mt-1.5 break-words">{sub}</p>}
+    </button>
+  );
+}
+
+/**
+ * Lets the user explicitly pick Guided (practise the current curriculum focus)
+ * or Free (talk about anything) BEFORE starting a session. The recommended
+ * option is highlighted with a badge; the guided card surfaces the localized
+ * current recorte when available. The chosen mode is passed to session.start()
+ * and the server remains the authority on mode + curricular credit.
+ */
+function ConversationModeChooser({ t, selected, recommended, currentFocus, onSelect }: ModeChooserProps) {
+  return (
+    <div className="flex gap-2.5">
+      <ModeOptionCard
+        active={selected === 'guided'}
+        icon={<Target className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />}
+        title={t.conversationGuidedTitle}
+        description={t.conversationGuidedDesc}
+        sub={currentFocus ? t.conversationFocusLabel(currentFocus) : null}
+        badge={recommended === 'guided' ? t.conversationRecommended : null}
+        onClick={() => onSelect('guided')}
+      />
+      <ModeOptionCard
+        active={selected === 'free'}
+        icon={<MessageCircle className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />}
+        title={t.conversationFreeTitle}
+        description={t.conversationFreeDesc}
+        badge={recommended === 'free' ? t.conversationRecommended : null}
+        onClick={() => onSelect('free')}
+      />
+    </div>
+  );
+}
+
 export default function ConversationView({ onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
@@ -215,6 +297,13 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
   const conversationDisabledByPlan = conversation ? !conversation.enabled : false;
   const conversationBlocked = conversation ? !conversation.monthlyTime.canStart : false;
   const startDisabled = conversationLoading || conversationDisabledByPlan || conversationBlocked;
+
+  // Explicit Guided/Free choice. null = user hasn't overridden; the effective
+  // mode then follows the plan-derived default (guided iff Conversation is a
+  // selected modality). Reset per-session is unnecessary — the last choice is a
+  // fine sticky default within the screen.
+  const curriculumFocus = useCurriculumFocus();
+  const [selectedMode, setSelectedMode] = useState<'guided' | 'free' | null>(null);
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
@@ -282,6 +371,18 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
   const isEnded      = session.status === 'ended';
   const isError      = session.status === 'error';
   const canStart     = session.status === 'idle' || isEnded || isError;
+
+  // ── Guided vs Free mode choice ─────────────────────────────────────────────
+  // The recommended/default mode follows the teaching plan: Guided when
+  // Conversation is a selected modality, otherwise Free. The user can always
+  // override. The server is the final authority on both the mode and whether the
+  // session earns curricular credit — this is purely the UI's choice surface.
+  const focusData = curriculumFocus.data;
+  const conversationInPlan = focusData?.conversationInPlan ?? false;
+  const currentFocus = focusData?.currentFocus?.trim() || null;
+  const focusStrings = curriculumUiStrings(focusData?.interfaceLanguage ?? null);
+  const defaultMode: 'guided' | 'free' = conversationInPlan ? 'guided' : 'free';
+  const effectiveMode: 'guided' | 'free' = selectedMode ?? defaultMode;
 
   // The technical gateway ceiling ('technical') must never be surfaced to
   // the user as if it were a commercial benefit/countdown — only show a
@@ -479,6 +580,14 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
             {/* ── Start / restart button ─────────────────────────────────── */}
             {canStart && (
               <>
+                {/* Guided vs Free — explicit choice BEFORE starting a session */}
+                <ConversationModeChooser
+                  t={focusStrings}
+                  selected={effectiveMode}
+                  recommended={defaultMode}
+                  currentFocus={currentFocus}
+                  onSelect={setSelectedMode}
+                />
                 {!conversationLoading && conversationDisabledByPlan && (
                   <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationUnavailable}</p>
                 )}
@@ -486,7 +595,7 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
                   <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>
                 )}
                 <button
-                  onClick={() => { if (!startDisabled) session.start(); }}
+                  onClick={() => { if (!startDisabled) session.start(effectiveMode); }}
                   disabled={startDisabled}
                   aria-disabled={startDisabled}
                   className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"

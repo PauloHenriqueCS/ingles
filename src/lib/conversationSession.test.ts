@@ -489,7 +489,8 @@ describe('client-side gatewaySessionId chain (useRealtimeSession.ts)', () => {
     const code = await hookSource();
     // Scoped to inside start()'s body, after the import statement (which
     // legitimately names reportSessionActive) and up to dc.onopen's own definition.
-    const startBodyStart = code.indexOf('const start = useCallback(async () => {');
+    // Anchor tolerates the optional `mode` argument on start()'s signature.
+    const startBodyStart = code.indexOf('const start = useCallback(async (');
     const dataChannelIdx = code.indexOf("const dc = pc.createDataChannel('oai-events');");
     expect(startBodyStart).toBeGreaterThan(-1);
     expect(dataChannelIdx).toBeGreaterThan(startBodyStart);

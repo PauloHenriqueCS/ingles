@@ -10,6 +10,7 @@ import { getLanguageSpeechConfig, SpeechConfigError } from '../_curriculum/langu
 import { getLanguageDisplayName } from '../_curriculum/presentation-i18n';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
+import { resolveSessionMode, computeGuidedEligible } from './session-mode';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
@@ -659,8 +660,16 @@ async function handleSession(req: any, res: any) {
   }
   const transcriptionConfig = { model: 'gpt-4o-mini-transcribe', language: sttLanguage };
 
-  const forceFree = (req.body ?? {}).mode === 'free';
-  const sessionMode: 'guided' | 'free' = (conversationInPlan && !forceFree) ? 'guided' : 'free';
+  // Mode is now an EXPLICIT user choice (Guided vs Free), resolved
+  // server-side: an explicit 'free'/'guided' is honored; absent a choice we keep
+  // the plan-derived default (guided iff Conversation is selected) for older
+  // clients. A client can request Guided, but curricular CREDIT is decided
+  // separately (computeGuidedEligible) and still requires Conversation to be a
+  // selected modality — so a client flag can never falsify progression credit.
+  const sessionMode: 'guided' | 'free' = resolveSessionMode({
+    requestedMode: (req.body ?? {}).mode,
+    conversationInPlan,
+  });
   let guidedInstructions: string | null = null;
   if (sessionMode === 'guided') {
     try {
@@ -981,7 +990,16 @@ async function handleSession(req: any, res: any) {
   // 7). GUIDED is eligible ONLY when there is a real current recorte to credit;
   // FREE is never eligible. The identity is persisted DURABLY with the row (in
   // the commercial INSERT below, atomically) and re-checked for guided.
-  const guidedEligible = sessionMode === 'guided' && conversationCurricularIdentity != null;
+  // Curricular credit requires MORE than a guided session: Conversation must be
+  // a SELECTED modality (menu = regra) and a real recorte must exist. A
+  // client-forced guided session on a plan that never selected Conversation runs
+  // guided but is NOT eligible — it can never make Conversation a progression
+  // requirement the user didn't opt into.
+  const guidedEligible = computeGuidedEligible({
+    sessionMode,
+    conversationInPlan,
+    hasCurricularIdentity: conversationCurricularIdentity != null,
+  });
   const identityCols = {
     session_mode: sessionMode,
     curriculum_practice_eligible: guidedEligible,
