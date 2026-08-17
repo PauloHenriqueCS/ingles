@@ -315,6 +315,13 @@ export function isTooSimilar(
 const VALID_LEVELS = new Set(['A1', 'A2', 'B1', 'B2', 'C1', 'C2']);
 const VALID_DIFFS = new Set(['easy', 'medium', 'hard']);
 
+// Generic fallback title applied by normalizeTheme when the AI omits `title`.
+// It is a SENTINEL for "no real title", never a legitimate mission title — the
+// data-driven template now REQUIRES the AI to produce its own specific title,
+// so a mission whose title is exactly this sentinel is treated as empty by the
+// semantic validator below.
+const DEFAULT_MISSION_TITLE = 'Missão do dia';
+
 export function normalizeTheme(parsed: any): Record<string, unknown> {
   const format = String(parsed.format || parsed.activityType || 'história');
   const conflict = String(parsed.conflict || '');
@@ -338,7 +345,7 @@ export function normalizeTheme(parsed: any): Record<string, unknown> {
   const semanticSummary = summaryParts.join(' | ');
 
   return {
-    title: String(parsed.title || 'Missão do dia'),
+    title: String(parsed.title || DEFAULT_MISSION_TITLE),
     missionSetup,
     missionTask,
     mission,
@@ -371,6 +378,49 @@ export function normalizeTheme(parsed: any): Record<string, unknown> {
     grammarGuide: normalizeGrammarGuide(parsed.grammarGuide),
     optionalExercises: normalizeOptionalExercises(parsed.optionalExercises),
   };
+}
+
+/**
+ * Semantic validation for a NORMAL (curriculum) writing mission.
+ *
+ * Parsing succeeding is NOT enough: the AI can return well-formed JSON whose
+ * mission fields are empty, which previously slipped through normalizeTheme's
+ * defaults and reached the UI as an empty "Missão do dia" card. This gate
+ * rejects any candidate that carries no real mission content OR that collapses
+ * to the generic defaults, so the retry loop tries again and — only after
+ * retries are exhausted — an operational error is returned instead of an empty
+ * mission. Returns a human-readable reason when invalid, or null when valid.
+ * Mirrors the review-mode contract enforced by validateReviewTheme.
+ */
+export function validateNormalTheme(theme: Record<string, unknown>): string | null {
+  const title = String(theme.title ?? '').trim();
+  if (!title) return 'title vazio';
+  // The sentinel default only appears when the AI omitted `title` — treat it as
+  // empty so an all-defaults object can never be persisted (blocker: defaults
+  // genéricos).
+  if (title === DEFAULT_MISSION_TITLE) return 'title é apenas o default genérico';
+
+  const mission = String(theme.mission ?? '').trim();
+  const missionSetup = String(theme.missionSetup ?? '').trim();
+  const missionTask = String(theme.missionTask ?? '').trim();
+
+  // `mission` is either sent directly by the AI or built from
+  // missionSetup + missionTask by normalizeTheme. If it is still empty here,
+  // neither source carried content.
+  if (!mission) return 'mission vazia (missionSetup/missionTask ausentes)';
+  // Guard against a token-thin "mission" that is not a real instruction.
+  if (mission.length < 12) return 'mission sem conteúdo real';
+
+  // Fundamental fields must have valid types. normalizeTheme already coerces
+  // these to valid values, so a failure here signals an internal contract drift
+  // rather than bad AI output — still rejected rather than persisted.
+  if (!VALID_LEVELS.has(String(theme.level))) return 'level inválido';
+  if (!VALID_DIFFS.has(String(theme.difficulty))) return 'difficulty inválida';
+  if (typeof theme.estimatedTimeMinutes !== 'number' || !(Number(theme.estimatedTimeMinutes) > 0)) {
+    return 'estimatedTimeMinutes inválido';
+  }
+
+  return null;
 }
 
 /**
@@ -837,6 +887,17 @@ export default async function handler(req: any, res: any) {
 
     const candidate = normalizeTheme(parsed);
 
+    // SEMANTIC validity gate (blocker: empty missions). Parsing is not enough —
+    // an AI response with empty mission/title must never be persisted or shown.
+    // Unlike the similarity guard below, this check is NOT skipped on the last
+    // attempt: a semantically-invalid mission is never accepted, so exhausting
+    // retries yields an operational error (below), never an empty card.
+    const invalidReason = validateNormalTheme(candidate);
+    if (invalidReason) {
+      console.error(`Attempt ${attempt}: missão semanticamente inválida — ${invalidReason}`);
+      continue;
+    }
+
     // Skip similarity check on last attempt to guarantee a response
     if (attempt < MAX_ATTEMPTS && isTooSimilar(candidate, recentThemes)) {
       console.log(`Attempt ${attempt}: too similar to history, retrying…`);
@@ -848,7 +909,9 @@ export default async function handler(req: any, res: any) {
   }
 
   if (!theme) {
-    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma missão diferente. Tente novamente.');
+    // Retries exhausted with no semantically-valid, sufficiently-distinct
+    // mission — an operational error, never an empty mission.
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão agora. Tente novamente.');
   }
 
   applySelectedTopicOverride(theme, selectedTheme);

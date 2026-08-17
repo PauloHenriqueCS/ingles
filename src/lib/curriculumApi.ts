@@ -98,8 +98,16 @@ export interface CurriculumPreferences {
 
 export interface CurriculumProgress {
   status: CurriculumStatus;
-  currentLevel: string;
-  currentModuleTitle: string;
+  currentLevel: string | null;
+  currentModuleTitle: string | null;
+  /** Localized (interface-language) title of the CURRENT recorte the four
+   *  curricular modalities resolve toward — e.g. "Cumprimentar e apresentar-se".
+   *  Never the technical subtopic_key. Null while initializing / when absent. */
+  currentFocus: string | null;
+  /** Interface language of this payload, so the UI localizes its own chrome. */
+  interfaceLanguage: string;
+  /** Whether the user selected Conversation as a required modality (menu = regra). */
+  conversationInPlan: boolean;
   completedRecortes: number;
   totalRecortes: number;
 }
