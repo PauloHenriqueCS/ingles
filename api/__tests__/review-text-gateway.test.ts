@@ -538,55 +538,56 @@ describe('OBSERVE mode — token metrics per event', () => {
   });
 });
 
-// ── 5. Review mode uses writing.correct_review ────────────────────────────────
+// ── 5. Legacy review mode is blocked server-side → routes as writing.correct ──
+// A modified client sending mode:'review' + reviewGroupId no longer activates
+// the old spaced-review flow: the handler normalizes mode to 'normal', so the
+// legacy featureKey writing.correct_review is never emitted.
 
-describe('review mode featureKey', () => {
+describe('legacy review mode is blocked server-side', () => {
   beforeEach(() => {
     mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
-    mockCreate.mockImplementation(() => aiOk(REVIEW_AI_RESPONSE));
+    // The request runs the NORMAL correction — a normal AI response is returned.
+    mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
   });
 
-  it('spaced review submissions use featureKey writing.correct_review', async () => {
+  it('a mode:"review" request uses featureKey writing.correct (never writing.correct_review)', async () => {
     const res = makeRes();
     await handler(makeReq({ body: reviewBody }), res);
     expect(res._status()).toBe(200);
     expect(mockStartEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ featureKey: 'writing.correct_review' }),
+      expect.objectContaining({ featureKey: 'writing.correct' }),
     );
+    const usedKeys = mockStartEvent.mock.calls.map((c) => (c[0] as any).featureKey);
+    expect(usedKeys).not.toContain('writing.correct_review');
   });
 });
 
 // ── 6. Per-feature policy isolation ───────────────────────────────────────────
 
 describe('per-feature policy isolation', () => {
-  it('writing.correct_review stays legacy when only writing.correct is activated in observe', async () => {
-    mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
-      ctx.featureKey === 'writing.correct'
-        ? { gatewayMode: 'observe', runtimeStatus: 'enabled' }
-        : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
-    );
-    mockCreate.mockImplementation(() => aiOk(REVIEW_AI_RESPONSE));
+  it('a mode:"review" request never resolves policy for the legacy writing.correct_review key', async () => {
+    mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
 
-    const res = makeRes();
-    await handler(makeReq({ body: reviewBody }), res);
+    await handler(makeReq({ body: reviewBody }), makeRes());
 
-    expect(res._status()).toBe(200);
-    expect(mockStartEvent).not.toHaveBeenCalled();
+    const resolvedKeys = mockPolicyResolvePolicy.mock.calls.map((c) => (c[0] as any).featureKey);
+    expect(resolvedKeys).toContain('writing.correct');
+    expect(resolvedKeys).not.toContain('writing.correct_review');
   });
 
-  it('writing.correct is observed while writing.correct_review remains legacy, in the same test run', async () => {
-    mockPolicyResolvePolicy.mockImplementation(async (ctx: any) =>
-      ctx.featureKey === 'writing.correct'
-        ? { gatewayMode: 'observe', runtimeStatus: 'enabled' }
-        : { gatewayMode: 'legacy', runtimeStatus: 'enabled' },
-    );
+  it('normal mode records one writing.correct event; a review-shaped request behaves identically', async () => {
+    mockPolicyResolvePolicy.mockResolvedValue({ gatewayMode: 'observe', runtimeStatus: 'enabled' });
+    mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
 
-    await handler(makeReq(), makeRes()); // normal mode
+    await handler(makeReq(), makeRes()); // normal
     expect(mockStartEvent).toHaveBeenCalledTimes(1);
 
-    mockCreate.mockImplementation(() => aiOk(REVIEW_AI_RESPONSE));
-    await handler(makeReq({ body: reviewBody }), makeRes()); // review mode
-    expect(mockStartEvent).toHaveBeenCalledTimes(1); // unchanged — still just the one from normal mode
+    await handler(makeReq({ body: reviewBody }), makeRes()); // review-shaped → treated as normal
+    expect(mockStartEvent).toHaveBeenCalledTimes(2);
+    for (const call of mockStartEvent.mock.calls) {
+      expect((call[0] as any).featureKey).toBe('writing.correct');
+    }
   });
 });
 
@@ -764,12 +765,12 @@ describe('metadata never leaks student content', () => {
     });
   });
 
-  it('review mode metadata carries flowType "review", still no submitted text', async () => {
-    mockCreate.mockImplementation(() => aiOk(REVIEW_AI_RESPONSE));
+  it('a mode:"review" request carries flowType "normal" (legacy not triggered), still no submitted text', async () => {
+    mockCreate.mockImplementation(() => aiOk(VALID_AI_RESPONSE));
     await handler(makeReq({ body: reviewBody }), makeRes());
 
     const startCall = mockStartEvent.mock.calls[0][0] as any;
-    expect(startCall.metadata.flowType).toBe('review');
+    expect(startCall.metadata.flowType).toBe('normal');
     expect(JSON.stringify(startCall.metadata)).not.toContain('tired');
     expect(JSON.stringify(startCall.metadata)).not.toContain('proud');
   });
