@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
-import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, ValidationResult, RequiredWordEvaluation, ReviewScheduleResult, RewriteComparisonResult } from '../types';
-import { useRequiredWordsValidation } from '../hooks/useRequiredWordsValidation';
+import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { getScheduleForDate } from '../data/calendar2026';
@@ -73,7 +72,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [historyState, setHistoryState] = useState<HistoryState>('idle');
   const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
-  const [reviewSchedule, setReviewSchedule] = useState<ReviewScheduleResult | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [existingV2Text, setExistingV2Text] = useState<string | null>(null);
   const [existingV2Comparison, setExistingV2Comparison] = useState<RewriteComparisonResult | null>(null);
@@ -85,7 +83,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   // NOT when entry changes (draft save), so dailyTheme survives draft saves
   useEffect(() => {
     setDailyTheme(null);
-    setReviewSchedule(null);
   }, [date]);
 
   useEffect(() => {
@@ -199,8 +196,9 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           theme: dailyTheme?.themeEn ?? '',
           grammarGoal: dailyTheme?.objective ?? '',
           mainTense: dailyTheme?.verbTense ?? '',
-          mode: dailyTheme?.mode ?? 'normal',
-          reviewGroupId: dailyTheme?.reviewGroupId ?? null,
+          // A Escrita é sempre uma Escrita normal — a revisão de erros virou
+          // uma atividade independente ("Revisar meus erros").
+          mode: 'normal',
           missionTitle: dailyTheme?.title ?? '',
           studentLevel: dailyTheme?.level ?? '',
           attemptId,
@@ -214,7 +212,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           generatedThemeId: dailyTheme?.id ?? null,
         }),
       });
-      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewSchedule?: ReviewScheduleResult; reviewId?: string };
+      let data: { feedback?: AIFeedback; reviewedAt?: string; error?: string; message?: string; reviewId?: string };
       try {
         data = await res.json();
       } catch {
@@ -229,7 +227,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
       entitlements.refetch();
       const feedback = data.feedback!;
       const ts = data.reviewedAt ?? new Date().toISOString();
-      if (data.reviewSchedule?.applied) setReviewSchedule(data.reviewSchedule);
       setAiReview(feedback);
       setReviewedAt(ts);
       setReviewState('done');
@@ -254,6 +251,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
             entryDate: date,
             theme: dailyTheme?.themeEn || undefined,
             activeWeekdays,
+            originalText,
           }).catch((err) => console.error('Review group creation failed:', err));
         }
       }
@@ -275,11 +273,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     weekday: 'long', day: 'numeric', month: 'long',
   });
   const isReviewing = reviewState === 'loading';
-  const isReviewMode = dailyTheme?.mode === 'review';
-  const validation = useRequiredWordsValidation(
-    isReviewMode ? (dailyTheme?.requiredWords ?? []) : [],
-    originalText,
-  );
 
   const entitlements = usePlanEntitlements();
   const writingEntitlements = entitlements.data?.writing ?? null;
@@ -302,8 +295,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const overLimitBy = maxChars !== null ? Math.max(charCount - maxChars, 0) : 0;
   const nearLimit = maxChars !== null && overLimitBy === 0 && charCount >= Math.floor(maxChars * 0.9);
 
-  const canSubmit = (!isReviewMode || validation.allFound)
-    && !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
+  const canSubmit = !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
 
   const saveBtnCls =
     saveState === 'saved' ? 'bg-green-700 text-white' :
@@ -430,10 +422,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           </div>
         </div>
 
-        {isReviewMode && validation.words.length > 0 && (
-          <RequiredWordsTracker validation={validation} />
-        )}
-
         {writingDisabledByPlan && (
           <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.featureUnavailable}</p>
         )}
@@ -499,9 +487,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
         {reviewState === 'done' && aiReview && (
           <>
-            {isReviewMode && reviewSchedule && (
-              <ScheduleResultCard schedule={reviewSchedule} />
-            )}
             <CollapsibleBlock title="Relatório do Professor" defaultOpen={true}>
               <TeacherReport
                 review={aiReview}
@@ -582,9 +567,6 @@ function TeacherReport({
       {review.summary && <SummaryCard text={review.summary} />}
       <CorrectedTextCard text={review.correctedText} />
       {review.mainMistakes.length > 0 && <MainMistakesCard items={review.mainMistakes} />}
-      {review.requiredWordEvaluation && review.requiredWordEvaluation.length > 0 && (
-        <RequiredWordEvaluationCard items={review.requiredWordEvaluation} />
-      )}
       {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
       {review.objectiveFeedback && (
         <ObjectiveFeedbackCard text={review.objectiveFeedback} objective={grammarObjective} />
@@ -766,103 +748,6 @@ function NextPracticeCard({ text }: { text: string }) {
         <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
       </div>
       <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
-    </div>
-  );
-}
-
-// ── Schedule result card ──────────────────────────────────────────────────────
-
-function ScheduleResultCard({ schedule }: { schedule: ReviewScheduleResult }) {
-  const isMastered = schedule.newStatus === 'mastered';
-  const isPassed = schedule.overallResult === 'passed';
-
-  const { bg, text, message } = isMastered
-    ? {
-        bg: 'bg-green-900/20 border border-green-800/30',
-        text: 'text-green-300',
-        message: 'Muito bem! Você dominou este grupo de palavras.',
-      }
-    : isPassed
-    ? {
-        bg: 'bg-blue-900/20 border border-blue-800/30',
-        text: 'text-blue-300',
-        message: `✓ Revisão concluída. Essas palavras voltarão em ${schedule.intervalDays} dias.`,
-      }
-    : {
-        bg: 'bg-amber-900/20 border border-amber-800/30',
-        text: 'text-amber-300',
-        message: '⚠ Algumas palavras ainda precisam de prática. Elas voltarão em 2 dias.',
-      };
-
-  return (
-    <div className={`rounded-xl p-4 ${bg}`}>
-      <p className={`text-sm font-medium ${text}`}>{message}</p>
-    </div>
-  );
-}
-
-// ── Required word evaluation card ────────────────────────────────────────────
-
-function RequiredWordEvaluationCard({ items }: { items: RequiredWordEvaluation[] }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Palavras Obrigatórias</p>
-      <div className="space-y-4">
-        {items.map((item, i) => {
-          const isCorrect = item.status === 'correct';
-          return (
-            <div key={i} className="space-y-1.5 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
-              <div className="flex items-center gap-2">
-                <span className={`text-base leading-none ${isCorrect ? 'text-green-400' : 'text-red-400'}`}>
-                  {isCorrect ? '✓' : '✕'}
-                </span>
-                <span className="font-mono text-sm font-semibold text-slate-100">{item.requiredWord}</span>
-              </div>
-              <p className="text-xs text-slate-300 leading-relaxed pl-5">{item.explanation}</p>
-              {item.usedExcerpt && (
-                <p className="text-xs text-slate-500 italic pl-5">"{item.usedExcerpt}"</p>
-              )}
-              {item.suggestedCorrection && (
-                <p className="text-xs text-green-400 italic pl-5">Sugestão: "{item.suggestedCorrection}"</p>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── Required words tracker ────────────────────────────────────────────────────
-
-function RequiredWordsTracker({ validation }: { validation: ValidationResult }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-      <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">
-        Palavras obrigatórias
-      </p>
-      <div className="space-y-1.5">
-        {validation.words.map((item, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <span className={`text-sm leading-none ${item.status === 'found' ? 'text-green-400' : 'text-slate-600'}`}>
-              {item.status === 'found' ? '✓' : '○'}
-            </span>
-            <span className={`text-sm font-mono ${item.status === 'found' ? 'text-green-300' : 'text-slate-400'}`}>
-              {item.word}
-            </span>
-          </div>
-        ))}
-      </div>
-      {!validation.allFound && (
-        <div className="pt-2 border-t border-slate-700">
-          <p className="text-xs text-amber-400 mb-1">Você ainda precisa utilizar:</p>
-          <ul className="space-y-0.5">
-            {validation.missingWords.map((word, i) => (
-              <li key={i} className="text-xs text-amber-300 font-mono">• {word}</li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

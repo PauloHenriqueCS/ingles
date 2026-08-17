@@ -28,6 +28,7 @@ import ConversationView from './components/ConversationView';
 import ListeningView from './components/ListeningView';
 import AudioSettingsView from './components/AudioSettingsView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
+import ErrorReviewView from './components/ErrorReviewView';
 import SettingsView from './components/SettingsView';
 import CurriculumPlanView from './components/CurriculumPlanView';
 import PlacementOnboarding from './components/placement/PlacementOnboarding';
@@ -321,6 +322,9 @@ export default function App() {
         )}
         {view === 'pronunciation-training' && (
           <PronunciationTrainingView onBack={() => setView('home')} onNavigateToSubscription={() => setView('subscription')} />
+        )}
+        {view === 'error-review' && (
+          <ErrorReviewView onBack={() => setView('home')} />
         )}
         {view === 'settings' && (
           <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
