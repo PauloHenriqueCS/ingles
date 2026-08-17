@@ -6,7 +6,6 @@ import { buildLearningContextForTheme } from '../lib/themeContext';
 import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
-import { fetchPendingReviewGroup } from '../lib/pendingReview';
 import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
 import { WRITING_THEMES, RANDOM_THEME_LABEL } from '../domain/writing/writing-themes';
 import type { WritingEntitlements } from '../domain/entitlements/entitlement-types';
@@ -96,13 +95,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
       : null;
 
     try {
-      const [memory, pendingReview] = await Promise.all([
-        fetchLearningMemory(),
-        fetchPendingReviewGroup().catch((err) => {
-          console.error('Failed to fetch pending review group:', err);
-          return null;
-        }),
-      ]);
+      // A Escrita é sempre uma Escrita normal — nunca consultamos revisão
+      // pendente para sequestrar a missão. Os erros viram cards na atividade
+      // independente "Revisar meus erros".
+      const memory = await fetchLearningMemory();
 
       let context;
       if (memory) {
@@ -125,8 +121,8 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
 
       const authHeader = await getAuthHeader();
       const requestBody = buildGenerateThemeRequestBody({
-        mode: pendingReview ? 'review' : 'normal',
-        reviewGroup: pendingReview ?? null,
+        mode: 'normal',
+        reviewGroup: null,
         learningContext: context,
         previousThemeId: currentThemeId,
         excludedTheme,
@@ -286,20 +282,6 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
                       <Info className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
                     </button>
                   </div>
-                ))}
-              </div>
-            </Section>
-          )}
-
-          {/* Required words (review mode) */}
-          {theme.requiredWords && theme.requiredWords.length > 0 && (
-            <Section title="Palavras obrigatórias">
-              <p className="text-xs text-slate-500 mb-1.5">Use todas estas palavras no seu texto.</p>
-              <div className="flex flex-wrap gap-1.5">
-                {theme.requiredWords.map((w, i) => (
-                  <span key={i} className="px-2 py-0.5 bg-amber-900/40 border border-amber-800/40 rounded text-xs text-amber-300 font-mono">
-                    {w}
-                  </span>
                 ))}
               </div>
             </Section>
