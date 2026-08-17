@@ -10,7 +10,7 @@ import { getLanguageSpeechConfig, SpeechConfigError } from '../_curriculum/langu
 import { getLanguageDisplayName } from '../_curriculum/presentation-i18n';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
-import { resolveSessionMode, computeGuidedEligible } from './session-mode';
+import { resolveSessionMode, computeGuidedEligible } from './_session-mode';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';

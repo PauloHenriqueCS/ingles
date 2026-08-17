@@ -45,7 +45,7 @@
     "api/__tests__/pronunciation-assessment-gateway.test.ts",
     "src/services/listening/audio/synthesize-listening-block.ts",
     "api/conversation/[...slug].ts",
-    "api/conversation/session-mode.ts",
+    "api/conversation/_session-mode.ts",
     "api/__tests__/conversation-preview-gateway.test.ts",
     "api/__tests__/conversation-session-gateway.test.ts",
     "api/__tests__/conversation-session-mode.test.ts",
