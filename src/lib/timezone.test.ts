@@ -80,6 +80,31 @@ describe('getSpYear / getSpMonth', () => {
   });
 });
 
+describe('fronteira do dia da Revisão de erros (America/Sao_Paulo)', () => {
+  // O limite de 10/dia reseta na virada de DATA em São Paulo — nunca às 21h SP
+  // por acidente de UTC. Estas assertivas espelham a regra usada no servidor
+  // (RPC: (now() AT TIME ZONE 'America/Sao_Paulo')::date) que é a autoridade.
+
+  it('17/08 22:30 SP ainda pertence ao dia 17/08 (UTC não antecipa o reset)', () => {
+    // 2026-08-18 01:30 UTC = 2026-08-17 22:30 SP (UTC-3, sem horário de verão)
+    expect(toSpDate('2026-08-18T01:30:00Z')).toBe('2026-08-17');
+  });
+
+  it('23:59 SP ainda é o mesmo dia; 00:00 SP já é o dia seguinte', () => {
+    // 2026-08-18 02:59 UTC = 2026-08-17 23:59 SP
+    expect(toSpDate('2026-08-18T02:59:00Z')).toBe('2026-08-17');
+    // 2026-08-18 03:00 UTC = 2026-08-18 00:00 SP
+    expect(toSpDate('2026-08-18T03:00:00Z')).toBe('2026-08-18');
+  });
+
+  it('getTodaySP às 22:30 SP retorna o dia corrente, não o seguinte', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-18T01:30:00Z')); // 22:30 SP do dia 17
+    expect(getTodaySP()).toBe('2026-08-17');
+    vi.useRealTimers();
+  });
+});
+
 describe('getYesterdaySP', () => {
   it('retorna o dia anterior ao dia atual em SP', () => {
     vi.useFakeTimers();
