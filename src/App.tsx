@@ -243,6 +243,7 @@ export default function App() {
           <HomePage
             onNavigate={setView}
             onStartPractice={() => openDay(today)}
+            activeWeekdays={learningSettings.activeWeekdays}
           />
         )}
         {view === 'dashboard' && (

@@ -3,10 +3,12 @@ import { toSpDate } from './timezone';
 import { computeWeekdayStreak, computeMaxWeekdayStreak } from './metricsCore';
 
 // Fetches every calendar date where the user completed at least one activity:
-//   writing (english_reviews), pronunciation, conversation (goal met), listening.
+//   writing (english_reviews), pronunciation, conversation (goal met),
+//   listening, and error review (a submitted review answer).
 //
 // This is the single source of truth for "active day" used by streak and
-// practiced-days counters across all screens.
+// practiced-days counters across all screens. All source queries run in a
+// single parallel round-trip.
 export async function fetchAllActiveDates(): Promise<string[]> {
   const dates = new Set<string>();
 
@@ -16,6 +18,7 @@ export async function fetchAllActiveDates(): Promise<string[]> {
     trainingRes,
     listeningRes,
     sessionsRes,
+    errorReviewRes,
     goalRes,
   ] = await Promise.all([
       supabase
@@ -39,6 +42,13 @@ export async function fetchAllActiveDates(): Promise<string[]> {
       supabase
         .from('conversation_sessions')
         .select('session_date, duration_sec'),
+      // "Revisar meus erros" — each row in review_item_attempts is a genuinely
+      // submitted answer (submit_error_review_item; only real submissions
+      // insert). activity_date is already the São Paulo day (server-authored),
+      // so it counts as a valid practice day like any other activity.
+      supabase
+        .from('review_item_attempts')
+        .select('activity_date'),
       supabase
         .from('ai_conversation_preferences')
         .select('daily_conversation_goal_minutes')
@@ -65,6 +75,11 @@ export async function fetchAllActiveDates(): Promise<string[]> {
 
   // Listening: activity_date is already a date string.
   for (const row of listeningRes.data ?? []) {
+    if (row.activity_date) dates.add(row.activity_date as string);
+  }
+
+  // Error review: activity_date is already the São Paulo day string.
+  for (const row of errorReviewRes.data ?? []) {
     if (row.activity_date) dates.add(row.activity_date as string);
   }
 
