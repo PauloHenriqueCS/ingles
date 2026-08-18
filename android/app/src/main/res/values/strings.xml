@@ -4,4 +4,8 @@
     <string name="title_activity_main">Orodim</string>
     <string name="package_name">com.lemon.app</string>
     <string name="custom_url_scheme">com.lemon.app</string>
+    <!-- OneSignal Android notification accent color (AARRGGBB). Tints the small
+         icon + app name in the notification header. Brand teal from the Orodim
+         logo (dominant #009999). See docs/onesignal-push.md §2. -->
+    <string name="onesignal_notification_accent_color">FF009999</string>
 </resources>
