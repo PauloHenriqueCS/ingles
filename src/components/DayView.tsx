@@ -3,6 +3,7 @@ import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookO
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
+import { canOfferNewWriting } from '../domain/writing/writing-practice';
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
@@ -78,14 +79,23 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const [existingV2FinalText, setExistingV2FinalText] = useState<string | null>(null);
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // True while the user is inside a freshly-started EXTRA practice of the same
+  // day ("Nova missão"). While true, the day's stored entry must NOT restore
+  // over the blank practice — the active practice is driven by local state and
+  // its own new english_reviews record. Cleared on day navigation.
+  const freshPracticeRef = useRef(false);
 
   // Reset mission + schedule only when navigating to a different day,
   // NOT when entry changes (draft save), so dailyTheme survives draft saves
   useEffect(() => {
     setDailyTheme(null);
+    freshPracticeRef.current = false;
   }, [date]);
 
   useEffect(() => {
+    // A "Nova missão" extra practice owns the screen from local state; never let
+    // the day's stored entry clobber it (a date change clears the flag above).
+    if (freshPracticeRef.current) return;
     setTitle(entry?.title ?? '');
     setOriginalText(entry?.originalText ?? '');
     setDifficulty(entry?.difficulty ?? null);
@@ -148,6 +158,38 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     } catch {
       // silent — user can still write regardless
     }
+  }
+
+  // "Nova missão": start a NEW, independent writing practice for the same day
+  // (only offered when the plan still allows another writing today — see the
+  // completion UI). This ONLY resets the on-screen practice to a blank state and
+  // refreshes the server-authoritative quota; it never generates a mission or
+  // consumes anything by itself, so a double-tap is harmless. The user then
+  // requests a fresh mission (DailyThemeCard, for the CURRENT recorte) and
+  // submits a new review — a distinct english_reviews record + its own curricular
+  // credit, re-validated server-side (reserve_writing_review) before any AI call.
+  // The calendar day stays "concluído"; no previous review is lost (history reads
+  // every english_reviews row).
+  function handleNewMission() {
+    freshPracticeRef.current = true;
+    setTitle('');
+    setOriginalText('');
+    setPtDraft('');
+    setDifficulty(null);
+    setStatus('nao-iniciado');
+    setAiReview(null);
+    setReviewedAt(null);
+    setReviewState('idle');
+    setReviewError(null);
+    setSaveState('idle');
+    setHistoryState('idle');
+    setReviewId(null);
+    setExistingV2Text(null);
+    setExistingV2Comparison(null);
+    setExistingV2FinalText(null);
+    setDailyTheme(null);
+    entitlements.refetch();
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function handleSaveDraft() {
@@ -531,6 +573,28 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
                 />
               )}
             </CollapsibleBlock>
+
+            {/* Next writing practice — shown only when the plan still allows
+                another writing today (server-authoritative: reviews.canStart is
+                computed from consumption vs the plan limit, refreshed after each
+                review). When the daily quota is exhausted, no action is offered
+                (the "exhausted" note in the compose area above informs the user),
+                and reserve_writing_review would reject a forged request anyway. */}
+            {canOfferNewWriting(writingEntitlements, writingDisabledByPlan) && (
+              <div className="pt-1 space-y-1.5">
+                <button
+                  onClick={handleNewMission}
+                  className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+                >
+                  Nova missão
+                </button>
+                {writingEntitlements && !writingEntitlements.reviews.unlimited && (
+                  <p className="text-xs text-slate-500 text-center">
+                    {`${writingEntitlements.reviews.remaining} escrit${writingEntitlements.reviews.remaining === 1 ? 'a restante' : 'as restantes'} hoje`}
+                  </p>
+                )}
+              </div>
+            )}
           </>
         )}
 
