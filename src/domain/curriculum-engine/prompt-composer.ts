@@ -42,6 +42,13 @@ export interface ComposedPrompt {
   user: string | null;
   model: string | null;
   temperature: number | null;
+  /**
+   * The version of the prompt_template this prompt was composed from. Surfaced so
+   * a shared content library can key compatibility on the generator/prompt
+   * version (a template edit under a fixed curriculum version must not silently
+   * reuse content produced by the previous prompt). Never pedagogical.
+   */
+  templateVersion: number;
 }
 
 function flattenRuleValues(rule: LevelGenerationRule | null | undefined, interfaceLanguage: string): Record<string, string> {
@@ -137,5 +144,6 @@ export function composePrompt(input: ComposeInput): ComposedPrompt {
     user,
     model: template.model,
     temperature: template.temperature,
+    templateVersion: template.version,
   };
 }

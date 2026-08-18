@@ -166,6 +166,14 @@ vi.mock('../../src/domain/missions/mission-fallback', () => ({
 
 // ── Handler import ────────────────────────────────────────────────────────────
 
+// The shared content library is covered by its own suite
+// (shared-content-library.test.ts). Here it is a pass-through so these tests keep
+// asserting the (unchanged) generation/telemetry behaviour on a cache miss.
+vi.mock('../_shared-content/get-or-create-shared-content', () => ({
+  getOrCreateSharedContent: async (opts: any) => ({ itemId: 'shared-item-1', content: await opts.generateContent(), reused: false, audio: null }),
+  levelCodeFromSubtopicKey: (k: string) => (typeof k === 'string' ? (k.split('.')[0] ?? '') : ''),
+}));
+
 import handler from '../generate-theme';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
