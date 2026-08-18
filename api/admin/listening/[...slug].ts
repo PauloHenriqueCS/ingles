@@ -1,5 +1,6 @@
 import { requireAuth } from '../../_auth';
-import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug, safeCompare } from '../../_helpers';
+import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../../_helpers';
+import { safeCompare } from '../../_crypto';
 import { archiveListeningEpisode } from '../../../src/services/listening/publication/archive-listening-episode';
 import { publishListeningEpisode } from '../../../src/services/listening/publication/publish-listening-episode';
 import { validateListeningEpisodeForPublication } from '../../../src/services/listening/publication/validate-listening-publication';

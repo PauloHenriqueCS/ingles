@@ -4,7 +4,7 @@
 // deterministically observable in a unit test).
 
 import { describe, it, expect } from 'vitest';
-import { safeCompare } from '../_helpers';
+import { safeCompare } from '../_crypto';
 
 describe('safeCompare', () => {
   it('returns true for identical strings', () => {
