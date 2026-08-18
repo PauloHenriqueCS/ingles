@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, AlertTriangle, Loader2, Sparkles, RefreshCw } from 'lucide-react';
 import {
   fetchErrorReviewSession,
   submitErrorReviewItem,
   ErrorReviewItem,
-  ErrorReviewResult,
 } from '../lib/errorReview';
+import { buildResultView, ErrorReviewResultView } from '../domain/error-review/result-view';
 
 interface Props {
   onBack: () => void;
@@ -22,7 +22,7 @@ export default function ErrorReviewView({ onBack }: Props) {
   const [answer, setAnswer] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [result, setResult] = useState<ErrorReviewResult | null>(null);
+  const [result, setResult] = useState<ErrorReviewResultView | null>(null);
 
   async function load() {
     setPhase('loading');
@@ -53,13 +53,25 @@ export default function ErrorReviewView({ onBack }: Props) {
   const current = items[index];
   const total = items.length;
 
+  // Always-fresh id of the card currently on screen, read at async-resolve time
+  // to drop a late response meant for a card the user already left.
+  const currentItemIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => { currentItemIdRef.current = current?.id; }, [current]);
+
   async function handleVerify() {
     if (!current || !answer.trim() || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
+    // Snapshot the EXACT item + answer this submission is for, BEFORE any await,
+    // so the result binds to the authoritative submitted string and to the right
+    // card even if the input is later reset or the current item changes.
+    const submittedItemId = current.id;
+    const submittedAnswer = answer;
     try {
-      const res = await submitErrorReviewItem(current.id, answer);
-      setResult(res);
+      const res = await submitErrorReviewItem(submittedItemId, submittedAnswer);
+      // Drop a stale / out-of-order response for a card the user already left.
+      const view = buildResultView(res, submittedAnswer, submittedItemId, currentItemIdRef.current);
+      if (view) setResult(view);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro ao verificar';
       // A concurrent day-limit change is the one case worth explaining plainly.
@@ -171,7 +183,7 @@ export default function ErrorReviewView({ onBack }: Props) {
 
 // ── Result card ───────────────────────────────────────────────────────────────
 
-function ResultCard({ result, onContinue, isLast }: { result: ErrorReviewResult; onContinue: () => void; isLast: boolean }) {
+function ResultCard({ result, onContinue, isLast }: { result: ErrorReviewResultView; onContinue: () => void; isLast: boolean }) {
   const passed = result.passed;
   return (
     <div className="space-y-4">
@@ -188,7 +200,9 @@ function ResultCard({ result, onContinue, isLast }: { result: ErrorReviewResult;
         {!passed && (
           <div className="space-y-1">
             <p className="text-xs text-slate-500">Sua resposta</p>
-            <p className="text-sm text-red-300 italic">"{result.originalValue}"</p>
+            {/* AUTHORITATIVE: exactly what the student submitted for this attempt
+                — never the original error the item is reviewing. */}
+            <p className="text-sm text-red-300 italic">"{result.submittedAnswer}"</p>
           </div>
         )}
 
