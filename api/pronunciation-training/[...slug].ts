@@ -920,18 +920,6 @@ async function handlePlanEntitlements(req: any, res: any) {
   res.setHeader('Cache-Control', 'no-store');
   try {
     const snapshot = await getCurrentUserPlanEntitlements(userId);
-    // TEMP DIAGNOSTIC (remove after): logs the authenticated userId + the plan
-    // the server actually resolves for this request, so we can compare it with
-    // what the app displays. No PII beyond the caller's own id.
-    safeLog('plan-entitlements', 'diag_resolved', 200, {
-      userId,
-      planCode: snapshot.planCode,
-      planName: snapshot.planName,
-      writing: `${snapshot.writing.themeGenerations.state}/unl=${snapshot.writing.themeGenerations.unlimited}/lim=${snapshot.writing.themeGenerations.limit}`,
-      listening: `${snapshot.listening.stories.state}/unl=${snapshot.listening.stories.unlimited}`,
-      pronunciation: `${snapshot.pronunciation.evaluations.state}/unl=${snapshot.pronunciation.evaluations.unlimited}`,
-      conversation: `${snapshot.conversation.monthlyTime.state}/unl=${snapshot.conversation.monthlyTime.unlimited}`,
-    });
     return res.json(snapshot);
   } catch (err) {
     safeLog('plan-entitlements', 'resolve_failed', 500, {
