@@ -622,6 +622,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         try {
           await completeStoryListening(storyData?.sharedStoryId ?? null);
           setCompletionSaveError(false);
+          setCompletionSaved(true);
           onComplete?.();
         } catch {
           setCompletionSaveError(true);
@@ -1659,6 +1660,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
           try {
             await completeStoryListening(storyData?.sharedStoryId ?? null);
             setCompletionSaveError(false);
+            setCompletionSaved(true);
             onComplete?.();
           } catch {
             setCompletionSaveError(true);

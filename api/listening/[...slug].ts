@@ -509,45 +509,30 @@ async function handleStoryComplete(req: any, res: any) {
   try {
     const serviceClient = getListeningServiceClient();
     const activityDate = resolveListeningActivityDate();
-    const now = new Date().toISOString();
 
-    // (1) Mark today's assignment complete — IDEMPOTENT. An already-completed
-    //     assignment is NOT an early return: a retry (e.g. after a transient
-    //     curricular failure) must still reach the curricular reconciliation
-    //     below (blocker 6).
-    const { data: existing } = await serviceClient
-      .from('user_listening_assignments')
-      .select('id, status')
-      .eq('user_id', userId)
-      .eq('activity_date', activityDate)
-      .is('episode_id', null)
-      .maybeSingle();
+    // (1) CANONICAL calendar registration — the single source of truth the
+    //     calendar reads (user_listening_assignments, episode_id IS NULL). Done
+    //     via an ATOMIC, idempotent RPC (INSERT ... ON CONFLICT DO UPDATE on the
+    //     partial unique index): a retry, a lost-response re-send, or two
+    //     concurrent finishes can NEVER create a second calendar row or duplicate
+    //     the registration. `already_completed` reports the state BEFORE this
+    //     call so a retry skips the (slower) curricular reconciliation below —
+    //     making retries fast and keeping the whole call safe to repeat.
+    const { data: rpcData, error: rpcError } = await serviceClient.rpc(
+      'complete_listening_shared_assignment',
+      { p_user_id: userId, p_activity_date: activityDate },
+    );
+    if (rpcError) throw rpcError;
+    const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+    const alreadyCompleted = Boolean((row as { already_completed?: boolean } | null)?.already_completed);
 
-    if (existing) {
-      if (existing.status !== 'completed') {
-        const { error } = await serviceClient
-          .from('user_listening_assignments')
-          .update({ status: 'completed', completed_at: now, updated_at: now })
-          .eq('id', existing.id);
-        if (error) throw error;
-      }
-    } else {
-      const { error } = await serviceClient
-        .from('user_listening_assignments')
-        .insert({
-          user_id: userId, episode_id: null, activity_date: activityDate, status: 'completed',
-          assigned_at: now, completed_at: now, created_at: now, updated_at: now,
-        });
-      if (error) throw error;
-    }
-
-    // (2) Curricular reconciliation — ALWAYS attempted (idempotent), keyed to the
-    //     EXACT story the user finished. Server-validated: the story must be
-    //     THIS user's association, actually consumed (completed=true), for the
-    //     SAME activity_date, and carry a real curricular identity. Recorded via
-    //     the identity-required path (no current-pointer fallback — blocker 5),
-    //     so story A finished after story B still credits A's recorte, never B.
-    if (sharedStoryId) {
+    // (2) Curricular reconciliation — attempted only on the FIRST completion
+    //     (skipped on an idempotent retry: it already ran, and skipping keeps the
+    //     retry fast so a lost-response re-send resolves instantly). Best-effort:
+    //     a failure here never fails the completion (the calendar is already
+    //     canonical above). Keyed to the EXACT story the user finished
+    //     (identity-required, no current-pointer fallback — blocker 5).
+    if (sharedStoryId && !alreadyCompleted) {
       try {
         const { data: assoc } = await serviceClient
           .from('user_listening_shared_progress')
@@ -582,8 +567,8 @@ async function handleStoryComplete(req: any, res: any) {
       safeLog('listening/story/complete', 'no_shared_story_id', 200, { userId });
     }
 
-    safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate });
-    return res.status(200).json({ activityDate, saved: true });
+    safeLog('listening/story/complete', 'completion_saved', 200, { userId, activityDate, alreadyCompleted });
+    return res.status(200).json({ activityDate, saved: true, alreadyCompleted });
   } catch (err) {
     console.error('[10] Erro completo', err);
     safeLog('listening/story/complete', 'internal_error', 500, { error: String(err) });
