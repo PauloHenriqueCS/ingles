@@ -25,6 +25,7 @@ import {
 } from '../lib/trainingWordCategory';
 import type { PronunciationNormalizedResult } from '../types';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
+import { decideFullTextAudioSource, base64AudioToObjectUrl } from '../lib/pronunciationAudioSource';
 import { apiUrl } from '../lib/apiUrl';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
@@ -428,6 +429,11 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
 
   const mountedRef        = useRef(true);
   const ttsUrlRef         = useRef<string | null>(null);
+  // Persisted/shared reference audio (base64 from generate-text → object URL) and
+  // the voice it was synthesized with. Preferred over /api/tts to avoid a
+  // redundant Azure call when the backend already returned valid cached audio.
+  const sharedAudioUrlRef   = useRef<string | null>(null);
+  const sharedAudioVoiceRef = useRef<string | null>(null);
   const sharedAudioRef    = useRef<HTMLAudioElement | null>(null);
   const wordTtsCacheRef   = useRef<Map<string, string>>(new Map());
   const playbackAudioRef  = useRef<HTMLAudioElement | null>(null);
@@ -472,6 +478,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
       sharedAudioRef.current?.pause();
       playbackAudioRef.current?.pause();
       if (ttsUrlRef.current) URL.revokeObjectURL(ttsUrlRef.current);
+      if (sharedAudioUrlRef.current) URL.revokeObjectURL(sharedAudioUrlRef.current);
       wordTtsCacheRef.current.forEach(url => URL.revokeObjectURL(url));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -508,6 +515,11 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
     setTtsPhase('idle');
     setPlaybackPlaying(false);
     recorder.deleteRecording(); // never carry a previous round's recording into a fresh text
+    // Fresh text ⇒ discard any previous round's audio caches (both the /api/tts
+    // blob and the shared reference) so we never play stale audio for a new text.
+    if (ttsUrlRef.current) { URL.revokeObjectURL(ttsUrlRef.current); ttsUrlRef.current = null; }
+    if (sharedAudioUrlRef.current) { URL.revokeObjectURL(sharedAudioUrlRef.current); sharedAudioUrlRef.current = null; }
+    sharedAudioVoiceRef.current = null;
 
     try {
       const headers = await getAuthHeader();
@@ -536,6 +548,22 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
       setGeneratedText(json.text as string);
       setUserLevel(json.level as string ?? null);
       if (typeof json.dailyCompleted === 'number') setDailyCompleted(json.dailyCompleted);
+
+      // Prefer the persisted/shared reference audio the backend returned (base64).
+      // Playing it directly avoids a redundant /api/tts (Azure) call. If it's
+      // absent, handlePlayFullText falls back to /api/tts. This is what makes the
+      // TTS cache effective end-to-end, including on same-day reentry (the backend
+      // re-attaches the persisted audio to the existing session).
+      const respAudio = json.audio as { base64?: string; mimeType?: string; voice?: string | null } | undefined;
+      if (respAudio?.base64) {
+        try {
+          sharedAudioUrlRef.current = base64AudioToObjectUrl(respAudio.base64, respAudio.mimeType ?? 'audio/mpeg');
+          sharedAudioVoiceRef.current = respAudio.voice ?? null;
+        } catch {
+          sharedAudioUrlRef.current = null;
+          sharedAudioVoiceRef.current = null;
+        }
+      }
 
       if (json.status === 'completed' && json.result) {
         const result = json.result as PronunciationNormalizedResult;
@@ -568,13 +596,26 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
       sharedAudioRef.current.pause();
     }
 
-    let url = ttsUrlRef.current;
-    if (!url) {
+    // Prefer the persisted/shared reference audio (no Azure call); only fall back
+    // to /api/tts when there is no usable shared audio for the current voice.
+    const decision = decideFullTextAudioSource({
+      sharedAudioUrl: sharedAudioUrlRef.current,
+      sharedAudioVoice: sharedAudioVoiceRef.current,
+      currentVoice: audioVoice,
+      ttsCachedUrl: ttsUrlRef.current,
+    });
+
+    let url: string;
+    const fromShared = decision.kind === 'shared';
+    if (decision.kind === 'shared' || decision.kind === 'tts-cache') {
+      url = decision.url;
+    } else {
       setTtsPhase('loading');
       try {
-        url = await fetchTtsUrl(generatedText, audioVoice);
-        if (!mountedRef.current) { URL.revokeObjectURL(url); return; }
-        ttsUrlRef.current = url;
+        const fetched = await fetchTtsUrl(generatedText, audioVoice);
+        if (!mountedRef.current) { URL.revokeObjectURL(fetched); return; }
+        ttsUrlRef.current = fetched;
+        url = fetched;
       } catch {
         if (mountedRef.current) setTtsPhase('error');
         return;
@@ -585,7 +626,19 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
     audio.playbackRate = speed;
     sharedAudioRef.current = audio;
     audio.onended = () => { if (mountedRef.current) setTtsPhase('idle'); };
-    audio.onerror = () => { if (mountedRef.current) setTtsPhase('error'); };
+    audio.onerror = () => {
+      if (!mountedRef.current) return;
+      if (fromShared) {
+        // The persisted audio failed to load — drop it and retry via /api/tts so
+        // the activity keeps working (graceful fallback, no background repair).
+        if (sharedAudioUrlRef.current) { URL.revokeObjectURL(sharedAudioUrlRef.current); sharedAudioUrlRef.current = null; }
+        sharedAudioVoiceRef.current = null;
+        setTtsPhase('idle');
+        void handlePlayFullText();
+      } else {
+        setTtsPhase('error');
+      }
+    };
     setTtsPhase('playing');
     audio.play().catch(() => { if (mountedRef.current) setTtsPhase('idle'); });
   }
