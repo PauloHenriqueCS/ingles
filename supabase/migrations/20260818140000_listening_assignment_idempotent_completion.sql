@@ -1,5 +1,7 @@
 -- =============================================================================
--- MIGRATION: 20260818130000_listening_assignment_idempotent_completion
+-- MIGRATION: 20260818140000_listening_assignment_idempotent_completion
+-- (renamed from ...130000 to avoid a version collision with a concurrently
+--  merged migration ...130000_shared_content_library)
 -- Projeto: Orodim
 --
 -- Aplicada automaticamente por deploy-production.yml / homologation.yml.
