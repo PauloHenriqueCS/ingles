@@ -293,18 +293,11 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
             </Section>
           )}
 
-          {/* Use these words */}
-          {theme.useTheseWords.length > 0 && (
-            <Section title="Palavras para usar">
-              <div className="flex flex-wrap gap-1.5">
-                {theme.useTheseWords.map((w, i) => (
-                  <span key={i} className="px-2 py-0.5 bg-slate-700 rounded text-xs text-slate-300 font-mono">
-                    {w}
-                  </span>
-                ))}
-              </div>
-            </Section>
-          )}
+          {/* The second, redundant support-vocabulary chip section was removed:
+             it duplicated the "Vocabulário útil para esta missão" section above
+             (both are optional support vocabulary). The underlying field stays in
+             the data model (mission snapshot + conversation context); only its
+             duplicate on-screen section is gone. */}
 
           {/* Example sentence */}
           {theme.exampleSentence && (
