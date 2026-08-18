@@ -1,7 +1,7 @@
 // Internal endpoint authentication for cron jobs and internal workers.
 // Vercel automatically adds Authorization: Bearer {CRON_SECRET} to cron requests.
 
-import { safeCompare } from '../_helpers';
+import { safeCompare } from '../_crypto';
 
 export function checkCronAuth(req: { headers: Record<string, string | undefined> }): boolean {
   const secret = process.env.CRON_SECRET;
