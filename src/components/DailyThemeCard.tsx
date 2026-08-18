@@ -118,6 +118,9 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
       }
 
       const authHeader = await getAuthHeader();
+      // The student does NOT choose a theme: the mission is determined
+      // exclusively by the day's pedagogical recorte. No user-selected theme is
+      // sent to the backend.
       const requestBody = buildGenerateThemeRequestBody({
         mode: 'normal',
         reviewGroup: null,
