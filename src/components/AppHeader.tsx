@@ -34,10 +34,10 @@ export default function AppHeader({ onMenuOpen, onLogoClick }: Props) {
           style={{ background: 'none' }}
         >
           <img
-            src="/brand/lemon-icon.png"
+            src="/brand/lemon-logo.png"
             alt="Orodim"
             className="h-8 sm:h-10 w-auto object-contain"
-            width={40}
+            width={125}
             height={40}
             fetchPriority="high"
             draggable={false}
