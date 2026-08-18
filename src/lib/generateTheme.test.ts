@@ -67,6 +67,14 @@ vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
 
 import { requireAuth } from '../../api/_auth';
 import { CurriculumConfigError } from '../../api/_curriculum/curriculum-runtime';
+// The shared content library is covered by its own suite
+// (api/__tests__/shared-content-library.test.ts). Here it is a pass-through so
+// these tests keep asserting the (unchanged) generation behaviour on a cache miss.
+vi.mock('../../api/_shared-content/get-or-create-shared-content', () => ({
+  getOrCreateSharedContent: async (opts: any) => ({ itemId: 'shared-item-1', content: await opts.generateContent(), reused: false, audio: null }),
+  levelCodeFromSubtopicKey: (k: string) => (typeof k === 'string' ? (k.split('.')[0] ?? '') : ''),
+}));
+
 import handler, {
   normalizeTheme,
   parseRawContent,

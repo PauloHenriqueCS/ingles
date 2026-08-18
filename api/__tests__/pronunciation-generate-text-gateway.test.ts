@@ -55,6 +55,14 @@ vi.mock('../_curriculum/curriculum-runtime', () => ({
   CurriculumConfigError: class CurriculumConfigError extends Error {},
 }));
 
+// The shared content library is covered by its own suite
+// (shared-content-library.test.ts). Here it is a pass-through so these tests keep
+// asserting the (unchanged) generation/telemetry behaviour on a cache miss.
+vi.mock('../_shared-content/get-or-create-shared-content', () => ({
+  getOrCreateSharedContent: async (opts: any) => ({ itemId: 'shared-item-1', content: await opts.generateContent(), reused: false, audio: null }),
+  levelCodeFromSubtopicKey: (k: string) => (typeof k === 'string' ? (k.split('.')[0] ?? '') : ''),
+}));
+
 import handler from '../pronunciation-training/[...slug]';
 import { CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 
