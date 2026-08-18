@@ -23,10 +23,14 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 const MIGRATIONS_DIR = resolve(__dirname, '..');
+// Normalize CRLF → LF so the static multi-line text assertions below (written
+// with \n) hold regardless of the checkout's line endings — on a Windows
+// autocrlf checkout the .sql reads as CRLF, which otherwise fails these exact
+// LF-based `toContain` blocks even though the SQL content is identical.
 const sql = readFileSync(
   resolve(MIGRATIONS_DIR, '20260724030000_ai_gateway_conservative_budget_estimate_fix.sql'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 
 function fnBody(source: string): string {
   return source.slice(

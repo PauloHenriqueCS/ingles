@@ -1,0 +1,516 @@
+name: Pipeline
+
+# Single source of truth for validation AND publication, for both develop and
+# main. One run per commit: the quality gates run first; only if EVERY gate
+# succeeds does the matching deploy job run — develop → homologation,
+# main → production. Pull requests run the gates and stop (no migrations, no
+# deploy). There is deliberately no separate "CI" workflow: nothing validates a
+# commit outside this file, so a deploy can never race an unfinished test.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time per ref (or PR). Pull requests cancel their own superseded
+# runs (pure validation — safe to interrupt). Pushes NEVER cancel: a running
+# deploy/migration must finish, and same-ref pushes queue instead — so two
+# deploys to the same environment can never overlap and a migration is never
+# cancelled mid-flight. develop and main are different refs → different groups →
+# independent (and they target different environments anyway).
+concurrency:
+  group: pipeline-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════
+  # QUALITY GATES — every job here is blocking. No continue-on-error, no
+  # `|| true`, no `if: always()`. If any gate fails, the deploy jobs below are
+  # skipped (they `needs:` all of them), so migrations and deploy never start.
+  # ════════════════════════════════════════════════════════════════════════
+
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: App typecheck
+        run: npx tsc --noEmit
+      - name: Gateway typecheck (api/_ai-gateway and dependents)
+        run: npx tsc -p tsconfig.gateway.json --noEmit
+
+  unit-tests:
+    name: Unit Tests (Vitest)
+    runs-on: ubuntu-latest
+    env:
+      # src/lib/supabase.ts calls createClient() at module load, so anything
+      # that transitively imports it needs a well-formed URL/key even though no
+      # test performs real I/O (every suite mocks the client). Placeholders
+      # only, scoped to this job — never seen by any deploy job.
+      VITE_SUPABASE_URL: http://127.0.0.1:54321
+      VITE_SUPABASE_ANON_KEY: test-anon-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm test -- --reporter=verbose
+
+  build:
+    name: Vite Build (validation)
+    runs-on: ubuntu-latest
+    env:
+      VITE_SUPABASE_URL: https://placeholder.supabase.co
+      VITE_SUPABASE_ANON_KEY: placeholder-anon-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Validation build only — proves the code compiles/bundles. The real
+      # deployable bundle is produced later by `vercel build` inside each deploy
+      # job, using the environment's real variables.
+      - run: npm run build
+
+  migrations-structure:
+    name: Migrations structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Baseline oficial: 20260725120000. supabase/migrations/ só pode conter os
+      # três arquivos oficiais do baseline/seeds e futuras migrations com
+      # timestamp posterior. Histórico legado vive em supabase/migrations_legacy/
+      # e nunca deve voltar para supabase/migrations/. Ver supabase/MIGRATIONS.md.
+      - name: Validate supabase/migrations/ structure
+        run: |
+          set -euo pipefail
+          cd supabase/migrations
+
+          REQUIRED=(
+            20260725120000_baseline_full_database.sql
+            20260725120001_seed_reference_data.sql
+            20260725120002_seed_ai_runtime_controls.sql
+          )
+          for f in "${REQUIRED[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Arquivo oficial ausente: supabase/migrations/$f"
+              exit 1
+            fi
+          done
+
+          BASELINE_TS=20260725120000
+          declare -A seen
+          shopt -s nullglob
+          for f in *.sql; do
+            ts="${f:0:14}"
+            if ! [[ "$ts" =~ ^[0-9]{14}$ ]]; then
+              echo "::error::Arquivo sem timestamp de 14 dígitos no prefixo (deve estar em migrations_legacy/): $f"
+              exit 1
+            fi
+            if [ "$ts" -lt "$BASELINE_TS" ]; then
+              echo "::error::Arquivo com timestamp anterior ao baseline oficial ($BASELINE_TS): $f — migrations legadas pertencem a supabase/migrations_legacy/"
+              exit 1
+            fi
+            if [ -n "${seen[$ts]:-}" ]; then
+              echo "::error::Timestamp duplicado ($ts): ${seen[$ts]} e $f"
+              exit 1
+            fi
+            seen[$ts]="$f"
+          done
+
+          echo "OK: $(ls *.sql | wc -l) arquivo(s) em supabase/migrations/, timestamps únicos, nenhum anterior ao baseline, os 3 oficiais presentes."
+
+  e2e-node:
+    name: E2E Node Checks (baseline + security-static)
+    runs-on: ubuntu-latest
+    needs: [build]
+    env:
+      VITE_SUPABASE_URL: https://placeholder.supabase.co
+      VITE_SUPABASE_ANON_KEY: placeholder-anon-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --project=node-checks --reporter=list
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-node
+          path: playwright-report/
+          retention-days: 7
+
+  e2e-browser:
+    name: E2E Browser (smoke + dashboard + calendar)
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Points at the existing lemon-homolog Supabase project (never production).
+    # Safe: every test in 09-dashboard/10-calendar/11-smoke mocks 100% of
+    # Supabase auth/REST traffic via page.route() catch-alls — no real request
+    # leaves the browser, and every test user is a synthetic, disposable id. The
+    # real project is only needed so createClient()'s URL is well-formed.
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.E2E_SUPABASE_ANON_KEY }}
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run browser E2E tests
+        run: |
+          npx playwright test \
+            tests/e2e/09-dashboard.spec.ts \
+            tests/e2e/10-calendar.spec.ts \
+            tests/e2e/11-smoke.spec.ts \
+            --project=chromium \
+            --reporter=list \
+            --retries=1
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-browser
+          path: playwright-report/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-screenshots
+          path: test-results/
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════════════════
+  # DEPLOY — HOMOLOGATION (develop only)
+  # Runs ONLY after all six gates succeed (`needs`), and only on a push /
+  # manual dispatch on develop. A PR never reaches here. Single linear job:
+  # Actions stops at the first failing step, so a failed build or migration
+  # aborts before anything downstream — no `if: always()`, no conditionals
+  # needed to enforce that. Ordering: real Vercel build BEFORE touching the DB,
+  # so we never apply migrations only to discover the app can't build.
+  # ════════════════════════════════════════════════════════════════════════
+  deploy-homologation:
+    name: Deploy homologation
+    needs: [typecheck, unit-tests, build, migrations-structure, e2e-node, e2e-browser]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: homologation
+    timeout-minutes: 30
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_HOMOLOG }}
+      SUPABASE_PROJECT_REF_HOMOLOG: ${{ secrets.SUPABASE_PROJECT_REF_HOMOLOG }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_HOMOLOG_PROJECT_ID }}
+      VERCEL_PROD_PROJECT_ID: ${{ secrets.VERCEL_PROD_PROJECT_ID }}
+      HOMOLOG_BASE_URL: ${{ secrets.HOMOLOG_BASE_URL }}
+    steps:
+      # ── Validate every required secret BEFORE touching any external service.
+      # HOMOLOG_BASE_URL is intentionally optional (smoke falls back to the
+      # ephemeral deployment URL until an official alias exists).
+      - name: Verify required secrets
+        run: |
+          missing=0
+          check() {
+            local internal="$1" name="$2"
+            if [ -z "${!internal}" ]; then
+              echo "::error::Missing required secret: $name (GitHub Environment: homologation)"
+              missing=1
+            fi
+          }
+          check SUPABASE_ACCESS_TOKEN SUPABASE_ACCESS_TOKEN
+          check SUPABASE_DB_PASSWORD SUPABASE_DB_PASSWORD_HOMOLOG
+          check SUPABASE_PROJECT_REF_HOMOLOG SUPABASE_PROJECT_REF_HOMOLOG
+          check VERCEL_TOKEN VERCEL_TOKEN
+          check VERCEL_ORG_ID VERCEL_ORG_ID
+          check VERCEL_PROJECT_ID VERCEL_HOMOLOG_PROJECT_ID
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Aborting before any external service is touched."
+            exit 1
+          fi
+
+      # ── Guard: the Supabase ref must be the homologation project, never prod.
+      - name: Guard — Supabase project ref must be homologation
+        run: |
+          if [ "$SUPABASE_PROJECT_REF_HOMOLOG" != "ahszqexfzpbirdlkmdci" ]; then
+            echo "::error::SUPABASE_PROJECT_REF_HOMOLOG não aponta para o projeto de homologação esperado (ahszqexfzpbirdlkmdci). Abortando."
+            exit 1
+          fi
+
+      # ── Guard: the Vercel project must not be the production project. Hard
+      # second line of defense on top of using a distinct secret name.
+      - name: Guard — Vercel project must not be production
+        run: |
+          if [ -n "$VERCEL_PROD_PROJECT_ID" ] && [ "$VERCEL_PROJECT_ID" = "$VERCEL_PROD_PROJECT_ID" ]; then
+            echo "::error::VERCEL_HOMOLOG_PROJECT_ID matches VERCEL_PROD_PROJECT_ID. Refusing to deploy homologation into the production Vercel project."
+            exit 1
+          fi
+
+      # ── Deploy exactly the commit that passed the gates in this run.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      # ── Vercel CLI — same pinned version used for production.
+      - name: Install Vercel CLI
+        run: npm install --global vercel@58.4.4
+
+      # ── Pull the homologation project config (fills .vercel/project.json from
+      # VERCEL_ORG_ID/VERCEL_PROJECT_ID). Retried: a freshly rotated token can
+      # transiently fail Vercel's token→user lookup, then succeed next call.
+      - name: Pull Vercel project (homologation)
+        run: |
+          for attempt in 1 2 3; do
+            if vercel pull --yes --environment=production --token="$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            echo "vercel pull attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::vercel pull failed after 3 attempts"
+          exit 1
+
+      # ── Build the REAL homologation bundle BEFORE touching the database, so a
+      # build failure aborts with the DB untouched. `--prod` selects the
+      # homologation project's own Production slot (its only real environment) —
+      # safe because this project is dedicated exclusively to homologation.
+      - name: Vercel build (real homologation bundle)
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      # ── Supabase migrations (only now that the bundle built).
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.110.0
+
+      - name: Link Supabase project (homologation)
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF_HOMOLOG"
+
+      - name: Migration history (before)
+        run: supabase migration list
+
+      # --include-all: os bancos são compartilhados com ingles-dashboad, que
+      # aplica suas próprias migrations diretamente nos remotos, deixando
+      # migrations deste repo "out of order". --include-all é a forma
+      # documentada e não-destrutiva de aplicar as pendentes fora de ordem; cada
+      # migration deste repo é idempotente/aditiva. Ver supabase/MIGRATIONS.md.
+      - name: Migration dry-run
+        run: supabase db push --dry-run --include-all
+
+      - name: Apply migrations
+        run: supabase db push --include-all
+
+      - name: Confirm zero pending migrations after push
+        run: supabase db push --dry-run --include-all
+
+      # ── Deploy the prebuilt bundle produced above (never rebuilt here).
+      - name: Vercel deploy
+        id: vercel_deploy
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "deployment_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
+
+      # ── Alias to the official homologation domain, only if configured.
+      - name: Alias to homologation domain (if configured)
+        if: env.HOMOLOG_BASE_URL != ''
+        run: |
+          host="${HOMOLOG_BASE_URL#https://}"
+          host="${host#http://}"
+          vercel alias set "${{ steps.vercel_deploy.outputs.deployment_url }}" "$host" --token="$VERCEL_TOKEN"
+
+      - name: Resolve smoke test target
+        id: smoke_target
+        run: |
+          if [ -n "$HOMOLOG_BASE_URL" ]; then
+            echo "url=$HOMOLOG_BASE_URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=${{ steps.vercel_deploy.outputs.deployment_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test — /
+        run: |
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "${{ steps.smoke_target.outputs.url }}/"
+
+      - name: Smoke test — /api/config/public
+        run: |
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "${{ steps.smoke_target.outputs.url }}/api/config/public"
+
+  # ════════════════════════════════════════════════════════════════════════
+  # DEPLOY — PRODUCTION (main only)
+  # Same guarantees as homologation: runs only after all six gates succeed and
+  # only on a push / manual dispatch on main. Real Vercel build BEFORE the DB.
+  # No typecheck/test/npm-build here — the gates already validated this exact
+  # commit; the only build is the real deployable `vercel build`.
+  # ════════════════════════════════════════════════════════════════════════
+  deploy-production:
+    name: Deploy production
+    needs: [typecheck, unit-tests, build, migrations-structure, e2e-node, e2e-browser]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROD_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_PROD_DB_PASSWORD }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROD_PROJECT_ID }}
+      PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+    steps:
+      # ── Validate every required secret before touching any external service.
+      - name: Verify required secrets
+        run: |
+          missing=0
+          check() {
+            local internal="$1" name="$2"
+            if [ -z "${!internal}" ]; then
+              echo "::error::Missing required secret: $name (GitHub Environment: production)"
+              missing=1
+            fi
+          }
+          check SUPABASE_ACCESS_TOKEN SUPABASE_ACCESS_TOKEN
+          check SUPABASE_PROJECT_REF SUPABASE_PROD_PROJECT_REF
+          check SUPABASE_DB_PASSWORD SUPABASE_PROD_DB_PASSWORD
+          check VERCEL_TOKEN VERCEL_TOKEN
+          check VERCEL_ORG_ID VERCEL_ORG_ID
+          check VERCEL_PROJECT_ID VERCEL_PROD_PROJECT_ID
+          check PRODUCTION_BASE_URL PRODUCTION_BASE_URL
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Aborting before any external service is touched."
+            exit 1
+          fi
+
+      # ── Deploy exactly the commit that passed the gates in this run.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@58.4.4
+
+      # ── Pull production project config (retried — see homologation rationale).
+      - name: Pull Vercel project (production)
+        run: |
+          for attempt in 1 2 3; do
+            if vercel pull --yes --environment=production --token="$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            echo "vercel pull attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::vercel pull failed after 3 attempts"
+          exit 1
+
+      # ── Build the REAL production bundle BEFORE touching the database.
+      - name: Vercel build (real production bundle)
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.110.0
+
+      - name: Link Supabase production project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+
+      # ── Exclude the homologation-only seed from the PRODUCTION push.
+      # 20260725120002_seed_ai_runtime_controls.sql is develop/homologation-only
+      # — production already has the real ai_runtime_controls rows since the
+      # legacy history, and re-seeding would overwrite real data (see
+      # supabase/MIGRATIONS.md). Removed from THIS runner's checkout only, never
+      # from the repo — homologation still applies it.
+      - name: Exclude homologation-only migration from the production set
+        run: |
+          f="supabase/migrations/20260725120002_seed_ai_runtime_controls.sql"
+          if [ -f "$f" ]; then
+            rm -f "$f"
+            echo "Excluded $f from the production migration set (homologation-only)."
+          else
+            echo "Note: $f not present in this checkout; nothing to exclude."
+          fi
+
+      # --include-all: as migrations de trial/commercial-plans/minute-packages
+      # carregam timestamps anteriores a uma migration já aplicada em produção
+      # pelo repo ingles-dashboad, ficando "out of order"; --include-all é a
+      # forma documentada e não-destrutiva de aplicá-las. Ver supabase/MIGRATIONS.md.
+      - name: Migration history (before)
+        run: supabase migration list
+      - name: Migration dry-run
+        run: supabase db push --dry-run --include-all
+      - name: Apply migrations
+        run: supabase db push --include-all
+      - name: Migration history (after)
+        run: supabase migration list
+
+      # ── Deploy the prebuilt bundle produced above (never rebuilt here).
+      - name: Vercel deploy
+        id: vercel_deploy
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "deployment_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
+
+      # ── Smoke test the public production domain (not the ephemeral URL).
+      - name: Smoke test — /
+        run: |
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "$PRODUCTION_BASE_URL/"
+
+      - name: Smoke test — /api/config/public
+        run: |
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "$PRODUCTION_BASE_URL/api/config/public"
+
+      # ── Real-browser smoke: curl only proves the HTML shell returns 200; this
+      # catches the app crashing during client-side init (blank page, HTTP 200).
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test — app renders without JS error
+        run: npx tsx scripts/smoke-check-browser.ts "$PRODUCTION_BASE_URL/"
