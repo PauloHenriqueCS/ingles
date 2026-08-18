@@ -9,7 +9,9 @@ import { applyRateLimit } from '../_rateLimit';
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
-import { resolveUserSpeechConfig, SpeechConfigError } from '../_curriculum/language-speech-config';
+import { resolveUserSpeechConfig, getLanguageSpeechConfig, SpeechConfigError, SAFE_AZURE_VOICE_RE } from '../_curriculum/language-speech-config';
+import { getOrCreateSharedContent, levelCodeFromSubtopicKey, SHARED_CONTENT_AUDIO_BUCKET, type SharedContentAudioSpec } from '../_shared-content/get-or-create-shared-content';
+import { synthesizeSpeech } from '../_azure-tts';
 import { checkFeatureConfigError, checkRecordingDuration } from '../_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { evaluateSkillPromotion } from '../../src/lib/promotionService';
@@ -105,6 +107,16 @@ function dailyPronunciationTrainingAllowedByPlan(entitlements: PlanEntitlementsS
 const AI_MODEL = 'gpt-4o-mini';
 const GENERATE_TIMEOUT_MS = 30_000;
 
+// Thrown inside the shared-content generateContent callback when the provider
+// returns empty text, so the item is marked failed (never a valid hit) and the
+// caller maps it to the same 503 AI_UNAVAILABLE as before.
+class SharedPronunciationTextEmptyError extends Error {
+  constructor() {
+    super('PRONUNCIATION_TEXT_EMPTY');
+    this.name = 'SharedPronunciationTextEmptyError';
+  }
+}
+
 // ── Metric extractor — reads from SDK response, never invents values ──────────
 
 function extractGenerateTextMetrics(completion: ChatCompletion): GatewayUsageMetric[] {
@@ -176,6 +188,42 @@ interface TrainingSessionRow {
   words_json: unknown;
   raw_result_json: unknown;
   audio_duration_seconds: number | null;
+  shared_content_item_id?: string | null;
+}
+
+// Shape of the additive `audio` field returned alongside the practice text: the
+// persisted/shared reference TTS (base64), so the client plays it directly
+// instead of calling /api/tts. `voice` lets the client honour a user-chosen
+// non-default voice (fall back to /api/tts) while the default case reuses cache.
+interface SharedReferenceAudio { base64: string; mimeType: string; voice: string | null; locale: string | null; }
+
+/**
+ * Loads the persisted reference TTS for a session's shared library item, if it
+ * has one with READY audio. Returns null (client falls back to /api/tts) when
+ * there is no item, no ready audio, or on ANY error — never throws, never calls a
+ * provider. Used on the reentry/early-return paths so reopening the activity the
+ * same day reuses the cached audio with no new Azure call.
+ */
+async function loadSharedReferenceAudio(
+  serviceClient: any,
+  sharedItemId: string | null | undefined,
+): Promise<SharedReferenceAudio | null> {
+  if (!sharedItemId) return null;
+  try {
+    const { data } = await serviceClient
+      .from('shared_content_items')
+      .select('audio_status, audio_path, audio_mime_type, audio_voice, audio_locale')
+      .eq('id', sharedItemId)
+      .maybeSingle();
+    const row = data as { audio_status?: string; audio_path?: string | null; audio_mime_type?: string | null; audio_voice?: string | null; audio_locale?: string | null } | null;
+    if (!row || row.audio_status !== 'ready' || !row.audio_path) return null;
+    const { data: file, error } = await serviceClient.storage.from(SHARED_CONTENT_AUDIO_BUCKET).download(row.audio_path);
+    if (error || !file) return null;
+    const base64 = Buffer.from(await file.arrayBuffer()).toString('base64');
+    return { base64, mimeType: row.audio_mime_type ?? 'audio/mpeg', voice: row.audio_voice ?? null, locale: row.audio_locale ?? null };
+  } catch {
+    return null;
+  }
 }
 
 function buildResultFromRow(row: TrainingSessionRow): PronunciationNormalizedResult | undefined {
@@ -232,7 +280,7 @@ async function handleGenerateText(req: any, res: any) {
   const [activeRes, completedRes] = await Promise.all([
     supabase
       .from('pronunciation_training_sessions')
-      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds')
+      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds, shared_content_item_id')
       .eq('user_id', userId).eq('practice_date', practiceDate).neq('status', 'completed')
       .maybeSingle(),
     supabase
@@ -252,8 +300,11 @@ async function handleGenerateText(req: any, res: any) {
   // failure): reloading always returns it — never generates a new text while a
   // round is pending. Preserves the "reload returns the same in-progress text".
   if (activeRow) {
+    // Reentry the same day: return the SAME text (no generation) AND the persisted
+    // reference audio, so reopening never re-calls OpenAI or Azure.
+    const audio = await loadSharedReferenceAudio(getCurriculumServiceClient(), activeRow.shared_content_item_id);
     safeLog('pronunciation-training/generate-text', 'returned_active', 200);
-    return res.status(200).json({ ...buildGenerateTextResponse(activeRow), ...dailyMeta });
+    return res.status(200).json({ ...buildGenerateTextResponse(activeRow), ...dailyMeta, ...(audio ? { audio } : {}) });
   }
 
   // No active row. If the user already finished at least one round today and is
@@ -262,15 +313,16 @@ async function handleGenerateText(req: any, res: any) {
   if (dailyCompleted > 0 && !forceNew) {
     const { data: latestCompleted, error: latestErr } = await supabase
       .from('pronunciation_training_sessions')
-      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds')
+      .select('id, level, generated_text, status, pronunciation_score, accuracy_score, fluency_score, completeness_score, prosody_score, recognized_text, words_json, raw_result_json, audio_duration_seconds, shared_content_item_id')
       .eq('user_id', userId).eq('practice_date', practiceDate).eq('status', 'completed')
       .order('completed_at', { ascending: false }).limit(1).maybeSingle();
     if (latestErr || !latestCompleted) {
       safeLog('pronunciation-training/generate-text', 'latest_completed_lookup_error', 500);
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível carregar o texto de hoje. Tente novamente.');
     }
+    const audio = await loadSharedReferenceAudio(getCurriculumServiceClient(), (latestCompleted as TrainingSessionRow).shared_content_item_id);
     safeLog('pronunciation-training/generate-text', 'returned_completed', 200);
-    return res.status(200).json({ ...buildGenerateTextResponse(latestCompleted as TrainingSessionRow), ...dailyMeta });
+    return res.status(200).json({ ...buildGenerateTextResponse(latestCompleted as TrainingSessionRow), ...dailyMeta, ...(audio ? { audio } : {}) });
   }
 
   // Need to create a new round (first text of the day, or an explicit new
@@ -336,46 +388,100 @@ async function handleGenerateText(req: any, res: any) {
 
   const openai = new OpenAI({ apiKey, timeout: GENERATE_TIMEOUT_MS });
   const gatewayDeps = getProductionDeps();
-  try {
-    const completion = await executeAiGatewayCall<ChatCompletion>(
-      {
-        featureKey: 'pronunciation.generate_text',
-        provider: 'openai',
-        service: 'chat.completions',
-        model,
-        userId,
-        initiatedByUserId: userId,
-        actorType: 'user',
-        executionLocation: 'backend',
-        correlationId: gatewayDeps.uuidGen(),
-        attemptNumber: 1,
-        callSequence: 1,
-        technicalMetadata: {
-          endpoint: 'pronunciation-training/generate-text',
-          flowType: 'generate_text',
-        },
-        estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, 400),
-      },
-      () => openai.chat.completions.create({
-        model,
-        messages: chatMessages,
-        temperature,
-        max_tokens: 400,
-      }),
-      gatewayDeps,
-      extractGenerateTextMetrics,
-    );
-    const text = completion.choices[0]?.message?.content?.trim() ?? '';
-    if (!text) return jsonError(res, 503, 'AI_UNAVAILABLE', 'Não foi possível gerar o texto. Tente novamente.');
+  const serviceClient = getCurriculumServiceClient();
+  const learningLanguage = resolvedPrompt.languageContext.learningLanguage;
+  const interfaceLanguage = resolvedPrompt.languageContext.interfaceLanguage;
 
-    // Atomic get-or-create: if a concurrent request already created today's
-    // row first, this returns THAT row and discards the text generated
-    // here — never two sessions for the same user+day, even under a real
-    // race between two simultaneous requests. The curricular identity
-    // (version + recorte) is persisted IN THE SAME atomic operation that creates
-    // the session (ROOT-1) — no best-effort post-RPC UPDATE. A NEW session can
-    // never be delivered without a durable identity; a reused row keeps its
-    // ORIGINAL identity (never the current pointer).
+  // Reference-TTS spec (best-effort): the shared library persists+reuses a model
+  // pronunciation audio alongside the text. Missing/invalid Speech config simply
+  // means no reference audio (the client can still fall back to /api/tts) — it
+  // never blocks text generation/reuse (§9). Voice/locale are data-driven from
+  // public.languages (no en-US hardcode).
+  let audioSpec: SharedContentAudioSpec<{ text: string }> | undefined;
+  try {
+    const speech = await getLanguageSpeechConfig(serviceClient, learningLanguage);
+    const productConfig = await getProductConfig(resolveConfigEnvironment());
+    const outputFormat = productConfig.values['audio.azure'].outputFormat;
+    if (SAFE_AZURE_VOICE_RE.test(speech.defaultTtsVoice)) {
+      audioSpec = {
+        extractText: (c) => c.text,
+        voice: speech.defaultTtsVoice,
+        locale: speech.speechLocale,
+        synth: (text) => synthesizeSpeech({
+          text, voice: speech.defaultTtsVoice, locale: speech.speechLocale,
+          outputFormat, userId, endpoint: 'pronunciation-training/generate-text',
+        }),
+      };
+    }
+  } catch {
+    audioSpec = undefined; // no reference audio; text still shared/generated normally
+  }
+
+  try {
+    // Shared content library: reuse a compatible pronunciation text (+ reference
+    // TTS) the user hasn't seen, or generate ONE now. OpenAI is called ONLY on a
+    // cache miss (inside generateContent); Azure TTS only when producing/repairing
+    // the reference audio. Keyed by curricular identity + prompt version — never
+    // English-specific. The per-user daily session below still owns the quota.
+    const shared = await getOrCreateSharedContent<{ text: string }>({
+      client: serviceClient,
+      userId,
+      identity: {
+        modality: 'pronunciation',
+        learningLanguage,
+        interfaceLanguage,
+        curriculumVersionId: resolvedPrompt.versionId,
+        subtopicKey: resolvedPrompt.subtopicKey ?? '',
+        levelCode: userLevel ?? levelCodeFromSubtopicKey(resolvedPrompt.subtopicKey ?? ''),
+        exerciseType: 'training',
+        templateKey: 'pronunciation.generate_text',
+        promptVersion: resolvedPrompt.templateVersion,
+      },
+      generatorModel: model,
+      generateContent: async () => {
+        const completion = await executeAiGatewayCall<ChatCompletion>(
+          {
+            featureKey: 'pronunciation.generate_text',
+            provider: 'openai',
+            service: 'chat.completions',
+            model,
+            userId,
+            initiatedByUserId: userId,
+            actorType: 'user',
+            executionLocation: 'backend',
+            correlationId: gatewayDeps.uuidGen(),
+            attemptNumber: 1,
+            callSequence: 1,
+            technicalMetadata: {
+              endpoint: 'pronunciation-training/generate-text',
+              flowType: 'generate_text',
+            },
+            estimatedMetrics: estimateTextTokens(systemPrompt.length + userPrompt.length, 400),
+          },
+          () => openai.chat.completions.create({
+            model,
+            messages: chatMessages,
+            temperature,
+            max_tokens: 400,
+          }),
+          gatewayDeps,
+          extractGenerateTextMetrics,
+        );
+        const generated = completion.choices[0]?.message?.content?.trim() ?? '';
+        if (!generated) throw new SharedPronunciationTextEmptyError();
+        return { text: generated };
+      },
+      audio: audioSpec,
+    });
+    const text = shared.content.text;
+
+    // Atomic get-or-create of the PER-USER day session (owns the daily quota and
+    // assessment isolation): if a concurrent request already created today's row
+    // first, this returns THAT row and discards the text here — never two sessions
+    // for the same user+day. The curricular identity (version + recorte) is
+    // persisted IN THE SAME atomic operation (ROOT-1). Cache hit or miss, this
+    // still runs — a cached activity counts against the quota exactly like a
+    // freshly generated one.
     const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
       p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
       p_start_new_round: forceNew, p_effective_limit: dailyLimit, p_unlimited: dailyUnlimited,
@@ -403,7 +509,21 @@ async function handleGenerateText(req: any, res: any) {
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível salvar o texto gerado. Tente novamente.');
     }
 
-    safeLog('pronunciation-training/generate-text', 'success', 200);
+    // Best-effort traceability: link this day's session to the library item it
+    // was served from (never affects behaviour; user_shared_content_usage is the
+    // authoritative repetition ledger). Fully defensive — a link failure must
+    // never break the response.
+    if (typeof result.sessionId === 'string') {
+      try {
+        await serviceClient
+          .from('pronunciation_training_sessions')
+          .update({ shared_content_item_id: shared.itemId })
+          .eq('id', result.sessionId)
+          .then(() => {}, () => {});
+      } catch { /* traceability only */ }
+    }
+
+    safeLog('pronunciation-training/generate-text', shared.reused ? 'success_cache_hit' : 'success', 200);
     return res.status(200).json({
       sessionId: result.sessionId,
       text: result.text,
@@ -412,9 +532,17 @@ async function handleGenerateText(req: any, res: any) {
       dailyCompleted: (result.dailyCompleted as number) ?? dailyCompleted,
       dailyLimit,
       dailyUnlimited,
+      // Additive: the reused/generated reference TTS audio for the text, when
+      // available. `voice` lets the client reuse it only when it matches the
+      // user's current voice, otherwise falling back to /api/tts. Absent when TTS
+      // is unavailable — the client then falls back to /api/tts (no behaviour change).
+      ...(shared.audio ? { audio: { base64: shared.audio.base64, mimeType: shared.audio.mimeType, voice: shared.audio.voice, locale: shared.audio.locale } } : {}),
       ...(result.result ? { result: result.result } : {}),
     });
   } catch (err) {
+    if (err instanceof SharedPronunciationTextEmptyError) {
+      return jsonError(res, 503, 'AI_UNAVAILABLE', 'Não foi possível gerar o texto. Tente novamente.');
+    }
     const { code, status } = sanitizeProviderError(err);
     return jsonError(res, status, code, 'Não foi possível gerar o texto. Tente novamente.');
   }

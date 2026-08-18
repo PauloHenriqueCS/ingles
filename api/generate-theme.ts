@@ -7,6 +7,7 @@ import { executeAiGatewayCall, getProductionDeps, estimateTextTokensFromMessages
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
+import { getOrCreateSharedContent, levelCodeFromSubtopicKey } from './_shared-content/get-or-create-shared-content';
 import {
   normalizeGrammarGuide,
   normalizeOptionalExercises,
@@ -18,6 +19,16 @@ import type { PlanEntitlementsSnapshot } from '../src/domain/entitlements/entitl
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 
 const AI_MODEL = 'gpt-4o-mini';
+
+// Thrown when the generation loop exhausts its retries with no valid mission, so
+// the shared-content item is marked failed (never a valid hit) and the caller
+// maps it to the same operational 500 as before.
+class WritingMissionGenerationError extends Error {
+  constructor() {
+    super('WRITING_MISSION_GENERATION_FAILED');
+    this.name = 'WritingMissionGenerationError';
+  }
+}
 
 // ── NORMAL-MODE writing generation is now data-driven ──────────────────────────
 // The hardcoded English SYSTEM_PROMPT + format/conflict/objective/context
@@ -779,6 +790,9 @@ export default async function handler(req: any, res: any) {
   // curriculum engine owns ALL pedagogy — this endpoint only runs the AI
   // Gateway call, parses, dedups and persists. There is NO hardcoded English
   // fallback: a misconfigured curriculum is an explicit operational error.
+  // The student does NOT pick a theme: the mission is determined EXCLUSIVELY by
+  // the day's pedagogical recorte, so no user-chosen `selected_theme` is injected
+  // into the prompt (and none is part of the shared-cache identity).
   let resolvedPrompt;
   try {
     resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
@@ -811,72 +825,101 @@ export default async function handler(req: any, res: any) {
   const baseTemperature = resolvedPrompt.temperature ?? 0.88;
 
   const MAX_ATTEMPTS = 3;
-  let theme: Record<string, unknown> | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    let raw: string;
-
-    try {
-      const completion = await callTheme('normal', attempt, MAX_ATTEMPTS, {
-        model: normalModel,
-        // Bump temperature per attempt to diversify retries against the
-        // history-based similarity guard below.
-        temperature: baseTemperature + (attempt - 1) * 0.06,
-        messages: normalMessages,
-      });
-      raw = completion.choices[0]?.message?.content ?? '';
-    } catch (err) {
-      const { code, status } = sanitizeProviderError(err);
-      if (code === 'AI_TIMEOUT') {
-        safeLog('generate-theme', 'timeout', status);
-        return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
+  // The generation loop, now a callback the shared library invokes ONLY on a
+  // cache miss. Behaviour is unchanged: retry with rising temperature, parse,
+  // semantic-validity gate, same-user similarity guard, and the surface-theme
+  // override. Throws WritingMissionGenerationError when retries are exhausted, or
+  // the provider error so the caller maps timeouts/unavailable as before.
+  const generateMission = async (): Promise<Record<string, unknown>> => {
+    let produced: Record<string, unknown> | null = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let raw: string;
+      try {
+        const completion = await callTheme('normal', attempt, MAX_ATTEMPTS, {
+          model: normalModel,
+          temperature: baseTemperature + (attempt - 1) * 0.06,
+          messages: normalMessages,
+        });
+        raw = completion.choices[0]?.message?.content ?? '';
+      } catch (err) {
+        const { code } = sanitizeProviderError(err);
+        if (code === 'AI_TIMEOUT' || code === 'AI_UNAVAILABLE') throw err; // mapped by caller
+        if (attempt >= MAX_ATTEMPTS) throw new WritingMissionGenerationError();
+        continue;
       }
-      if (code === 'AI_UNAVAILABLE') {
-        safeLog('generate-theme', 'provider_unavailable', status);
-        return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
+
+      const parsed = parseRawContent(raw);
+      if (!parsed) { console.error(`Attempt ${attempt}: invalid JSON`); continue; }
+
+      const candidate = normalizeTheme(parsed);
+      const invalidReason = validateNormalTheme(candidate);
+      if (invalidReason) {
+        console.error(`Attempt ${attempt}: missão semanticamente inválida — ${invalidReason}`);
+        continue;
       }
-      if (attempt >= MAX_ATTEMPTS) {
-        return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão. Tente novamente.');
+      if (attempt < MAX_ATTEMPTS && isTooSimilar(candidate, recentThemes)) {
+        console.log(`Attempt ${attempt}: too similar to history, retrying…`);
+        continue;
       }
-      continue;
+      produced = candidate;
+      break;
     }
+    if (!produced) throw new WritingMissionGenerationError();
+    // No user-chosen theme override: the mission's context/tag is whatever the
+    // curriculum-composed generation produced for the recorte (the student never
+    // selects a subject).
+    return produced;
+  };
 
-    const parsed = parseRawContent(raw);
-    if (!parsed) {
-      console.error(`Attempt ${attempt}: invalid JSON`);
-      continue;
+  // Shared content library (Writing): reuse a compatible mission this user hasn't
+  // seen, or GENERATE one now. OpenAI runs ONLY on a cache miss (inside
+  // generateMission). Keyed by curricular identity + prompt version + the OPTIONAL
+  // surface theme — never English-specific. The per-user generated_themes row
+  // below still owns history, dedup and curricular credit.
+  const serviceClient = getCurriculumServiceClient();
+  let shared;
+  try {
+    shared = await getOrCreateSharedContent<Record<string, unknown>>({
+      client: serviceClient,
+      userId,
+      identity: {
+        modality: 'writing',
+        learningLanguage: resolvedPrompt.languageContext.learningLanguage,
+        interfaceLanguage: resolvedPrompt.languageContext.interfaceLanguage,
+        curriculumVersionId: resolvedPrompt.versionId,
+        subtopicKey: resolvedPrompt.subtopicKey ?? '',
+        levelCode: levelCodeFromSubtopicKey(resolvedPrompt.subtopicKey ?? ''),
+        // Constant — the writing mission identity is PURELY curricular; it never
+        // depends on a user-selected theme.
+        exerciseType: 'mission',
+        templateKey: 'writing.generate_topic',
+        promptVersion: resolvedPrompt.templateVersion,
+      },
+      generatorModel: normalModel,
+      generateContent: generateMission,
+    });
+  } catch (err) {
+    if (err instanceof WritingMissionGenerationError) {
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão agora. Tente novamente.');
     }
-
-    const candidate = normalizeTheme(parsed);
-
-    // SEMANTIC validity gate (blocker: empty missions). Parsing is not enough —
-    // an AI response with empty mission/title must never be persisted or shown.
-    // Unlike the similarity guard below, this check is NOT skipped on the last
-    // attempt: a semantically-invalid mission is never accepted, so exhausting
-    // retries yields an operational error (below), never an empty card.
-    const invalidReason = validateNormalTheme(candidate);
-    if (invalidReason) {
-      console.error(`Attempt ${attempt}: missão semanticamente inválida — ${invalidReason}`);
-      continue;
+    const { code, status } = sanitizeProviderError(err);
+    if (code === 'AI_TIMEOUT') {
+      safeLog('generate-theme', 'timeout', status);
+      return jsonError(res, status, code, 'O serviço demorou para responder. Tente novamente.');
     }
-
-    // Skip similarity check on last attempt to guarantee a response
-    if (attempt < MAX_ATTEMPTS && isTooSimilar(candidate, recentThemes)) {
-      console.log(`Attempt ${attempt}: too similar to history, retrying…`);
-      continue;
+    if (code === 'AI_UNAVAILABLE') {
+      safeLog('generate-theme', 'provider_unavailable', status);
+      return jsonError(res, status, code, 'O serviço está temporariamente indisponível. Tente novamente.');
     }
-
-    theme = candidate;
-    break;
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão. Tente novamente.');
   }
 
-  if (!theme) {
-    // Retries exhausted with no semantically-valid, sufficiently-distinct
-    // mission — an operational error, never an empty mission.
-    return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão agora. Tente novamente.');
-  }
+  const theme = shared.content;
 
-  // Persist to database
+  // Persist to database (the PER-USER activity instance — history, dedup, and the
+  // curricular credit link. The mission CONTENT came from the shared library, but
+  // this row and everything downstream stays per-user, exactly as before).
   let themeId: string | null = null;
   try {
     const { data, error } = await supabase
@@ -897,6 +940,8 @@ export default async function handler(req: any, res: any) {
         // current pointer if it advanced meanwhile (blocker 7).
         curriculum_version_id: resolvedPrompt.versionId,
         curriculum_subtopic_key: resolvedPrompt.subtopicKey,
+        // Traceability to the shared library item (never affects behaviour).
+        shared_content_item_id: shared.itemId,
       })
       .select('id')
       .single();
