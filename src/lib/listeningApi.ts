@@ -308,18 +308,41 @@ export function verifyStoryAnswer(input: {
   });
 }
 
-export async function completeStoryListening(sharedStoryId?: string | null): Promise<{ activityDate: string; saved: boolean }> {
+export type StoryCompletionResult = { activityDate: string; saved: boolean; alreadyCompleted?: boolean };
+
+export async function completeStoryListening(sharedStoryId?: string | null): Promise<StoryCompletionResult> {
   // Real-completion event routed through the SERVER (was a direct client write).
-  // The client sends ONLY the id of the story it just finished; the server
-  // marks the assignment complete AND records the curricular 'listening'
-  // practice for THAT exact story's recorte (server-validated ownership +
-  // consumed + identity), granting credit at REAL completion — never at
-  // "Começar a ouvir" (blocker 9) — and never trusting a client-supplied recorte
-  // (blocker 6).
-  return apiFetch<{ activityDate: string; saved: boolean }>('/api/listening/story/complete', {
-    method: 'POST',
-    body: JSON.stringify(sharedStoryId ? { sharedStoryId } : {}),
-  });
+  // The client sends ONLY the id of the story it just finished; the server marks
+  // the calendar assignment complete (the CANONICAL truth) AND records the
+  // curricular 'listening' practice for THAT exact story's recorte — never
+  // trusting a client-supplied recorte (blocker 6).
+  //
+  // The server endpoint is fully IDEMPOTENT (atomic upsert on the calendar row),
+  // so a lost or slow first response is safe to re-send: the retry hits
+  // `already_completed` and returns fast. We therefore auto-retry transient
+  // failures here so a flaky mobile connection no longer surfaces the false
+  // "não foi possível registrar no calendário" when the calendar was in fact
+  // registered. A definitive client error (4xx, e.g. auth) is NOT retried.
+  const body = JSON.stringify(sharedStoryId ? { sharedStoryId } : {});
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await apiFetch<StoryCompletionResult>('/api/listening/story/complete', {
+        method: 'POST',
+        body,
+      });
+    } catch (err) {
+      lastErr = err;
+      const status = err instanceof ListeningApiError ? err.status : 0;
+      // Retry only transient failures: a network reject (status 0), a non-JSON /
+      // timeout response, or a 5xx. Never a 4xx.
+      const retriable = status === 0 || status >= 500;
+      if (!retriable || attempt === maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+    }
+  }
+  throw lastErr;
 }
 
 // ── On-demand generation ───────────────────────────────────────────────────────
