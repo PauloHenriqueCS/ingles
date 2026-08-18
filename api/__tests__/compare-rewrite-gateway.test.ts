@@ -523,6 +523,45 @@ describe('OBSERVE mode — generateFinalTextOnly flow', () => {
   });
 });
 
+// ── 3b. Output-language guard on the "Versão final corrigida" ─────────────────
+// The reported bug: the final corrected version came back mixing Portuguese into
+// the student's English. The guard verifies the output language and retries once;
+// it must never silently persist/return a wrong- or mixed-language correction.
+
+describe('generateFinalTextOnly — output-language guard', () => {
+  const PT_OUTPUT = 'Olá! Eu não sei o seu nome, mas eu gostaria de saber mais sobre você e a sua família hoje.';
+  const EN_OUTPUT = 'Hello! I do not know your name yet, but I would like to know more about you and your family today.';
+
+  it('a clean English correction passes with a SINGLE AI call (no false retry)', async () => {
+    mockCreate.mockImplementation(() => aiOk(EN_OUTPUT));
+    const res = makeRes();
+    await handler(makeFinalOnlyReq(), res);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe(EN_OUTPUT);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries ONCE when the first output is in the wrong language, then succeeds', async () => {
+    mockCreate
+      .mockImplementationOnce(() => aiOk(PT_OUTPUT))   // drift → rejected by guard
+      .mockImplementationOnce(() => aiOk(EN_OUTPUT));  // retry → correct
+    const res = makeRes();
+    await handler(makeFinalOnlyReq(), res);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(res._status()).toBe(200);
+    expect((res._body() as any).finalCorrectedText).toBe(EN_OUTPUT);
+  });
+
+  it('never silently accepts a wrong-language correction: both attempts wrong → 502 AI_WRONG_LANGUAGE', async () => {
+    mockCreate.mockImplementation(() => aiOk(PT_OUTPUT)); // stays wrong on retry too
+    const res = makeRes();
+    await handler(makeFinalOnlyReq(), res);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(res._status()).toBe(502);
+    expect((res._body() as any).code).toBe('AI_WRONG_LANGUAGE');
+  });
+});
+
 // ── 4. Failure scenarios: comparison succeeded + correction failed ────────────
 
 describe('comparison succeeded, final correction failed (best-effort)', () => {

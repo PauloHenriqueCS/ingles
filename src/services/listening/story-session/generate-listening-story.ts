@@ -9,6 +9,7 @@ import type { GatewayUsageMetric, GatewayDeps } from '../../../../api/_ai-gatewa
 import { countTtsSsmlCharacters } from '../../../../api/_ai-gateway/tts-character-count';
 import { getCurriculumServiceClient } from '../../../../api/_curriculum/service-client';
 import { resolveActivityPrompt, type ResolvedActivityPrompt } from '../../../../api/_curriculum/curriculum-runtime';
+import { evaluateOutputLanguage } from '../../../domain/language/language-guard';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -168,7 +169,8 @@ Structural rules:
 - Part 2 must continue naturally where Part 1 ended.
 - Each question tests only the part just heard — do not cross-reference parts.
 - Exactly 5 options per question, exactly one correct, all distractors plausible.
-- correctIndex: integer 0–4.${themeRule}`;
+- correctIndex: integer 0–4.
+- LANGUAGE: write every "title", "summary" and "text" field in the LEARNING language named in the instructions above; only "explanationPt" uses the interface language.${themeRule}`;
 }
 
 // ── Normalize correctIndex from AI (may return letter, 1-indexed, or text) ────
@@ -669,6 +671,25 @@ export async function generateListeningStory(
     });
     stepLog(requestId, 'ai_start', { level, theme: theme ?? 'random', subtopicKey: composed.subtopicKey ?? 'none' });
     ai = await callAI(level, openaiKey, requestId, userId, composed, theme);
+
+    // Output-language guard: the story text must be in the LEARNING language.
+    // The default TTS voice is multilingual and will faithfully speak whatever
+    // language the text is in — so a story that drifted into the interface
+    // language would produce interface-language AUDIO (the reported bug). If the
+    // generated story is evidently in the wrong/mixed language, regenerate ONCE;
+    // if it still fails, throw so nothing is cached (fail-loud, never silent).
+    const expectedLang = composed.languageContext.learningLanguage;
+    const storyLanguageText = (s: AIStory) => [s.title, s.summary, ...s.parts.map((p) => p.text)].join('\n');
+    let guard = evaluateOutputLanguage(storyLanguageText(ai), expectedLang);
+    if (!guard.ok) {
+      stepLog(requestId, 'ai_language_guard_retry', { reason: guard.reason, detected: guard.detected });
+      ai = await callAI(level, openaiKey, requestId, userId, composed, theme);
+      guard = evaluateOutputLanguage(storyLanguageText(ai), expectedLang);
+      if (!guard.ok) {
+        stepLog(requestId, 'ai_language_guard_failed', { reason: guard.reason, detected: guard.detected });
+        throw new Error('AI_WRONG_LANGUAGE');
+      }
+    }
   }
 
   // Pack the story now — before TTS — so we can return it on audio failure

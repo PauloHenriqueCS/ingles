@@ -14,6 +14,7 @@ import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-mes
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { validateRewriteText } from '../src/domain/writing-rewrite/rewrite-text-validation';
 import { normalizeForComparison } from '../src/domain/text/text-normalization';
+import { evaluateOutputLanguage } from '../src/domain/language/language-guard';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 const AI_MODEL = 'gpt-4o-mini';
@@ -265,6 +266,7 @@ export default async function handler(req: any, res: any) {
     // operational error rather than a silent English prompt.
     let correctSystem: string;
     let correctUser: string;
+    let expectedLang: string;
     try {
       const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
         templateKey: 'writing.correct_v2_text',
@@ -274,6 +276,9 @@ export default async function handler(req: any, res: any) {
       });
       correctSystem = resolved.system;
       correctUser = resolved.user ?? '';
+      // The corrected version MUST stay in the student's learning language; the
+      // guard below verifies the model actually honoured that.
+      expectedLang = resolved.languageContext.learningLanguage;
     } catch (err) {
       if (err instanceof CurriculumConfigError) {
         safeLog('compare-rewrite', 'curriculum_config_error', 500, { mode: 'final_text_only' });
@@ -326,44 +331,71 @@ export default async function handler(req: any, res: any) {
 
     try {
       const openai = new OpenAI({ apiKey, timeout: TIMEOUTS.MEDIUM, maxRetries: 0 });
-      physicalAttempt += 1;
-      const completion = await executeAiGatewayCall<ChatCompletion>(
-        {
-          featureKey: 'writing.correct_v2_text',
-          provider: 'openai',
-          service: 'chat.completions',
-          model: AI_MODEL,
-          userId,
-          initiatedByUserId: userId,
-          actorType: 'user',
-          executionLocation: 'backend',
-          correlationId,
-          attemptNumber: physicalAttempt,
-          callSequence: 1,
-          technicalMetadata: {
-            endpoint: 'compare-rewrite',
-            operation: 'final_correction',
-            physicalAttempt,
-            flowType: 'final_text_only',
+
+      // Generate, then verify the output language. If the model drifts into the
+      // wrong/mixed language (the reported "Versão final corrigida" bug), retry
+      // ONCE with a reinforced instruction; never silently accept a bad result.
+      const MAX_LANGUAGE_ATTEMPTS = 2;
+      let finalCorrectedText = '';
+      let lastGuardFailed = false;
+      for (let attempt = 0; attempt < MAX_LANGUAGE_ATTEMPTS; attempt++) {
+        const reinforcement = attempt === 0
+          ? ''
+          : '\n\n=== RETRY: LANGUAGE ERROR ===\nYour previous output was not entirely in the student\'s learning language. Output the corrected text ONLY in that language. Do not translate any part of it and do not mix languages.';
+        physicalAttempt += 1;
+        const completion = await executeAiGatewayCall<ChatCompletion>(
+          {
+            featureKey: 'writing.correct_v2_text',
+            provider: 'openai',
+            service: 'chat.completions',
+            model: AI_MODEL,
+            userId,
+            initiatedByUserId: userId,
+            actorType: 'user',
+            executionLocation: 'backend',
+            correlationId,
+            attemptNumber: physicalAttempt,
+            callSequence: 1,
+            technicalMetadata: {
+              endpoint: 'compare-rewrite',
+              operation: 'final_correction',
+              physicalAttempt,
+              flowType: 'final_text_only',
+            },
+            estimatedMetrics: estimateTextTokens(
+              correctSystem.length + correctUser.length,
+              DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
+            ),
           },
-          estimatedMetrics: estimateTextTokens(
-            correctSystem.length + correctUser.length,
-            DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE,
-          ),
-        },
-        () => openai.chat.completions.create({
-          model: AI_MODEL,
-          temperature: 0.2,
-          messages: [
-            { role: 'system', content: correctSystem },
-            { role: 'user', content: correctUser },
-          ],
-        }),
-        gatewayDeps,
-        extractCompareMetrics,
-      );
-      const finalCorrectedText = (completion.choices[0]?.message?.content ?? '').trim();
-      if (!finalCorrectedText) throw new Error('Resposta vazia');
+          () => openai.chat.completions.create({
+            model: AI_MODEL,
+            temperature: 0.2,
+            messages: [
+              { role: 'system', content: correctSystem + reinforcement },
+              { role: 'user', content: correctUser },
+            ],
+          }),
+          gatewayDeps,
+          extractCompareMetrics,
+        );
+        const candidate = (completion.choices[0]?.message?.content ?? '').trim();
+        if (!candidate) throw new Error('Resposta vazia');
+        finalCorrectedText = candidate;
+
+        const guard = evaluateOutputLanguage(candidate, expectedLang);
+        if (guard.ok) { lastGuardFailed = false; break; }
+        lastGuardFailed = true;
+        safeLog('compare-rewrite', 'final_only_language_guard', 200, {
+          attempt: attempt + 1, reason: guard.reason ?? null, detected: guard.detected ?? null,
+        });
+      }
+
+      // Never persist/return an evidently wrong- or mixed-language correction.
+      if (lastGuardFailed) {
+        if (dedupeLockId) await dedupeStore!.fail(dedupeLockId).catch(() => undefined);
+        safeLog('compare-rewrite', 'final_only_language_rejected', 502, {});
+        return jsonError(res, 502, 'AI_WRONG_LANGUAGE', 'A correção saiu no idioma errado. Tente novamente.');
+      }
 
       // Persist server-side so a later retry/refresh finds the result without a
       // new AI call, and promote the day to 'revisado'. Bound to the review row

@@ -10,24 +10,20 @@ const BASE_INPUT = {
 };
 
 describe('buildGenerateThemeRequestBody', () => {
-  it('sends the selected technical theme value under "theme"', () => {
-    const body = buildGenerateThemeRequestBody({ ...BASE_INPUT, selectedTheme: 'football_sports' });
-    expect(body.theme).toBe('football_sports');
+  it('never sends a user-picked theme — mission is curriculum-driven only', () => {
+    const body = buildGenerateThemeRequestBody(BASE_INPUT);
+    // The manual theme selection was removed; no `theme` field must be emitted,
+    // so nothing can compete with the daily curricular recorte on the server.
+    expect('theme' in body).toBe(false);
   });
 
-  it('sends theme: null for "Tema aleatório" (no selection) — matches prior behavior', () => {
-    const body = buildGenerateThemeRequestBody({ ...BASE_INPUT, selectedTheme: null });
-    expect(body.theme).toBeNull();
-  });
-
-  it('does not alter the other existing fields of the request', () => {
+  it('preserves the other request fields verbatim', () => {
     const body = buildGenerateThemeRequestBody({
       mode: 'review',
       reviewGroup: { group: { id: 'g1' }, items: [] },
       learningContext: { currentLevel: 'A2' },
       previousThemeId: 'prev-1',
       excludedTheme: { title: 'x' },
-      selectedTheme: 'music',
     });
     expect(body).toEqual({
       mode: 'review',
@@ -35,13 +31,6 @@ describe('buildGenerateThemeRequestBody', () => {
       learningContext: { currentLevel: 'A2' },
       previousThemeId: 'prev-1',
       excludedTheme: { title: 'x' },
-      theme: 'music',
     });
-  });
-
-  it('sends the raw technical value, never a pre-translated label', () => {
-    const body = buildGenerateThemeRequestBody({ ...BASE_INPUT, selectedTheme: 'football_sports' });
-    expect(body.theme).not.toBe('Futebol e esportes');
-    expect(body.theme).toBe('football_sports');
   });
 });

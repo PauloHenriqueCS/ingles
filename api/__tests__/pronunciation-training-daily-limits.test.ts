@@ -258,6 +258,59 @@ describe('generate-text — daily get-or-create', () => {
     expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
+  it('REPORTED BUG: entering and leaving the screen many times generates the daily text EXACTLY ONCE', async () => {
+    // Reproduces the reported flow: open → get a text → leave → re-open (×N).
+    // The first open (no active row) generates via AI + RPC; every subsequent
+    // open must find the now-persisted active row and return it WITHOUT any new
+    // AI generation — so 10 re-entries cost exactly ONE provider call.
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'The daily text.' } }] });
+
+    // Stateful mock: no active row until the create RPC runs; afterwards the
+    // active row exists (as the partial unique index guarantees in the real DB).
+    let persistedActiveRow: Record<string, unknown> | null = null;
+    const rpc = vi.fn((fnName: string) => {
+      if (fnName === 'create_pronunciation_training_text') {
+        persistedActiveRow = activeTextRow({ id: 's1', generated_text: 'The daily text.' });
+        return Promise.resolve({ data: { sessionId: 's1', text: 'The daily text.', level: 'B1', status: 'text_generated', result: null, dailyCompleted: 0 }, error: null });
+      }
+      return Promise.resolve({ data: null, error: null });
+    });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'pronunciation_training_sessions') {
+          const state = { neq: false };
+          const chain: any = {
+            select: vi.fn(() => chain),
+            eq: vi.fn(() => chain),
+            neq: vi.fn(() => { state.neq = true; return chain; }),
+            order: vi.fn(() => chain),
+            limit: vi.fn(() => chain),
+            maybeSingle: vi.fn(() => Promise.resolve({ data: state.neq ? persistedActiveRow : null, error: null })),
+            then: (resolve: (v: unknown) => unknown) => resolve({ data: null, count: 0, error: null }),
+          };
+          return chain;
+        }
+        return { select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(), order: vi.fn().mockReturnThis(), limit: vi.fn().mockReturnThis(), maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) };
+      }),
+      rpc,
+    };
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
+
+    const texts: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const res = makeRes();
+      await handler(makeReq('generate-text'), res);
+      texts.push((res._body() as any).text);
+    }
+
+    // Exactly one AI generation + one create RPC across all 10 entries.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(rpc.mock.calls.filter((c) => c[0] === 'create_pronunciation_training_text')).toHaveLength(1);
+    // And every entry returned the SAME persisted text.
+    expect(new Set(texts)).toEqual(new Set(['The daily text.']));
+  });
+
   it('feature disabled blocks before any DB lookup', async () => {
     const supabase = makeSupabase();
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
