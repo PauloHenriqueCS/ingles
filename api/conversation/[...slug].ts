@@ -43,6 +43,7 @@ import {
   attachTrialConversationSessionGatewayIds,
   releaseTrialConversationSessionAuthorization,
 } from '../_entitlements/authorize-trial-conversation-session';
+import { authorizeCommercialConversationSession } from '../_entitlements/authorize-commercial-conversation-session';
 import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-messages';
 import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
@@ -777,6 +778,54 @@ async function handleSession(req: any, res: any) {
     }
   }
 
+  // Commercial (monthly) plan, finite balance — the atomic twin of the trial
+  // guard above (security: TOCTOU fix). Reserves the balance BEFORE the OpenAI
+  // call, so N concurrent /session starts can never together be authorized for
+  // more than the real remaining monthly balance (+ purchased extra credits):
+  // each open row reserves its FULL authorized_max_seconds. Unlimited-monthly
+  // plans skip this and keep the post-OpenAI insert path below unchanged.
+  if (!isTrialBalance && !entitlements.conversation.monthlyTime.unlimited && recordingAuthorizationId === null) {
+    const requestedMaxSeconds = Math.floor(authorizedAtStart.authorizedMaxRecordingSeconds);
+    if (requestedMaxSeconds > 0) {
+      const rawSessionAttemptId = (req.body ?? {}).sessionAttemptId;
+      const sessionAttemptId = isValidUuid(rawSessionAttemptId) ? rawSessionAttemptId : gatewayDeps.uuidGen();
+      let commercialResult;
+      try {
+        commercialResult = await authorizeCommercialConversationSession(getSharedServiceClient(), {
+          userId,
+          requestedMaxSeconds,
+          sessionDate: getTodaySP(),
+          // Effective allowance resolved server-side from entitlements (includes
+          // admin overrides + purchased credits) — passed to the service_role-only
+          // RPC, never trusted from a client.
+          planLimitSeconds: entitlements.conversation.monthlyTime.limit,
+          planUnlimited: entitlements.conversation.monthlyTime.unlimited,
+          extraCreditsSeconds: entitlements.conversation.extraSecondsAvailable,
+          idempotencyKey: sessionAttemptId,
+        });
+      } catch (e) {
+        // Fail-SAFE (deliberately not fail-open): the whole point of this atomic
+        // check is to bound paid consumption under concurrency; letting a session
+        // start on a transient failure would defeat it — mirrors the trial guard.
+        gatewayDeps.logger('gateway.commercialConversationAuthorize.failed', { message: String(e) });
+        return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Não foi possível verificar seu saldo de conversação. Tente novamente.' });
+      }
+      if (commercialResult.blocked) {
+        return res.status(403).json({ code: 'MONTHLY_LIMIT_REACHED', message: ENTITLEMENT_MESSAGES.conversationMinutesExhausted });
+      }
+      recordingAuthorizationId = commercialResult.authorizationId;
+      if (commercialResult.authorizedMaxSeconds < requestedMaxSeconds) {
+        // The balance shrank between the snapshot and this atomic recheck (a
+        // concurrent session reserved some of it) — reflect the TRUE ceiling.
+        authorizedAtStart = {
+          authorizedMaxRecordingSeconds: commercialResult.authorizedMaxSeconds,
+          recordingLimitReason: 'monthly_balance',
+          effectiveDeadlineMs: sessionStartNowMs + commercialResult.authorizedMaxSeconds * 1000,
+        };
+      }
+    }
+  }
+
   // Upfront AI Gateway budget reservation for conversation.realtime_usage —
   // see api/_realtime-budget.ts's header comment for the full rationale.
   // After the rate limiter (a spamming client must not be able to hold
@@ -927,13 +976,15 @@ async function handleSession(req: any, res: any) {
     // sitting reserved for up to REALTIME_MAX_SESSION_SECONDS over a call
     // that never happened.
     if (realtimeBudget.reservationId) await releaseSessionReservation(gatewayDeps, realtimeBudget.reservationId, 'session_never_started');
-    // Etapa 2A — the trial's authorization row (if any) was created EARLY,
-    // atomically, before this OpenAI call — it never represented real usage
-    // since the call itself never succeeded, so it must be released rather
-    // than permanently holding part of the trial's lifetime balance.
-    if (recordingAuthorizationId && isTrialBalance) {
+    // The authorization row (if any) was created EARLY and atomically, before
+    // this OpenAI call — for BOTH the trial and the commercial finite-balance
+    // paths. It never represented real usage since the call itself never
+    // succeeded, so it must be released (DELETEd) rather than permanently
+    // holding part of the balance's reservation. (Unlimited plans have no early
+    // row here — theirs is inserted only after a successful call below.)
+    if (recordingAuthorizationId) {
       await releaseTrialConversationSessionAuthorization(getSharedServiceClient(), recordingAuthorizationId).catch((e) => {
-        gatewayDeps.logger('gateway.trialConversationAuthorization.releaseFailed', { message: String(e) });
+        gatewayDeps.logger('gateway.conversationAuthorization.releaseFailed', { message: String(e) });
       });
       recordingAuthorizationId = null;
     }

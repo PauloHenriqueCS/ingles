@@ -134,7 +134,16 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
 // stubbed to a fixed prompt (model null → handler falls back to AI_MODEL) so the
 // gateway / telemetry / billing path is exercised exactly as before.
 // recordCurricularPractice is a best-effort no-op stub.
-vi.mock('../_curriculum/service-client', () => ({ getCurriculumServiceClient: () => ({}) }));
+// reserve_writing_review is service_role-only and now runs via
+// getCurriculumServiceClient().rpc(...). Return the SAME per-test client the auth
+// mock resolved (its `.rpc` is the same spy), so existing rpc assertions hold.
+vi.mock('../_curriculum/service-client', () => ({
+  getCurriculumServiceClient: () => {
+    const settled = (mockRequireAuth as any).mock?.settledResults ?? [];
+    const last = settled[settled.length - 1];
+    return last?.value?.supabase ?? {};
+  },
+}));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: vi.fn().mockResolvedValue({
     system: 'CURRICULUM_CORRECTION_SYSTEM',

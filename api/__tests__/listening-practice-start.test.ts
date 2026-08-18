@@ -15,6 +15,13 @@ const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockRpc } = vi.hois
   mockRpc: vi.fn(),
 }));
 
+// consume_listening_pending_story is service_role-only and now runs via
+// getListeningServiceClient().rpc(...). Point that client at the SAME hoisted
+// rpc spy (mockRpc) so the existing `expect(mockRpc)...` assertions keep working.
+vi.mock('../../src/services/listening/publication/_supabase', () => ({
+  getListeningServiceClient: vi.fn(() => ({ rpc: mockRpc })),
+}));
+
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
 vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
@@ -75,7 +82,7 @@ describe('POST /api/listening/story/practice-start', () => {
     expect((res._body() as any).limit).toBe(3);
     expect((res._body() as any).remaining).toBe(2);
     expect(mockRpc).toHaveBeenCalledWith('consume_listening_pending_story', expect.objectContaining({
-      p_shared_story_id: STORY_ID, p_effective_limit: 3, p_unlimited: false,
+      p_user_id: USER_ID, p_shared_story_id: STORY_ID, p_effective_limit: 3, p_unlimited: false,
     }));
   });
 

@@ -3,8 +3,12 @@ import type { FeatureLimit, PlanEntitlementsSnapshot } from '../domain/entitleme
 
 // ── Hoist mock refs ───────────────────────────────────────────────────────────
 
-const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
+const { mockCreate, mockGatewayDeps, mockRequireAuth } = vi.hoisted(() => {
   const mockCreate = vi.fn();
+  // Hoisted so the service-client mock can read the supabase the auth mock
+  // resolved (reserve_writing_review is service_role-only and runs via
+  // getCurriculumServiceClient().rpc — its `.rpc` must be the same spy).
+  const mockRequireAuth = vi.fn();
   // AI Gateway stays fully neutral here — this file tests review-text's own
   // logic (auth, validation, retries, DB writes), not gateway telemetry.
   // Forcing legacy mode avoids constructing a real Supabase-backed usage
@@ -45,11 +49,11 @@ const { mockCreate, mockGatewayDeps } = vi.hoisted(() => {
     uuidGen: vi.fn(() => 'test-uuid'),
     logger: vi.fn(),
   };
-  return { mockCreate, mockGatewayDeps };
+  return { mockCreate, mockGatewayDeps, mockRequireAuth };
 });
 
 vi.mock('../../api/_auth', () => ({
-  requireAuth: vi.fn(),
+  requireAuth: mockRequireAuth,
 }));
 
 // Plan entitlements — permissive by default (writing enabled + unlimited),
@@ -85,7 +89,14 @@ vi.mock('openai', () => ({
 // covered by api/__tests__/review-text-gateway.test.ts and the seeded template
 // SQL guarded by api/__tests__/review-text-feedback-precision.test.ts.
 vi.mock('../../api/_curriculum/service-client', () => ({
-  getCurriculumServiceClient: () => ({}),
+  // reserve_writing_review is service_role-only and now runs via
+  // getCurriculumServiceClient().rpc(...). Return the SAME per-test client the
+  // auth mock resolved (its `.rpc` is the same spy) so every rpc assertion holds.
+  getCurriculumServiceClient: () => {
+    const settled = (mockRequireAuth as any).mock?.settledResults ?? [];
+    const last = settled[settled.length - 1];
+    return last?.value?.supabase ?? {};
+  },
 }));
 vi.mock('../../api/_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: vi.fn().mockResolvedValue({
@@ -698,7 +709,7 @@ describe('handler — limites de plano (writing.reviews)', () => {
     expect(res._status).toBe(200);
     expect(mockCreate).toHaveBeenCalledTimes(1);
     const reserveCall = calls.find((c) => c.name === 'reserve_writing_review');
-    expect(reserveCall?.params).toMatchObject({ p_unlimited: false, p_limit: 1 });
+    expect(reserveCall?.params).toMatchObject({ p_user_id: USER_ID, p_unlimited: false, p_limit: 1 });
   });
 
   it('2) usuário Free no último uso disponível (consumed = limit - 1): ainda permite', async () => {

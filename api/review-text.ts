@@ -351,7 +351,12 @@ export default async function handler(req: any, res: any) {
   // "Revisar com IA" click) makes a retried/duplicated request idempotent:
   // the same attempt never consumes two slots, and never calls the AI
   // provider twice.
-  const { data: reserveData, error: reserveError } = await supabase.rpc('reserve_writing_review', {
+  // Called via the SERVICE-ROLE client with an explicit p_user_id: the daily
+  // limit (p_unlimited/p_limit) is resolved server-side from entitlements above
+  // and the RPC is service_role-only, so a client can never call it directly
+  // with an inflated/unlimited limit (security: quota RPC hardening).
+  const { data: reserveData, error: reserveError } = await getCurriculumServiceClient().rpc('reserve_writing_review', {
+    p_user_id: userId,
     p_attempt_id: attemptId,
     p_unlimited: entitlements.writing.reviews.unlimited,
     p_limit: entitlements.writing.reviews.limit,

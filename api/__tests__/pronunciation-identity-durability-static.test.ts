@@ -57,7 +57,10 @@ describe('pronunciation-training handler — identity is durable, not best-effor
   });
 
   it('checks the RPC { error } explicitly before delivering the session', () => {
-    expect(handler).toMatch(/const \{ data: created, error: createError \} = await supabase\.rpc\('create_pronunciation_training_text'/);
+    // The quota RPC is now service_role-only: called via the service-role client
+    // with an explicit p_user_id, never the caller's JWT client.
+    expect(handler).toMatch(/const \{ data: created, error: createError \} = await getCurriculumServiceClient\(\)\.rpc\('create_pronunciation_training_text'/);
+    expect(handler).toMatch(/p_user_id: userId/);
     expect(handler).toMatch(/if \(createError\)/);
   });
 });

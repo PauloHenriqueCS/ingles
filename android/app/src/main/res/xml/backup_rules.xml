@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legacy auto-backup rules (Android 11 and below, android:fullBackupContent).
+     Exclude ALL app data from cloud auto-backup. WebView localStorage holds the
+     Supabase session/refresh token; it must never leave the device via backup. -->
+<full-backup-content>
+    <exclude domain="root" path="." />
+</full-backup-content>
