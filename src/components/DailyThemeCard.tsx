@@ -7,7 +7,6 @@ import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
 import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
-import { WRITING_THEMES, RANDOM_THEME_LABEL } from '../domain/writing/writing-themes';
 import type { WritingEntitlements } from '../domain/entitlements/entitlement-types';
 import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
@@ -60,7 +59,6 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
   const [grammarModal, setGrammarModal] = useState<string | null>(null);
-  const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
   const isLoading = genState === 'loading';
 
   const entitlementsLoading = writingEntitlements === null;
@@ -126,11 +124,6 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
         learningContext: context,
         previousThemeId: currentThemeId,
         excludedTheme,
-        // Optional SURFACE topic the user picked (raw technical value from the
-        // canonical writing-themes select). The backend hands it to the
-        // curriculum engine as non-authoritative context (userContext.
-        // selected_theme); the user's current recorte remains authoritative.
-        selectedTheme,
       });
       const res = await fetch(apiUrl('/api/generate-theme'), {
         method: 'POST',
@@ -188,19 +181,6 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
               A IA cria uma missão do seu plano de ensino, focada no recorte atual do currículo. Cada missão é uma situação real para resolver.
             </p>
           )}
-          <select
-            value={selectedTheme ?? ''}
-            onChange={(e) => setSelectedTheme(e.target.value || null)}
-            disabled={generateDisabled}
-            className="w-full px-3 py-2.5 rounded-xl bg-slate-700 border border-slate-600 text-slate-200 text-sm focus:outline-none focus:border-blue-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <option value="">{RANDOM_THEME_LABEL}</option>
-            {WRITING_THEMES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
           <button
             onClick={generate}
             disabled={generateDisabled}

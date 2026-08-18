@@ -7,7 +7,6 @@ import { executeAiGatewayCall, getProductionDeps, estimateTextTokensFromMessages
 import type { GatewayUsageMetric } from './_ai-gateway/index';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
-import { resolveWritingThemeLabel } from '../src/domain/writing/writing-themes';
 import {
   normalizeGrammarGuide,
   normalizeOptionalExercises,
@@ -56,25 +55,11 @@ function buildReviewUserMessage(
   recentThemes: RecentThemeRow[],
   level: string,
   attempt: number,
-  selectedTheme: string | null = null,
 ): string {
   const lines: string[] = [];
 
   lines.push('=== PERFIL DO ALUNO ===');
   lines.push(`Nível: ${level}`);
-
-  // User-requested theme — same contract as normal mode: when present, it
-  // overrides the review group's own originalTheme for the new scenario.
-  // It never touches requiredWords, which stays bound exclusively to the
-  // student's corrected errors regardless of theme.
-  if (selectedTheme) {
-    lines.push('');
-    lines.push('=== TEMA OBRIGATÓRIO ===');
-    lines.push(`TEMA OBRIGATÓRIO ESCOLHIDO PELO USUÁRIO: ${selectedTheme}.`);
-    lines.push('A nova situação criada para esta revisão deve ser centralizada nesse assunto, mesmo que o tema original do grupo de revisão abaixo seja outro.');
-    lines.push('Isso NUNCA afeta requiredWords: as palavras obrigatórias continuam sendo exatamente as corrigidas do aluno, apenas encaixadas numa situação sobre este tema.');
-    lines.push('Este tema tem prioridade máxima sobre o "Tema original" do grupo de revisão listado abaixo.');
-  }
 
   lines.push('');
   lines.push('=== GRUPO DE REVISÃO ===');
@@ -117,11 +102,7 @@ function buildReviewUserMessage(
 
   lines.push('');
   lines.push(`IMPORTANTE: O campo reviewGroupId deve ser exatamente: "${reviewGroup.group.id}"`);
-  if (selectedTheme) {
-    lines.push(`Siga os 6 passos. O TEMA OBRIGATÓRIO acima não é negociável — a situação criada deve girar em torno dele, não do tema original do grupo.`);
-  } else {
-    lines.push('Siga os 6 passos e gere uma atividade de revisão natural e envolvente.');
-  }
+  lines.push('Siga os 6 passos e gere uma atividade de revisão natural e envolvente.');
 
   return lines.join('\n');
 }
@@ -423,23 +404,6 @@ export function validateNormalTheme(theme: Record<string, unknown>): string | nu
   return null;
 }
 
-/**
- * When the user explicitly picked a theme, force the mission's displayed
- * context/tag to that theme's label. The AI's own `context` choice (or,
- * in review mode, a leftover from the review group's unrelated
- * originalTheme) must never override an explicit user selection — the tag
- * shown in the UI has to reflect what the user picked, not an internal
- * mission-structure code like "planning".
- */
-export function applySelectedTopicOverride(
-  candidate: Record<string, unknown>,
-  selectedTheme: string | null,
-): void {
-  if (selectedTheme) {
-    candidate.context = selectedTheme;
-  }
-}
-
 export function parseRawContent(raw: string): any | null {
   try {
     return JSON.parse(raw);
@@ -554,7 +518,7 @@ export default async function handler(req: any, res: any) {
     return { code, message: ENTITLEMENT_MESSAGES.writingGenerationsExhausted };
   }
 
-  const { mode: _clientMode, reviewGroup, learningContext, previousThemeId, excludedTheme, theme: rawTheme } = req.body ?? {};
+  const { mode: _clientMode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
   // SECURITY: legacy review-mission generation is discontinued and can no longer
   // be initiated by ANY client request. Normalize the client-supplied mode to
   // 'normal' server-side, so no modified client can reactivate the old review
@@ -563,15 +527,10 @@ export default async function handler(req: any, res: any) {
   // but is unreachable at runtime. Error review is a separate activity now.
   const mode: string = 'normal';
   void _clientMode;
-  // The client sends the raw technical value from the theme select (e.g.
-  // 'football_sports'); it is resolved to a display label from the single
-  // canonical writing-themes list (a UI option list of SURFACE topics — never
-  // authoritative pedagogy) and handed to the curriculum engine as OPTIONAL
-  // context (userContext.selected_theme). The DB curriculum template decides how
-  // (or whether) to use it; the user's CURRENT recorte remains the sole
-  // authority over what is taught. An unrecognized/empty value => no theme.
-  const normalizedThemeValue = typeof rawTheme === 'string' && rawTheme.trim() ? rawTheme.trim() : null;
-  const selectedTheme = resolveWritingThemeLabel(normalizedThemeValue);
+  // Manual theme selection was removed: the daily writing mission is determined
+  // exclusively by the user's teaching plan / current level / daily curricular
+  // recorte (the DB `writing.generate_topic` template composed for the current
+  // recorte). There is no user-picked topic that could conflict with it.
 
   // Mark previous theme as regenerated (only if it belongs to this user)
   if (previousThemeId) {
@@ -680,7 +639,6 @@ export default async function handler(req: any, res: any) {
       recentThemes,
       level,
       1,
-      selectedTheme,
     );
     let resolvedReviewPrompt;
     try {
@@ -766,8 +724,6 @@ export default async function handler(req: any, res: any) {
       return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar uma atividade de revisão válida. Tente novamente.');
     }
 
-    applySelectedTopicOverride(reviewTheme, selectedTheme);
-
     let themeId: string | null = null;
     try {
       const { data, error } = await supabase
@@ -828,8 +784,6 @@ export default async function handler(req: any, res: any) {
     resolvedPrompt = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
       templateKey: 'writing.generate_topic',
       activityType: 'writing',
-      // Dynamic bits the template MAY consume (unreferenced keys are harmless).
-      userContext: selectedTheme ? { selected_theme: selectedTheme } : undefined,
     });
   } catch (err) {
     if (err instanceof CurriculumConfigError) {
@@ -921,8 +875,6 @@ export default async function handler(req: any, res: any) {
     // mission — an operational error, never an empty mission.
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível gerar a missão agora. Tente novamente.');
   }
-
-  applySelectedTopicOverride(theme, selectedTheme);
 
   // Persist to database
   let themeId: string | null = null;

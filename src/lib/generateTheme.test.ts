@@ -66,7 +66,6 @@ vi.mock('../../api/_ai-gateway/index', async (importOriginal) => {
 });
 
 import { requireAuth } from '../../api/_auth';
-import { WRITING_THEMES } from '../domain/writing/writing-themes';
 import { CurriculumConfigError } from '../../api/_curriculum/curriculum-runtime';
 import handler, {
   normalizeTheme,
@@ -75,7 +74,6 @@ import handler, {
   isTooSimilar,
   normalizeReviewTheme,
   validateReviewTheme,
-  applySelectedTopicOverride,
 } from '../../api/generate-theme';
 
 // ── Shared test helpers ───────────────────────────────────────────────────────
@@ -327,21 +325,39 @@ describe('normalizeTheme', () => {
     const tips = { 'Present Perfect': 'use para experiências.' };
     expect(normalizeTheme({ grammarTips: tips }).grammarTips).toEqual(tips);
   });
-});
 
-// ── applySelectedTopicOverride ────────────────────────────────────────────────
-
-describe('applySelectedTopicOverride', () => {
-  it('força context para o tema selecionado, mesmo que a IA tenha escolhido outro', () => {
-    const candidate: Record<string, unknown> = { context: 'trabalho' };
-    applySelectedTopicOverride(candidate, 'Música');
-    expect(candidate.context).toBe('Música');
+  // Preparatory exercises ("Antes de escrever") are generated in the SAME AI call
+  // as the mission. They disappeared when the strict contract stopped asking for
+  // them; the fix re-adds grammarGuide + optionalExercises to the DB template.
+  // normalizeTheme must surface them to the frontend (MissionGrammarGuide) when
+  // the AI returns them.
+  it('surfaces grammarGuide + preparatory optionalExercises when the AI returns them', () => {
+    const t = normalizeTheme({
+      title: 'T', missionSetup: 'S', missionTask: 'K', level: 'A1',
+      verbTense: 'Simple Present',
+      grammarGuide: {
+        title: 'Simple Present',
+        explanationPtBr: 'Usamos para rotinas.',
+        usagePtBr: ['rotinas'],
+        structures: { affirmative: 'I work', negative: "I don't work", interrogative: 'Do I work?' },
+        examples: [{ english: 'I work.', portuguese: 'Eu trabalho.' }],
+        commonMistakes: ['esquecer o -s na 3ª pessoa'],
+      },
+      optionalExercises: [
+        { id: 'ex1', type: 'fill_blank', instructionPtBr: 'Complete', question: 'I ___ (work).', correctAnswer: 'work', explanationPtBr: 'base form' },
+        { id: 'ex2', type: 'translate', instructionPtBr: 'Traduza', question: 'Eu trabalho.', correctAnswer: 'I work.', explanationPtBr: 'simple present' },
+      ],
+    });
+    expect((t.grammarGuide as any)?.title).toBe('Simple Present');
+    expect(Array.isArray(t.optionalExercises)).toBe(true);
+    expect((t.optionalExercises as any[]).length).toBe(2);
+    expect((t.optionalExercises as any[])[0].type).toBe('fill_blank');
   });
 
-  it('não mexe em context quando nenhum tema foi selecionado (aleatório)', () => {
-    const candidate: Record<string, unknown> = { context: 'trabalho' };
-    applySelectedTopicOverride(candidate, null);
-    expect(candidate.context).toBe('trabalho');
+  it('leaves grammarGuide/optionalExercises null when the AI omits them (no crash)', () => {
+    const t = normalizeTheme({ title: 'T', missionSetup: 'S', missionTask: 'K', level: 'A1' });
+    expect(t.grammarGuide).toBeNull();
+    expect(t.optionalExercises).toBeNull();
   });
 });
 
@@ -717,19 +733,17 @@ describe('handler — modo normal', () => {
   });
 });
 
-// ── handler — tema selecionado (Missão do dia) via currículo data-driven ─────
+// ── handler — seleção manual de tema REMOVIDA (missão 100% do currículo) ──────
 //
-// O bloco de "tema obrigatório" hardcoded no prompt (texto em PT injetado
-// direto na mensagem do usuário) foi REMOVIDO do caminho normal. O endpoint
-// ainda recebe o valor técnico do select (ex: 'football_sports') e o converte
-// para o label canônico via src/domain/writing/writing-themes.ts (nunca uma
-// segunda lista) — mas agora esse label é entregue ao motor de currículo
-// através de `userContext.selected_theme`, e é o template do banco que decide
-// como usá-lo. Estas provas verificam o contrato data-driven (o que o handler
-// passa para resolveActivityPrompt), não mais o texto interno do prompt.
+// A seleção manual de tema foi removida: a missão do dia é determinada
+// exclusivamente pelo plano de ensino / nível atual / recorte curricular do dia
+// (o template `writing.generate_topic` composto para o recorte atual). Estas
+// provas garantem que nenhum tema escolhido pelo cliente pode competir com o
+// recorte: um `theme` legado no corpo é IGNORADO e NUNCA vira userContext nem
+// sobrescreve o context retornado.
 
-describe('handler — tema selecionado (Missão do dia) via currículo', () => {
-  it('converte o valor técnico do select para o label canônico e o injeta em userContext.selected_theme', async () => {
+describe('handler — seleção manual de tema removida', () => {
+  it('nunca injeta um tema do cliente no currículo (userContext sem selected_theme), mesmo com `theme` legado no corpo', async () => {
     const req = makeReq({ body: { theme: 'football_sports' } });
     await handler(req, makeRes());
 
@@ -740,62 +754,14 @@ describe('handler — tema selecionado (Missão do dia) via currículo', () => {
       expect.objectContaining({
         templateKey: 'writing.generate_topic',
         activityType: 'writing',
-        userContext: { selected_theme: 'Futebol e esportes' },
       }),
     );
+    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, unknown> };
+    // The daily recorte is the sole authority — no user topic is forwarded.
+    expect(opts.userContext?.selected_theme).toBeUndefined();
   });
 
-  it('funciona para cada valor técnico do catálogo canônico (mesma lista do select)', async () => {
-    for (const t of WRITING_THEMES) {
-      mockResolveActivityPrompt.mockClear();
-      const req = makeReq({ body: { theme: t.value } });
-      await handler(req, makeRes());
-      const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: Record<string, unknown> };
-      expect(opts.userContext).toEqual({ selected_theme: t.label });
-    }
-  });
-
-  it('"tema aleatório" (campo ausente) não injeta selected_theme algum no currículo', async () => {
-    const req = makeReq({ body: {} });
-    await handler(req, makeRes());
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
-    expect(opts.userContext).toBeUndefined();
-  });
-
-  it('"tema aleatório" (theme: null explícito) também não injeta selected_theme', async () => {
-    const req = makeReq({ body: { theme: null } });
-    await handler(req, makeRes());
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
-    expect(opts.userContext).toBeUndefined();
-  });
-
-  it('valor de theme desconhecido/inválido é tratado como aleatório, sem quebrar', async () => {
-    const req = makeReq({ body: { theme: 'not_a_real_theme_value' } });
-    const res = makeRes();
-    await handler(req, res);
-
-    expect(res._status).toBe(200);
-    const opts = mockResolveActivityPrompt.mock.calls[0][2] as { userContext?: unknown };
-    expect(opts.userContext).toBeUndefined();
-  });
-
-  it('não faz nenhuma chamada de IA extra além da que já existia (1 tentativa quando a primeira é válida)', async () => {
-    const req = makeReq({ body: { theme: 'travel' } });
-    await handler(req, makeRes());
-    expect(mockCreate).toHaveBeenCalledTimes(1);
-  });
-
-  it('o prompt composto (system/user) nunca vaza na resposta HTTP como texto de debug', async () => {
-    const req = makeReq({ body: { theme: 'football_sports' } });
-    const res = makeRes();
-    await handler(req, res);
-    expect(res._status).toBe(200);
-    const serialized = JSON.stringify(res._body);
-    expect(serialized).not.toContain('CURRICULUM_SYSTEM_PROMPT');
-    expect(serialized).not.toContain('Gere a missão de escrita agora.');
-  });
-
-  it('a tag/context final reflete o tema selecionado mesmo que a IA retorne um context diferente', async () => {
+  it('um `theme` legado do cliente NÃO sobrescreve o context retornado pela IA (recorte é autoridade)', async () => {
     mockCreate.mockImplementation(() =>
       aiResponse(JSON.stringify({ ...JSON.parse(VALID_THEME_JSON), context: 'trabalho' })),
     );
@@ -803,15 +769,15 @@ describe('handler — tema selecionado (Missão do dia) via currículo', () => {
     const res = makeRes();
     await handler(req, res);
     const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
-    expect(theme.context).toBe('Música');
+    expect(theme.context).toBe('trabalho');
   });
 
-  it('sem tema selecionado, o context retornado continua sendo o que a IA escolheu (sem override)', async () => {
+  it('sem `theme` no corpo, gera normalmente com uma única chamada de IA', async () => {
     const req = makeReq({ body: {} });
     const res = makeRes();
     await handler(req, res);
-    const theme = (res._body as Record<string, unknown>).theme as Record<string, unknown>;
-    expect(theme.context).toBe('trabalho');
+    expect(res._status).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });
 

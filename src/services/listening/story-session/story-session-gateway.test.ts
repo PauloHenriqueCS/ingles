@@ -197,6 +197,30 @@ describe('generateListeningStory (story-session) — LEGACY mode', () => {
     mockCreate.mockImplementation(() => aiOk(VALID_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
     const result = await generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] });
     expect(result.title).toBe('A Longer Story');
+  });
+
+  // Output-language guard: the default TTS voice is multilingual and would
+  // faithfully speak whatever language the text is in — so a story that drifted
+  // into the interface language (the reported Portuguese-audio bug) must be
+  // caught BEFORE TTS. The guard retries once, then throws so nothing is cached.
+  it('rejects a story generated in the wrong language (Portuguese), retrying once, never reaching TTS', async () => {
+    const PT_TWO_PART_JSON = JSON.stringify({
+      title: 'Uma História', level: 'A2', summary: 'Uma história em duas partes sobre amizade.',
+      parts: [
+        { id: 1, text: 'Era uma vez um menino que morava em uma cidade pequena e que gostava muito de brincar no parque com os seus amigos todos os dias.', question: { text: 'Q1?', options: ['A', 'B', 'C', 'D', 'E'], correctIndex: 0, explanationPt: 'Pt' } },
+        { id: 2, text: 'Um dia ele encontrou uma menina e os dois começaram a conversar sobre a vida e sobre a escola onde eles estudavam juntos.', question: { text: 'Q2?', options: ['A', 'B', 'C', 'D', 'E'], correctIndex: 0, explanationPt: 'Pt' } },
+      ],
+    });
+    mockCreate.mockImplementation(() => aiOk(PT_TWO_PART_JSON, { prompt_tokens: 200, completion_tokens: 100 }));
+    const fetchSpy = mockFetchOk();
+    global.fetch = fetchSpy as any;
+
+    await expect(
+      generateListeningStory(USER_ID, makeSupabase(), 'key', 'azure-key', 'eastus', 'secret', undefined, undefined, 'A2', { speechLocale: 'en-US', defaultTtsVoice: 'en-US-AvaMultilingualNeural', sttLanguage: 'en', allowedTtsVoices: ['en-US-AvaMultilingualNeural'] }),
+    ).rejects.toThrow('AI_WRONG_LANGUAGE');
+    // Generated twice (initial + one retry), and TTS (fetch) was never reached.
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(gw.mockStartEvent).not.toHaveBeenCalled();
   });
 });
