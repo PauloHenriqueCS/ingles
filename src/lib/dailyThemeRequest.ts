@@ -1,7 +1,11 @@
 /**
  * Pure request-body builder for POST /api/generate-theme, extracted out of
- * DailyThemeCard so the "does the selected theme actually reach the request
- * body" behavior is unit-testable without rendering the component.
+ * DailyThemeCard so the request shape stays unit-testable without rendering the
+ * component.
+ *
+ * NOTE: manual theme selection was removed — the daily writing mission is
+ * determined exclusively by the user's teaching plan / current level / daily
+ * curricular recorte on the server. No user-picked topic is sent.
  */
 
 export interface GenerateThemeRequestInput {
@@ -10,8 +14,6 @@ export interface GenerateThemeRequestInput {
   learningContext: unknown;
   previousThemeId: string | null;
   excludedTheme: unknown | null;
-  /** Technical value from the theme select (e.g. 'football_sports'), or null for "Tema aleatório". */
-  selectedTheme: string | null;
 }
 
 export interface GenerateThemeRequestBody {
@@ -20,7 +22,6 @@ export interface GenerateThemeRequestBody {
   learningContext: unknown;
   previousThemeId: string | null;
   excludedTheme: unknown | null;
-  theme: string | null;
 }
 
 export function buildGenerateThemeRequestBody(input: GenerateThemeRequestInput): GenerateThemeRequestBody {
@@ -30,6 +31,5 @@ export function buildGenerateThemeRequestBody(input: GenerateThemeRequestInput):
     learningContext: input.learningContext,
     previousThemeId: input.previousThemeId,
     excludedTheme: input.excludedTheme,
-    theme: input.selectedTheme,
   };
 }

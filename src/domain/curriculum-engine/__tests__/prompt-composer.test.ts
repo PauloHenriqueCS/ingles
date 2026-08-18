@@ -59,6 +59,25 @@ describe('prompt-composer (English)', () => {
     expect(out.temperature).toBe(0.8);
   });
 
+  it('renders {{learning_language_name}} from userContext (the human-readable directive, not the code)', () => {
+    // The fix: resolveActivityPrompt injects learning_language_name/interface_
+    // language_name into userContext so templates emit "English", not "en".
+    const out = composePrompt({
+      template: template({
+        systemBody: 'Write ONLY in {{learning_language_name}}; explanations in {{interface_language_name}}. Level {{level}}. Cap {{subtopic_capability}}.',
+        requiredPlaceholders: ['learning_language_name', 'level', 'subtopic_capability'],
+      }),
+      languageContext: { learningLanguage: 'en', interfaceLanguage: 'pt-BR' },
+      module,
+      subtopic,
+      levelRule,
+      userContext: { learning_language_name: 'English', interface_language_name: 'Brazilian Portuguese' },
+    });
+    expect(out.system).toContain('Write ONLY in English');
+    expect(out.system).toContain('explanations in Brazilian Portuguese');
+    expect(out.system).not.toContain('Write ONLY in en');
+  });
+
   it('throws (no silent fallback) when a required curricular value is empty', () => {
     const emptySub: CurriculumSubtopic = { ...subtopic, capability: '' };
     expect(() =>

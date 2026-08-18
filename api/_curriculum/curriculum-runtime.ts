@@ -23,6 +23,7 @@ import type { CurricularModality, ModalityPreferences, OrderedSubtopic } from '.
 import type { LanguageContext } from '../../src/domain/curriculum-engine/language-context';
 import type { ComposedPrompt } from '../../src/domain/curriculum-engine/prompt-composer';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
+import { getLanguageNamesMap } from './language-names';
 
 export { CurriculumConfigError };
 
@@ -348,6 +349,25 @@ export async function resolveActivityPrompt(
     }
   }
 
+  // Resolve human-readable language NAMES from data and expose them to EVERY
+  // template as {{learning_language_name}} / {{interface_language_name}} (english
+  // endonym) and *_native. This is the systemic fix for the wrong/mixed output
+  // language: templates use the name — an unambiguous directive — instead of the
+  // weak raw code. Injected as DEFAULTS (a caller's explicit userContext key still
+  // wins). Never throws: a missing `languages` row degrades to the raw code.
+  const names = await getLanguageNamesMap(client, [
+    ensured.languageContext.learningLanguage,
+    ensured.languageContext.interfaceLanguage,
+  ]);
+  const learningNames = names.get(ensured.languageContext.learningLanguage)!;
+  const interfaceNames = names.get(ensured.languageContext.interfaceLanguage)!;
+  const languageNameContext: Record<string, string> = {
+    learning_language_name: learningNames.englishName,
+    learning_language_native: learningNames.nativeName,
+    interface_language_name: interfaceNames.englishName,
+    interface_language_native: interfaceNames.nativeName,
+  };
+
   const composed = await resolveCurriculumPrompt({
     repository: new SupabaseCurriculumRepository(client),
     languageContext: ensured.languageContext,
@@ -356,7 +376,7 @@ export async function resolveActivityPrompt(
     subtopicKey,
     versionId: ensured.versionId, // PINNED version — never "latest published"
     transversalTargets: opts.transversalTargets,
-    userContext: opts.userContext,
+    userContext: { ...languageNameContext, ...opts.userContext },
   });
 
   return {
