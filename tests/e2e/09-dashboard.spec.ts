@@ -112,15 +112,19 @@ test.describe('Tela inicial (HomePage) — conteúdo e estrutura', () => {
     await expect(page.locator('body')).toBeVisible();
   });
 
-  test('tela inicial exibe os quatro cards de atividade', async ({ page }) => {
+  test('tela inicial exibe as quatro atividades de prática', async ({ page }) => {
     await setupA1User(page);
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByRole('heading', { name: 'Praticar escrita e voz' })).toBeVisible({ timeout: 8_000 });
-    await expect(page.getByRole('heading', { name: 'Conversar com IA' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Praticar listening' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Treinar pronúncia' })).toBeVisible();
+    // As quatro atividades curriculares são itens clicáveis na Home. A
+    // recomendada aparece em destaque (card hero) e as demais como linhas
+    // compactas — todas são <button>, então validamos pelo nome acessível de
+    // cada uma, independentemente de qual esteja em destaque no momento.
+    await expect(page.getByRole('button', { name: /Praticar escrita e voz/ })).toBeVisible({ timeout: 8_000 });
+    await expect(page.getByRole('button', { name: /Conversar com IA/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Praticar listening/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Treinar pronúncia/ })).toBeVisible();
   });
 
   test('dashboard exibe estado vazio único quando não há atividades', async ({ page }) => {
