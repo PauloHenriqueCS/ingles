@@ -11,13 +11,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockGatewayDeps, aiOk } from './_ai-gateway-test-helpers';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw } = vi.hoisted(() => {
+const { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw, svc } = vi.hoisted(() => {
   const mockCreate = vi.fn();
   const mockRequireAuth = vi.fn();
   const mockGetCurrentUserPlanEntitlements = vi.fn();
   const mockResolveActivityPrompt = vi.fn();
   const mockRecordCurricularPractice = vi.fn();
-  return { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps> };
+  // The quota RPC (create_pronunciation_training_text) is now service_role-only:
+  // the handler calls it via getCurriculumServiceClient().rpc. `svc.current` is
+  // pointed at the per-test user-client mock so that .rpc IS the same spy.
+  const svc = { current: null as any };
+  return { mockCreate, mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockResolveActivityPrompt, mockRecordCurricularPractice, gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps>, svc };
 });
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -44,7 +48,7 @@ vi.mock('../_entitlements/plan-entitlements-service', () => ({
   getCurrentUserPlanEntitlements: mockGetCurrentUserPlanEntitlements,
 }));
 vi.mock('../_curriculum/service-client', () => ({
-  getCurriculumServiceClient: vi.fn(() => ({})),
+  getCurriculumServiceClient: vi.fn(() => svc.current ?? ({})),
 }));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: mockResolveActivityPrompt,
@@ -149,7 +153,9 @@ beforeEach(() => {
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   mockCreate.mockImplementation(() => aiOk('A short pronunciation practice text.'));
-  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: makeSupabase() });
+  const supabase = makeSupabase();
+  svc.current = supabase; // getCurriculumServiceClient().rpc === supabase.rpc (same spy)
+  mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
   mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
   // Data-driven curriculum: the prompt is composed for the user's recorte. Model
   // null → the handler falls back to AI_MODEL ('gpt-4o-mini').

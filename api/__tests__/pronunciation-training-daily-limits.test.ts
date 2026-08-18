@@ -17,12 +17,18 @@ import { createMockGatewayDeps } from './_ai-gateway-test-helpers';
 import { makeSpeechConfigFrom } from '../../src/test-utils/mock-speech-config';
 import type { FeatureLimit, PlanEntitlementsSnapshot } from '../../src/domain/entitlements/entitlement-types';
 
-const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockIssueAzureSpeechToken, mockCreate, gw } = vi.hoisted(() => ({
+const { mockRequireAuth, mockGetCurrentUserPlanEntitlements, mockIssueAzureSpeechToken, mockCreate, gw, svc } = vi.hoisted(() => ({
   mockRequireAuth: vi.fn(),
   mockGetCurrentUserPlanEntitlements: vi.fn(),
   mockIssueAzureSpeechToken: vi.fn(),
   mockCreate: vi.fn(),
   gw: {} as ReturnType<typeof import('./_ai-gateway-test-helpers').createMockGatewayDeps>,
+  // Holder for the SERVICE-role client mock. The quota RPCs
+  // (create_pronunciation_training_text / reserve_pronunciation_training_assessment)
+  // are service_role-only and now run via getCurriculumServiceClient().rpc(...).
+  // We point that client at the SAME per-test client mock (same `.rpc` spy),
+  // so the existing `expect(supabase.rpc)...` assertions keep working.
+  svc: { current: null as any },
 }));
 
 vi.mock('../_ai-gateway/index', async (importOriginal) => {
@@ -53,8 +59,12 @@ vi.mock('../_rateLimit', () => ({ applyRateLimit: vi.fn().mockResolvedValue(true
 // a best-effort no-op. Prompt composition is covered by
 // api/__tests__/pronunciation-generate-text-gateway.test.ts.
 vi.mock('../_curriculum/service-client', () => ({
-  // Speech config resolves via the service client (active-path authority).
-  getCurriculumServiceClient: vi.fn(() => ({ from: makeSpeechConfigFrom() })),
+  // Speech config resolves via the service client (active-path authority); the
+  // hardened quota RPCs now run through it too. When a per-test client is wired
+  // (svc.current) return it verbatim so `getCurriculumServiceClient().rpc` is the
+  // SAME spy as `supabase.rpc` (and `.from` still serves speech config); else
+  // fall back to a speech-config-only client.
+  getCurriculumServiceClient: vi.fn(() => svc.current ?? { from: makeSpeechConfigFrom() }),
 }));
 vi.mock('../_curriculum/curriculum-runtime', () => ({
   resolveActivityPrompt: vi.fn().mockResolvedValue({
@@ -149,7 +159,7 @@ function makeSupabase(overrides: {
     const result = overrides.rpcResults?.[fnName];
     return Promise.resolve(result !== undefined ? { data: result, error: null } : { data: null, error: null });
   });
-  return {
+  const client = {
     from: vi.fn((table: string) => {
       if (table === 'pronunciation_training_sessions') {
         const state = { neq: false, statusCompletedEq: false, ordered: false };
@@ -182,6 +192,10 @@ function makeSupabase(overrides: {
     }),
     rpc,
   };
+  // Wire this client as the service-role client too — the hardened quota RPCs
+  // run via getCurriculumServiceClient().rpc, which must be the same spy.
+  svc.current = client;
+  return client;
 }
 const speechFrom = makeSpeechConfigFrom();
 
@@ -198,6 +212,7 @@ const completedRow = (o: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  svc.current = null;
   Object.assign(gw, createMockGatewayDeps());
   gw.resetDefaults();
   process.env.OPENAI_API_KEY = 'test-key';
@@ -224,7 +239,7 @@ describe('generate-text — daily get-or-create', () => {
     expect((res._body() as any).status).toBe('text_generated');
     expect((res._body() as any).dailyLimit).toBe(3);
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_start_new_round: false, p_effective_limit: 3, p_unlimited: false }));
+    expect(supabase.rpc).toHaveBeenCalledWith('create_pronunciation_training_text', expect.objectContaining({ p_user_id: USER_ID, p_start_new_round: false, p_effective_limit: 3, p_unlimited: false }));
   });
 
   it('2) an active (pending) session exists for today: returns it and never touches the AI provider', async () => {
@@ -302,6 +317,7 @@ describe('generate-text — daily get-or-create', () => {
       }),
       rpc,
     };
+    svc.current = supabase; // service-role client shares this test's rpc spy
     mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase });
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlementsWith({ evaluationsLimit: 3 }));
 
@@ -512,7 +528,7 @@ describe('start — reserve the daily official submission', () => {
     expect((res._body() as any).sessionId).toBe('s1');
     expect((res._body() as any).token).toBe('azure-token');
     expect((res._body() as any).referenceText).toBe('The text.');
-    expect(supabase.rpc).toHaveBeenCalledWith('reserve_pronunciation_training_assessment', expect.objectContaining({ p_effective_limit: 3, p_unlimited: false }));
+    expect(supabase.rpc).toHaveBeenCalledWith('reserve_pronunciation_training_assessment', expect.objectContaining({ p_user_id: USER_ID, p_effective_limit: 3, p_unlimited: false }));
   });
 
   it('7) a submission past the limit is blocked with DAILY_LIMIT_REACHED (RPC enforces N atomically)', async () => {

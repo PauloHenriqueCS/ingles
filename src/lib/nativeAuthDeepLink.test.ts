@@ -23,10 +23,17 @@ describe('parseAuthCallbackUrl', () => {
     expect(parseAuthCallbackUrl(`${CB}?code=abc123`)).toEqual({ kind: 'code', code: 'abc123' });
   });
 
-  it('extracts implicit access/refresh tokens from the hash', () => {
+  it('PKCE-only: implicit access/refresh tokens in the hash are ignored (no session)', () => {
+    // Security regression guard: a co-installed app spoofing our custom scheme
+    // could deliver implicit tokens here. They must never establish a session,
+    // so an implicit-token callback parses to `ignore` (never `tokens`).
     expect(
       parseAuthCallbackUrl(`${CB}#access_token=AT&refresh_token=RT&token_type=bearer&expires_in=3600`),
-    ).toEqual({ kind: 'tokens', accessToken: 'AT', refreshToken: 'RT' });
+    ).toEqual({ kind: 'ignore' });
+    // Even in the query string, tokens without a `?code=` are ignored.
+    expect(
+      parseAuthCallbackUrl(`${CB}?access_token=AT&refresh_token=RT`),
+    ).toEqual({ kind: 'ignore' });
   });
 
   it('surfaces a provider error / user cancel (query or hash)', () => {

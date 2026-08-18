@@ -744,6 +744,8 @@ async function handleListeningGenerate(req: any, res: any) {
       requestId, stage, errorName,
       errorMessage: errorMessage.slice(0, 200),
       upstreamStatus, upstreamCode, upstreamType,
+      upstreamRequestId: upstreamReqId,
+      upstreamCause: upstreamCause ? String(upstreamCause).slice(0, 200) : null,
     });
 
     if (err instanceof StoryTtsError) {
@@ -754,17 +756,13 @@ async function handleListeningGenerate(req: any, res: any) {
       );
     }
 
-    // Temporary debug: expose full error details in Network response
+    // Sanitized client response — provider internals (errorName/message,
+    // upstream status/code/type/request-id/cause) are recorded ONLY in the
+    // server-side safeLog above, never returned to the client. The client gets
+    // a stable code + the internal requestId for support correlation.
     return res.status(500).json({
       code: 'GENERATION_FAILED',
-      stage,
-      errorName,
-      errorMessage,
-      upstreamStatus,
-      upstreamCode,
-      upstreamType,
-      upstreamRequestId: upstreamReqId,
-      upstreamCause,
+      message: 'Não foi possível gerar agora. Tente novamente.',
       requestId,
     });
   }
@@ -1061,7 +1059,11 @@ async function handleStoryPracticeStart(req: any, res: any) {
   const stories = entitlements.listening.stories;
   const practiceDate = resolveListeningActivityDate();
 
-  const { data, error } = await supabase.rpc('consume_listening_pending_story', {
+  // Service-role client + explicit p_user_id: the daily limit is resolved
+  // server-side (entitlements above) and the RPC is service_role-only, so a
+  // client cannot call it directly with an inflated/unlimited quota.
+  const { data, error } = await getListeningServiceClient().rpc('consume_listening_pending_story', {
+    p_user_id: userId,
     p_shared_story_id: sharedStoryId,
     p_practice_date: practiceDate,
     p_effective_limit: stories.limit,

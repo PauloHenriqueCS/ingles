@@ -9,17 +9,18 @@ import { ANDROID_OAUTH_CALLBACK } from './appleAuth';
  * back through an AndroidManifest intent-filter; @capacitor/app's appUrlOpen
  * delivers it here, and we turn the returned params into a Supabase session.
  *
- * Handles BOTH shapes so it is correct regardless of the project's flow type:
- *  - PKCE `?code=`   → exchangeCodeForSession
- *  - implicit `#access_token&refresh_token` → setSession
+ * PKCE-ONLY: this handler exclusively completes the PKCE `?code=` flow via
+ * exchangeCodeForSession. It deliberately does NOT accept implicit
+ * `#access_token&refresh_token` tokens from a deep link — a co-installed app
+ * that registered the same custom scheme could otherwise hand us a real
+ * session. Implicit-token callbacks are ignored.
  * A provider error / user cancel is silent: no error, no broken session.
  */
 
 export type AuthDeepLinkAction =
   | { kind: 'ignore' }
   | { kind: 'error'; message: string }
-  | { kind: 'code'; code: string }
-  | { kind: 'tokens'; accessToken: string; refreshToken: string };
+  | { kind: 'code'; code: string };
 
 /** Pure parse of a deep-link URL — unit-testable without a device. Only URLs
  *  that start with our own callback prefix are acted on; everything else is
@@ -37,10 +38,9 @@ export function parseAuthCallbackUrl(url: string, prefix: string = ANDROID_OAUTH
   const code = q.get('code');
   if (code) return { kind: 'code', code };
 
-  const accessToken = h.get('access_token') || q.get('access_token');
-  const refreshToken = h.get('refresh_token') || q.get('refresh_token');
-  if (accessToken && refreshToken) return { kind: 'tokens', accessToken, refreshToken };
-
+  // Implicit `#access_token&refresh_token` callbacks are intentionally NOT
+  // accepted (see file header): PKCE-only. Anything without a `?code=` is
+  // ignored so a spoofed implicit deep link can never establish a session.
   return { kind: 'ignore' };
 }
 
@@ -77,15 +77,10 @@ async function handleAuthDeepLink(url: string): Promise<void> {
 
   if (action.kind === 'error') return; // cancel / provider error → stay on login
 
+  if (action.kind !== 'code') return; // PKCE-only: nothing else establishes a session
+
   try {
-    if (action.kind === 'code') {
-      await supabase.auth.exchangeCodeForSession(action.code);
-    } else {
-      await supabase.auth.setSession({
-        access_token: action.accessToken,
-        refresh_token: action.refreshToken,
-      });
-    }
+    await supabase.auth.exchangeCodeForSession(action.code);
     // onAuthStateChange → useAuth → App.tsx renders the Home. rememberAuthMethod
     // was already recorded when the browser opened (signInWithApple).
   } catch {

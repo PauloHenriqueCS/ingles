@@ -482,7 +482,12 @@ async function handleGenerateText(req: any, res: any) {
     // persisted IN THE SAME atomic operation (ROOT-1). Cache hit or miss, this
     // still runs — a cached activity counts against the quota exactly like a
     // freshly generated one.
-    const { data: created, error: createError } = await supabase.rpc('create_pronunciation_training_text', {
+    // Service-role client + explicit p_user_id: the daily limit is resolved
+    // server-side (dailyLimit/dailyUnlimited from entitlements) and the RPC is
+    // service_role-only, so a client can never call it directly with an inflated
+    // or unlimited quota (security: quota RPC hardening).
+    const { data: created, error: createError } = await getCurriculumServiceClient().rpc('create_pronunciation_training_text', {
+      p_user_id: userId,
       p_practice_date: practiceDate, p_level: userLevel, p_generated_text: text,
       p_start_new_round: forceNew, p_effective_limit: dailyLimit, p_unlimited: dailyUnlimited,
       p_curriculum_version_id: resolvedPrompt.versionId,
@@ -800,7 +805,12 @@ async function handleTrainingStart(req: any, res: any) {
   // The effective daily limit + unlimited flag come from the already-resolved
   // plan entitlement; the RPC enforces N atomically (no number hardcoded in SQL
   // or here). Unlimited plans pass null-limit and are never blocked by count.
-  const { data: reserveData, error: rpcError } = await supabase.rpc('reserve_pronunciation_training_assessment', {
+  // Service-role client + explicit p_user_id: the daily limit is resolved
+  // server-side (entitlements) and the RPC is service_role-only, closing the
+  // direct-call bypass where a client set p_unlimited=true to mint unlimited
+  // Azure assessment tokens (security: quota RPC hardening).
+  const { data: reserveData, error: rpcError } = await getCurriculumServiceClient().rpc('reserve_pronunciation_training_assessment', {
+    p_user_id: userId,
     p_practice_date: practiceDate, p_azure_region: azureRegion, p_attempt_id: attemptId,
     p_effective_limit: entitlements.pronunciation.evaluations.limit,
     p_unlimited: entitlements.pronunciation.evaluations.unlimited,

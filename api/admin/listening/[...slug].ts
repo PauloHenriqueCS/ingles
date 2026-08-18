@@ -1,5 +1,5 @@
 import { requireAuth } from '../../_auth';
-import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../../_helpers';
+import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug, safeCompare } from '../../_helpers';
 import { archiveListeningEpisode } from '../../../src/services/listening/publication/archive-listening-episode';
 import { publishListeningEpisode } from '../../../src/services/listening/publication/publish-listening-episode';
 import { validateListeningEpisodeForPublication } from '../../../src/services/listening/publication/validate-listening-publication';
@@ -11,7 +11,7 @@ function checkAdminToken(req: any, res: any): boolean {
   const adminToken = process.env.LISTENING_ADMIN_TOKEN;
   if (!adminToken) { jsonError(res, 503, 'INTERNAL_ERROR', 'Operação administrativa não configurada.'); return false; }
   const provided = req.headers['x-admin-token'];
-  if (!provided || provided !== adminToken) { jsonError(res, 403, 'UNAUTHORIZED', 'Token administrativo inválido.'); return false; }
+  if (!safeCompare(String(provided ?? ''), adminToken)) { jsonError(res, 403, 'UNAUTHORIZED', 'Token administrativo inválido.'); return false; }
   return true;
 }
 
