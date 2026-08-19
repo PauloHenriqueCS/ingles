@@ -26,6 +26,25 @@ const config: CapacitorConfig = {
   // this is no longer the primary UI — it's just where the local offline-
   // fallback page (errorPath below) lives (public/mobile-fallback.html).
   webDir: 'dist',
+  plugins: {
+    // @capgo/capacitor-social-login ships all four providers (Google, Apple,
+    // Facebook, Twitter) as `implementation` by default. Its post-`cap sync`
+    // hook (scripts/configure-dependencies.js) regenerates the native provider
+    // wiring from THIS block on every sync, so it is the single source of
+    // truth. Orodim uses only Google (Android) and Apple (iOS) — see
+    // src/lib/googleAuth.ts and src/lib/appleAuth.ts. Marking Facebook false
+    // drops com.facebook.android:facebook-login/facebook-core, which is the
+    // sole origin of com.google.android.gms.permission.AD_ID and the
+    // ACCESS_ADSERVICES_* permissions (confirmed via manifest-merger blame),
+    // and swaps in the plugin's stub FacebookProvider. This keeps the app
+    // eligible to declare "No advertising ID" in the Play Console. Google and
+    // Apple are left at their defaults (implementation) to preserve login.
+    SocialLogin: {
+      providers: {
+        facebook: false,
+      },
+    },
+  },
   ...(isBundledMode
     ? {}
     : {
