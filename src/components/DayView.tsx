@@ -353,7 +353,12 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10">
+      {/* paddingTop = safe-area inset so the header clears the status bar/notch
+          on Android 15+ edge-to-edge (env() is 0 otherwise). Preserves py-3. */}
+      <header
+        className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10"
+        style={{ paddingTop: 'calc(0.75rem + env(safe-area-inset-top))' }}
+      >
         <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-slate-100 capitalize truncate">{dateLabel}</p>
