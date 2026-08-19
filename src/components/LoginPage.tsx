@@ -25,6 +25,7 @@ export default function LoginPage() {
   const startForgot = new URLSearchParams(window.location.search).get('forgot') === '1';
   const [authView, setAuthView] = useState<AuthView>(startForgot ? 'email' : 'chooser');
   const [mode, setMode] = useState<Mode>(startForgot ? 'forgot' : 'login');
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [state, setState] = useState<State>('idle');
@@ -50,7 +51,9 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const trimmedEmail = email.trim();
+    const trimmedName = name.trim();
     if (!trimmedEmail || !password) return;
+    if (mode === 'signup' && !trimmedName) return;
     setState('loading');
     setErrorMsg('');
 
@@ -70,6 +73,7 @@ export default function LoginPage() {
       const { data, error } = await supabase.auth.signUp({
         email: trimmedEmail,
         password,
+        options: { data: { full_name: trimmedName } },
       });
       if (error) {
         setErrorMsg(translateError(error.message));
@@ -267,6 +271,22 @@ export default function LoginPage() {
       <Brand subtitle={mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'} />
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {mode === 'signup' && (
+          <div>
+            <label className="text-xs text-slate-400 block mb-1.5">Nome</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => { setName(e.target.value); if (state === 'error') setState('idle'); }}
+              placeholder="Seu nome"
+              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
+              autoComplete="name"
+              autoFocus
+              required
+            />
+          </div>
+        )}
+
         <div>
           <label className="text-xs text-slate-400 block mb-1.5">Email</label>
           <input
@@ -275,7 +295,7 @@ export default function LoginPage() {
             onChange={(e) => { setEmail(e.target.value); if (state === 'error') setState('idle'); }}
             placeholder="seu@email.com"
             className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
-            autoFocus
+            autoFocus={mode === 'login'}
             required
           />
         </div>
