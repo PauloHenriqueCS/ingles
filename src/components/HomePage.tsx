@@ -14,6 +14,7 @@ import PracticeRow from './home/PracticeRow';
 import { type AccentKey } from './home/accents';
 import {
   activityState,
+  limitReachedBadgeLabel,
   resolveRecommendedActivity,
   secondaryBadge,
   type CardVisualState,
@@ -114,7 +115,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
   const heroKey = resolveRecommendedActivity(resolved, config);
   const heroState = activityState(heroKey, resolved, config);
   const heroStateBadge =
-    heroState === 'limit_reached' ? s.limitReached
+    heroState === 'limit_reached' ? limitReachedBadgeLabel(heroKey, s)
     : heroState === 'disabled_by_plan' ? s.notInPlan
     : heroState === 'disabled_globally' ? s.featureUnavailable
     : null;

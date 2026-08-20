@@ -13,13 +13,15 @@ async function raw(path: string): Promise<string> {
 }
 
 describe('conversation abandon fail-safe — server wiring', () => {
-  it('exposes a session-heartbeat route and reconciles stale sessions when a new one starts', async () => {
+  it('exposes a session-heartbeat route and closes prior open sessions when a new one starts', async () => {
     const code = await raw('../conversation/[...slug]');
     expect(code).toContain("case 'session-heartbeat': return handleSessionHeartbeat");
-    // reconcile-on-start runs inside handleSession (before authorizing a new one)
-    expect(code).toContain('reconcileUserStaleAuthorizations');
+    // reconcile-on-start runs inside handleSession (before authorizing a new one):
+    // it closes ALL of the user's own open rows so the balance, the session
+    // ceiling, and the authorize RPC agree on the same real remaining.
+    expect(code).toContain('closeUserOpenAuthorizationsForNewSession');
     const handleSession = code.slice(code.indexOf('async function handleSession('), code.indexOf('async function handleSessionComplete('));
-    expect(handleSession).toContain('reconcileUserStaleAuthorizations');
+    expect(handleSession).toContain('closeUserOpenAuthorizationsForNewSession');
     // the heartbeat only bumps the caller's OWN still-open row (ownership + status guarded)
     const heartbeat = code.slice(code.indexOf('async function handleSessionHeartbeat('));
     expect(heartbeat).toMatch(/last_seen_at/);

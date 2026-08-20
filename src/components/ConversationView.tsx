@@ -139,6 +139,52 @@ function ConversationBalanceIndicator({ conversation, onBuyMinutes }: { conversa
   );
 }
 
+// ── Balance-exhausted call to action ──────────────────────────────────────────
+// Shown when the balance is truly 0 (start blocked, or a session just ended by
+// balance). Paid plans get a prominent "Comprar mais minutos" leading to the
+// existing minute-packages screen; a trial (which cannot buy add-on packages)
+// is pointed at the plans screen instead. Never claims the conversation was
+// preserved — Orodim keeps no conversation history.
+function BuyMoreMinutesCta({
+  conversation,
+  onBuyMinutes,
+  onSubscribe,
+}: {
+  conversation: ConversationEntitlements;
+  onBuyMinutes?: () => void;
+  onSubscribe: () => void;
+}) {
+  const isTrial = conversation.monthlyTime.period === 'lifetime';
+  const canBuyPackages = conversation.extraPurchaseEnabled === true && !isTrial && onBuyMinutes != null;
+
+  return (
+    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-center space-y-3">
+      <p className="text-sm text-amber-200 leading-relaxed">
+        {isTrial ? ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted : ENTITLEMENT_MESSAGES.conversationMinutesExhausted}
+      </p>
+      {canBuyPackages ? (
+        <button
+          type="button"
+          onClick={onBuyMinutes}
+          data-testid="conversation-buy-minutes-button"
+          className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px]"
+        >
+          {MINUTE_PACKAGES_MESSAGES.entryCtaTitle}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={onSubscribe}
+          data-testid="conversation-view-plans-button"
+          className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px]"
+        >
+          {ENTITLEMENT_MESSAGES.viewPlansCta}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── First-access banner ───────────────────────────────────────────────────────
 
 function FirstAccessBanner({ onPersonalize, onDismiss }: { onPersonalize: () => void; onDismiss: () => void }) {
@@ -453,8 +499,13 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
               <ActivityAccessBlocked compact onSubscribe={onNavigateToSubscription} />
             )}
 
-            {/* ── Monthly conversation balance (commercial plan) ──────────── */}
-            {!conversationLoading && conversation && (
+            {/* ── Monthly conversation balance (commercial plan) ──────────────
+                 Hidden during an active/connecting session so it can never
+                 diverge from the authoritative in-session countdown (elapsed /
+                 authorizedMax). The session card's timer is the single source of
+                 truth while a call is running; this pre/post-session view shows
+                 the reconciled server balance. */}
+            {!conversationLoading && conversation && !isActive && !isConnecting && (
               <ConversationBalanceIndicator conversation={conversation} onBuyMinutes={onNavigateToMinutePackages} />
             )}
 
@@ -592,8 +643,12 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
                 {!conversationLoading && conversationDisabledByPlan && (
                   <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationUnavailable}</p>
                 )}
-                {!conversationLoading && !conversationDisabledByPlan && conversationBlocked && (
-                  <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationMinutesExhausted}</p>
+                {!conversationLoading && !conversationDisabledByPlan && conversationBlocked && conversation && (
+                  <BuyMoreMinutesCta
+                    conversation={conversation}
+                    onBuyMinutes={onNavigateToMinutePackages}
+                    onSubscribe={onNavigateToSubscription}
+                  />
                 )}
                 <button
                   onClick={() => { if (!startDisabled) session.start(effectiveMode); }}

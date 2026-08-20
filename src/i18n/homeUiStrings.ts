@@ -45,7 +45,8 @@ export interface HomeUiStrings {
   // Availability badges (words only — numbers injected)
   minutesRemaining: (min: number) => string;   // "42 min"
   unlimited: string;                            // "Ilimitado"
-  limitReached: string;                         // "Limite de hoje"
+  limitReached: string;                         // "Limite de hoje" (real daily cap)
+  noMinutes: string;                            // "Sem minutos" (conversation zero balance)
   notInPlan: string;                            // "Ver planos"
   featureUnavailable: string;                   // globally disabled
   reviewsToDo: (n: number) => string;           // "4 para revisar"
@@ -85,6 +86,7 @@ const PT_BR: HomeUiStrings = {
   minutesRemaining: (min) => `${min} min`,
   unlimited: 'Ilimitado',
   limitReached: 'Limite de hoje',
+  noMinutes: 'Sem minutos',
   notInPlan: 'Ver planos',
   featureUnavailable: 'Indisponível',
   reviewsToDo: (n) => `${n} para revisar`,
@@ -124,6 +126,7 @@ const EN: HomeUiStrings = {
   minutesRemaining: (min) => `${min} min`,
   unlimited: 'Unlimited',
   limitReached: "Today's limit",
+  noMinutes: 'No minutes',
   notInPlan: 'See plans',
   featureUnavailable: 'Unavailable',
   reviewsToDo: (n) => `${n} to review`,

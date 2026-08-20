@@ -35,6 +35,18 @@ function isExhausted(state: string): boolean {
   return state === 'daily_limit_reached' || state === 'monthly_limit_reached' || state === 'trial_balance_exhausted';
 }
 
+/**
+ * Label for a `limit_reached` badge. Conversation is a special case: its
+ * exhaustion is ALWAYS a zero minute BALANCE (monthly or trial — it has no
+ * daily period), so it must read "Sem minutos", never "Limite de hoje" (which
+ * would wrongly imply it resets tomorrow). Every other activity is a genuine
+ * daily cap and keeps "Limite de hoje". Shared by the secondary rows and the
+ * hero so both stay consistent.
+ */
+export function limitReachedBadgeLabel(key: CurricularActivityKey, s: HomeUiStrings): string {
+  return key === 'conversation' ? s.noMinutes : s.limitReached;
+}
+
 // Central de Configuração's global on/off (checked first, distinct from the
 // per-plan gate) — an admin-wide switch, not a plan capability.
 function globallyDisabled(flag: { enabled: boolean } | undefined): boolean {
@@ -108,7 +120,7 @@ export function secondaryBadge(
   if (state === 'loading') return null;
   if (state === 'disabled_by_plan') return { label: s.notInPlan, tone: 'muted' };
   if (state === 'disabled_globally') return { label: s.featureUnavailable, tone: 'muted' };
-  if (state === 'limit_reached') return { label: s.limitReached, tone: 'warning' };
+  if (state === 'limit_reached') return { label: limitReachedBadgeLabel(key, s), tone: 'warning' };
   if (!e) return null;
 
   // available → surface the real remaining balance when it's finite.

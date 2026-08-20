@@ -143,3 +143,41 @@ export async function reconcileUserStaleAuthorizations(
   }
   return closed;
 }
+
+/**
+ * Close EVERY one of this user's own still-open ('authorized') rows before we
+ * authorize a NEW session — regardless of heartbeat staleness. Starting a new
+ * session means any prior one is definitively over, so its upfront full-ceiling
+ * reservation must be released and converted to the real time used; otherwise a
+ * session abandoned within the stale window keeps its whole ceiling reserved and
+ * the next authorization (and the top balance) diverge — the balance reads the
+ * live-elapsed seconds while the authorize RPC still subtracts the full ceiling,
+ * so the session is authorized for a tiny window while the header shows minutes
+ * left. This is the fix for that divergence + premature end.
+ *
+ * Effective end = the last credible heartbeat (never `now`), so superseding an
+ * abandoned session bills only the time the user was provably present and never
+ * charges silence. Legacy rows with no heartbeat fall back to `now` (no evidence
+ * to refund). Reuses the ONE shared close path, so the balance is charged
+ * exactly one way. Never grants curricular credit. Best-effort; returns count.
+ */
+export async function closeUserOpenAuthorizationsForNewSession(
+  client: any,
+  userId: string,
+  nowMs: number,
+  log?: Logger,
+): Promise<number> {
+  const { data: openRows } = await client
+    .from('conversation_session_authorizations')
+    .select('id, user_id, session_date, authorized_at, authorized_max_seconds, last_seen_at, gateway_budget_reservation_id, gateway_session_id')
+    .eq('user_id', userId)
+    .eq('status', 'authorized');
+
+  let closed = 0;
+  for (const row of (openRows ?? []) as AuthorizationRow[]) {
+    const effectiveEndMs = row.last_seen_at ? Math.min(nowMs, lastSeenMs(row)) : nowMs;
+    const durationSeconds = computeAuthorizationDurationSeconds(row, effectiveEndMs);
+    if (await closeAuthorizationRow(client, row, durationSeconds, nowMs, log)) closed++;
+  }
+  return closed;
+}

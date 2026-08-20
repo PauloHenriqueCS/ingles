@@ -22,10 +22,13 @@ export const ENTITLEMENT_MESSAGES = {
     'Análise concluída! Seu plano permite treinar sem limite — gere um novo texto para continuar.',
   pronunciationTrainingRoundCompletedMoreAvailable:
     'Análise concluída! Você ainda tem análises disponíveis hoje — gere um novo texto para continuar.',
+  // NB: Orodim never stores conversation history/transcripts, so these messages
+  // must never claim the conversation was "preserved". They only state the
+  // balance is gone and (for paid plans) point to buying more minutes.
   conversationMinutesExhausted:
-    'Seus minutos de conversação deste mês acabaram. Sua conversa foi preservada.',
+    'Seus minutos de conversa acabaram. Compre mais minutos para continuar praticando.',
   conversationTrialMinutesExhausted:
-    'Seus minutos de conversação do período de teste acabaram. Sua conversa foi preservada.',
+    'Seus minutos de conversa do período de teste acabaram.',
   conversationExtraPurchaseAvailable:
     'Seus minutos deste mês acabaram. Você pode adicionar mais minutos para continuar praticando.',
   conversationRecordingStoppedByBalance:
