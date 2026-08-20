@@ -158,6 +158,15 @@ describe('secondaryBadge', () => {
     expect(secondaryBadge('listening', 'limit_reached', snapshot(), s)).toEqual({ label: s.limitReached, tone: 'warning' });
   });
 
+  it('conversation exhaustion shows "Sem minutos", not "Limite de hoje" (it is a zero balance, not a daily cap)', () => {
+    // Conversation has no daily period, so a reset-tomorrow "Limite de hoje" is
+    // conceptually wrong — it must read the zero-balance badge (problem 7).
+    expect(secondaryBadge('conversation', 'limit_reached', snapshot(), s)).toEqual({ label: s.noMinutes, tone: 'warning' });
+    expect(s.noMinutes).not.toBe(s.limitReached);
+    // other activities keep the genuine daily-cap wording
+    expect(secondaryBadge('listening', 'limit_reached', snapshot(), s).label).toBe(s.limitReached);
+  });
+
   it('conversation available → real minutes remaining', () => {
     expect(secondaryBadge('conversation', 'available', snapshot(), s)).toEqual({ label: s.minutesRemaining(42), tone: 'positive' });
   });

@@ -48,7 +48,7 @@ import { ENTITLEMENT_MESSAGES } from '../../src/domain/entitlements/entitlement-
 import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
 import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
-import { reconcileUserStaleAuthorizations } from './_session-accounting';
+import { closeUserOpenAuthorizationsForNewSession } from './_session-accounting';
 import { reserveRealtimeSessionBudget } from '../_realtime-budget';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
@@ -444,16 +444,20 @@ async function handleSession(req: any, res: any) {
   if (!auth) return;
   const { supabase, userId } = auth;
 
-  // ── Reconcile-on-start (abandon fail-safe) ─────────────────────────────────
-  // Before authorizing a NEW session, close any of THIS user's previous
-  // authorizations whose heartbeat has gone stale (they left the screen / the
-  // app was backgrounded or killed and /session-complete never ran). This closes
-  // the row with the real, heartbeat-clamped duration and frees its reservation
-  // — so a returning user's balance already reflects only real use, and an
-  // abandoned session can never stay "active" indefinitely, independent of any
-  // background cron. Best-effort: never blocks starting a new session.
+  // ── Reconcile-on-start (abandon fail-safe + balance consistency) ───────────
+  // Before authorizing a NEW session, close ALL of THIS user's previous open
+  // authorizations — not only the heartbeat-stale ones. Starting a new session
+  // means any prior one is definitively over, so its upfront full-ceiling
+  // reservation must be released now and converted to the real time used.
+  // Otherwise a session abandoned within the stale window keeps its entire
+  // ceiling reserved, and the authorize RPC (which subtracts that full ceiling)
+  // diverges from the top balance (which counts only live-elapsed seconds) — the
+  // session gets authorized for a tiny window while the header still shows
+  // minutes left, and it ends "por falta de minutos" with balance > 0. Closing
+  // every open row here makes the balance, the session ceiling, and the RPC
+  // agree on the same real remaining. Best-effort: never blocks starting.
   try {
-    await reconcileUserStaleAuthorizations(
+    await closeUserOpenAuthorizationsForNewSession(
       getSharedServiceClient(), userId, getProductionDeps().clock(),
       (event, detail) => safeLog('conversation/session', `reconcile_on_start_${event}`, 200, { detail: String(detail).slice(0, 150) }),
     );

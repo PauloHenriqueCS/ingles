@@ -25,6 +25,7 @@ import {
   abandonedEffectiveEndMs,
   closeAuthorizationRow,
   reconcileUserStaleAuthorizations,
+  closeUserOpenAuthorizationsForNewSession,
   type AuthorizationRow,
 } from '../conversation/_session-accounting';
 import { AUTHORIZATION_HEARTBEAT_STALE_SECONDS } from '../_realtime-constants';
@@ -170,5 +171,51 @@ describe('reconcileUserStaleAuthorizations', () => {
     const client = makeClient();
     client._setOpenRows([]);
     expect(await reconcileUserStaleAuthorizations(client, 'u1', T0 + 1000)).toBe(0);
+  });
+});
+
+describe('closeUserOpenAuthorizationsForNewSession (balance-consistency fix)', () => {
+  it('closes EVERY open row — including a not-yet-stale one — so no phantom reservation survives', async () => {
+    const nowMs = T0 + 5 * 60_000;
+    // Abandoned 10s ago: heartbeat is still "fresh" (< stale window) so the
+    // stale reconcile would SKIP it, leaving its whole ceiling reserved.
+    const recentlyAbandoned = row({ id: 'r1', last_seen_at: new Date(nowMs - 10_000).toISOString() });
+    const alsoOpen = row({ id: 'r2', last_seen_at: new Date(T0 + 40_000).toISOString() });
+    const client = makeClient();
+    client._setOpenRows([recentlyAbandoned, alsoOpen]);
+
+    const closed = await closeUserOpenAuthorizationsForNewSession(client, 'u1', nowMs);
+    expect(closed).toBe(2); // both closed, unlike the stale-only reconcile
+    const authUpdates = client._updates.filter((u: any) => u.table === 'conversation_session_authorizations');
+    expect(authUpdates.length).toBe(2);
+    expect(authUpdates.every((u: any) => u.vals.status === 'completed')).toBe(true);
+  });
+
+  it('charges only up to the last heartbeat (never bills silence up to now)', async () => {
+    const nowMs = T0 + 10 * 60_000; // 10 min later
+    const lastSeen = T0 + 54_000;   // user last provably present at 54s
+    const r = row({ id: 'r', last_seen_at: new Date(lastSeen).toISOString() });
+    const client = makeClient();
+    client._setOpenRows([r]);
+    await closeUserOpenAuthorizationsForNewSession(client, 'u1', nowMs);
+    const upd = client._updates.find((u: any) => u.table === 'conversation_session_authorizations');
+    // exactly 54s — NOT 54 + stale window, and NOT the 30-min ceiling
+    expect(upd.vals.duration_seconds).toBe(54);
+  });
+
+  it('legacy row with no heartbeat falls back to now (no evidence to refund)', async () => {
+    const nowMs = T0 + 120_000;
+    const legacy = row({ id: 'legacy', last_seen_at: null, authorized_max_seconds: 1800 });
+    const client = makeClient();
+    client._setOpenRows([legacy]);
+    await closeUserOpenAuthorizationsForNewSession(client, 'u1', nowMs);
+    const upd = client._updates.find((u: any) => u.table === 'conversation_session_authorizations');
+    expect(upd.vals.duration_seconds).toBe(120);
+  });
+
+  it('does nothing when the user has no open rows', async () => {
+    const client = makeClient();
+    client._setOpenRows([]);
+    expect(await closeUserOpenAuthorizationsForNewSession(client, 'u1', T0 + 1000)).toBe(0);
   });
 });
