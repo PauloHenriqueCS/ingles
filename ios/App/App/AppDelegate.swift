@@ -1,6 +1,14 @@
 import UIKit
 import Capacitor
 
+// GoogleSignIn is pulled in transitively by @capgo/capacitor-social-login. Guard
+// the import so the App target still compiles if the module isn't linked (e.g. a
+// build where the plugin is absent) — the URL then simply falls through to the
+// default Capacitor handler below.
+#if canImport(GoogleSignIn)
+import GoogleSignIn
+#endif
+
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
@@ -34,8 +42,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-        // Called when the app was launched with a url. Feel free to add additional processing here,
-        // but if you want the App API to support tracking app url opens, make sure to keep this call
+        // Called when the app was launched with a url. Give Google Sign-In first
+        // chance to consume its OAuth callback (reversed-client-id scheme); if it
+        // handles the URL we're done. Otherwise keep the default Capacitor
+        // forwarding so app-url-open tracking and other plugins still work.
+        #if canImport(GoogleSignIn)
+        if GIDSignIn.sharedInstance.handle(url) {
+            return true
+        }
+        #endif
         return ApplicationDelegateProxy.shared.application(app, open: url, options: options)
     }
 

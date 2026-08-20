@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { supabase } from './supabase';
 import { rememberAuthMethod } from './authMethodMemory';
+import { logAuthDiag } from './authDiag';
 
 /**
  * Sign in with Apple, brokered by Supabase Auth (the session authority) so an
@@ -130,11 +131,24 @@ async function nativeAppleSignIn(): Promise<AppleSignInResult> {
   const { raw, hashed } = await makeNonce();
 
   // iOS uses the app's entitlement, not a Services ID; redirectUrl '' disables
-  // the web redirect (see @capgo apple init docs).
-  await SocialLogin.initialize({ apple: { redirectUrl: '' } });
+  // the web redirect (see @capgo apple init docs). Native Sign in with Apple
+  // additionally REQUIRES the com.apple.developer.applesignin entitlement on the
+  // Release target (AppRelease.entitlements) — without it ASAuthorization is
+  // rejected by the OS and this login fails generically.
+  try {
+    await SocialLogin.initialize({ apple: { redirectUrl: '' } });
+    logAuthDiag({ provider: 'apple', step: 'initialize', platform: 'ios', initOk: true });
+  } catch (e) {
+    logAuthDiag({ provider: 'apple', step: 'initialize', platform: 'ios', initOk: false });
+    return { ok: false, reason: classifyThrown(e), message: describe(e) };
+  }
 
   let idToken: string | null;
   try {
+    // Apple embeds the *hashed* nonce in the identity token; @capgo passes this
+    // value straight to ASAuthorizationAppleIDRequest.nonce WITHOUT re-hashing
+    // (AppleProvider.swift), so we must send the hash here and the raw value to
+    // Supabase below. Confirmed against the installed plugin — do not change.
     const { result } = await SocialLogin.login({
       provider: 'apple',
       options: { scopes: ['email', 'name'], nonce: hashed },
@@ -142,11 +156,14 @@ async function nativeAppleSignIn(): Promise<AppleSignInResult> {
     idToken = 'idToken' in result ? result.idToken : null;
   } catch (e) {
     if (isUserCancellation(e)) {
+      logAuthDiag({ provider: 'apple', step: 'login', platform: 'ios', outcome: 'cancelled' });
       return { ok: false, reason: 'cancelled', message: 'Login cancelado.' };
     }
+    logAuthDiag({ provider: 'apple', step: 'login', platform: 'ios', outcome: classifyThrown(e) });
     return { ok: false, reason: classifyThrown(e), message: describe(e) };
   }
 
+  logAuthDiag({ provider: 'apple', step: 'login', platform: 'ios', idTokenPresent: !!idToken });
   if (!idToken) {
     return {
       ok: false,
@@ -160,7 +177,10 @@ async function nativeAppleSignIn(): Promise<AppleSignInResult> {
     token: idToken,
     nonce: raw,
   });
-  if (error) return fail(error.message);
+  if (error) {
+    logAuthDiag({ provider: 'apple', step: 'supabase', platform: 'ios', supabaseError: error.message });
+    return fail(error.message);
+  }
   return { ok: true };
 }
 

@@ -2,26 +2,38 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Hoisted spies so the vi.mock factories (which are hoisted above imports) can
 // reference them safely.
-const { signInWithOAuthMock, signInWithIdTokenMock, rememberMock, isNativeMock, isPluginMock } =
-  vi.hoisted(() => ({
-    signInWithOAuthMock: vi.fn(),
-    signInWithIdTokenMock: vi.fn(),
-    rememberMock: vi.fn(),
-    isNativeMock: vi.fn(() => false),
-    isPluginMock: vi.fn(() => false),
-  }));
+const {
+  signInWithOAuthMock,
+  signInWithIdTokenMock,
+  rememberMock,
+  isNativeMock,
+  isPluginMock,
+  getPlatformMock,
+} = vi.hoisted(() => ({
+  signInWithOAuthMock: vi.fn(),
+  signInWithIdTokenMock: vi.fn(),
+  rememberMock: vi.fn(),
+  isNativeMock: vi.fn(() => false),
+  isPluginMock: vi.fn(() => false),
+  getPlatformMock: vi.fn(() => 'web'),
+}));
 
 vi.mock('./supabase', () => ({
   supabase: { auth: { signInWithOAuth: signInWithOAuthMock, signInWithIdToken: signInWithIdTokenMock } },
 }));
 vi.mock('./authMethodMemory', () => ({ rememberAuthMethod: rememberMock }));
 vi.mock('@capacitor/core', () => ({
-  Capacitor: { isNativePlatform: isNativeMock, isPluginAvailable: isPluginMock },
+  Capacitor: {
+    isNativePlatform: isNativeMock,
+    isPluginAvailable: isPluginMock,
+    getPlatform: getPlatformMock,
+  },
 }));
 
 import {
   signInWithGoogle,
   isGoogleSignInAvailable,
+  buildGoogleInitOptions,
   classifySupabaseError,
   isUserCancellation,
 } from './googleAuth';
@@ -30,6 +42,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   isNativeMock.mockReturnValue(false);
   isPluginMock.mockReturnValue(false);
+  getPlatformMock.mockReturnValue('web');
   vi.stubGlobal('window', { location: { origin: 'https://app.orodim.com.br' } });
 });
 
@@ -73,6 +86,32 @@ describe('isGoogleSignInAvailable', () => {
     isNativeMock.mockReturnValue(true);
     isPluginMock.mockReturnValue(false);
     expect(isGoogleSignInAvailable()).toBe(false);
+  });
+});
+
+describe('buildGoogleInitOptions', () => {
+  const WEB = '159171449078-d2bp21e2gskg1agfqc82j9evhqjf4fs6.apps.googleusercontent.com';
+  const IOS = '159171449078-2fifll286pdvom3r81nqmpph2icmk0st.apps.googleusercontent.com';
+
+  it('android uses EXACTLY the web client id (validated, unchanged shape)', () => {
+    expect(buildGoogleInitOptions('android', WEB, IOS)).toEqual({ webClientId: WEB });
+  });
+
+  it('any non-ios native falls back to the android shape', () => {
+    expect(buildGoogleInitOptions('web', WEB, IOS)).toEqual({ webClientId: WEB });
+  });
+
+  it('ios adds iOSClientId + iOSServerClientId(=web) + online mode', () => {
+    expect(buildGoogleInitOptions('ios', WEB, IOS)).toEqual({
+      webClientId: WEB,
+      iOSClientId: IOS,
+      iOSServerClientId: WEB,
+      mode: 'online',
+    });
+  });
+
+  it('never leaks the ios client id into the android config', () => {
+    expect(buildGoogleInitOptions('android', WEB, IOS)).not.toHaveProperty('iOSClientId');
   });
 });
 

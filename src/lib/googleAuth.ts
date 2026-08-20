@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { supabase } from './supabase';
 import { rememberAuthMethod } from './authMethodMemory';
+import { logAuthDiag } from './authDiag';
 
 /**
  * Google sign-in, brokered by Supabase Auth (the session authority) so a
@@ -38,15 +39,54 @@ export type GoogleSignInResult =
 const WEB_CLIENT_ID =
   ((import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID as string | undefined) ?? '').trim();
 
+/** The Google *iOS* OAuth client id (public, not a secret). REQUIRED on iOS:
+ *  @capgo's SocialLoginPlugin.swift only initializes the Google provider when an
+ *  `iOSClientId` is supplied (it guards `if let clientId = iOSClientId`), so
+ *  without this the native iOS Google flow never starts. Unused on Android/web,
+ *  which key off the Web client id. Must be set as VITE_GOOGLE_IOS_CLIENT_ID in
+ *  Vercel PROD (remote-first: the value is baked into the deployed web bundle). */
+const IOS_CLIENT_ID =
+  ((import.meta.env.VITE_GOOGLE_IOS_CLIENT_ID as string | undefined) ?? '').trim();
+
+/**
+ * Build the provider-specific `google` block for SocialLogin.initialize. Pure and
+ * exported so the platform branching is unit-testable without a device.
+ *  - Android (and any other native): EXACTLY `{ webClientId }` — the validated,
+ *    unchanged Credential-Manager configuration. Do not add fields here.
+ *  - iOS: GoogleSignIn needs the iOS client id, and to mint an ID token whose
+ *    `aud` Supabase accepts it needs `iOSServerClientId` = the Web client id
+ *    (Supabase's Google provider "Authorized Client IDs"). `online` returns the
+ *    ID token (offline would return only a serverAuthCode).
+ */
+export function buildGoogleInitOptions(
+  platform: string,
+  webClientId: string,
+  iosClientId: string,
+): Record<string, unknown> {
+  if (platform === 'ios') {
+    return {
+      webClientId,
+      iOSClientId: iosClientId,
+      iOSServerClientId: webClientId,
+      mode: 'online',
+    };
+  }
+  return { webClientId };
+}
+
 /**
  * Whether the current runtime can even offer "Continuar com Google", so the UI
  * can hide the button instead of showing one that always fails. Fails closed on
- * native (needs both the plugin and the web client id); web is always offerable
- * (Supabase gates whether the provider is actually enabled).
+ * native (needs both the plugin and the web client id; iOS additionally needs
+ * the iOS client id); web is always offerable (Supabase gates whether the
+ * provider is actually enabled).
  */
 export function isGoogleSignInAvailable(): boolean {
   if (Capacitor.isNativePlatform()) {
-    return WEB_CLIENT_ID !== '' && Capacitor.isPluginAvailable('SocialLogin');
+    if (WEB_CLIENT_ID === '' || !Capacitor.isPluginAvailable('SocialLogin')) return false;
+    // iOS needs the iOS OAuth client id too, or the native flow can't start.
+    if (Capacitor.getPlatform() === 'ios') return IOS_CLIENT_ID !== '';
+    return true;
   }
   return true;
 }
@@ -77,7 +117,13 @@ async function webGoogleSignIn(): Promise<GoogleSignInResult> {
 }
 
 async function nativeGoogleSignIn(): Promise<GoogleSignInResult> {
-  if (WEB_CLIENT_ID === '' || !Capacitor.isPluginAvailable('SocialLogin')) {
+  const platform = Capacitor.getPlatform();
+  if (
+    WEB_CLIENT_ID === '' ||
+    !Capacitor.isPluginAvailable('SocialLogin') ||
+    (platform === 'ios' && IOS_CLIENT_ID === '')
+  ) {
+    logAuthDiag({ provider: 'google', step: 'guard', platform, outcome: 'unavailable' });
     return {
       ok: false,
       reason: 'unavailable',
@@ -114,11 +160,14 @@ async function nativeGoogleSignIn(): Promise<GoogleSignInResult> {
     idToken = 'idToken' in result ? result.idToken : null;
   } catch (e) {
     if (isUserCancellation(e)) {
+      logAuthDiag({ provider: 'google', step: 'login', platform, outcome: 'cancelled' });
       return { ok: false, reason: 'cancelled', message: 'Login cancelado.' };
     }
+    logAuthDiag({ provider: 'google', step: 'login', platform, outcome: classifyThrown(e) });
     return { ok: false, reason: classifyThrown(e), message: describe(e) };
   }
 
+  logAuthDiag({ provider: 'google', step: 'login', platform, idTokenPresent: !!idToken });
   if (!idToken) {
     return {
       ok: false,
@@ -132,7 +181,10 @@ async function nativeGoogleSignIn(): Promise<GoogleSignInResult> {
     token: idToken,
     nonce: raw,
   });
-  if (error) return fail(error.message);
+  if (error) {
+    logAuthDiag({ provider: 'google', step: 'supabase', platform, supabaseError: error.message });
+    return fail(error.message);
+  }
   // On success useAuth's onAuthStateChange picks up the session and App.tsx
   // renders the main view; RevenueCat re-identifies via useRevenueCatIdentitySync.
   return { ok: true };
@@ -143,8 +195,17 @@ async function ensureInitialized(
   SocialLogin: typeof import('@capgo/capacitor-social-login').SocialLogin,
 ): Promise<void> {
   if (initialized) return;
-  await SocialLogin.initialize({ google: { webClientId: WEB_CLIENT_ID } });
-  initialized = true;
+  const platform = Capacitor.getPlatform();
+  try {
+    await SocialLogin.initialize({
+      google: buildGoogleInitOptions(platform, WEB_CLIENT_ID, IOS_CLIENT_ID),
+    });
+    initialized = true;
+    logAuthDiag({ provider: 'google', step: 'initialize', platform, initOk: true });
+  } catch (e) {
+    logAuthDiag({ provider: 'google', step: 'initialize', platform, initOk: false });
+    throw e;
+  }
 }
 
 /** Random raw nonce plus its SHA-256 hex digest. */

@@ -22,6 +22,28 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- Google Sign-In returns the OAuth callback to the app via the iOS OAuth
+	     client's REVERSED client id URL scheme. Required for native Google
+	     Sign-In to complete. Preserve any other schemes added later (OneSignal,
+	     Apple and Capacitor do not need a custom scheme here today). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.159171449078-2fifll286pdvom3r81nqmpph2icmk0st</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Google Sign-In native config. GIDClientID = the iOS OAuth client id;
+	     GIDServerClientID = the Web client id, so the minted ID token's `aud`
+	     matches what the Supabase Google provider accepts. These mirror the
+	     values passed to SocialLogin.initialize (src/lib/googleAuth.ts) and let
+	     the GoogleSignIn SDK self-configure. -->
+	<key>GIDClientID</key>
+	<string>159171449078-2fifll286pdvom3r81nqmpph2icmk0st.apps.googleusercontent.com</string>
+	<key>GIDServerClientID</key>
+	<string>159171449078-d2bp21e2gskg1agfqc82j9evhqjf4fs6.apps.googleusercontent.com</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<!-- Required by App Store validation (warning ITMS-90683): the OneSignal

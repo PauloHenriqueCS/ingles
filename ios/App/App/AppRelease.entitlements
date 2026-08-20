@@ -10,5 +10,16 @@
 	<array>
 		<string>group.app.lemonenglish.lemon.onesignal</string>
 	</array>
+	<!-- Native Sign in with Apple. Required for @capgo SocialLogin's Apple
+	     provider (ASAuthorization) to succeed on the Release App ID
+	     app.lemonenglish.lemon, which already has the capability enabled in the
+	     Apple Developer portal. "Default" scopes the entitlement to the app's own
+	     App ID. Only on Release — Debug uses a legacy Bundle ID whose App ID may
+	     not have this capability, so it is intentionally left out of
+	     App.entitlements. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 </dict>
 </plist>
