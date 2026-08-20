@@ -186,6 +186,68 @@ function BuyMoreMinutesCta({
   );
 }
 
+// ── Exhausted-balance modal ───────────────────────────────────────────────────
+// A blocking popup so the "buy more minutes" / "see plans" action is never
+// buried below the fold. Shown as soon as the balance hits 0 (a session ended
+// by balance) and every time the screen is entered with 0 balance. Dismissible
+// ("Agora não") so the student can still read the screen / choose a mode.
+function ConversationExhaustedModal({
+  conversation,
+  onBuyMinutes,
+  onSubscribe,
+  onClose,
+}: {
+  conversation: ConversationEntitlements;
+  onBuyMinutes?: () => void;
+  onSubscribe: () => void;
+  onClose: () => void;
+}) {
+  const isTrial = conversation.monthlyTime.period === 'lifetime';
+  const canBuyPackages = conversation.extraPurchaseEnabled === true && !isTrial && onBuyMinutes != null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Minutos de conversa esgotados"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm bg-slate-800 border border-slate-700 rounded-2xl p-6 space-y-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-center space-y-2">
+          <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/15 flex items-center justify-center">
+            <Lock className="w-6 h-6 text-amber-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+          </div>
+          <h2 className="text-lg font-bold text-slate-100">Seus minutos acabaram</h2>
+          <p className="text-sm text-slate-300 leading-relaxed">
+            {isTrial ? ENTITLEMENT_MESSAGES.conversationTrialMinutesExhausted : ENTITLEMENT_MESSAGES.conversationMinutesExhausted}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={canBuyPackages ? onBuyMinutes : onSubscribe}
+          data-testid="conversation-exhausted-modal-cta"
+          className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px]"
+        >
+          {canBuyPackages ? MINUTE_PACKAGES_MESSAGES.entryCtaTitle : ENTITLEMENT_MESSAGES.viewPlansCta}
+        </button>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full py-2.5 rounded-xl text-slate-400 hover:text-slate-200 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-slate-600"
+        >
+          Agora não
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── First-access banner ───────────────────────────────────────────────────────
 
 function FirstAccessBanner({ onPersonalize, onDismiss }: { onPersonalize: () => void; onDismiss: () => void }) {
@@ -351,6 +413,7 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const [selectedMode, setSelectedMode] = useState<'guided' | 'free' | null>(null);
 
   const [showSheet,       setShowSheet]       = useState(false);
+  const [showExhaustedModal, setShowExhaustedModal] = useState(false);
   const [showFirstAccess, setShowFirstAccess] = useState(false);
   const [firstAccessChecked, setFirstAccessChecked] = useState(false);
   const [todayTotalSec, setTodayTotalSec]     = useState<number | null>(null);
@@ -373,6 +436,16 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       getDayTotalSeconds(today).then(setPreviousDayTotalSec).catch(() => {});
     }
   }, [session.status, today]);
+
+  // Auto-open the exhausted-balance popup so the buy/plans action is never
+  // buried below the fold: the moment the balance hits 0 (a session just ended
+  // by balance → entitlements refetched) and every time the screen is entered
+  // with 0 balance. Never during an active/connecting call.
+  useEffect(() => {
+    const balanceExhausted = !conversationLoading && !!conversation?.enabled && conversationBlocked;
+    const inCall = session.status === 'active' || session.status === 'connecting';
+    if (balanceExhausted && !inCall) setShowExhaustedModal(true);
+  }, [conversationLoading, conversation?.enabled, conversationBlocked, session.status]);
 
   // Save session when it ends and fetch updated daily total
   useEffect(() => {
@@ -691,6 +764,16 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
           hp={hp}
           sessionActive={isActive}
           onClose={() => setShowSheet(false)}
+        />
+      )}
+
+      {/* Exhausted-balance popup — front and center, never buried below the fold */}
+      {showExhaustedModal && !isActive && !isConnecting && conversation?.enabled && conversationBlocked && (
+        <ConversationExhaustedModal
+          conversation={conversation}
+          onBuyMinutes={onNavigateToMinutePackages}
+          onSubscribe={onNavigateToSubscription}
+          onClose={() => setShowExhaustedModal(false)}
         />
       )}
     </div>
