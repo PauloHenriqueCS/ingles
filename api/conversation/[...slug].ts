@@ -49,6 +49,7 @@ import { getTodaySP } from '../../src/lib/timezone';
 import { hangupAndPersist } from '../_realtime-hangup';
 import { WEBRTC_CONNECT_FEATURE_KEY, REALTIME_MAX_SESSION_SECONDS } from '../_realtime-constants';
 import { closeUserOpenAuthorizationsForNewSession } from './_session-accounting';
+import { computeRecordingCeiling } from './_recording-ceiling';
 import { reserveRealtimeSessionBudget } from '../_realtime-budget';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../../src/server/product-config';
 
@@ -519,7 +520,7 @@ async function handleSession(req: any, res: any) {
   const gatewayDeps = getProductionDeps();
   const sessionStartNowMs = gatewayDeps.clock();
   let authorizedAtStart = computeAuthorizedRecording(
-    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000,
+    entitlements, sessionStartNowMs, sessionStartNowMs + REALTIME_MAX_SESSION_SECONDS * 1000, sessionStartNowMs,
   );
 
   const safetyIdentifier = createHash('sha256').update(userId).digest('hex');
@@ -2088,30 +2089,21 @@ function computeAuthorizedRecording(
   entitlements: Awaited<ReturnType<typeof getCurrentUserPlanEntitlements>>,
   startedAtMs: number,
   technicalDeadlineMs: number,
+  nowMs: number,
 ): AuthorizedRecording {
-  const perTurnCapSeconds = entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds;
-  const monthlyRemainingSeconds = entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining;
-
-  const perTurnDeadlineMs = Number.isFinite(perTurnCapSeconds) ? startedAtMs + perTurnCapSeconds * 1000 : Infinity;
-  const monthlyDeadlineMs = Number.isFinite(monthlyRemainingSeconds) ? startedAtMs + monthlyRemainingSeconds * 1000 : Infinity;
-
-  const effectiveDeadlineMs = Math.min(technicalDeadlineMs, perTurnDeadlineMs, monthlyDeadlineMs);
-  // Session-start-relative, not poll-time-relative — stays stable across polls.
-  const authorizedMaxRecordingSeconds = Math.max(0, (effectiveDeadlineMs - startedAtMs) / 1000);
-
-  let recordingLimitReason: RecordingLimitReason;
-  if (effectiveDeadlineMs === perTurnDeadlineMs && Number.isFinite(perTurnDeadlineMs)) {
-    recordingLimitReason = 'per_turn';
-  } else if (effectiveDeadlineMs === monthlyDeadlineMs && Number.isFinite(monthlyDeadlineMs)) {
-    // Etapa 2A — the trial's lifetime total shares this same FeatureLimit
-    // slot (period='lifetime' instead of 'month'); the reason reported must
-    // distinguish it so it's never described as "monthly" downstream.
-    recordingLimitReason = entitlements.conversation.monthlyTime.period === 'lifetime' ? 'trial_balance' : 'monthly_balance';
-  } else {
-    recordingLimitReason = 'technical';
-  }
-
-  return { authorizedMaxRecordingSeconds, recordingLimitReason, effectiveDeadlineMs };
+  // Etapa 2A — the trial's lifetime total shares this same FeatureLimit slot
+  // (period='lifetime' instead of 'month'); flagged so the reason is reported
+  // as 'trial_balance', never described as "monthly" downstream. All the ceiling
+  // math (incl. the now-vs-start anchoring that keeps the ceiling fixed across
+  // polls) lives in the pure, unit-tested _recording-ceiling helper.
+  return computeRecordingCeiling({
+    startedAtMs,
+    nowMs,
+    technicalDeadlineMs,
+    perTurnCapSeconds: entitlements.conversation.maxRecordingUnlimited ? Infinity : entitlements.conversation.maxRecordingSeconds,
+    monthlyRemainingSeconds: entitlements.conversation.monthlyTime.unlimited ? Infinity : entitlements.conversation.monthlyTime.remaining,
+    isLifetimeTrial: entitlements.conversation.monthlyTime.period === 'lifetime',
+  });
 }
 
 async function handleSessionControl(req: any, res: any) {
@@ -2217,7 +2209,11 @@ async function handleSessionControl(req: any, res: any) {
     };
     try {
       const entitlements = await getCurrentUserPlanEntitlements(userId);
-      authorized = computeAuthorizedRecording(entitlements, startedAtMs, deadlineAtMs);
+      // Anchor the depleting monthly/trial balance to NOW (see
+      // computeAuthorizedRecording): using the poll's real clock keeps the
+      // absolute deadline fixed at startedAt + initial-balance instead of
+      // shrinking it toward the elapsed on every poll.
+      authorized = computeAuthorizedRecording(entitlements, startedAtMs, deadlineAtMs, Date.now());
     } catch (e) {
       gatewayDeps.logger('gateway.sessionControl.planLimit.failed', { message: String(e) });
     }

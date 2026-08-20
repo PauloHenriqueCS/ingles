@@ -1411,7 +1411,7 @@ describe('POST /session-control — mid-session control poll', () => {
     expect(res._body()).toEqual({ terminate: true, reason: 'plan_recording_limit_reached' });
   });
 
-  it('tightens the deadline using the smaller of per-turn cap and remaining monthly balance', async () => {
+  it('the monthly balance is the binding constraint (smaller than the per-turn cap) but the remaining is measured from NOW — 10s left never terminates at elapsed 20s', async () => {
     const startedAt = new Date(Date.now() - 20 * 1000).toISOString(); // 20s ago
     mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
     const entitlements = permissiveEntitlements();
@@ -1419,26 +1419,44 @@ describe('POST /session-control — mid-session control poll', () => {
     entitlements.conversation.maxRecordingUnlimited = false;
     entitlements.conversation.monthlyTime = {
       enabled: true, unlimited: false, limit: 600, consumed: 590, remaining: 10, period: 'month', state: 'available', canStart: true,
-    }; // only 10s of monthly balance left — smaller than elapsed 20s
+    }; // 10s of monthly balance still LEFT (from now) — must NOT end early
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
 
     const res = makeRes();
     await handler(controlReq(), res);
     expect(res._status()).toBe(200);
-    // Monthly balance (10s left) is the binding constraint here, not the
-    // generous 600s per-turn cap — the reason must say so distinctly.
-    expect(res._body()).toEqual({ terminate: true, reason: 'plan_monthly_balance_exhausted' });
+    const body = res._body() as { terminate: boolean; recordingLimitReason: string; authorizedMaxRecordingSeconds: number };
+    expect(body.terminate).toBe(false); // 10s remaining ≠ exhausted, regardless of elapsed (regression)
+    expect(body.recordingLimitReason).toBe('monthly_balance'); // still the binding constraint
+    expect(body.authorizedMaxRecordingSeconds).toBeCloseTo(30, 0); // elapsed 20 + remaining 10 = fixed ceiling
   });
 
-  it('Etapa 2A: reports plan_trial_balance_exhausted (never "monthly") when the binding constraint is the trial lifetime balance', async () => {
-    const startedAt = new Date(Date.now() - 20 * 1000).toISOString(); // 20s ago
+  it('terminates with plan_monthly_balance_exhausted only when the monthly balance truly reaches 0', async () => {
+    const startedAt = new Date(Date.now() - 20 * 1000).toISOString();
     mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
     const entitlements = permissiveEntitlements();
     entitlements.conversation.maxRecordingSeconds = 600;
     entitlements.conversation.maxRecordingUnlimited = false;
     entitlements.conversation.monthlyTime = {
-      enabled: true, unlimited: false, limit: 900, consumed: 890, remaining: 10, period: 'lifetime', state: 'available', canStart: true,
-    }; // only 10s of the trial's lifetime total left — smaller than elapsed 20s
+      enabled: true, unlimited: false, limit: 600, consumed: 600, remaining: 0, period: 'month', state: 'monthly_limit_reached', canStart: false,
+    };
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
+
+    const res = makeRes();
+    await handler(controlReq(), res);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ terminate: true, reason: 'plan_monthly_balance_exhausted' });
+  });
+
+  it('Etapa 2A: reports plan_trial_balance_exhausted (never "monthly") when the trial lifetime balance reaches 0', async () => {
+    const startedAt = new Date(Date.now() - 20 * 1000).toISOString();
+    mockSessionsFrom.mockReturnValue(makeSelectChain({ data: { id: GATEWAY_SESSION_ID, started_at: startedAt }, error: null }));
+    const entitlements = permissiveEntitlements();
+    entitlements.conversation.maxRecordingSeconds = 600;
+    entitlements.conversation.maxRecordingUnlimited = false;
+    entitlements.conversation.monthlyTime = {
+      enabled: true, unlimited: false, limit: 900, consumed: 900, remaining: 0, period: 'lifetime', state: 'trial_balance_exhausted', canStart: false,
+    };
     mockGetCurrentUserPlanEntitlements.mockResolvedValue(entitlements);
 
     const res = makeRes();
