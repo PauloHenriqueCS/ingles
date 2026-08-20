@@ -371,113 +371,38 @@ export default function LoginPage() {
 
 // ── Shared presentational pieces (unchanged Orodim visual language) ────────────
 
+/**
+ * Login shell. The backdrop is the brand aurora photo (public/brand/
+ * aurora-login.webp) set to cover the screen and framed so the logo sits in
+ * the dark "eye" of the aurora with the bright ribbons wrapping around it.
+ * `background-size: auto 140%` + `background-position: 31% 78%` reproduce that
+ * framing; they are expressed relatively so it holds across phone aspect
+ * ratios, and the parent clips overflow so nothing bleeds sideways. A dark
+ * floor gradient keeps the tagline + buttons area clean and readable.
+ */
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-[#010817]">
-      <AuroraBackground />
+    <div
+      className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-[#010817]"
+      style={{
+        backgroundImage: "url('/brand/aurora-login.webp')",
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: 'auto 140%',
+        backgroundPosition: '31% 78%',
+      }}
+    >
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-[42%]"
+        style={{
+          background:
+            'linear-gradient(to bottom, transparent 0%, rgba(1,8,23,0.35) 55%, rgba(1,8,23,0.72) 100%)',
+        }}
+      />
       <div className="relative z-10 max-w-sm w-full space-y-6">{children}</div>
     </div>
   );
 }
-
-/**
- * Aurora-borealis login backdrop. Built as a layered DOM composition (not a
- * single flat gradient): a deep-navy base, two bright diagonal teal/cyan
- * streaks sweeping toward the top-right, a wide ambient haze and a curved
- * "cradle" that wraps the logo's lower-left, a sparse particle field, and a
- * dark floor that keeps the tagline/buttons area clean. Pure CSS, no raster
- * image, no animation. Purely decorative → aria-hidden.
- *
- * Geometry is expressed in vw/%/rotate so the same silhouette holds across
- * phone aspect ratios; the parent clips overflow so nothing bleeds sideways.
- */
-function AuroraBackground() {
-  return (
-    <div aria-hidden className="oaur pointer-events-none absolute inset-0 overflow-hidden">
-      <style>{AURORA_CSS}</style>
-      <div className="oaur-haze" />
-      <div className="oaur-glow" />
-      <div className="oaur-core" />
-      <div className="oaur-core2" />
-      <div className="oaur-second" />
-      <div className="oaur-curl" />
-      <div className="oaur-stars" />
-      <div className="oaur-floor" />
-    </div>
-  );
-}
-
-const AURORA_CSS = `
-.oaur{background:radial-gradient(120% 90% at 50% 40%,#031B34 0%,#02152A 42%,#010A1C 72%,#010817 100%);}
-.oaur > div{position:absolute;pointer-events:none;}
-.oaur-haze{
-  left:58%;top:26%;width:180vw;height:52vh;
-  transform:translate(-50%,-50%) rotate(-29deg);
-  background:linear-gradient(to bottom,transparent 0%,rgba(20,120,150,.09) 42%,rgba(25,150,170,.15) 50%,rgba(20,120,150,.09) 58%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 0%,#000 42%,#000 86%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 0%,#000 42%,#000 86%,transparent 100%);
-  filter:blur(44px);opacity:.9;
-}
-.oaur-glow{
-  left:62%;top:26%;width:150vw;height:180px;
-  transform:translate(-50%,-50%) rotate(-30deg);
-  border-radius:60% 40% 70% 30% / 50% 70% 30% 50%;
-  background:linear-gradient(to bottom,transparent 0%,rgba(21,134,196,.08) 34%,rgba(25,200,197,.20) 50%,rgba(22,160,200,.10) 66%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 6%,#000 50%,#000 86%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 6%,#000 50%,#000 86%,transparent 100%);
-  filter:blur(34px);opacity:.75;
-}
-.oaur-core{
-  left:64%;top:24%;width:150vw;height:46px;
-  transform:translate(-50%,-50%) rotate(-30deg);
-  background:linear-gradient(to bottom,transparent 0%,rgba(30,210,190,.04) 24%,rgba(58,240,222,.72) 50%,rgba(40,205,228,.24) 70%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 16%,#000 58%,#000 84%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 16%,#000 58%,#000 84%,transparent 100%);
-  filter:blur(10px);opacity:1;
-}
-.oaur-core2{
-  left:56%;top:35%;width:146vw;height:40px;
-  transform:translate(-50%,-50%) rotate(-31deg);
-  background:linear-gradient(to bottom,transparent 0%,rgba(30,200,205,.04) 26%,rgba(46,228,218,.50) 50%,rgba(30,185,218,.18) 70%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 12%,#000 46%,#000 82%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 12%,#000 46%,#000 82%,transparent 100%);
-  filter:blur(13px);opacity:.88;
-}
-.oaur-second{
-  left:82%;top:44%;width:100vw;height:90px;
-  transform:translate(-50%,-50%) rotate(-27deg);
-  border-radius:70% 30% 60% 40% / 40% 60% 40% 60%;
-  background:linear-gradient(to bottom,transparent 0%,rgba(22,187,212,.10) 42%,rgba(39,227,209,.22) 52%,rgba(22,150,190,.08) 62%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 12%,#000 52%,#000 86%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 12%,#000 52%,#000 86%,transparent 100%);
-  filter:blur(22px);opacity:.55;
-}
-.oaur-curl{
-  left:33%;top:58%;width:54vw;height:124px;
-  transform:translate(-50%,-50%) rotate(-64deg);
-  border-radius:85% 15% 50% 50% / 65% 35% 65% 35%;
-  background:linear-gradient(to bottom,transparent 0%,rgba(25,185,205,.16) 44%,rgba(34,215,200,.28) 55%,transparent 100%);
-  -webkit-mask-image:linear-gradient(to right,transparent 0%,#000 52%,transparent 100%);
-          mask-image:linear-gradient(to right,transparent 0%,#000 52%,transparent 100%);
-  filter:blur(26px);opacity:.6;
-}
-.oaur-stars{
-  inset:0;opacity:.6;filter:blur(.2px);
-  background-image:
-    radial-gradient(1.4px 1.4px at 20% 22%,rgba(255,255,255,.9),transparent),
-    radial-gradient(1px 1px at 68% 16%,rgba(210,240,255,.7),transparent),
-    radial-gradient(1.2px 1.2px at 82% 30%,rgba(255,255,255,.8),transparent),
-    radial-gradient(1px 1px at 44% 12%,rgba(210,240,255,.6),transparent),
-    radial-gradient(1.3px 1.3px at 88% 46%,rgba(255,255,255,.7),transparent),
-    radial-gradient(1px 1px at 14% 40%,rgba(210,240,255,.5),transparent),
-    radial-gradient(1.5px 1.5px at 58% 26%,rgba(255,255,255,.85),transparent),
-    radial-gradient(1px 1px at 74% 8%,rgba(210,240,255,.55),transparent);
-}
-.oaur-floor{
-  left:0;right:0;bottom:0;top:auto;width:auto;height:52%;
-  background:linear-gradient(to bottom,transparent 0%,rgba(1,10,24,.55) 42%,#010817 88%);
-}
-`;
 
 function Brand({
   subtitle,
