@@ -382,14 +382,12 @@ function Shell({ children }: { children: React.ReactNode }) {
 function Brand({ subtitle }: { subtitle: string }) {
   return (
     <div className="text-center space-y-1">
-      <div className="flex items-center justify-center w-16 h-16 rounded-xl bg-blue-900/40 mx-auto mb-3 overflow-hidden">
-        <img
-          src="/brand/lemon-header.png"
-          alt=""
-          className="w-[38px] h-[38px] object-cover object-left shrink-0"
-          draggable={false}
-        />
-      </div>
+      <img
+        src="/brand/orodim-logo.png"
+        alt=""
+        className="w-28 h-28 object-contain mx-auto mb-3"
+        draggable={false}
+      />
       <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
       <p className="text-slate-400 text-sm">{subtitle}</p>
     </div>
