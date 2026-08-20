@@ -87,7 +87,7 @@ function utcDateString(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function utcDayRange(now: Date): { startIso: string; endIso: string } {
+export function utcDayRange(now: Date): { startIso: string; endIso: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   return { startIso: start.toISOString(), endIso: end.toISOString() };

@@ -29,6 +29,7 @@ const {
   mockUpdateRewriteAttemptStatus,
   mockEvaluateWritingRewrite,
   mockGetEvaluationForAttempt,
+  mockRpc,
 } = vi.hoisted(() => ({
   mockRequireAuth: vi.fn(),
   mockApplyRateLimit: vi.fn(),
@@ -42,6 +43,7 @@ const {
   mockUpdateRewriteAttemptStatus: vi.fn(),
   mockEvaluateWritingRewrite: vi.fn(),
   mockGetEvaluationForAttempt: vi.fn(),
+  mockRpc: vi.fn(),
 }));
 
 vi.mock('../_auth', () => ({ requireAuth: mockRequireAuth }));
@@ -60,6 +62,7 @@ vi.mock('../_ai-gateway/index', () => ({
         select: () => ({ eq: () => ({ single: mockSingle }) }),
       };
     },
+    rpc: (name: string, args: unknown) => mockRpc(name, args),
   }),
 }));
 vi.mock('../../src/lib/writingRewriteRepository', () => ({
@@ -178,6 +181,12 @@ beforeEach(() => {
   });
   mockGetLatestRewriteAttempt.mockResolvedValue(null);
   mockGetNextRewriteSequence.mockResolvedValue(1);
+  // Default: the one-per-review reservation is fresh (proceed to evaluate);
+  // complete/fail are no-ops. Individual tests override the reserve status.
+  mockRpc.mockImplementation((name: string) =>
+    name === 'reserve_writing_rewrite'
+      ? Promise.resolve({ data: { status: 'reserved', fresh: true }, error: null })
+      : Promise.resolve({ data: null, error: null }));
   mockCreateRewriteAttempt.mockImplementation(async (_supabase: unknown, input: Record<string, unknown>) =>
     attemptFixture({ status: 'draft', rewriteText: null, rewriteSequence: input.rewriteSequence }));
   mockUpdateRewriteText.mockImplementation(async (_supabase: unknown, id: string, text: string) =>
@@ -327,15 +336,67 @@ describe('idempotency', () => {
     expect((res._body() as any).result.rewriteSubmissionId).toBe(ATTEMPT_ID);
   });
 
-  it('a DIFFERENT rewrite text after a completed evaluation creates a genuinely new attempt (not wrongly deduped)', async () => {
+  it('a DIFFERENT rewrite text after a completed evaluation is limited to ONE analysis: replays the stored result, never a second AI call (problem 10)', async () => {
+    // The one-per-review rule: once V2 was analyzed, editing "Sua versão 2" and
+    // re-submitting must NOT mint a new attempt or call the model again — it
+    // replays the original evaluation. This was the unlimited-AI bug.
     mockGetLatestRewriteAttempt.mockResolvedValue(attemptFixture({ status: 'evaluated', rewriteText: 'a completely different rewrite' }));
     mockGetNextRewriteSequence.mockResolvedValue(2);
     const res = makeRes();
     await handler(makeReq(), res); // makeReq() sends REWRITE_TEXT, which differs from the fixture's stored text
-    expect(mockCreateRewriteAttempt).toHaveBeenCalledTimes(1);
-    expect(mockCreateRewriteAttempt).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ rewriteSequence: 2 }));
-    expect(mockEvaluateWritingRewrite).toHaveBeenCalledTimes(1);
+    expect(mockCreateRewriteAttempt).not.toHaveBeenCalled();
+    expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
+    expect(mockGetEvaluationForAttempt).toHaveBeenCalledWith(expect.anything(), ATTEMPT_ID, 1);
     expect(res._status()).toBe(200);
+    expect((res._body() as any).alreadyAnalyzed).toBe(true);
+  });
+
+  it('a completed reservation short-circuits to a replay even when the latest attempt lookup is used', async () => {
+    mockRpc.mockImplementation((name: string) =>
+      name === 'reserve_writing_rewrite'
+        ? Promise.resolve({ data: { status: 'already_evaluated' }, error: null })
+        : Promise.resolve({ data: null, error: null }));
+    mockGetLatestRewriteAttempt.mockResolvedValue(attemptFixture({ status: 'evaluated', rewriteText: REWRITE_TEXT }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
+    expect((res._body() as any).alreadyAnalyzed).toBe(true);
+  });
+
+  it('an in-flight reservation returns 409 (a concurrent evaluation is running) and never calls the AI', async () => {
+    mockRpc.mockImplementation((name: string) =>
+      name === 'reserve_writing_rewrite'
+        ? Promise.resolve({ data: { status: 'in_progress' }, error: null })
+        : Promise.resolve({ data: null, error: null }));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(409);
+    expect((res._body() as any).code).toBe('V2_EVALUATION_IN_PROGRESS');
+    expect(mockEvaluateWritingRewrite).not.toHaveBeenCalled();
+  });
+
+  it('a fresh reservation is COMPLETED after a successful evaluation and RELEASED after a failure', async () => {
+    // success → complete
+    await handler(makeReq(), makeRes());
+    expect(mockRpc).toHaveBeenCalledWith('complete_writing_rewrite_reservation', expect.objectContaining({ p_review_id: REVIEW_ID }));
+    vi.clearAllMocks();
+    // reset the defaults clearAllMocks wiped
+    mockRequireAuth.mockResolvedValue({ userId: USER_ID, supabase: {} });
+    mockApplyRateLimit.mockResolvedValue(true);
+    mockGetCurrentUserPlanEntitlements.mockResolvedValue(permissiveEntitlements());
+    mockIsRewriteV2Enabled.mockReturnValue(true);
+    mockSingle.mockResolvedValue({ data: { id: REVIEW_ID, user_id: USER_ID, original_text: 'x', corrected_text: 'y' }, error: null });
+    mockGetLatestRewriteAttempt.mockResolvedValue(null);
+    mockGetNextRewriteSequence.mockResolvedValue(1);
+    mockCreateRewriteAttempt.mockImplementation(async (_s: unknown, input: Record<string, unknown>) => attemptFixture({ status: 'draft', rewriteText: null, rewriteSequence: input.rewriteSequence }));
+    mockUpdateRewriteText.mockImplementation(async (_s: unknown, id: string, text: string) => attemptFixture({ id, status: 'draft', rewriteText: text }));
+    mockUpdateRewriteAttemptStatus.mockImplementation(async (_s: unknown, id: string, status: string) => attemptFixture({ id, status }));
+    mockRpc.mockImplementation((name: string) => name === 'reserve_writing_rewrite' ? Promise.resolve({ data: { status: 'reserved' }, error: null }) : Promise.resolve({ data: null, error: null }));
+    mockEvaluateWritingRewrite.mockRejectedValue(new Error('model failed'));
+    const res = makeRes();
+    await handler(makeReq(), res);
+    expect(res._status()).toBe(500);
+    expect(mockRpc).toHaveBeenCalledWith('fail_writing_rewrite_reservation', expect.objectContaining({ p_review_id: REVIEW_ID }));
   });
 
   it('double-click race: two concurrent requests for the same fresh submission each independently create/reuse and call the orchestrator once per call — no crash, no unhandled rejection', async () => {

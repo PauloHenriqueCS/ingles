@@ -12,7 +12,7 @@ import {
   normalizeGrammarGuide,
   normalizeOptionalExercises,
 } from './_mission-grammar-guide';
-import { getCurrentUserPlanEntitlements } from './_entitlements/plan-entitlements-service';
+import { getCurrentUserPlanEntitlements, utcDayRange } from './_entitlements/plan-entitlements-service';
 import { checkFeatureConfigError } from './_entitlements/require-feature-access';
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import type { PlanEntitlementsSnapshot } from '../src/domain/entitlements/entitlement-types';
@@ -527,6 +527,67 @@ export default async function handler(req: any, res: any) {
     const code = entitlements.writing.themeGenerations.state === 'monthly_limit_reached'
       ? 'MONTHLY_LIMIT_REACHED' : 'DAILY_LIMIT_REACHED';
     return { code, message: ENTITLEMENT_MESSAGES.writingGenerationsExhausted };
+  }
+
+  // ── Retrieve-only: restore today's already-assigned mission ─────────────────
+  // The daily mission is persisted per-user in `generated_themes` (the row that
+  // also IS the generation counter). The client used to hold it only in local
+  // state, so leaving and returning lost it while the generation still counted —
+  // the screen then said "você já usou todas as gerações" with NO mission to
+  // continue (an invalid state). This branch rehydrates the active mission on
+  // re-entry: it makes NO AI call, inserts nothing, and never touches the
+  // generation counter. It returns the most recent still-active mission created
+  // within the SAME UTC day window the counter uses, so what is restored is
+  // exactly what counts against today's limit.
+  const retrieveOnly = req.body?.mode === 'retrieve' || req.body?.retrieveOnly === true;
+  if (retrieveOnly) {
+    const { startIso, endIso } = utcDayRange(new Date(getProductionDeps().clock()));
+    const { data: activeRow } = await supabase
+      .from('generated_themes')
+      .select('id, shared_content_item_id, title, description, grammar_focus, activity_type, context, semantic_summary, difficulty, vocabulary')
+      .eq('user_id', userId)
+      .eq('status', 'generated')
+      .gte('created_at', startIso)
+      .lt('created_at', endIso)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!activeRow) return res.json({ theme: null, themeId: null, mode: 'retrieve' });
+
+    const rowVal = activeRow as {
+      id: string; shared_content_item_id: string | null; title: string; description: string | null;
+      grammar_focus: string[] | null; activity_type: string | null; context: string | null;
+      semantic_summary: string | null; difficulty: string | null; vocabulary: string[] | null;
+    };
+
+    // Prefer the full content from the shared library (the exact object first
+    // served); fall back to reconstructing a minimal theme from the row columns
+    // for legacy rows that predate the shared-content link.
+    let theme: Record<string, unknown> | null = null;
+    if (rowVal.shared_content_item_id) {
+      const { data: sharedItem } = await getCurriculumServiceClient()
+        .from('shared_content_items')
+        .select('content')
+        .eq('id', rowVal.shared_content_item_id)
+        .maybeSingle();
+      const content = (sharedItem as { content: unknown } | null)?.content;
+      if (content && typeof content === 'object') theme = content as Record<string, unknown>;
+    }
+    if (!theme) {
+      theme = {
+        title: rowVal.title,
+        mission: rowVal.description ?? '',
+        requiredGrammar: rowVal.grammar_focus ?? [],
+        format: rowVal.activity_type ?? undefined,
+        context: rowVal.context ?? undefined,
+        semanticSummary: rowVal.semantic_summary ?? undefined,
+        difficulty: rowVal.difficulty ?? undefined,
+        useTheseWords: rowVal.vocabulary ?? [],
+      };
+    }
+
+    return res.json({ theme, themeId: rowVal.id, mode: 'retrieve' });
   }
 
   const { mode: _clientMode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};

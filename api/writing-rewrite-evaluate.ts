@@ -132,20 +132,53 @@ export default async function handler(req: any, res: any) {
 
   const trimmedRewriteText = rewriteText.trim();
 
-  try {
-    const latestAttempt = await getLatestRewriteAttempt(supabase, reviewId, userId);
+  // One V2 analysis per review (authoritative, idempotent, concurrency-safe) —
+  // mirrors the V1 reserve_writing_review pattern, keyed by review_id. Set true
+  // only when THIS call holds a fresh reservation, so the outer catch releases
+  // it on failure (letting the user retry) without touching a replay path.
+  let reservedFresh = false;
 
-    // Idempotent replay of an already-completed submission (retry / double
-    // click / resend of the identical text) — evaluateWritingRewrite REJECTS
-    // an attempt whose status is already 'evaluated' (only submitted /
-    // evaluation_pending / evaluation_failed are evaluable), so this must be
-    // handled here, not by calling the orchestrator again. Returns the exact
-    // cached result; never re-runs the model.
-    if (latestAttempt && latestAttempt.status === 'evaluated' && latestAttempt.rewriteText === trimmedRewriteText) {
-      const evaluation = await getEvaluationForAttempt(supabase, latestAttempt.id, EVALUATION_VERSION);
-      const dto = buildPublicRewriteDTO(latestAttempt, review.original_text ?? '', review.corrected_text ?? '', evaluation);
-      safeLog('writing-rewrite-evaluate', 'idempotent_replay_evaluated', 200);
-      return res.json({ result: dto });
+  try {
+    // Reserve BEFORE any attempt row / AI call. A completed reservation means the
+    // single V2 analysis was already consumed → replay the stored result, never
+    // the model, no matter how the text was edited. A reserved (in-flight) one
+    // means a concurrent evaluation is running → 409.
+    const { data: reserveData, error: reserveError } = await supabase.rpc('reserve_writing_rewrite', {
+      p_user_id: userId,
+      p_review_id: reviewId,
+    });
+    if (reserveError || !reserveData || (reserveData as { error?: string }).error) {
+      safeLog('writing-rewrite-evaluate', 'reserve_failed', 500, { detail: reserveError?.message ?? (reserveData as { error?: string })?.error });
+      return jsonError(res, 500, 'EVALUATION_FAILED', 'Não foi possível avaliar sua reescrita agora. Tente novamente em instantes.');
+    }
+    const reservationStatus = (reserveData as { status: string }).status;
+    if (reservationStatus === 'in_progress') {
+      return jsonError(res, 409, 'V2_EVALUATION_IN_PROGRESS', 'Sua reescrita já está sendo avaliada. Aguarde um instante.');
+    }
+    reservedFresh = reservationStatus === 'reserved';
+
+    const latestAttempt = await getLatestRewriteAttempt(supabase, reviewId, userId);
+    const evaluatedAttempt = latestAttempt && latestAttempt.status === 'evaluated' ? latestAttempt : null;
+
+    // Already analyzed once — either the reservation says so, or (legacy rows
+    // created before this reservation existed) an evaluated attempt is already on
+    // record. Replay the stored evaluation and never call the AI again. Editing
+    // "Sua versão 2" and re-submitting can no longer buy a second analysis.
+    if (reservationStatus === 'already_evaluated' || evaluatedAttempt) {
+      if (!evaluatedAttempt) {
+        // Reservation marked completed but no evaluated attempt is retrievable —
+        // release so the user isn't permanently stuck, and let them retry.
+        if (reservedFresh) await releaseRewriteReservation();
+        else await supabase.rpc('fail_writing_rewrite_reservation', { p_user_id: userId, p_review_id: reviewId });
+        return jsonError(res, 500, 'EVALUATION_FAILED', 'Não foi possível recuperar sua avaliação. Tente novamente.');
+      }
+      const evaluation = await getEvaluationForAttempt(supabase, evaluatedAttempt.id, EVALUATION_VERSION);
+      const dto = buildPublicRewriteDTO(evaluatedAttempt, review.original_text ?? '', review.corrected_text ?? '', evaluation);
+      // Backfill the reservation for legacy reviews so future calls short-circuit
+      // at the RPC (idempotent no-op when it was already completed).
+      await supabase.rpc('complete_writing_rewrite_reservation', { p_user_id: userId, p_review_id: reviewId });
+      safeLog('writing-rewrite-evaluate', 'v2_already_analyzed_replay', 200);
+      return res.json({ result: dto, alreadyAnalyzed: true });
     }
 
     // Same content already submitted and still in flight (or previously
@@ -187,14 +220,33 @@ export default async function handler(req: any, res: any) {
       clientRequestId: `writing-rewrite-evaluate:${attemptId}`,
     });
 
+    // The single V2 analysis for this review is now consumed — mark the
+    // reservation completed so any later submit (edited text, reload, other
+    // device) replays this result instead of calling the AI again.
+    await supabase.rpc('complete_writing_rewrite_reservation', { p_user_id: userId, p_review_id: reviewId });
+    reservedFresh = false;
+
     safeLog('writing-rewrite-evaluate', 'success', 200);
     return res.json({ result: dto });
   } catch (err) {
+    // A genuine failure must NOT consume the one-per-review analysis: release the
+    // fresh reservation so the user can retry (timeout→retry, transient error).
+    if (reservedFresh) await releaseRewriteReservation();
     // requestId ties this exact failure to the server log for support/
     // debugging, without ever putting the real error (which can include
     // Supabase/PostgREST internals) in front of the user.
     const requestId = crypto.randomUUID();
     safeLog('writing-rewrite-evaluate', 'error', 500, { requestId, message: String(err instanceof Error ? err.message : err) });
     return jsonError(res, 500, 'EVALUATION_FAILED', 'Não foi possível avaliar sua reescrita agora. Tente novamente em instantes.', { requestId });
+  }
+
+  // Best-effort release of THIS call's fresh reservation (never masks the real
+  // error; a lingering 'reserved' row would otherwise wrongly block retry).
+  async function releaseRewriteReservation(): Promise<void> {
+    try {
+      await supabase.rpc('fail_writing_rewrite_reservation', { p_user_id: userId, p_review_id: reviewId });
+    } catch {
+      safeLog('writing-rewrite-evaluate', 'release_reservation_failed', 500);
+    }
   }
 }

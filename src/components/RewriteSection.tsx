@@ -114,6 +114,11 @@ export default function RewriteSection({
   // different feature (writing.correct_v2_text, unchanged) fired
   // independently, not a second evaluation.
   async function compare() {
+    // One analysis per review: once a comparison exists (done this session or
+    // rehydrated from the server), never fire a second evaluation. The backend
+    // is the authority (reserve_writing_rewrite), but the UI must reflect it and
+    // not even attempt the call — matching the persisted state.
+    if (compareState === 'done' || compareState === 'loading') return;
     const trimmedRewrite = rewriteText.trim();
 
     // Content-quality gate — UX only, mirrored authoritatively on the
@@ -221,24 +226,28 @@ export default function RewriteSection({
         )}
       </div>
 
-      {/* Rewrite textarea */}
+      {/* Rewrite textarea — locked once the single V2 analysis was consumed */}
       <div className="space-y-2">
         <label className="text-xs text-slate-400 block">Sua versão 2</label>
         <textarea
           value={rewriteText}
           onChange={(e) => { setRewriteText(e.target.value); setEmptyWarning(false); }}
+          readOnly={hasCompared}
           placeholder="Reescreva seu texto aqui tentando corrigir os erros apontados pela IA."
-          className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500 min-h-[180px] resize-none"
+          className={`w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500 min-h-[180px] resize-none ${hasCompared ? 'opacity-70 cursor-not-allowed' : ''}`}
         />
         {emptyWarning && (
           <p className="text-xs text-amber-400">Escreva sua versão 2 antes de comparar.</p>
         )}
+        {hasCompared && (
+          <p className="text-xs text-slate-500">Sua versão 2 já foi analisada. Cada missão permite uma análise da versão 2.</p>
+        )}
       </div>
 
-      {/* Compare button */}
+      {/* Compare button — disabled after the one allowed analysis */}
       <button
         onClick={compare}
-        disabled={isComparing || finalCorrectState === 'loading'}
+        disabled={isComparing || finalCorrectState === 'loading' || hasCompared}
         className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
         {isComparing ? (
@@ -246,7 +255,7 @@ export default function RewriteSection({
             <Loader2 className="w-4 h-4 shrink-0 animate-spin" strokeWidth={2} />
             Comparando sua versão 2...
           </span>
-        ) : 'Comparar versão 2'}
+        ) : hasCompared ? 'Versão 2 já analisada' : 'Comparar versão 2'}
       </button>
 
       {/* Compare error */}
