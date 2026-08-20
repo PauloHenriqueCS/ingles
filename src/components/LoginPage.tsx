@@ -245,7 +245,7 @@ export default function LoginPage() {
           <button
             type="button"
             onClick={enterEmail}
-            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium bg-slate-800 border border-slate-700 text-slate-100 hover:bg-slate-700/70 transition-colors"
+            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium bg-slate-800/40 border border-slate-600/50 text-slate-100 backdrop-blur-sm hover:bg-slate-700/50 transition-colors"
           >
             <Mail className="w-[18px] h-[18px] shrink-0" strokeWidth={1.75} aria-hidden="true" />
             Continuar com e-mail
@@ -373,8 +373,62 @@ export default function LoginPage() {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="max-w-sm w-full space-y-6">{children}</div>
+    <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-[#060b14]">
+      <AuroraBackground />
+      <div className="relative z-10 max-w-sm w-full space-y-6">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Aurora-borealis login backdrop: a dark navy field with a teal/green light
+ * ribbon sweeping diagonally and a scatter of stars. Pure CSS so it renders
+ * instantly with no image asset. Purely decorative → aria-hidden.
+ */
+function AuroraBackground() {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+      {/* Deep-space base with a soft central glow */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_38%,#102338_0%,#0a1626_45%,#060b14_100%)]" />
+
+      {/* Primary aurora ribbon — bright teal core sweeping diagonally */}
+      <div
+        className="absolute left-1/2 top-1/2 h-[150%] w-[52%] -translate-x-1/2 -translate-y-1/2 rotate-[36deg] blur-3xl opacity-80"
+        style={{
+          background:
+            'linear-gradient(180deg, transparent 0%, rgba(34,211,238,0.30) 28%, rgba(45,212,191,0.55) 50%, rgba(16,185,129,0.32) 72%, transparent 100%)',
+        }}
+      />
+
+      {/* Secondary softer ribbon for depth */}
+      <div
+        className="absolute left-[40%] top-1/2 h-[135%] w-[34%] -translate-x-1/2 -translate-y-1/2 rotate-[36deg] blur-3xl opacity-55"
+        style={{
+          background:
+            'linear-gradient(180deg, transparent 0%, rgba(125,246,222,0.42) 46%, rgba(45,212,191,0.28) 62%, transparent 100%)',
+        }}
+      />
+
+      {/* Starfield */}
+      <div
+        className="absolute inset-0 opacity-70"
+        style={{
+          backgroundImage: [
+            'radial-gradient(1.2px 1.2px at 12% 18%, rgba(255,255,255,0.9), transparent)',
+            'radial-gradient(1px 1px at 22% 62%, rgba(255,255,255,0.7), transparent)',
+            'radial-gradient(1.3px 1.3px at 34% 28%, rgba(255,255,255,0.85), transparent)',
+            'radial-gradient(1px 1px at 46% 78%, rgba(255,255,255,0.6), transparent)',
+            'radial-gradient(1.1px 1.1px at 58% 14%, rgba(255,255,255,0.8), transparent)',
+            'radial-gradient(1px 1px at 68% 52%, rgba(255,255,255,0.65), transparent)',
+            'radial-gradient(1.4px 1.4px at 78% 34%, rgba(255,255,255,0.9), transparent)',
+            'radial-gradient(1px 1px at 86% 70%, rgba(255,255,255,0.6), transparent)',
+            'radial-gradient(1.1px 1.1px at 92% 22%, rgba(255,255,255,0.75), transparent)',
+            'radial-gradient(1px 1px at 8% 82%, rgba(255,255,255,0.55), transparent)',
+            'radial-gradient(1.2px 1.2px at 52% 44%, rgba(255,255,255,0.7), transparent)',
+            'radial-gradient(1px 1px at 30% 90%, rgba(255,255,255,0.5), transparent)',
+          ].join(','),
+        }}
+      />
     </div>
   );
 }
