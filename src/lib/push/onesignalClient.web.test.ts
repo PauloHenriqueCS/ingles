@@ -39,6 +39,7 @@ import {
   initializeOneSignal,
   syncOneSignalIdentity,
   promptPushPermission,
+  maybeRequestPushPermission,
   getPushPermissionState,
   __resetOneSignalClientForTests,
 } from './onesignalClient';
@@ -67,6 +68,12 @@ describe('onesignalClient on the web build', () => {
 
   it('promptPushPermission resolves false without prompting', async () => {
     await expect(promptPushPermission()).resolves.toBe(false);
+    expect(mockRequestPermission).not.toHaveBeenCalled();
+  });
+
+  it('maybeRequestPushPermission is an inert no-op on web (never prompts)', async () => {
+    await expect(maybeRequestPushPermission()).resolves.toBe(false);
+    expect(mockInitialize).not.toHaveBeenCalled();
     expect(mockRequestPermission).not.toHaveBeenCalled();
   });
 

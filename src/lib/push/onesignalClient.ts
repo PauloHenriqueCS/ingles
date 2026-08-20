@@ -270,6 +270,61 @@ export async function promptPushPermission(fallbackToSettings = true): Promise<b
   }
 }
 
+// One automatic push-permission ask per app session. `attempted` blocks a second
+// prompt across rerenders/StrictMode/session restore within the same loaded
+// bundle; `inFlight` collapses two *concurrent* calls (StrictMode double-effect)
+// into a single requestPermission(). On a fresh app launch the module reloads
+// and these reset — which is correct, because the OS state (canRequest=false
+// once asked) then stops us from re-prompting anyway.
+let pushPromptAttempted = false;
+let pushPromptInFlight: Promise<boolean> | null = null;
+
+/**
+ * The product entry point for the first-run permission ask (ETAPA 4/5). Call it
+ * once the user is authenticated and Home is on screen; it decides safely:
+ *   - not supported / web            → do nothing
+ *   - already asked this session      → do nothing (no repeat prompt)
+ *   - SDK not ready yet               → do nothing, stay retryable (no attempt burned)
+ *   - permission already granted      → do nothing
+ *   - already denied (canRequest=false) → do nothing (never re-fires the OS prompt)
+ *   - not yet asked (canRequest=true) → show the native prompt exactly once
+ * Never throws, never opens Settings (the automatic first-ask must not bounce a
+ * fresh user out of the app — that's reserved for an explicit Settings action).
+ * Returns whether permission is granted after the attempt.
+ */
+export function maybeRequestPushPermission(): Promise<boolean> {
+  if (!isOneSignalSupported()) return Promise.resolve(false);
+  if (pushPromptAttempted) return Promise.resolve(false);
+  if (pushPromptInFlight) return pushPromptInFlight;
+
+  pushPromptInFlight = (async () => {
+    try {
+      const ready = await initializeOneSignal();
+      // Not initialized yet — leave `attempted` false so a later call can retry.
+      if (!ready) return false;
+      // Commit to the single attempt now that we can actually read state.
+      pushPromptAttempted = true;
+
+      const { hasPermission, canRequest } = await getPushPermissionState();
+      if (hasPermission) return true; // already subscribed → nothing to do
+      if (!canRequest) return false; // denied/blocked → do not re-prompt uselessly
+
+      // Not asked yet: show the OS prompt exactly once. No Settings fallback here.
+      return await promptPushPermission(false);
+    } catch (err) {
+      console.warn(
+        '[oneSignal] maybeRequestPushPermission failed',
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    } finally {
+      pushPromptInFlight = null;
+    }
+  })();
+
+  return pushPromptInFlight;
+}
+
 /** True once initialize() has completed for this app session. */
 export function isOneSignalInitialized(): boolean {
   return initialized;
@@ -283,4 +338,6 @@ export function __resetOneSignalClientForTests(): void {
   identityChain = Promise.resolve();
   listenersRegistered = false;
   clickHandler = null;
+  pushPromptAttempted = false;
+  pushPromptInFlight = null;
 }

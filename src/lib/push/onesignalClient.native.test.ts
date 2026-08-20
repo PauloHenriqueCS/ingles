@@ -40,6 +40,7 @@ import {
   initializeOneSignal,
   syncOneSignalIdentity,
   promptPushPermission,
+  maybeRequestPushPermission,
   getPushPermissionState,
   setNotificationClickHandler,
   __resetOneSignalClientForTests,
@@ -167,5 +168,86 @@ describe('onesignalClient on native', () => {
       url: 'https://app.orodim.com.br/x',
       additionalData: { screen: 'review' },
     });
+  });
+});
+
+describe('maybeRequestPushPermission (first-run auto ask)', () => {
+  it('requests the prompt when not yet asked (canRequest=true, hasPermission=false)', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(true);
+
+    const granted = await maybeRequestPushPermission();
+
+    expect(granted).toBe(true);
+    expect(mockRequestPermission).toHaveBeenCalledTimes(1);
+    // The automatic first-ask must NOT bounce the user to Settings.
+    expect(mockRequestPermission).toHaveBeenCalledWith(false);
+  });
+
+  it('does NOT prompt when permission is already granted', async () => {
+    mockHasPermission.mockResolvedValue(true);
+    mockCanRequestPermission.mockResolvedValue(false);
+
+    const granted = await maybeRequestPushPermission();
+
+    expect(granted).toBe(true);
+    expect(mockRequestPermission).not.toHaveBeenCalled();
+  });
+
+  it('does NOT re-prompt when already denied/blocked (canRequest=false)', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(false);
+
+    const granted = await maybeRequestPushPermission();
+
+    expect(granted).toBe(false);
+    expect(mockRequestPermission).not.toHaveBeenCalled();
+  });
+
+  it('asks only once per session across repeated calls (rerenders)', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(true);
+
+    await maybeRequestPushPermission();
+    await maybeRequestPushPermission();
+    await maybeRequestPushPermission();
+
+    expect(mockRequestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent calls (StrictMode double-effect) into a single request', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(true);
+
+    await Promise.all([
+      maybeRequestPushPermission(),
+      maybeRequestPushPermission(),
+    ]);
+
+    expect(mockRequestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not burn the attempt when the SDK is not initialized yet (stays retryable)', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(true);
+    // First call: init fails → no prompt, attempt not consumed.
+    mockInitialize.mockRejectedValueOnce(new Error('not ready'));
+
+    const first = await maybeRequestPushPermission();
+    expect(first).toBe(false);
+    expect(mockRequestPermission).not.toHaveBeenCalled();
+
+    // Retry once init works: now it asks.
+    const second = await maybeRequestPushPermission();
+    expect(second).toBe(true);
+    expect(mockRequestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throwing requestPermission is swallowed (never crashes the app)', async () => {
+    mockHasPermission.mockResolvedValue(false);
+    mockCanRequestPermission.mockResolvedValue(true);
+    mockRequestPermission.mockRejectedValueOnce(new Error('sdk boom'));
+
+    await expect(maybeRequestPushPermission()).resolves.toBe(false);
   });
 });

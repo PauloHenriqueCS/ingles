@@ -6,6 +6,7 @@ import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
 import { useOneSignalIdentitySync } from './hooks/useOneSignalIdentitySync';
+import { usePushPermissionPrompt } from './hooks/usePushPermissionPrompt';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
 import { endSessionAfterAccountDeletion } from './lib/accountSessionCleanup';
@@ -68,6 +69,16 @@ export default function App() {
   useOneSignalIdentitySync(user?.id);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
   const { status: placementStatus, loading: placementLoading, refresh: refreshPlacement } = usePlacementStatus(user?.id);
+
+  // First-run push permission ask (native only). True exactly when the app has
+  // cleared every blocking gate below — authenticated, past the auth/entries
+  // spinners and the placement-onboarding gate — i.e. the real Home experience
+  // is on screen. Kept in sync with those same `return`s so the OS prompt never
+  // fires on login, a splash, or during onboarding (ETAPA 5).
+  const placementReleased =
+    !(placementLoading && placementStatus === null) && placementStatus !== 'not_started';
+  const atHomeExperience = !!user && !authLoading && !loading && placementReleased;
+  usePushPermissionPrompt(atHomeExperience);
 
   useEffect(() => {
     if (!user) return;
