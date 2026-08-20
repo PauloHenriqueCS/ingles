@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, AlertTriangle, Loader2, Sparkles, RefreshCw } from 'lucide-react';
+import ScreenHeader from './ScreenHeader';
 import {
   fetchErrorReviewSession,
   submitErrorReviewItem,
@@ -97,15 +98,11 @@ export default function ErrorReviewView({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      <header className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10">
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg" aria-label="Voltar">←</button>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-100 truncate">Revisar meus erros</p>
-          {phase === 'active' && (
-            <p className="text-xs text-slate-400">{index + 1} de {total}</p>
-          )}
-        </div>
-      </header>
+      <ScreenHeader
+        onBack={onBack}
+        title="Revisar meus erros"
+        subtitle={phase === 'active' ? `${index + 1} de ${total}` : undefined}
+      />
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full">
         {phase === 'loading' && (
