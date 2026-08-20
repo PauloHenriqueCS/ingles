@@ -233,7 +233,7 @@ export default function LoginPage() {
     return (
       <Shell>
         <SessionNotice notice={sessionNotice} />
-        <Brand subtitle="Entre ou crie sua conta" />
+        <Brand subtitle="Pratique inglês. Evolua de verdade." />
 
         <div className="space-y-3">
           {/* Order: Apple first when offered (App Store guideline 4.8 — present
@@ -382,11 +382,11 @@ function Shell({ children }: { children: React.ReactNode }) {
 function Brand({ subtitle }: { subtitle: string }) {
   return (
     <div className="text-center space-y-1">
-      <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-900/40 mx-auto mb-2 overflow-hidden">
+      <div className="flex items-center justify-center w-16 h-16 rounded-xl bg-blue-900/40 mx-auto mb-3 overflow-hidden">
         <img
           src="/brand/lemon-header.png"
           alt=""
-          className="w-7 h-7 object-cover object-left shrink-0"
+          className="w-[38px] h-[38px] object-cover object-left shrink-0"
           draggable={false}
         />
       </div>
