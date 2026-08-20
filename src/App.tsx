@@ -221,9 +221,21 @@ export default function App() {
     );
   }
 
+  // Internal activity screens render their OWN standardized ScreenHeader (back
+  // arrow + Orodim logo), so the global chrome header (hamburger + logo) is not
+  // shown for them — otherwise the screen would stack two bars. The content
+  // offset is dropped for these too, since the ScreenHeader is sticky and owns
+  // the safe-area inset itself.
+  const usesOwnHeader =
+    view === 'conversation' || view === 'listening' ||
+    view === 'pronunciation-training' || view === 'error-review';
+  const headerOffset = usesOwnHeader ? undefined : 'calc(3.5rem + env(safe-area-inset-top))';
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-      <AppHeader onMenuOpen={() => setMenuOpen(true)} onLogoClick={() => setView('home')} />
+      {!usesOwnHeader && (
+        <AppHeader onMenuOpen={() => setMenuOpen(true)} onLogoClick={() => setView('home')} />
+      )}
 
       {menuOpen && (
         <HamburgerMenu
@@ -240,7 +252,7 @@ export default function App() {
       {syncError && (
         <div
           className="bg-amber-900/60 border-b border-amber-700 px-4 py-2 text-xs text-amber-200 text-center"
-          style={{ marginTop: 'calc(3.5rem + env(safe-area-inset-top))' }}
+          style={{ marginTop: headerOffset }}
         >
           {syncError}
         </div>
@@ -248,7 +260,7 @@ export default function App() {
 
       <main
         className="flex-1 overflow-auto"
-        style={{ paddingTop: 'calc(3.5rem + env(safe-area-inset-top))' }}
+        style={{ paddingTop: headerOffset }}
       >
         {view === 'home' && (
           <HomePage
@@ -313,6 +325,7 @@ export default function App() {
         )}
         {view === 'conversation' && (
           <ConversationView
+            onBack={() => setView('home')}
             onComplete={() => setConversationRefreshKey((k) => k + 1)}
             onNavigateToSubscription={() => setView('subscription')}
             onNavigateToMinutePackages={() => openMinutePackages('conversation')}

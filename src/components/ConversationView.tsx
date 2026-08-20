@@ -9,6 +9,7 @@ import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import { useConversationCaptions } from '../hooks/useConversationCaptions';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
+import ScreenHeader from './ScreenHeader';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
 import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
@@ -224,6 +225,9 @@ function statusLabel(state: AvatarState, teacherName: string): string {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 interface Props {
+  /** Standardized back navigation (view-state, never WebView history). Optional
+   *  so existing mounts/tests stay valid; when absent the header is not shown. */
+  onBack?: () => void;
   onComplete?: () => void;
   onNavigateToSubscription: () => void;
   /** Opens the shared "Minutos adicionais" screen (path B). Optional so
@@ -325,7 +329,7 @@ function ConversationModeChooser({ t, selected, recommendGuided, currentFocus, o
   );
 }
 
-export default function ConversationView({ onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
+export default function ConversationView({ onBack, onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
   const session      = useRealtimeSession(playbackRate);
@@ -478,7 +482,9 @@ export default function ConversationView({ onComplete, onNavigateToSubscription,
     <div className="min-h-screen bg-slate-900 flex flex-col">
       <audio id="realtime-audio" autoPlay style={{ display: 'none' }} />
 
-      <div className="flex-1 flex flex-col px-4 pt-20 pb-8 max-w-lg mx-auto w-full">
+      {onBack && <ScreenHeader onBack={onBack} title="Conversar com IA" />}
+
+      <div className="flex-1 flex flex-col px-4 pt-6 pb-8 max-w-lg mx-auto w-full">
 
         {/* Page header */}
         <div className="mb-5">

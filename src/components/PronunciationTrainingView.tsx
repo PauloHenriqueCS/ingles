@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback, MutableRefObject } from 'react';
 import {
-  ArrowLeft, Volume2, Mic, Square, Play, Pause,
+  Volume2, Mic, Square, Play, Pause,
   RefreshCw, Send, Loader2, CheckCircle, AlertCircle,
   RotateCcw, Lock,
 } from 'lucide-react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
+import ScreenHeader from './ScreenHeader';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { getAuthHeader } from '../lib/apiAuth';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
@@ -760,22 +761,12 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-4 pt-6 max-w-2xl mx-auto pb-16">
+    <div className="min-h-screen bg-slate-900">
+      <ScreenHeader onBack={onBack} title="Treinar pronúncia" />
 
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 mb-6">
-        <button
-          onClick={onBack}
-          className="p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
-          aria-label="Voltar"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </button>
-        <div>
-          <h1 className="text-xl font-bold text-slate-100">Treinar pronúncia</h1>
-          <p className="text-xs text-slate-400 mt-0.5">Leia, grave e descubra quais palavras precisam de atenção.</p>
-        </div>
-      </div>
+      <div className="p-4 pt-6 max-w-2xl mx-auto pb-16">
+
+      <p className="text-xs text-slate-400 mb-6">Leia, grave e descubra quais palavras precisam de atenção.</p>
 
       {/* ── Generating ─────────────────────────────────────────────────── */}
       {mainPhase === 'generating' && (
@@ -1086,6 +1077,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
           )}
         </>
       )}
+      </div>
     </div>
   );
 }

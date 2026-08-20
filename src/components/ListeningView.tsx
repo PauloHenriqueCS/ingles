@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Headphones, Play, Pause, RotateCcw, ArrowLeft,
+  Headphones, Play, Pause, RotateCcw,
   Check, X, AlertCircle, Trophy, RefreshCw, Lock,
   ScrollText, Rewind, Clock, Loader2, CheckCircle2,
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
+import ScreenHeader from './ScreenHeader';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
@@ -799,33 +800,29 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   // ── Render: header ───────────────────────────────────────────────────────────
   function renderHeader() {
     return (
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 sticky top-0 bg-slate-900/95 backdrop-blur z-10">
-        <button
-          onClick={onBack}
-          className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
-          aria-label="Voltar"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </button>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-200 truncate">
-            {episodeData?.title ?? 'Listening'}
-          </p>
-        </div>
-        {/* Daily stories counter — persistent across EVERY phase (prepare, intro,
-            player, question, done), so it is always visible on the real screen
-            the user practices in. Reflects only PRACTICED (consumed) stories. */}
-        {storiesRemainingLabel && (
-          <span className="text-xs font-medium text-slate-400 shrink-0 whitespace-nowrap">
-            {storiesRemainingLabel}
-          </span>
-        )}
-        {episodeData && (
-          <span className="text-xs font-semibold text-purple-400 shrink-0 px-2 py-0.5 rounded-full bg-purple-600/15 border border-purple-500/20">
-            {episodeData.cefrLevel}
-          </span>
-        )}
-      </div>
+      <ScreenHeader
+        onBack={onBack}
+        title={episodeData?.title ?? 'Praticar listening'}
+        right={
+          // Daily stories counter + level — persistent across EVERY phase
+          // (prepare, intro, player, question, done). Reflects only PRACTICED
+          // (consumed) stories.
+          (storiesRemainingLabel || episodeData) ? (
+            <div className="flex items-center gap-2">
+              {storiesRemainingLabel && (
+                <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
+                  {storiesRemainingLabel}
+                </span>
+              )}
+              {episodeData && (
+                <span className="text-xs font-semibold text-purple-400 px-2 py-0.5 rounded-full bg-purple-600/15 border border-purple-500/20">
+                  {episodeData.cefrLevel}
+                </span>
+              )}
+            </div>
+          ) : undefined
+        }
+      />
     );
   }
 

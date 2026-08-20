@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
+import ScreenHeader from './ScreenHeader';
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
@@ -353,19 +354,17 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      {/* paddingTop = safe-area inset so the header clears the status bar/notch
-          on Android 15+ edge-to-edge (env() is 0 otherwise). Preserves py-3. */}
-      <header
-        className="sticky top-0 bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center gap-3 z-10"
-        style={{ paddingTop: 'calc(0.75rem + env(safe-area-inset-top))' }}
-      >
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-100 text-lg">←</button>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-100 capitalize truncate">{dateLabel}</p>
-          <p className="text-xs text-slate-400 truncate">{dailyTheme?.title ?? '—'}</p>
-        </div>
-        <StatusBadgePill status={status} />
-      </header>
+      {/* Standardized header (back + Orodim logo), present through EVERY writing
+          sub-state (mission creating/loaded, filling, analysis, versão 2,
+          result) because it sits outside the conditional content below. The
+          date is the title, the current mission the subtitle, and the save/
+          review status stays as the trailing pill. */}
+      <ScreenHeader
+        onBack={onBack}
+        title={dateLabel}
+        subtitle={dailyTheme?.title ?? '—'}
+        right={<StatusBadgePill status={status} />}
+      />
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-4 pb-10">
         {showInactiveMessage ? (
