@@ -245,7 +245,7 @@ export default function LoginPage() {
           <button
             type="button"
             onClick={enterEmail}
-            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium bg-slate-800 border border-slate-700 text-slate-100 hover:bg-slate-700/70 transition-colors"
+            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium bg-slate-800/40 border border-slate-600/50 text-slate-100 backdrop-blur-sm hover:bg-slate-700/50 transition-colors"
           >
             <Mail className="w-[18px] h-[18px] shrink-0" strokeWidth={1.75} aria-hidden="true" />
             Continuar com e-mail
@@ -371,10 +371,35 @@ export default function LoginPage() {
 
 // ── Shared presentational pieces (unchanged Orodim visual language) ────────────
 
+/**
+ * Login shell. The backdrop is the brand aurora photo (public/brand/
+ * aurora-login.webp) set to cover the screen and framed so the logo sits in
+ * the dark "eye" of the aurora with the bright ribbons wrapping around it.
+ * `background-size: auto 140%` + `background-position: 31% 78%` reproduce that
+ * framing; they are expressed relatively so it holds across phone aspect
+ * ratios, and the parent clips overflow so nothing bleeds sideways. A dark
+ * floor gradient keeps the tagline + buttons area clean and readable.
+ */
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="max-w-sm w-full space-y-6">{children}</div>
+    <div
+      className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-[#010817]"
+      style={{
+        backgroundImage: "url('/brand/aurora-login.webp')",
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: 'auto 140%',
+        backgroundPosition: '31% 78%',
+      }}
+    >
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-[42%]"
+        style={{
+          background:
+            'linear-gradient(to bottom, transparent 0%, rgba(1,8,23,0.35) 55%, rgba(1,8,23,0.72) 100%)',
+        }}
+      />
+      <div className="relative z-10 max-w-sm w-full space-y-6">{children}</div>
     </div>
   );
 }
