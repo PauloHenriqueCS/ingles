@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Target, Clock, Zap, Check, Info, Lock } from 'lucide-react';
 import { EnglishDailyTheme, ResponseExample } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
@@ -59,7 +59,43 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
   const [grammarModal, setGrammarModal] = useState<string | null>(null);
+  // True while we ask the server whether today's mission already exists, so the
+  // "no mission / generations exhausted" UI never flashes before the restore.
+  const [restoring, setRestoring] = useState(theme === null);
   const isLoading = genState === 'loading';
+
+  // Restore today's already-assigned mission on entry. The mission is persisted
+  // server-side (generated_themes); the client used to keep it only in memory,
+  // so leaving and coming back lost it while the generation still counted —
+  // showing "você já usou todas as gerações" with no mission to continue. This
+  // read-only call makes NO AI request and never consumes a generation. Runs
+  // once on mount; if a mission is already loaded (e.g. just generated) it skips.
+  useEffect(() => {
+    if (theme !== null) { setRestoring(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const authHeader = await getAuthHeader();
+        const res = await fetch(apiUrl('/api/generate-theme'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ mode: 'retrieve' }),
+        });
+        if (!res.ok) return; // best-effort: fall back to the normal generate UI
+        const data = await res.json();
+        if (cancelled || !data?.theme) return;
+        onThemeReady({ ...(data.theme as EnglishDailyTheme), id: data.themeId ?? undefined });
+        setCurrentThemeId(data.themeId ?? null);
+      } catch {
+        // network hiccup → leave the normal generate UI; never blocks the screen
+      } finally {
+        if (!cancelled) setRestoring(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Mount-only: the restore is a one-shot on entry, not re-run when props change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const entitlementsLoading = writingEntitlements === null;
   const disabledByPlan = writingEntitlements ? !writingEntitlements.enabled : false;
@@ -157,16 +193,16 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
         <p className="text-sm font-semibold text-slate-100">Missão do dia</p>
       </div>
 
-      {/* Loading */}
-      {isLoading && (
+      {/* Loading (generating a new mission, or restoring today's on entry) */}
+      {(isLoading || (restoring && !theme)) && (
         <div className="px-4 pb-6 flex flex-col items-center gap-3 py-4">
           <div className="w-7 h-7 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs text-slate-400">Criando sua missão...</p>
+          <p className="text-xs text-slate-400">{isLoading ? 'Criando sua missão...' : 'Carregando sua missão...'}</p>
         </div>
       )}
 
-      {/* No theme yet */}
-      {!theme && !isLoading && (
+      {/* No theme yet (only after the restore attempt settled) */}
+      {!theme && !isLoading && !restoring && (
         <div className="px-4 pb-4 space-y-3">
           {disabledByPlan ? (
             <p className="text-xs text-amber-400 flex items-center gap-1.5">
