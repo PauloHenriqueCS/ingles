@@ -233,7 +233,7 @@ export default function LoginPage() {
     return (
       <Shell>
         <SessionNotice notice={sessionNotice} />
-        <Brand subtitle="Pratique inglês. Evolua de verdade." />
+        <Brand subtitle="Pratique inglês. Evolua de verdade." emphasizeSubtitle />
 
         <div className="space-y-3">
           {/* Order: Apple first when offered (App Store guideline 4.8 — present
@@ -379,7 +379,16 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Brand({ subtitle }: { subtitle: string }) {
+function Brand({
+  subtitle,
+  emphasizeSubtitle = false,
+}: {
+  subtitle: string;
+  /** Render the subtitle as a bold, slightly larger brand tagline (chooser
+   *  screen only). Functional subtitles on the email/forgot screens stay small
+   *  and muted. */
+  emphasizeSubtitle?: boolean;
+}) {
   return (
     <div className="text-center space-y-1">
       <img
@@ -389,7 +398,15 @@ function Brand({ subtitle }: { subtitle: string }) {
         draggable={false}
       />
       <h1 className="text-2xl font-bold text-slate-100">Orodim</h1>
-      <p className="text-slate-400 text-sm">{subtitle}</p>
+      <p
+        className={
+          emphasizeSubtitle
+            ? 'text-slate-300 text-base font-bold'
+            : 'text-slate-400 text-sm'
+        }
+      >
+        {subtitle}
+      </p>
     </div>
   );
 }
