@@ -63,6 +63,12 @@ export const ENTITLEMENT_MESSAGES = {
    *  plan simply doesn't include this activity". */
   noValidAccessMessage: 'Seu teste gratuito terminou ou sua assinatura não está mais ativa.',
   viewPlansCta: 'Ver planos',
+  /** Proactive access-ended popup shown OUTSIDE the subscription screen (e.g.
+   *  on Home) when the trial ran out or a subscription lapsed. Body reuses
+   *  noValidAccessMessage; these are the extra strings that popup needs. */
+  accessEndedPopupTitle: 'Seu acesso terminou',
+  accessEndedPopupReassurance: 'Seus dados e progresso continuam salvos. Assine um plano para voltar a praticar.',
+  accessEndedPopupDismiss: 'Agora não',
   checkingAccessMessage: 'Verificando seu acesso...',
   accessCheckFailedMessage: 'Não foi possível verificar seu acesso agora.',
   tryAgainCta: 'Tentar novamente',

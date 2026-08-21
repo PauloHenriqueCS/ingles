@@ -35,6 +35,7 @@ import CurriculumPlanView from './components/CurriculumPlanView';
 import PlacementOnboarding from './components/placement/PlacementOnboarding';
 import { usePlacementStatus } from './hooks/usePlacementStatus';
 import SubscriptionView from './components/SubscriptionView';
+import SubscriptionGatePopup from './components/SubscriptionGatePopup';
 import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
 import HamburgerMenu from './components/HamburgerMenu';
@@ -370,6 +371,14 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Proactive access-ended gate — offers a plan once the trial ran out or a
+          subscription lapsed. Overlays any view; suppressed on the subscription
+          screen itself (where the plans are already the focus). */}
+      <SubscriptionGatePopup
+        onNavigateToSubscription={() => setView('subscription')}
+        suppressed={view === 'subscription'}
+      />
     </div>
   );
 }
