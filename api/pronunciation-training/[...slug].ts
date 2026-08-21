@@ -3,6 +3,8 @@ import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
+import { assessPronunciation } from '../_azure-pronunciation';
+import { PronunciationServiceError } from '../../src/domain/pronunciation/pronunciation-scoring';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, getSharedServiceClient, mapPronunciationFailCodeToProviderSignal, recordAndAlertBrowserProviderFailure } from '../_ai-gateway/index';
 import type { GatewayUsageMetric } from '../_ai-gateway/index';
 import { applyRateLimit } from '../_rateLimit';
@@ -919,15 +921,37 @@ async function handleTrainingComplete(req: any, res: any) {
   if (!isValidUuid(attemptId)) return jsonError(res, 400, 'INVALID_ATTEMPT_ID', 'attemptId inválido.');
   if (!validateTrainingResult(result)) return jsonError(res, 400, 'INVALID_RESULT', 'Resultado inválido ou fora do intervalo permitido.');
 
+  const access = await requirePronunciationEnabled(userId);
+  if (isAccessDenial(access)) return jsonError(res, access.status, access.code, access.message);
+
+  return finalizeTrainingAssessment(res, supabase, userId, access.entitlements, sessionId, attemptId, result);
+}
+
+/**
+ * Persists a finished assessment and returns the canonical response.
+ *
+ * Shared by /complete (result produced by an older browser client) and /assess
+ * (result produced server-side). Keeping ONE implementation is what guarantees
+ * the quota and idempotency rules stay identical on both paths: the daily slot
+ * is consumed by /start, `dailyCompleted` only advances here, a duplicate
+ * attempt still returns 409 ASSESSMENT_ALREADY_COMPLETED, and curricular credit
+ * stays convergent + idempotent.
+ */
+async function finalizeTrainingAssessment(
+  res: any,
+  supabase: any,
+  userId: string,
+  entitlements: any,
+  sessionId: string,
+  attemptId: string,
+  result: PronunciationNormalizedResult,
+) {
   // Server-side re-validation of the plan's recording-duration cap — the
   // client-side auto-stop (useAudioRecorder's maxDurationMs) is UX only,
   // this is the definitive check, exactly mirroring
   // api/pronunciation/[...slug].ts's handleComplete. A rejected duration
   // releases the reservation (RESULT_INVALID) instead of leaving the
   // session stuck in 'processing', so the user can retry the same day.
-  const access = await requirePronunciationEnabled(userId);
-  if (isAccessDenial(access)) return jsonError(res, access.status, access.code, access.message);
-  const { entitlements } = access;
   const durationCheck = checkRecordingDuration(
     result.audioDurationSeconds, entitlements.pronunciation.maxRecordingSeconds, entitlements.pronunciation.maxRecordingUnlimited,
   );
@@ -982,6 +1006,127 @@ async function handleTrainingComplete(req: any, res: any) {
     dailyLimit: entitlements.pronunciation.evaluations.limit,
     dailyUnlimited: entitlements.pronunciation.evaluations.unlimited,
   });
+}
+
+// ─── POST /api/pronunciation-training/assess ──────────────────────────────────
+//
+// Server-side continuous pronunciation assessment. Replaces the browser-side
+// Azure Speech WebSocket leg, which could stall with zero events (see the module
+// header in api/_azure-pronunciation.ts). The client now uploads the WAV it
+// already produces and this endpoint runs Azure, scores with the SAME shared
+// module the browser used, and finalizes through finalizeTrainingAssessment —
+// so scores, per-word/phoneme data, counters and idempotency are unchanged.
+
+/** ~12 MB of base64 ≈ 9 MB of WAV ≈ 4.7 min of 16 kHz mono 16-bit audio. */
+const MAX_BODY_BYTES_TRAINING_ASSESS = 12 * 1024 * 1024;
+
+async function handleTrainingAssess(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const { supabase, userId } = auth;
+
+  const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
+  if (contentLength > MAX_BODY_BYTES_TRAINING_ASSESS) {
+    return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'A gravação é grande demais para ser analisada.');
+  }
+
+  const { sessionId, attemptId, audioBase64 } = req.body ?? {};
+  if (!isValidUuid(sessionId)) return jsonError(res, 400, 'INVALID_SESSION_ID', 'sessionId inválido.');
+  if (!isValidUuid(attemptId)) return jsonError(res, 400, 'INVALID_ATTEMPT_ID', 'attemptId inválido.');
+  if (typeof audioBase64 !== 'string' || audioBase64.length === 0) {
+    return jsonError(res, 400, 'INVALID_AUDIO', 'Áudio ausente.');
+  }
+
+  const access = await requirePronunciationEnabled(userId);
+  if (isAccessDenial(access)) return jsonError(res, access.status, access.code, access.message);
+  const { entitlements } = access;
+
+  if (!await applyRateLimit(res, userId, 'pronunciation-training-start')) return;
+
+  // Read back the reservation /start created. The reference text ALWAYS comes
+  // from the DB row, never from the request — the client cannot choose what it
+  // is graded against (same trust boundary /start already enforced).
+  const { data: sessionRow, error: sessionErr } = await supabase
+    .from('pronunciation_training_sessions')
+    .select('id, status, active_attempt_id, generated_text, language_code')
+    .eq('id', sessionId)
+    .maybeSingle();
+  if (sessionErr) {
+    safeLog('pronunciation-training/assess', 'session_read_error', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao carregar a análise.');
+  }
+  if (!sessionRow) return jsonError(res, 404, 'NOT_FOUND', 'Avaliação não encontrada.');
+  if (sessionRow.status === 'completed') {
+    return jsonError(res, 409, 'ASSESSMENT_ALREADY_COMPLETED', 'O texto de hoje já possui uma análise concluída.');
+  }
+  if (sessionRow.status !== 'processing' || sessionRow.active_attempt_id !== attemptId) {
+    return jsonError(res, 409, 'ATTEMPT_MISMATCH', 'Esta tentativa não corresponde à tentativa ativa.');
+  }
+
+  let wav: Buffer;
+  try {
+    wav = Buffer.from(audioBase64, 'base64');
+  } catch {
+    return jsonError(res, 400, 'INVALID_AUDIO', 'Áudio inválido.');
+  }
+
+  /** Releases the reserved daily slot so a failure never consumes an analysis. */
+  const releaseSlot = async (code: PronunciationFailCode) => {
+    try {
+      await supabase.rpc('fail_pronunciation_training_assessment', {
+        p_session_id: sessionId, p_attempt_id: attemptId, p_error_code: code,
+      });
+    } catch { /* best-effort: the client's /fail cleanup is the backstop */ }
+  };
+
+  const gatewayDeps = getProductionDeps();
+  let assessed: Awaited<ReturnType<typeof assessPronunciation>>;
+  try {
+    assessed = await executeAiGatewayCall(
+      {
+        featureKey: 'pronunciation.assess_text',
+        provider: 'azure',
+        service: 'speech_sdk',
+        userId,
+        initiatedByUserId: userId,
+        actorType: 'user',
+        executionLocation: 'backend',
+        correlationId: gatewayDeps.uuidGen(),
+        attemptNumber: 1,
+        callSequence: 1,
+        resourceType: 'pronunciation_training_session',
+        resourceId: sessionId,
+        technicalMetadata: { endpoint: 'pronunciation-training/assess' },
+      },
+      () => assessPronunciation({
+        wav,
+        referenceText: sessionRow.generated_text as string,
+        language: (sessionRow.language_code as string | null) ?? undefined,
+        logLabel: sessionId,
+      }),
+      gatewayDeps,
+    );
+  } catch (err) {
+    const code: PronunciationFailCode =
+      err instanceof PronunciationServiceError ? err.code : 'AZURE_CANCELED';
+    await releaseSlot(code);
+    safeLog('pronunciation-training/assess', `failed_${code.toLowerCase()}`, 502);
+
+    const message =
+      code === 'AZURE_NO_MATCH'
+        ? 'Nenhuma fala foi detectada no áudio. Grave novamente e tente outra vez.'
+        : code === 'AUDIO_EMPTY' || code === 'AUDIO_DECODE_FAILED'
+          ? 'Não foi possível preparar esta gravação para análise. Grave novamente e tente outra vez.'
+          : code === 'AZURE_TIMEOUT'
+            ? 'O serviço de pronúncia demorou para responder. Tente novamente.'
+            : 'Ocorreu um erro durante a análise. Tente novamente.';
+    return jsonError(res, code === 'AUDIO_EMPTY' || code === 'AUDIO_DECODE_FAILED' ? 400 : 502, code, message);
+  }
+
+  return finalizeTrainingAssessment(
+    res, supabase, userId, entitlements, sessionId, attemptId, assessed.result,
+  );
 }
 
 // ─── POST /api/pronunciation-training/fail ────────────────────────────────────
@@ -1150,6 +1295,7 @@ export default async function handler(req: any, res: any) {
     case 'token':             return handleToken(req, res);
     case 'start':             return handleTrainingStart(req, res);
     case 'complete':          return handleTrainingComplete(req, res);
+    case 'assess':            return handleTrainingAssess(req, res);
     case 'fail':              return handleTrainingFail(req, res);
     case 'plan-entitlements': return handlePlanEntitlements(req, res);
     case 'evaluate':          return handlePromotionEvaluate(req, res);
