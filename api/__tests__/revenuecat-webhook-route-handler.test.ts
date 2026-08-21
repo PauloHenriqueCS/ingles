@@ -298,6 +298,42 @@ describe('handleRevenueCatWebhookRoute — valid events', () => {
     expect(supabase.__rows[0].processing_status).toBe('ignored');
     expect(supabase.__rows[0].error_message).toBe('sandbox_blocked_in_production');
   });
+
+  it('forwards the normalized store from the (HMAC-verified) webhook payload into the sync service — UPPER_CASE APP_STORE → app_store', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody({ id: 'evt-store-apple', store: 'APP_STORE' })), res);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ store: 'app_store' }),
+      expect.anything(),
+    );
+  });
+
+  it('a payload with no store collapses to the fail-closed "unknown" (never silently treated as Apple)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(makeReq(eventBody({ id: 'evt-store-absent' })), res);
+    expect(mockSyncSubscriptionFromEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ store: 'unknown' }),
+      expect.anything(),
+    );
+  });
+
+  it('forwards the normalized store into the minute-credit service too (NON_RENEWING_PURCHASE)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-c-store', type: 'NON_RENEWING_PURCHASE', product_id: 'orodim.conversation.minutes.300', transaction_id: 'txn-c1', store: 'APP_STORE' })),
+      res,
+    );
+    expect(mockCreditMinutePackagePurchase).toHaveBeenCalledWith(
+      expect.objectContaining({ store: 'app_store' }),
+      expect.anything(),
+    );
+  });
 });
 
 describe('handleRevenueCatWebhookRoute — idempotency', () => {

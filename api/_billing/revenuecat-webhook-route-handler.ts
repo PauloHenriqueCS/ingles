@@ -44,6 +44,7 @@ import {
   type RevenueCatLifecycleEvent,
 } from './revenuecat-subscription-sync-service';
 import { creditMinutePackagePurchase } from './revenuecat-minute-credit-service';
+import { normalizeRevenueCatStore } from './revenuecat-environment';
 
 const MAX_WEBHOOK_BODY_BYTES = 65_536; // 64KB — generous for a RevenueCat event payload
 
@@ -173,7 +174,15 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
         errorMessage = 'missing_app_user_id_or_product_id';
       } else {
         const outcome = await creditMinutePackagePurchase(
-          { appUserId, environment, productId, transactionId: str(rawEvent.transaction_id) },
+          {
+            appUserId,
+            environment,
+            // Trusted: rawEvent came from the HMAC/authorization-verified webhook
+            // payload (RevenueCat's servers), never from a client request body.
+            store: normalizeRevenueCatStore(str(rawEvent.store)),
+            productId,
+            transactionId: str(rawEvent.transaction_id),
+          },
           { supabase },
         );
         processingStatus = outcome.ok ? 'processed' : 'ignored';
@@ -188,6 +197,9 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
           type: eventType,
           appUserId,
           environment,
+          // Trusted: rawEvent came from the HMAC/authorization-verified webhook
+          // payload (RevenueCat's servers), never from a client request body.
+          store: normalizeRevenueCatStore(str(rawEvent.store)),
           productId: str(rawEvent.product_id),
           purchasedAtMs: num(rawEvent.purchased_at_ms),
           expirationAtMs: num(rawEvent.expiration_at_ms),

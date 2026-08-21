@@ -90,6 +90,22 @@ describe('resolveSubscriptionUiState — 18 required subscription scenarios', ()
     expect(r.needsReconciliation).toBe(true);
   });
 
+  // 3b. THE audited header self-contradiction. In PRODUCTION the backend sends a
+  // non-null trial name ('Teste gratuito'); the store owns Plus. The state is
+  // promoted to active, so the header NAME must be 'Plus' too — never
+  // "Assinatura ativa / Plano atual: Teste gratuito" beside a Plus "Plano atual"
+  // card. (The fixture default currentPlanName is null, which masked this; the
+  // real backend sends the trial name, so this is the regression that fails
+  // without the fix.)
+  it('[3b] trial (real "Teste gratuito" backend name) + store owns Plus → state active AND currentPlanName follows Plus, not the trial name', () => {
+    const trialWithRealName = backend({ currentPlanName: 'Teste gratuito' });
+    const r = resolveSubscriptionUiState(trialWithRealName, store({ activeEntitlementIds: OWNS_PLUS }));
+    expect(r.subscriptionState).toBe('active');
+    expect(r.plusCardAction).toBe('current');
+    expect(r.currentPlanName).toBe('Plus'); // <- the fix (was 'Teste gratuito')
+    expect(r.currentPlanName).not.toBe('Teste gratuito');
+  });
+
   // 4. backend essential + RevenueCat essential
   it('[4] Essencial coherent (backend + store agree) → Essencial "current", Plus "upgrade", NO sync', () => {
     const r = resolveSubscriptionUiState(COMMERCIAL_ESSENTIAL, store({ activeEntitlementIds: OWNS_ESSENTIAL }));
@@ -99,6 +115,9 @@ describe('resolveSubscriptionUiState — 18 required subscription scenarios', ()
     expect(r.plusCardAction).toBe('upgrade');
     expect(r.needsReconciliation).toBe(false);
     expect(r.availableActions).toEqual(['upgrade_to_plus']);
+    // A genuine backend commercial plan name always wins — store promotion never
+    // overrides it (guards the fix from regressing the normal coherent path).
+    expect(r.currentPlanName).toBe('Essencial');
   });
 
   // 5. backend plus + RevenueCat plus

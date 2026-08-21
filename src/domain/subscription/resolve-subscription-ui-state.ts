@@ -321,21 +321,34 @@ export function resolveSubscriptionUiState(
   // already owns a commercial plan (owned != null), we show that plan as
   // active — NEVER "trial + Essencial Plano atual" on the same screen (the
   // audited split). This is the single state the whole screen renders from.
+  const backendState = uiStateFromBackend(backend);
+  // The store proves ownership of a commercial plan the backend still reports as
+  // trial/expired — the whole screen shows that plan as active (below), so this
+  // is the single "promoted by store ownership" condition the name must also
+  // honor.
+  const storePromotedToOwned =
+    backend.accessType !== 'internal' &&
+    (backendState === 'trial' || backendState === 'expired') &&
+    owned != null;
+
   let subscriptionState: SubscriptionUiState;
   if (reconciling) {
     subscriptionState = 'reconciling';
   } else if (backend.accessType === 'internal') {
     subscriptionState = 'internal';
   } else {
-    const backendState = uiStateFromBackend(backend);
-    subscriptionState = (backendState === 'trial' || backendState === 'expired') && owned != null
-      ? 'active'
-      : backendState;
+    subscriptionState = storePromotedToOwned ? 'active' : backendState;
   }
 
-  // Current plan name for the topo: backend name, or the catalog name when only
-  // the store knows the plan yet (backend still trial/expired mid-reconcile).
-  const currentPlanName = backend.currentPlanName ?? (owned ? PLAN_DISPLAY_NAME[owned] : null);
+  // Current plan name for the topo. When the state was promoted to active purely
+  // because the STORE owns a commercial plan the backend hasn't caught up to, the
+  // name MUST follow that owned plan — otherwise the header reads "Assinatura
+  // ativa / Plano atual: Teste gratuito" while the Plus card says "Plano atual"
+  // (the audited self-contradiction: backend trial name winning the ?? over the
+  // store-owned plan). A genuine backend plan name always wins otherwise.
+  const currentPlanName = storePromotedToOwned && owned
+    ? PLAN_DISPLAY_NAME[owned]
+    : backend.currentPlanName ?? (owned ? PLAN_DISPLAY_NAME[owned] : null);
 
   // ---- per-card CTAs -----------------------------------------------------
   const essentialCardAction = cardActionWithPending('essential', owned, pendingPlan);

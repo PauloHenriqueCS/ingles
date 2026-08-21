@@ -18,11 +18,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { isValidUuid } from './revenuecat-subscription-sync-service';
-import { isSandboxBlockedHere } from './revenuecat-environment';
+import { isSandboxBlockedHere, type RevenueCatStore } from './revenuecat-environment';
 
 export interface RevenueCatConsumablePurchaseEvent {
   appUserId: string;
   environment: string;
+  /** Trusted store/platform (from the verified webhook payload) — same
+   *  Apple-sandbox-in-production rule as subscriptions (isSandboxBlockedHere). */
+  store: RevenueCatStore;
   productId: string;
   transactionId: string | null;
 }
@@ -51,7 +54,7 @@ export async function creditMinutePackagePurchase(
   const supabase = deps?.supabase ?? getSharedServiceClient();
   const now = deps?.now ?? new Date();
 
-  if (isSandboxBlockedHere(purchase.environment, purchase.appUserId)) {
+  if (isSandboxBlockedHere(purchase.environment, purchase.appUserId, purchase.store)) {
     return { ok: false, reason: 'sandbox_blocked_in_production' };
   }
   if (!isValidUuid(purchase.appUserId)) {
