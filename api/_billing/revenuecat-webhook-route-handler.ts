@@ -45,6 +45,7 @@ import {
 } from './revenuecat-subscription-sync-service';
 import { creditMinutePackagePurchase } from './revenuecat-minute-credit-service';
 import { normalizeRevenueCatStore } from './revenuecat-environment';
+import { reconcileSubscriptionsFromRevenueCatRest } from './revenuecat-rest-reconcile';
 
 const MAX_WEBHOOK_BODY_BYTES = 65_536; // 64KB — generous for a RevenueCat event payload
 
@@ -109,7 +110,14 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
   const eventId = str(rawEvent.id);
   const eventType = str(rawEvent.type);
   const environment = str(rawEvent.environment) ?? 'PRODUCTION';
-  const appUserId = str(rawEvent.app_user_id);
+  // A TRANSFER event names the parties in transferred_from/transferred_to and
+  // leaves app_user_id NULL — so the generic !appUserId guard below used to
+  // discard every transfer as 'missing_app_user_id' (making the sync service's
+  // own transferredTo branch unreachable from the webhook). The receiving user
+  // IS the subscription's new owner, so treat it as this event's app user.
+  const transferredTo = strArray(rawEvent.transferred_to);
+  const appUserId = str(rawEvent.app_user_id)
+    ?? (eventType === 'TRANSFER' ? transferredTo?.[0] ?? null : null);
   if (!eventId || !eventType) {
     return jsonError(res, 400, 'INVALID_REQUEST', 'Evento sem id ou type.');
   }
@@ -187,6 +195,21 @@ export async function handleRevenueCatWebhookRoute(req: any, res: any): Promise<
         );
         processingStatus = outcome.ok ? 'processed' : 'ignored';
         if (!outcome.ok) errorMessage = outcome.reason;
+      }
+    } else if (eventType === 'TRANSFER') {
+      // A TRANSFER payload carries NO product_id / original_transaction_id, so
+      // it cannot be reconciled as a lifecycle event (that path would always
+      // bail on 'unknown_product'). The subscription simply changed owner: the
+      // authoritative move is to re-read the RECEIVING user's state from
+      // RevenueCat, via the same shared reconcile POST /api/subscription/sync
+      // uses. The central sandbox policy (isSandboxBlockedHere, with the
+      // server-side `store`) is enforced inside it, per subscription.
+      if (!appUserId) {
+        processingStatus = 'ignored';
+        errorMessage = 'missing_app_user_id';
+      } else {
+        await reconcileSubscriptionsFromRevenueCatRest(appUserId, 'billing/revenuecat-webhook');
+        processingStatus = 'processed';
       }
     } else if (SUBSCRIPTION_LIFECYCLE_EVENT_TYPES.has(eventType) || eventType === 'BILLING_ISSUE') {
       if (!appUserId) {

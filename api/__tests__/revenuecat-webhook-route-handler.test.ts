@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 
-const { mockGetSharedServiceClient, mockSyncSubscriptionFromEvent, mockCreditMinutePackagePurchase } = vi.hoisted(() => ({
+const { mockGetSharedServiceClient, mockSyncSubscriptionFromEvent, mockCreditMinutePackagePurchase, mockRestReconcile } = vi.hoisted(() => ({
   mockGetSharedServiceClient: vi.fn(),
   mockSyncSubscriptionFromEvent: vi.fn(),
   mockCreditMinutePackagePurchase: vi.fn(),
+  mockRestReconcile: vi.fn(),
+}));
+
+vi.mock('../_billing/revenuecat-rest-reconcile', () => ({
+  reconcileSubscriptionsFromRevenueCatRest: mockRestReconcile,
 }));
 
 vi.mock('../_ai-gateway/usage-repository', () => ({
@@ -33,6 +38,7 @@ beforeEach(() => {
   process.env.REVENUECAT_WEBHOOK_HMAC_SECRET = HMAC_SECRET;
   mockSyncSubscriptionFromEvent.mockReset().mockResolvedValue({ ok: true, action: 'upserted_assignment' });
   mockCreditMinutePackagePurchase.mockReset().mockResolvedValue({ ok: true, action: 'credited', minutes: 300 });
+  mockRestReconcile.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -333,6 +339,72 @@ describe('handleRevenueCatWebhookRoute — valid events', () => {
       expect.objectContaining({ store: 'app_store' }),
       expect.anything(),
     );
+  });
+});
+
+describe('handleRevenueCatWebhookRoute — TRANSFER (subscription changed owner)', () => {
+  const NEW_OWNER = 'bbbbbbbb-0000-0000-0000-000000000002';
+
+  it('a TRANSFER with app_user_id=null resolves the receiving user from transferred_to and reconciles THAT user (the audited "missing_app_user_id" dead end)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({
+        id: 'evt-transfer',
+        type: 'TRANSFER',
+        app_user_id: null,
+        product_id: null,
+        original_transaction_id: null,
+        transferred_from: ['aaaaaaaa-0000-0000-0000-000000000001'],
+        transferred_to: [NEW_OWNER],
+      })),
+      res,
+    );
+    expect(res._status()).toBe(200);
+    expect(mockRestReconcile).toHaveBeenCalledWith(NEW_OWNER, expect.any(String));
+    expect(supabase.__rows[0].processing_status).toBe('processed');
+    expect(supabase.__rows[0].error_message).toBeNull();
+    // The receiving user is recorded on the event row, not left null.
+    expect(supabase.__rows[0].app_user_id).toBe(NEW_OWNER);
+  });
+
+  it('a TRANSFER never goes through the lifecycle sync path (its payload has no product_id/original_transaction_id — that path would always bail)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-transfer-2', type: 'TRANSFER', app_user_id: null, product_id: null, original_transaction_id: null, transferred_to: [NEW_OWNER] })),
+      res,
+    );
+    expect(mockSyncSubscriptionFromEvent).not.toHaveBeenCalled();
+  });
+
+  it('a TRANSFER with neither app_user_id nor transferred_to is still ignored (nothing to reconcile)', async () => {
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-transfer-empty', type: 'TRANSFER', app_user_id: null, product_id: null, original_transaction_id: null })),
+      res,
+    );
+    expect(res._status()).toBe(200);
+    expect(mockRestReconcile).not.toHaveBeenCalled();
+    expect(supabase.__rows[0].processing_status).toBe('ignored');
+    expect(supabase.__rows[0].error_message).toBe('missing_app_user_id');
+  });
+
+  it('a reconcile failure during TRANSFER ACKs 500 so RevenueCat retries (never a silent loss of the new owner\'s plan)', async () => {
+    mockRestReconcile.mockRejectedValue(new Error('revenuecat down'));
+    const supabase = makeMockSupabase();
+    mockGetSharedServiceClient.mockReturnValue(supabase);
+    const res = makeRes();
+    await handleRevenueCatWebhookRoute(
+      makeReq(eventBody({ id: 'evt-transfer-fail', type: 'TRANSFER', app_user_id: null, product_id: null, original_transaction_id: null, transferred_to: [NEW_OWNER] })),
+      res,
+    );
+    expect(res._status()).toBe(500);
+    expect(supabase.__rows[0].processing_status).toBe('failed');
   });
 });
 
