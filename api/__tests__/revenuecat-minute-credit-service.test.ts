@@ -44,6 +44,9 @@ function basePurchase(overrides: Partial<RevenueCatConsumablePurchaseEvent> = {}
   return {
     appUserId: VALID_USER_ID,
     environment: 'PRODUCTION',
+    // Default to Google Play so the production-sandbox gate test keeps
+    // exercising the allowlist path; Apple sandbox has its own bypass (below).
+    store: 'play_store',
     productId: 'orodim.conversation.minutes.300',
     transactionId: 'txn-consumable-1',
     ...overrides,
@@ -165,11 +168,19 @@ describe('creditMinutePackagePurchase — business rules', () => {
     expect(outcome).toEqual({ ok: false, reason: 'missing_transaction_id' });
   });
 
-  it('blocks a SANDBOX purchase when this deployment is production', async () => {
+  it('blocks a SANDBOX (Google Play) purchase when this deployment is production', async () => {
     process.env.VERCEL_ENV = 'production';
     const { client, insertCalls } = makeMockSupabase({ packageRow: { minutes: 300, active: true, status: 'published' } });
-    const outcome = await creditMinutePackagePurchase(basePurchase({ environment: 'SANDBOX' }), { supabase: client });
+    const outcome = await creditMinutePackagePurchase(basePurchase({ environment: 'SANDBOX', store: 'play_store' }), { supabase: client });
     expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
     expect(insertCalls).toHaveLength(0);
+  });
+
+  it('APP STORE + SANDBOX in production is APPLIED even for a non-allowlisted user (App Review can buy a minute package)', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, insertCalls } = makeMockSupabase({ packageRow: { minutes: 300, active: true, status: 'published' } });
+    const outcome = await creditMinutePackagePurchase(basePurchase({ environment: 'SANDBOX', store: 'app_store' }), { supabase: client });
+    expect(outcome).toEqual({ ok: true, action: 'credited', minutes: 300 });
+    expect(insertCalls).toHaveLength(1);
   });
 });

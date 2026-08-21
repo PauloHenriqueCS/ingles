@@ -35,7 +35,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { flagSubscriptionBillingIssue, clearSubscriptionBillingIssue } from '../_account/billing-block-repository';
-import { isSandboxBlockedHere } from './revenuecat-environment';
+import { isSandboxBlockedHere, type RevenueCatStore } from './revenuecat-environment';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -94,6 +94,10 @@ export interface RevenueCatLifecycleEvent {
    *  else as identity). */
   appUserId: string;
   environment: string;
+  /** Trusted store/platform (from the verified webhook payload). Decides
+   *  whether an Apple sandbox purchase is honored in production — see
+   *  isSandboxBlockedHere. Never sourced from client input. */
+  store: RevenueCatStore;
   productId: string | null;
   purchasedAtMs: number | null;
   expirationAtMs: number | null;
@@ -134,7 +138,7 @@ export async function syncSubscriptionFromEvent(
     return { ok: false, reason: 'invalid_app_user_id' };
   }
 
-  if (isSandboxBlockedHere(event.environment, event.appUserId)) {
+  if (isSandboxBlockedHere(event.environment, event.appUserId, event.store)) {
     return { ok: false, reason: 'sandbox_blocked_in_production' };
   }
 
@@ -261,6 +265,10 @@ export async function syncSubscriptionFromEvent(
 export interface RevenueCatRestSubscriptionState {
   appUserId: string;
   environment: string;
+  /** Trusted store/platform, derived from the RevenueCat REST subscriber
+   *  response WE fetch server-side (never the client request body). Same role
+   *  as the webhook event's `store` — see isSandboxBlockedHere. */
+  store: RevenueCatStore;
   /** Store product id as keyed in `subscriber.subscriptions` (bare on Apple;
    *  may carry ':basePlanId' on Google). */
   productId: string;
@@ -312,7 +320,7 @@ export async function reconcileSubscriptionStateFromRest(
   if (!isValidUuid(state.appUserId)) {
     return { ok: false, reason: 'invalid_app_user_id' };
   }
-  if (isSandboxBlockedHere(state.environment, state.appUserId)) {
+  if (isSandboxBlockedHere(state.environment, state.appUserId, state.store)) {
     return { ok: false, reason: 'sandbox_blocked_in_production' };
   }
 

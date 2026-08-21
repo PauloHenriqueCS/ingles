@@ -27,6 +27,7 @@ import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
 import { resolveSubscriptionStatus } from '../_entitlements/subscription-status-service';
 import { REVENUECAT_SUBSCRIPTION_PRODUCT_IDS } from '../../src/domain/subscription/revenuecat-catalog';
 import { reconcileSubscriptionStateFromRest, baseStoreProductId } from './revenuecat-subscription-sync-service';
+import { normalizeRevenueCatStore } from './revenuecat-environment';
 
 const KNOWN_SUBSCRIPTION_PRODUCT_IDS: string[] = Object.values(REVENUECAT_SUBSCRIPTION_PRODUCT_IDS);
 
@@ -39,6 +40,10 @@ interface RevenueCatSubscriberSubscription {
   store_transaction_id?: string | null;
   unsubscribe_detected_at?: string | null;
   is_sandbox?: boolean;
+  /** RevenueCat's store for this subscription (e.g. 'app_store', 'play_store').
+   *  Server-side truth from the REST subscriber response WE fetch with the
+   *  secret key — never a client-supplied value. */
+  store?: string | null;
 }
 
 interface RevenueCatSubscriberResponse {
@@ -96,6 +101,9 @@ async function reconcileFromRevenueCat(userId: string): Promise<void> {
         {
           appUserId: userId,
           environment: sub.is_sandbox ? 'SANDBOX' : 'PRODUCTION',
+          // Derived from the RevenueCat REST subscriber response (server-side,
+          // secret-key auth) — never the client request body.
+          store: normalizeRevenueCatStore(sub.store),
           productId: storeProductId,
           purchaseDateMs: sub.purchase_date ? new Date(sub.purchase_date).getTime() : null,
           expiresDateMs: sub.expires_date ? new Date(sub.expires_date).getTime() : null,

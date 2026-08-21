@@ -66,6 +66,10 @@ function baseEvent(overrides: Partial<RevenueCatLifecycleEvent>): RevenueCatLife
     type: 'INITIAL_PURCHASE',
     appUserId: VALID_USER_ID,
     environment: 'PRODUCTION',
+    // Default to Google Play so the existing production-sandbox gate tests keep
+    // exercising the allowlist path (Apple sandbox has its own bypass — see the
+    // "App Store sandbox (App Review)" describe below).
+    store: 'play_store',
     productId: 'orodim.subscription.essential.monthly',
     purchasedAtMs: Date.parse('2026-08-01T00:00:00Z'),
     expirationAtMs: Date.parse('2026-09-01T00:00:00Z'),
@@ -339,6 +343,78 @@ describe('syncSubscriptionFromEvent — Android base plans (:basePlanId) & sandb
   });
 });
 
+describe('syncSubscriptionFromEvent — App Store sandbox in production (App Review)', () => {
+  it('APP STORE + SANDBOX in production is APPLIED even for a NON-allowlisted user (Apple reviewer can complete a purchase)', async () => {
+    process.env.VERCEL_ENV = 'production';
+    // allowlist deliberately unset — the Apple reviewer can never be allowlisted.
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ environment: 'SANDBOX', store: 'app_store' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: true, action: 'upserted_assignment' });
+    expect(upsertCalls).toHaveLength(1);
+  });
+
+  it('MAC APP STORE + SANDBOX in production is likewise APPLIED (Apple family)', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ environment: 'SANDBOX', store: 'mac_app_store' }),
+      { supabase: client },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(upsertCalls).toHaveLength(1);
+  });
+
+  it('PLAY STORE + SANDBOX in production stays BLOCKED for a NON-allowlisted user (Google sandbox unchanged)', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ environment: 'SANDBOX', store: 'play_store' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(upsertCalls).toHaveLength(0);
+  });
+
+  it('UNKNOWN/absent store + SANDBOX in production is BLOCKED (fail-closed — only an explicit Apple store unblocks)', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, upsertCalls } = makeMockSupabase({ planRow: { id: ESSENCIAL_PLAN_ID } });
+    const outcome = await syncSubscriptionFromEvent(
+      baseEvent({ environment: 'SANDBOX', store: 'unknown' }),
+      { supabase: client },
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(upsertCalls).toHaveLength(0);
+  });
+});
+
+describe('reconcileSubscriptionStateFromRest — App Store sandbox in production (App Review via /sync)', () => {
+  it('APP STORE + SANDBOX in production is APPLIED for a NON-allowlisted user', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, inserts } = makeReconcileMock({ planIdForProduct: PLUS_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(
+      restState({ productId: PLUS_PRODUCT, environment: 'SANDBOX', store: 'app_store' }),
+      { supabase: client, now: NOW },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(inserts).toHaveLength(1);
+  });
+
+  it('PLAY STORE + SANDBOX in production stays BLOCKED for a NON-allowlisted user', async () => {
+    process.env.VERCEL_ENV = 'production';
+    const { client, inserts, updates } = makeReconcileMock({ planIdForProduct: PLUS_PLAN_ID });
+    const outcome = await reconcileSubscriptionStateFromRest(
+      restState({ environment: 'SANDBOX', store: 'play_store' }),
+      { supabase: client, now: NOW },
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'sandbox_blocked_in_production' });
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+  });
+});
+
 describe('syncSubscriptionFromEvent — TRANSFER', () => {
   it('reconciles the assignment for the transferred-to user, not the original event app_user_id', async () => {
     const transferredToUserId = 'dddddddd-0000-0000-0000-000000000004';
@@ -446,6 +522,7 @@ function restState(overrides: Partial<RevenueCatRestSubscriptionState> = {}): Re
   return {
     appUserId: VALID_USER_ID,
     environment: 'PRODUCTION',
+    store: 'play_store',
     productId: ESSENTIAL_PRODUCT,
     purchaseDateMs: Date.parse('2026-08-01T00:00:00Z'),
     expiresDateMs: Date.parse('2026-09-01T00:00:00Z'),

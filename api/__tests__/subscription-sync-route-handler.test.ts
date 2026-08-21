@@ -260,6 +260,62 @@ describe('handleSubscriptionSyncRoute — RevenueCat configured', () => {
     await handleSubscriptionSyncRoute(makeReq(), res);
     expect(res._body()).toBe(await mockResolveSubscriptionStatus.mock.results[0].value);
   });
+
+  it('forwards the store from the RevenueCat REST subscriber (server-side truth), normalized', async () => {
+    mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subscriber: {
+          subscriptions: {
+            'orodim.subscription.essential.monthly': {
+              purchase_date: '2026-08-01T00:00:00Z',
+              expires_date: '2026-09-01T00:00:00Z',
+              store_transaction_id: 'gpa.store-1',
+              is_sandbox: true,
+              store: 'app_store',
+            },
+          },
+        },
+      }),
+    });
+    const res = makeRes();
+    await handleSubscriptionSyncRoute(makeReq(), res);
+    expect(mockReconcileState).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: 'SANDBOX', store: 'app_store' }),
+      expect.anything(),
+    );
+  });
+
+  it('a client body can NOT spoof `store` — reconcile always receives the REST-derived store, never the request body (the App-Store-sandbox bypass can only be granted by RevenueCat itself)', async () => {
+    mockGetRevenueCatApiSecretKey.mockReturnValue('rc-secret-key');
+    // RevenueCat (server-side truth, fetched with the secret key) says this is a
+    // Google Play sandbox subscription — which stays gated in production.
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subscriber: {
+          subscriptions: {
+            'orodim.subscription.plus.monthly:monthly': {
+              purchase_date: '2026-08-01T00:00:00Z',
+              expires_date: '2026-09-01T00:00:00Z',
+              store_transaction_id: 'gpa.spoof',
+              is_sandbox: true,
+              store: 'play_store',
+            },
+          },
+        },
+      }),
+    });
+    const res = makeRes();
+    // ...while the client request body tries to claim App Store (+ non-sandbox)
+    // to dodge the gate. The handler must ignore the body entirely for `store`.
+    await handleSubscriptionSyncRoute(makeReq({ body: { store: 'app_store', is_sandbox: false } }), res);
+    expect(mockReconcileState).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: 'SANDBOX', store: 'play_store' }),
+      expect.anything(),
+    );
+  });
 });
 
 describe('handleSubscriptionSyncRoute — errors', () => {
