@@ -161,18 +161,16 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     }
   }
 
-  // "Nova missão": start a NEW, independent writing practice for the same day
-  // (only offered when the plan still allows another writing today — see the
-  // completion UI). This ONLY resets the on-screen practice to a blank state and
-  // refreshes the server-authoritative quota; it never generates a mission or
-  // consumes anything by itself, so a double-tap is harmless. The user then
-  // requests a fresh mission (DailyThemeCard, for the CURRENT recorte) and
-  // submits a new review — a distinct english_reviews record + its own curricular
-  // credit, re-validated server-side (reserve_writing_review) before any AI call.
-  // The calendar day stays "concluído"; no previous review is lost (history reads
-  // every english_reviews row).
-  function handleNewMission() {
-    freshPracticeRef.current = true;
+  // Clears EVERY piece of the writing/review surface that belongs to a specific
+  // mission, so the next mission starts identical to a freshly-generated,
+  // not-yet-answered one: título, ideia em português, seu texto + local draft,
+  // dificuldade, and the whole AI report (nota geral, Writing Level, gramática/
+  // vocabulário/naturalidade/fluência, resumo do professor, texto corrigido,
+  // próxima prática, feedback detalhado, estado "Revisado"), Versão 2, and the
+  // reviewId the report/Versão 2/pronúncia bind to. It deliberately does NOT
+  // touch dailyTheme (the caller sets the next mission) and performs NO network
+  // call and consumes nothing — the previous mission's history stays untouched.
+  function resetWritingState() {
     setTitle('');
     setOriginalText('');
     setPtDraft('');
@@ -188,9 +186,40 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     setExistingV2Text(null);
     setExistingV2Comparison(null);
     setExistingV2FinalText(null);
-    setDailyTheme(null);
+  }
+
+  // "Nova missão": start a NEW, independent writing practice for the same day
+  // (only offered when the plan still allows another writing today — see the
+  // completion UI). This ONLY resets the on-screen practice to a blank state and
+  // refreshes the server-authoritative quota; it never generates a mission or
+  // consumes anything by itself, so a double-tap is harmless. The user then
+  // requests a fresh mission (DailyThemeCard, for the CURRENT recorte) and
+  // submits a new review — a distinct english_reviews record + its own curricular
+  // credit, re-validated server-side (reserve_writing_review) before any AI call.
+  // The calendar day stays "concluído"; no previous review is lost (history reads
+  // every english_reviews row).
+  function handleNewMission() {
+    // A fresh extra practice owns the screen from local state; the day's stored
+    // entry (the previous mission) must not restore over it. Cleared on day nav.
+    freshPracticeRef.current = true;
+    resetWritingState();
+    setDailyTheme(null); // re-open "Receber missão" for a brand-new mission
     entitlements.refetch();
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // A genuinely NEW mission was generated in DailyThemeCard (re-roll "Outra
+  // missão" or first "Receber missão"). The new mission has its OWN identity, so
+  // adopt its theme AND wipe the previous mission's writing/review surface in the
+  // same commit — otherwise the old text/report/"Revisado" state would leak into
+  // it (the reported bug). Marked a fresh practice so the stored entry can't
+  // clobber the blank surface. Restoring a mission on entry uses onThemeReady
+  // instead and must NOT reset — hence two separate callbacks.
+  function handleMissionGenerated(newTheme: EnglishDailyTheme) {
+    freshPracticeRef.current = true;
+    resetWritingState();
+    setDailyTheme(newTheme);
+    entitlements.refetch();
   }
 
   async function handleSaveDraft() {
@@ -340,6 +369,17 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
   const canSubmit = !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
 
+  // The current mission is finished once its AI report is on screen. A top-of-
+  // screen "Nova missão" is offered only when the plan still allows another
+  // writing today — the SAME server-authoritative gate as the bottom action
+  // (reviews.canStart, refreshed after each review). It never bypasses the limit:
+  // reserve_writing_review re-checks it server-side before any AI call.
+  const missionReviewed = reviewState === 'done' && !!aiReview;
+  const canStartNewWriting = canOfferNewWriting(writingEntitlements, writingDisabledByPlan);
+  const remainingWritingsLabel = writingEntitlements && !writingEntitlements.reviews.unlimited
+    ? `${writingEntitlements.reviews.remaining} escrit${writingEntitlements.reviews.remaining === 1 ? 'a restante' : 'as restantes'} hoje`
+    : null;
+
   const saveBtnCls =
     saveState === 'saved' ? 'bg-green-700 text-white' :
     saveState === 'error' ? 'bg-red-800 text-white' :
@@ -371,6 +411,33 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
         ) : (
           <>
+        {/* Top-of-screen "Nova missão": once the current mission is revisada and
+            the plan still allows another writing today, the action is available
+            here — pinned to the top of the scroll area — so the user never has to
+            scroll to the end to start the next one. Same handler and same
+            server-authoritative gate as the bottom action. */}
+        {missionReviewed && canStartNewWriting && (
+          <div className="sticky top-0 z-10 -mx-4 -mt-4 px-4 pt-4 pb-3 bg-slate-900/95 backdrop-blur">
+            <div className="flex items-center justify-between gap-3 bg-slate-800 border border-blue-800/40 rounded-xl p-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-green-400" strokeWidth={2} aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-200 truncate">Missão revisada</p>
+                  {remainingWritingsLabel && (
+                    <p className="text-xs text-slate-500 truncate">{remainingWritingsLabel}</p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={handleNewMission}
+                className="shrink-0 px-4 py-2 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+              >
+                Nova missão
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* No valid trial/subscription access — banner only, never replaces
             the page: past content on this day (if any) must stay viewable,
             only starting new writing/review activity is blocked. */}
@@ -380,13 +447,25 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
         <DailyThemeCard
           theme={dailyTheme}
+          // Restore-only: re-hydrate today's mission on entry WITHOUT resetting
+          // the writing surface — the stored entry belongs to this exact mission.
           onThemeReady={(t) => { setDailyTheme(t); entitlements.refetch(); }}
+          // A brand-new mission: adopt it AND reset the writing/review surface so
+          // nothing from the previous mission leaks in.
+          onMissionGenerated={handleMissionGenerated}
           onStartWriting={scrollToWritingField}
           writingEntitlements={writingEntitlements}
         />
 
         {dailyTheme && (
-          <MissionGrammarGuide theme={dailyTheme} onSkipToWriting={scrollToWritingField} />
+          // Keyed by mission identity so the pre-writing exercises (which hold
+          // their own answered/checked state) fully remount for a new mission and
+          // never carry an answer over from the previous one.
+          <MissionGrammarGuide
+            key={dailyTheme.id ?? dailyTheme.title}
+            theme={dailyTheme}
+            onSkipToWriting={scrollToWritingField}
+          />
         )}
 
         <div>
@@ -584,7 +663,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
                 review). When the daily quota is exhausted, no action is offered
                 (the "exhausted" note in the compose area above informs the user),
                 and reserve_writing_review would reject a forged request anyway. */}
-            {canOfferNewWriting(writingEntitlements, writingDisabledByPlan) && (
+            {canStartNewWriting && (
               <div className="pt-1 space-y-1.5">
                 <button
                   onClick={handleNewMission}
@@ -592,10 +671,8 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
                 >
                   Nova missão
                 </button>
-                {writingEntitlements && !writingEntitlements.reviews.unlimited && (
-                  <p className="text-xs text-slate-500 text-center">
-                    {`${writingEntitlements.reviews.remaining} escrit${writingEntitlements.reviews.remaining === 1 ? 'a restante' : 'as restantes'} hoje`}
-                  </p>
+                {remainingWritingsLabel && (
+                  <p className="text-xs text-slate-500 text-center">{remainingWritingsLabel}</p>
                 )}
               </div>
             )}
