@@ -526,13 +526,21 @@ async function handleStoryComplete(req: any, res: any) {
     const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
     const alreadyCompleted = Boolean((row as { already_completed?: boolean } | null)?.already_completed);
 
-    // (2) Curricular reconciliation — attempted only on the FIRST completion
-    //     (skipped on an idempotent retry: it already ran, and skipping keeps the
-    //     retry fast so a lost-response re-send resolves instantly). Best-effort:
-    //     a failure here never fails the completion (the calendar is already
-    //     canonical above). Keyed to the EXACT story the user finished
-    //     (identity-required, no current-pointer fallback — blocker 5).
-    if (sharedStoryId && !alreadyCompleted) {
+    // (2) Curricular reconciliation — attempted for the EXACT story the user
+    //     finished, keyed to that story's OWN consumed state (per-recorte), NEVER
+    //     to the calendar's per-day `already_completed` flag. A Plus user can
+    //     finish several recortes the same day: the calendar keeps ONE row/day
+    //     (already_completed=true from the first story), but each later story
+    //     belongs to a DIFFERENT recorte and MUST still be credited — gating this
+    //     on `already_completed` silently skipped every recorte after the first
+    //     one finished that day, so it never advanced (the reported bug). Credit
+    //     is idempotent per (user, subtopic, modality) and the resync is
+    //     advisory-locked, so re-crediting on a genuine same-story retry is a
+    //     harmless no-op (never a double advance). Best-effort: a failure here
+    //     never fails the completion (the calendar is already canonical above).
+    //     Keyed to the EXACT story the user finished (identity-required, no
+    //     current-pointer fallback — blocker 5).
+    if (sharedStoryId) {
       try {
         const { data: assoc } = await serviceClient
           .from('user_listening_shared_progress')

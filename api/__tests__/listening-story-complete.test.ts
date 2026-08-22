@@ -122,9 +122,9 @@ describe('story/complete — canonical calendar registration (atomic + idempoten
     expect(client._rpcCalls.some((c: any) => c.name === 'consume_listening_pending_story')).toBe(false);
   });
 
-  it('IDEMPOTENT RETRY: an already-completed day returns success, skips curricular (no double credit), never consumes', async () => {
+  it('IDEMPOTENT RETRY (same story): re-credits the SAME story only — idempotent, never a second story, never consumes', async () => {
     const client = makeListeningClient({
-      alreadyCompleted: true, // the calendar row already existed → this is a retry
+      alreadyCompleted: true, // the calendar row already existed → lost-response re-send of the SAME story
       progress: { [STORY_A]: { completed: true, activity_date: '2026-08-15' } },
       stories: { [STORY_A]: { curriculum_version_id: 'v1', subtopic_key: 'A1.M1.S1' } },
     });
@@ -134,11 +134,47 @@ describe('story/complete — canonical calendar registration (atomic + idempoten
 
     expect(res._status()).toBe(200);
     expect(res._body()).toEqual({ activityDate: '2026-08-15', saved: true, alreadyCompleted: true });
-    // The atomic RPC still runs (idempotent, no duplicate), but curricular credit
-    // is NOT re-applied on a retry.
+    // The atomic RPC still runs (idempotent, no duplicate calendar row).
     expect(client._rpcCalls.filter((c: any) => c.name === 'complete_listening_shared_assignment')).toHaveLength(1);
-    expect(mockRecordFromIdentity).not.toHaveBeenCalled();
+    // Curricular credit is keyed to the STORY (not the per-day flag): re-crediting
+    // the SAME story is idempotent downstream (upsert per user+subtopic+modality +
+    // advisory-locked resync), so it is safe to re-attempt and NEVER double-advances.
+    expect(mockRecordFromIdentity).toHaveBeenCalledTimes(1);
+    expect(mockRecordFromIdentity).toHaveBeenCalledWith(
+      expect.anything(), USER, 'listening', STORY_A, { versionId: 'v1', subtopicKey: 'A1.M1.S1' },
+    );
     expect(client._rpcCalls.some((c: any) => c.name === 'consume_listening_pending_story')).toBe(false);
+  });
+
+  it('REGRESSION (Plus, 2nd recorte same day): a DIFFERENT story finished after the day already has a calendar row is STILL credited to ITS recorte', async () => {
+    // Reproduces the reported bug: recorte A already finished today (its listening
+    // set the one-per-day calendar row → already_completed=true). The user, still
+    // with daily balance, finishes recorte B's NEW listening the same day. The
+    // per-day calendar flag must NOT suppress B's curricular credit, or recorte B
+    // never completes and the user is stuck on B despite finishing everything.
+    const client = makeListeningClient({
+      alreadyCompleted: true, // calendar already has today's row (from story A)
+      progress: {
+        [STORY_A]: { completed: true, activity_date: '2026-08-15' },
+        [STORY_B]: { completed: true, activity_date: '2026-08-15' },
+      },
+      stories: {
+        [STORY_A]: { curriculum_version_id: 'v1', subtopic_key: 'A1.M1.S1' },
+        [STORY_B]: { curriculum_version_id: 'v1', subtopic_key: 'A1.M1.S2' },
+      },
+    });
+    mockGetListeningClient.mockReturnValue(client);
+    const res = makeRes();
+    await handler(makeReq({ sharedStoryId: STORY_B }), res);
+
+    expect(res._status()).toBe(200);
+    expect(res._body()).toEqual({ activityDate: '2026-08-15', saved: true, alreadyCompleted: true });
+    // The DIFFERENT story (recorte B) IS credited to its OWN recorte, even though
+    // the day's calendar row already existed.
+    expect(mockRecordFromIdentity).toHaveBeenCalledTimes(1);
+    expect(mockRecordFromIdentity).toHaveBeenCalledWith(
+      expect.anything(), USER, 'listening', STORY_B, { versionId: 'v1', subtopicKey: 'A1.M1.S2' },
+    );
   });
 
   it('finishing A after B was started still credits A, never B', async () => {
