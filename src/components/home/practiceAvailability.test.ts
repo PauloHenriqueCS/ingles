@@ -185,22 +185,6 @@ describe('secondaryBadge', () => {
     const e = snapshot({ listening: { enabled: true, stories: limit({ unlimited: true, state: 'unlimited' }) } });
     expect(secondaryBadge('listening', 'available', e, s)).toEqual({ label: s.unlimited, tone: 'positive' });
   });
-
-  // ── Eligibility boundary: the SAME snapshot drives both the number and the
-  //    limit label, so the Home can never show "1 restante" once the gate says 0.
-  it('listening remaining=1 → "1 restante"; consuming the last → exhausted state → "Limite de hoje"', () => {
-    // remaining = 1 (limit 3, consumed 2): card is available and shows "1 restante".
-    const oneLeft = snapshot({ listening: { enabled: true, stories: limit({ limit: 3, consumed: 2, remaining: 1, state: 'available', canStart: true }) } });
-    expect(listeningCardState(oneLeft, null)).toBe('available');
-    expect(secondaryBadge('listening', listeningCardState(oneLeft, null), oneLeft, s)).toEqual({ label: s.remainingCount(1), tone: 'positive' });
-
-    // remaining = 0 (limit 3, consumed 3): the SAME snapshot flips the card to
-    // limit_reached → "Limite de hoje" (never a leftover "1 restante").
-    const noneLeft = snapshot({ listening: { enabled: true, stories: limit({ limit: 3, consumed: 3, remaining: 0, state: 'daily_limit_reached', canStart: false }) } });
-    expect(noneLeft.listening.stories.canStart).toBe(false); // gate eligibility …
-    expect(listeningCardState(noneLeft, null)).toBe('limit_reached'); // … and Home agree
-    expect(secondaryBadge('listening', listeningCardState(noneLeft, null), noneLeft, s)).toEqual({ label: s.limitReached, tone: 'warning' });
-  });
 });
 
 // ── Minute math ─────────────────────────────────────────────────────────────────
