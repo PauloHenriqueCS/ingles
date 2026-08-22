@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 import { EnglishReviewSaved, CefrLevel, MainMistake, VocabularyItem, RewriteComparisonResult } from '../types';
 import { parseMissionSnapshot } from './missionSnapshot';
 
@@ -46,13 +47,13 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
 }
 
 export async function fetchEnglishReviews(limit?: number): Promise<EnglishReviewSaved[]> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return [];
+  const uid = await getCurrentUserId();
+  if (!uid) return [];
 
   let query = supabase
     .from('english_reviews')
     .select('*')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .order('created_at', { ascending: false });
 
   if (limit) query = query.limit(limit);
@@ -63,13 +64,13 @@ export async function fetchEnglishReviews(limit?: number): Promise<EnglishReview
 }
 
 export async function fetchReviewByDate(date: string): Promise<EnglishReviewSaved | null> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  const uid = await getCurrentUserId();
+  if (!uid) return null;
 
   const { data, error } = await supabase
     .from('english_reviews')
     .select('*')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .eq('entry_date', date)
     .order('created_at', { ascending: false })
     .limit(1)

@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 
 export interface LearningSettings {
   activeWeekdays: number[]; // 0=Dom, 1=Seg, ..., 6=Sáb
@@ -9,13 +10,13 @@ export const DEFAULT_SETTINGS: LearningSettings = {
 };
 
 export async function fetchLearningSettings(): Promise<LearningSettings> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return DEFAULT_SETTINGS;
+  const uid = await getCurrentUserId();
+  if (!uid) return DEFAULT_SETTINGS;
 
   const { data } = await supabase
     .from('user_learning_settings')
     .select('active_weekdays')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .single();
 
   if (!data) return DEFAULT_SETTINGS;
@@ -25,13 +26,13 @@ export async function fetchLearningSettings(): Promise<LearningSettings> {
 }
 
 export async function saveLearningSettings(settings: LearningSettings): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Não autenticado');
+  const uid = await getCurrentUserId();
+  if (!uid) throw new Error('Não autenticado');
 
   const { error } = await supabase
     .from('user_learning_settings')
     .upsert(
-      { user_id: user.id, active_weekdays: settings.activeWeekdays, updated_at: new Date().toISOString() },
+      { user_id: uid, active_weekdays: settings.activeWeekdays, updated_at: new Date().toISOString() },
       { onConflict: 'user_id' }
     );
 
@@ -39,13 +40,13 @@ export async function saveLearningSettings(settings: LearningSettings): Promise<
 }
 
 export async function addLearningDayOverride(date: string): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Não autenticado');
+  const uid = await getCurrentUserId();
+  if (!uid) throw new Error('Não autenticado');
 
   const { error } = await supabase
     .from('learning_day_overrides')
     .upsert(
-      { user_id: user.id, entry_date: date, is_active: true },
+      { user_id: uid, entry_date: date, is_active: true },
       { onConflict: 'user_id,entry_date' }
     );
 
@@ -53,13 +54,13 @@ export async function addLearningDayOverride(date: string): Promise<void> {
 }
 
 export async function checkLearningDayOverride(date: string): Promise<boolean> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return false;
+  const uid = await getCurrentUserId();
+  if (!uid) return false;
 
   const { data } = await supabase
     .from('learning_day_overrides')
     .select('id')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .eq('entry_date', date)
     .eq('is_active', true)
     .maybeSingle();
@@ -68,8 +69,8 @@ export async function checkLearningDayOverride(date: string): Promise<boolean> {
 }
 
 export async function fetchActiveDayOverrides(year: number, month: number): Promise<string[]> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return [];
+  const uid = await getCurrentUserId();
+  if (!uid) return [];
 
   const paddedMonth = String(month).padStart(2, '0');
   const startDate = `${year}-${paddedMonth}-01`;
@@ -79,7 +80,7 @@ export async function fetchActiveDayOverrides(year: number, month: number): Prom
   const { data } = await supabase
     .from('learning_day_overrides')
     .select('entry_date')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .eq('is_active', true)
     .gte('entry_date', startDate)
     .lte('entry_date', endDate);

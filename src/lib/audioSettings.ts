@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 
 export interface AzureVoiceEntry {
   id: string;
@@ -36,13 +37,13 @@ export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
 };
 
 export async function fetchAudioSettings(): Promise<AudioSettings> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return DEFAULT_AUDIO_SETTINGS;
+  const uid = await getCurrentUserId();
+  if (!uid) return DEFAULT_AUDIO_SETTINGS;
 
   const { data } = await supabase
     .from('user_learning_settings')
     .select('audio_preferences')
-    .eq('user_id', user.id)
+    .eq('user_id', uid)
     .single();
 
   if (!data?.audio_preferences) return DEFAULT_AUDIO_SETTINGS;
@@ -50,13 +51,13 @@ export async function fetchAudioSettings(): Promise<AudioSettings> {
 }
 
 export async function saveAudioSettings(settings: AudioSettings): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Não autenticado');
+  const uid = await getCurrentUserId();
+  if (!uid) throw new Error('Não autenticado');
 
   const { error } = await supabase
     .from('user_learning_settings')
     .upsert(
-      { user_id: user.id, audio_preferences: settings, updated_at: new Date().toISOString() },
+      { user_id: uid, audio_preferences: settings, updated_at: new Date().toISOString() },
       { onConflict: 'user_id' }
     );
 

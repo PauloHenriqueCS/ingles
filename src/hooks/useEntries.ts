@@ -63,7 +63,7 @@ export function useEntries(userId?: string) {
     }
 
     setLoading(true);
-    fetchAllEntries()
+    fetchAllEntries(userId)
       .then((data) => {
         setEntries(data);
         lsSave(data, key);
