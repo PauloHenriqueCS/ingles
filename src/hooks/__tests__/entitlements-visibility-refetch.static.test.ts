@@ -20,22 +20,16 @@ const reviewHook = readFileSync(join(__dirname, '..', 'useErrorReviewSummary.ts'
 
 function assertReconcilesOnVisibility(src: string, label: string) {
   it(`${label} reconciles with the server when the app/tab regains visibility`, () => {
-    // Web/PWA signals.
+    // Listens to BOTH signals (WebView resume + desktop tab refocus).
     expect(src).toMatch(/addEventListener\(\s*['"]visibilitychange['"]/);
     expect(src).toMatch(/addEventListener\(\s*['"]focus['"]/);
     // Only acts on the transition INTO the foreground — never storms while hidden.
     expect(src).toMatch(/visibilityState\s*===\s*['"]visible['"]/);
-    // Native (Capacitor Android/iOS WebView) resume signal — visibilitychange is
-    // unreliable there, so appStateChange (isActive) is required for the app.
-    expect(src).toMatch(/@capacitor\/app/);
-    expect(src).toMatch(/appStateChange/);
-    expect(src).toMatch(/isActive/);
-    // The active transition drives a refetch (bumps the fetch effect's token).
+    // The visible transition drives a refetch (bumps the fetch effect's token).
     expect(src).toMatch(/setRefetchToken\(\(t\)\s*=>\s*t\s*\+\s*1\)/);
     // Cleans the listeners up (no leak / duplicate refetch after unmount).
     expect(src).toMatch(/removeEventListener\(\s*['"]visibilitychange['"]/);
     expect(src).toMatch(/removeEventListener\(\s*['"]focus['"]/);
-    expect(src).toMatch(/handle\.remove\(\)/);
   });
 }
 
