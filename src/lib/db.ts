@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 import { DayEntry, EntriesStore, AIFeedback, CefrLevel, MainMistake, VocabularyItem } from '../types';
 
 interface DBRow {
@@ -123,14 +124,17 @@ function entryToRow(entry: DayEntry, userId: string): Omit<DBRow, 'updated_at'> 
   };
 }
 
-export async function fetchAllEntries(): Promise<EntriesStore> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return {};
+export async function fetchAllEntries(userId?: string): Promise<EntriesStore> {
+  // Reuse the id the caller already holds (from useAuth); otherwise read it from
+  // the local session. Either way, no `/auth/v1/user` round-trip. RLS enforces
+  // ownership regardless of the id passed here.
+  const uid = userId ?? await getCurrentUserId();
+  if (!uid) return {};
 
   const { data, error } = await supabase
     .from('writing_entries')
     .select('*')
-    .eq('user_id', user.id);
+    .eq('user_id', uid);
 
   if (error) throw new Error(error.message);
 
@@ -143,10 +147,10 @@ export async function fetchAllEntries(): Promise<EntriesStore> {
 }
 
 export async function upsertEntry(entry: DayEntry): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Não autenticado');
+  const uid = await getCurrentUserId();
+  if (!uid) throw new Error('Não autenticado');
 
-  const row = entryToRow(entry, user.id);
+  const row = entryToRow(entry, uid);
   const { error } = await supabase
     .from('writing_entries')
     .upsert(row, { onConflict: 'user_id,entry_date' });

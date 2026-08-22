@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { getCurrentUserId } from '../lib/authSession';
 
 const LS_PREFIX = 'conversation_captions_enabled';
 const DEFAULT_ENABLED = true;
@@ -38,10 +39,9 @@ export function useConversationCaptions(): UseConversationCaptions {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await supabase.auth.getUser();
+        const id = await getCurrentUserId();
         if (cancelled) return;
 
-        const id = data.user?.id ?? null;
         setUserId(id);
 
         // Apply localStorage immediately for fast UX

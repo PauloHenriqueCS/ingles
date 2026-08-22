@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 import { EnglishReviewSaved, EnglishLearningMemory, RecurringMistake, VocabularyItem } from '../types';
 import { fetchEnglishReviews } from './reviewsHistory';
 import { getUniquePracticeDays } from './evolutionStats';
@@ -210,7 +211,7 @@ export function buildLearningMemoryFromReviews(
 
 export async function fetchLearningMemory(): Promise<EnglishLearningMemory | null> {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const uid = await getCurrentUserId();
 
     let query = supabase
       .from('english_learning_memory')
@@ -218,8 +219,8 @@ export async function fetchLearningMemory(): Promise<EnglishLearningMemory | nul
       .order('updated_at', { ascending: false })
       .limit(1);
 
-    if (user) {
-      query = query.eq('user_id', user.id);
+    if (uid) {
+      query = query.eq('user_id', uid);
     } else {
       query = query.is('user_id', null);
     }
@@ -233,7 +234,7 @@ export async function fetchLearningMemory(): Promise<EnglishLearningMemory | nul
 }
 
 export async function updateLearningMemory(): Promise<EnglishLearningMemory> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const uid = await getCurrentUserId();
   // Fetch reviews and canonical streak (all activity types) in parallel.
   const [reviews, currentStreak] = await Promise.all([
     fetchEnglishReviews(50),
@@ -274,7 +275,7 @@ export async function updateLearningMemory(): Promise<EnglishLearningMemory> {
   } else {
     const { data, error } = await supabase
       .from('english_learning_memory')
-      .insert([{ user_id: user?.id ?? null, ...dbPayload }])
+      .insert([{ user_id: uid ?? null, ...dbPayload }])
       .select();
 
     if (error) throw new Error(error.message);

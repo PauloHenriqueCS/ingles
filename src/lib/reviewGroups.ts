@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getCurrentUserId } from './authSession';
 import { MainMistake } from '../types';
 import { getNextActivePracticeDate } from './activePracticeDate';
 
@@ -50,8 +51,8 @@ export async function createReviewGroupFromReview({
 }: CreateGroupParams): Promise<void> {
   if (mistakes.length === 0) return;
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Não autenticado');
+  const uid = await getCurrentUserId();
+  if (!uid) throw new Error('Não autenticado');
 
   const rawDate = new Date();
   rawDate.setUTCDate(rawDate.getUTCDate() + 2);
@@ -60,7 +61,7 @@ export async function createReviewGroupFromReview({
   const { data: group, error: groupError } = await supabase
     .from('review_groups')
     .insert({
-      user_id: user.id,
+      user_id: uid,
       source_review_id: reviewId,
       source_entry_date: entryDate ?? null,
       original_theme: theme ?? null,
@@ -82,7 +83,7 @@ export async function createReviewGroupFromReview({
 
   const items = mistakes.map((m) => ({
     review_group_id: group.id,
-    user_id: user.id,
+    user_id: uid,
     original_value: m.original,
     corrected_value: m.correct,
     explanation: m.explanation || null,
