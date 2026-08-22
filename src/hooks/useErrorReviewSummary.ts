@@ -35,16 +35,38 @@ export function useErrorReviewSummary(): ErrorReviewSummary {
     return () => { active = false; };
   }, [refetchToken]);
 
+  // Same dual web + native-resume reconcile as usePlanEntitlements: on a
+  // Capacitor WebView `visibilitychange` is unreliable on app resume, so the App
+  // plugin's `appStateChange` (isActive) is needed to refresh a Home that
+  // survived a background→foreground round-trip.
   useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const reconcileIfVisible = () => {
-      if (document.visibilityState === 'visible') setRefetchToken((t) => t + 1);
-    };
-    document.addEventListener('visibilitychange', reconcileIfVisible);
-    window.addEventListener('focus', reconcileIfVisible);
+    const reconcile = () => setRefetchToken((t) => t + 1);
+
+    const onVisible = () => { if (document.visibilityState === 'visible') reconcile(); };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('focus', onVisible);
+    }
+
+    let removeAppListener: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { App } = await import('@capacitor/app');
+        const handle = await App.addListener('appStateChange', ({ isActive }) => {
+          if (isActive) reconcile();
+        });
+        if (cancelled) { void handle.remove(); } else { removeAppListener = () => { void handle.remove(); }; }
+      } catch { /* plugin unavailable — DOM events suffice */ }
+    })();
+
     return () => {
-      document.removeEventListener('visibilitychange', reconcileIfVisible);
-      window.removeEventListener('focus', reconcileIfVisible);
+      cancelled = true;
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisible);
+        window.removeEventListener('focus', onVisible);
+      }
+      if (removeAppListener) removeAppListener();
     };
   }, []);
 

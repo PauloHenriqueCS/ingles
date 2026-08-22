@@ -58,21 +58,47 @@ export function usePlanEntitlements(): PlanEntitlementsState {
 
   const refetch = useCallback(() => setRefetchToken((t) => t + 1), []);
 
-  // Reconcile with the server when the app/tab becomes visible again. Only acts
-  // on the transition INTO the foreground (visibilityState === 'visible'), so it
-  // never fires while backgrounded and never storms the endpoint. A prior
+  // Reconcile with the server when the app/tab becomes active again. A prior
   // in-flight request is aborted by the fetch effect above, so overlapping
   // refetches are safe.
+  //
+  // Two signals, because neither alone is enough on every platform:
+  //  - Web/PWA: `visibilitychange`/`focus` fire on tab show/refocus.
+  //  - Native (Capacitor Android/iOS WebView): the WebView does NOT reliably
+  //    emit `visibilitychange` on app resume, so a Home that survived a
+  //    background→foreground round-trip would keep its pre-consumption snapshot
+  //    (e.g. "1 restante" after the daily limit is already reached). The App
+  //    plugin's `appStateChange` (isActive === true) is the reliable resume
+  //    signal there — same plugin the realtime session uses. Best-effort: on web
+  //    the dynamic import may resolve to a no-op, which the DOM events cover.
   useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const reconcileIfVisible = () => {
-      if (document.visibilityState === 'visible') setRefetchToken((t) => t + 1);
-    };
-    document.addEventListener('visibilitychange', reconcileIfVisible);
-    window.addEventListener('focus', reconcileIfVisible);
+    const reconcile = () => setRefetchToken((t) => t + 1);
+
+    const onVisible = () => { if (document.visibilityState === 'visible') reconcile(); };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('focus', onVisible);
+    }
+
+    let removeAppListener: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { App } = await import('@capacitor/app');
+        const handle = await App.addListener('appStateChange', ({ isActive }) => {
+          if (isActive) reconcile();
+        });
+        if (cancelled) { void handle.remove(); } else { removeAppListener = () => { void handle.remove(); }; }
+      } catch { /* plugin unavailable — DOM events suffice */ }
+    })();
+
     return () => {
-      document.removeEventListener('visibilitychange', reconcileIfVisible);
-      window.removeEventListener('focus', reconcileIfVisible);
+      cancelled = true;
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisible);
+        window.removeEventListener('focus', onVisible);
+      }
+      if (removeAppListener) removeAppListener();
     };
   }, []);
 
