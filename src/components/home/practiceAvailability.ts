@@ -80,7 +80,10 @@ export function pronunciationCardState(e: PlanEntitlementsSnapshot | null, confi
   if (!e) return 'loading';
   if (globallyDisabled(config?.['features.pronunciation'])) return 'disabled_globally';
   if (!e.pronunciation.enabled) return 'disabled_by_plan';
-  return isExhausted(e.pronunciation.evaluations.state) ? 'limit_reached' : 'available';
+  // The Home card opens the standalone "Treinar pronúncia" surface, so its
+  // exhaustion must come from `training` (that surface's own daily count), not
+  // `evaluations` (the diary surface) — otherwise it reads a different activity.
+  return isExhausted(e.pronunciation.training.state) ? 'limit_reached' : 'available';
 }
 
 export function activityState(
@@ -137,7 +140,8 @@ export function secondaryBadge(
       return { label: s.remainingCount(Math.max(0, l.remaining)), tone: 'positive' };
     }
     case 'pronunciation': {
-      const p = e.pronunciation.evaluations;
+      // Standalone training surface (see pronunciationCardState) — never the diary.
+      const p = e.pronunciation.training;
       if (p.unlimited) return { label: s.unlimited, tone: 'positive' };
       return { label: s.remainingCount(Math.max(0, p.remaining)), tone: 'positive' };
     }

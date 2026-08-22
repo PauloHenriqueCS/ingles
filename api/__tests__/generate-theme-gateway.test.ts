@@ -280,7 +280,7 @@ function permissiveEntitlements(): PlanEntitlementsSnapshot {
     planId: 'plan-1', planCode: 'free', planName: 'Gratuito', planVersionId: 'version-1', suspended: false,
     writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
     listening: { enabled: true, stories: permissiveLimit('day') },
-    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), training: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
     conversation: { enabled: true, monthlyTime: permissiveLimit('month'), maxRecordingSeconds: 0, maxRecordingUnlimited: true, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
     monthlyRenewsAt: null,
     resolvedAt: new Date().toISOString(),

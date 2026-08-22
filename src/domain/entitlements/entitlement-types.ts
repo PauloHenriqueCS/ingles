@@ -59,7 +59,14 @@ export interface ListeningEntitlements {
 
 export interface PronunciationEntitlements {
   enabled: boolean;
+  /** Surface #1 — the diary/writing-flow pronunciation (counts pronunciation_assessments). */
   evaluations: FeatureLimit;
+  /** Surface #2 — the standalone "Treinar pronúncia" screen (counts
+   *  pronunciation_training_sessions). Shares the same daily limit capability as
+   *  `evaluations` but is counted separately, exactly like the training endpoints'
+   *  own daily gate. The Home "Treinar pronúncia" card MUST read this, not
+   *  `evaluations`, or it shows the diary's remaining for a different activity. */
+  training: FeatureLimit;
   maxRecordingSeconds: number;
   maxRecordingUnlimited: boolean;
 }

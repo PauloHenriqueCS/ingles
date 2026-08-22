@@ -102,7 +102,7 @@ function entitlementsFor(planCode: string, extraPurchaseEnabled: boolean): PlanE
     planId: 'plan-1', planCode, planName: planCode, planVersionId: 'version-1', suspended: false,
     writing: { enabled: true, themeGenerations: permissiveLimit('day'), reviews: permissiveLimit('day'), maxCharactersPerText: 0, maxCharactersUnlimited: true },
     listening: { enabled: true, stories: permissiveLimit('day') },
-    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
+    pronunciation: { enabled: true, evaluations: permissiveLimit('day'), training: permissiveLimit('day'), maxRecordingSeconds: 0, maxRecordingUnlimited: true },
     conversation: {
       enabled: true,
       monthlyTime: permissiveLimit(planCode === 'trial' ? 'lifetime' : 'month'),
