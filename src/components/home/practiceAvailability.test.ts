@@ -47,7 +47,7 @@ function snapshot(overrides: Partial<PlanEntitlementsSnapshot> = {}): PlanEntitl
     suspended: false,
     writing: { enabled: true, themeGenerations: limit(), reviews: limit(), maxCharactersPerText: 1000, maxCharactersUnlimited: false },
     listening: { enabled: true, stories: limit({ remaining: 2, limit: 2 }) },
-    pronunciation: { enabled: true, evaluations: limit({ remaining: 3, limit: 3 }), maxRecordingSeconds: 60, maxRecordingUnlimited: false },
+    pronunciation: { enabled: true, evaluations: limit({ remaining: 3, limit: 3 }), training: limit({ remaining: 3, limit: 3 }), maxRecordingSeconds: 60, maxRecordingUnlimited: false },
     conversation: {
       enabled: true,
       monthlyTime: limit({ period: 'month', limit: 3600, consumed: 1080, remaining: 2520 }), // 42 min left
@@ -139,7 +139,7 @@ describe('resolveRecommendedActivity', () => {
       writing: { enabled: false, themeGenerations: limit(), reviews: limit(), maxCharactersPerText: 1000, maxCharactersUnlimited: false },
       conversation: { ...snapshot().conversation, monthlyTime: exhausted('month') },
       listening: { enabled: false, stories: limit() },
-      pronunciation: { enabled: false, evaluations: limit(), maxRecordingSeconds: 60, maxRecordingUnlimited: false },
+      pronunciation: { enabled: false, evaluations: limit(), training: limit(), maxRecordingSeconds: 60, maxRecordingUnlimited: false },
     });
     expect(resolveRecommendedActivity(e, null)).toBe('writing');
   });
@@ -179,6 +179,29 @@ describe('secondaryBadge', () => {
   it('listening/pronunciation available → remaining count', () => {
     expect(secondaryBadge('listening', 'available', snapshot(), s)).toEqual({ label: s.remainingCount(2), tone: 'positive' });
     expect(secondaryBadge('pronunciation', 'available', snapshot(), s)).toEqual({ label: s.remainingCount(3), tone: 'positive' });
+  });
+
+  // The Home "Treinar pronúncia" card opens the STANDALONE training surface, so it
+  // must read `pronunciation.training` (that surface's own daily count), NEVER
+  // `pronunciation.evaluations` (the diary surface). Regression for the review6
+  // report: all 3 trainings done (training exhausted) while the diary still had 1
+  // left — the card wrongly showed "1 restante" because it read the diary.
+  it('pronunciation card reflects the TRAINING surface, not the diary (evaluations)', () => {
+    const e = snapshot({
+      pronunciation: {
+        enabled: true,
+        // diary still has 1 left …
+        evaluations: limit({ limit: 3, consumed: 2, remaining: 1, state: 'available', canStart: true }),
+        // … but the standalone training is fully used today.
+        training: limit({ limit: 3, consumed: 3, remaining: 0, state: 'daily_limit_reached', canStart: false }),
+        maxRecordingSeconds: 60,
+        maxRecordingUnlimited: false,
+      },
+    });
+    // Card is limit_reached (from training), NOT available (from the diary's 1).
+    expect(pronunciationCardState(e, null)).toBe('limit_reached');
+    expect(secondaryBadge('pronunciation', pronunciationCardState(e, null), e, s))
+      .toEqual({ label: s.limitReached, tone: 'warning' });
   });
 
   it('unlimited listening → Ilimitado', () => {

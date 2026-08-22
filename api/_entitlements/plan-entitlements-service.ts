@@ -110,7 +110,7 @@ function lockedSnapshot(now: Date): PlanEntitlementsSnapshot {
     suspended: false,
     writing: { enabled: false, themeGenerations: zeroLimit, reviews: zeroLimit, maxCharactersPerText: 0, maxCharactersUnlimited: false },
     listening: { enabled: false, stories: zeroLimit },
-    pronunciation: { enabled: false, evaluations: zeroLimit, maxRecordingSeconds: 0, maxRecordingUnlimited: false },
+    pronunciation: { enabled: false, evaluations: zeroLimit, training: zeroLimit, maxRecordingSeconds: 0, maxRecordingUnlimited: false },
     conversation: { enabled: false, monthlyTime: zeroLimit, maxRecordingSeconds: 0, maxRecordingUnlimited: false, extraPurchaseEnabled: false, extraSecondsAvailable: 0 },
     trialAssignment: null,
     monthlyRenewsAt: null,
@@ -265,6 +265,7 @@ export async function getCurrentUserPlanEntitlements(
     pronunciationCountResult,
     listeningConsumedResult,
     conversationSecondsResult,
+    pronunciationTrainingCountResult,
   ] = await Promise.all([
     plan.plan_version_id
       ? supabase.from('plan_capability_values').select('capability_key, value').eq('plan_version_id', plan.plan_version_id).in('capability_key', ALL_CAPABILITY_KEYS)
@@ -331,6 +332,17 @@ export async function getCurrentUserPlanEntitlements(
       }
       return q.gte('session_date', monthStartDate).lt('session_date', monthEndDate);
     })(),
+    // Standalone "Treinar pronúncia" (Surface #2) — counted from its OWN table
+    // by the São Paulo practice_date, EXACTLY as the training endpoints' daily
+    // gate does (api/pronunciation-training: completed rows per practice_date).
+    // This is what the Home "Treinar pronúncia" card must reflect — never the
+    // diary's pronunciation_assessments count.
+    supabase
+      .from('pronunciation_training_sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('status', 'completed')
+      .eq('practice_date', todaySpDate),
   ]);
 
   const planRows = (planValuesResult.data ?? []) as CapabilityValueRow[];
@@ -438,11 +450,19 @@ export async function getCurrentUserPlanEntitlements(
   const pronunciationConfigError = pronunciationEnabledR.configError || evaluationsR.configError || pronunciationMaxRecordingR.configError;
   const pronunciationEnabled = pronunciationConfigError ? false : pronunciationEnabledR.enabled;
 
+  const pronunciationTrainingToday = pronunciationTrainingCountResult.count ?? 0;
   const pronunciation: PronunciationEntitlements = {
     enabled: pronunciationEnabled,
     evaluations: pronunciationConfigError ? configErrorLimit('day') : computeFeatureState({
       enabled: pronunciationEnabled, unlimited: evaluationsR.unlimited, limit: evaluationsR.limit,
       consumed: pronunciationEvaluationsToday, period: 'day',
+    }),
+    // Same daily limit capability as evaluations, but consumed by the standalone
+    // training surface (pronunciation_training_sessions), so the Home "Treinar
+    // pronúncia" card matches that surface's gate instead of the diary's count.
+    training: pronunciationConfigError ? configErrorLimit('day') : computeFeatureState({
+      enabled: pronunciationEnabled, unlimited: evaluationsR.unlimited, limit: evaluationsR.limit,
+      consumed: pronunciationTrainingToday, period: 'day',
     }),
     maxRecordingSeconds: pronunciationConfigError ? 0 : pronunciationMaxRecordingR.limit,
     maxRecordingUnlimited: pronunciationConfigError ? false : pronunciationMaxRecordingR.unlimited,
