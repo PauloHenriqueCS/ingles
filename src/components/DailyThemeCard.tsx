@@ -16,7 +16,18 @@ type GenState = 'idle' | 'loading' | 'error';
 
 interface Props {
   theme: EnglishDailyTheme | null;
+  /**
+   * A previously-assigned mission was RESTORED (mount-only retrieve). This only
+   * re-hydrates the mission on screen; it must NOT reset the writing surface,
+   * because the day's stored writing/review belongs to this exact mission.
+   */
   onThemeReady: (theme: EnglishDailyTheme) => void;
+  /**
+   * A genuinely NEW mission was just generated (re-roll or first generation).
+   * The new mission has its own identity, so the caller must reset the writing/
+   * review surface — nothing from the previous mission may leak into it.
+   */
+  onMissionGenerated: (theme: EnglishDailyTheme) => void;
   onStartWriting: () => void;
   /** null while the plan is still resolving — never treat as "available" during that window. */
   writingEntitlements: WritingEntitlements | null;
@@ -54,7 +65,7 @@ function formatLabel(format: string | undefined, activityType: string | undefine
   return FORMAT_LABELS[key] ?? key.replace(/_/g, ' ');
 }
 
-export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, writingEntitlements }: Props) {
+export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated, onStartWriting, writingEntitlements }: Props) {
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
@@ -175,8 +186,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onStartWriting, wr
 
       // Carry the persisted generated_theme id ON the theme so the review can
       // bind the writing to the EXACT mission it was generated for (blocker 2),
-      // instead of the server guessing "the latest theme".
-      onThemeReady({ ...(data.theme as EnglishDailyTheme), id: data.themeId ?? undefined });
+      // instead of the server guessing "the latest theme". This is a NEW mission,
+      // so it goes through onMissionGenerated (resets the writing surface) — never
+      // onThemeReady, which is restore-only and would keep the previous text.
+      onMissionGenerated({ ...(data.theme as EnglishDailyTheme), id: data.themeId ?? undefined });
       setCurrentThemeId(data.themeId ?? null);
       setGenState('idle');
     } catch (err) {
