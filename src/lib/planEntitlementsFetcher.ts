@@ -4,12 +4,19 @@ import type { PlanEntitlementsSnapshot } from '../domain/entitlements/entitlemen
 
 export async function fetchPlanEntitlements(signal?: AbortSignal): Promise<PlanEntitlementsSnapshot> {
   const authHeader = await getAuthHeader();
-  // `cache: 'no-store'` so the WebView/HTTP layer never serves a stale plan
-  // snapshot — a plan change (e.g. an admin granting an unlimited plan) must be
-  // reflected on the next fetch, not held behind a cached older response. Pairs
-  // with the endpoint's own `Cache-Control: no-store`.
-  const res = await fetch(apiUrl('/api/pronunciation-training/plan-entitlements'), {
-    headers: authHeader,
+  // Cache-busting is REQUIRED, not just defensive: the iOS Capacitor WKWebView
+  // does NOT reliably honour `cache: 'no-store'` (nor the endpoint's own
+  // `Cache-Control: no-store`) — it serves a previously-cached GET response, so
+  // the plan counters ("X restante") stay frozen on their old value no matter
+  // how many times we refetch (every refetch just re-reads the cached body).
+  // A unique query param per request makes the URL distinct, so the WebView can
+  // never satisfy it from cache and is forced to hit the network. The server
+  // ignores the extra param. `no-store` + no-cache request headers stay as
+  // belt-and-suspenders for well-behaved HTTP layers.
+  const bust = `_ts=${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const url = `${apiUrl('/api/pronunciation-training/plan-entitlements')}?${bust}`;
+  const res = await fetch(url, {
+    headers: { ...authHeader, 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
     signal,
     cache: 'no-store',
   });
