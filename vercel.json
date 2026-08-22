@@ -43,6 +43,13 @@
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
       ]
+    },
+    {
+      "comment": "SPA HTML shell must NEVER be cached stale: it references the hashed asset bundles, so a cached index.html pins the app to an old JS build. On the remote-first native WebView this is what forced a reinstall to see a web deploy. no-cache forces revalidation on every load, so a new deploy reaches the installed app without reinstalling. Assets stay immutable (their filename changes on content change).",
+      "source": "/((?!api/|assets/).*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
     }
   ],
   "crons": [
