@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Clock, CheckCircle2, AlertTriangle, Ban, CreditCard, RotateCcw, Settings2, ExternalLink, RefreshCw } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 import SubscriptionPlanCard from './SubscriptionPlanCard';
+import SubscriptionLegalLinks from './SubscriptionLegalLinks';
 import type { CommercialPlanDisplay, SubscriptionAccessStatus } from '../domain/subscription/subscription-types';
 import { COMMERCIAL_PLAN_ORDER, COMMERCIAL_PLANS, RECOMMENDED_PLAN_CODE } from '../domain/subscription/subscription-plans';
 import { SUBSCRIPTION_MESSAGES } from '../domain/subscription/subscription-copy';
@@ -15,6 +16,8 @@ import { useSubscriptionStatus } from '../hooks/useSubscriptionStatus';
 import { useNativeSubscriptionPurchase } from '../hooks/useNativeSubscriptionPurchase';
 import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } from '../domain/subscription/revenuecat-catalog';
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
+import { formatBillingPeriodPtBr } from '../domain/subscription/subscription-period';
+import { isIOSApp } from '../lib/runtimeEnvironment';
 
 interface Props {
   onBack: () => void;
@@ -444,6 +447,9 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
               // (FASE 5); static fallback on web / before load. Matched by
               // package id so it works on both stores (see the catalog).
               const realOffering = nativePurchase.offerings.find((o) => o.packageId === packageId);
+              // Duration from the store's real subscriptionPeriod when loaded;
+              // undefined → the card falls back to the default monthly label.
+              const periodLabel = formatBillingPeriodPtBr(realOffering?.subscriptionPeriod) ?? undefined;
               return (
                 <SubscriptionPlanCard
                   key={code}
@@ -452,6 +458,7 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
                   action={action}
                   onCta={handlePlanCta}
                   priceLabel={realOffering?.priceFormatted}
+                  periodLabel={periodLabel}
                   ctaLoading={nativePurchase.purchasing === packageId}
                   ctaDisabled={isPlanCtaDisabled({
                     reconciling: resolved.cardsDisabled,
@@ -465,6 +472,12 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
             })}
           </section>
         )}
+
+        {/* Legal + compliance (App Store Guideline 3.1.2(c)) — auto-renewal
+            disclosure + Privacy Policy (all platforms) + Apple Standard EULA
+            (iOS/iPadOS only). Always rendered on the paywall, before any
+            purchase; never hidden inside settings. */}
+        <SubscriptionLegalLinks showAppleEula={isIOSApp} />
 
         {/* Honest footnote moved BELOW the plans so no big text block pushes the
             cards down (redesign requirement #1/#10). */}

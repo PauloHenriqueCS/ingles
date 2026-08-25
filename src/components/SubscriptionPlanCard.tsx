@@ -19,6 +19,10 @@ interface Props {
   /** Real store-returned price string (e.g. "R$ 34,90"), when the native
    *  Offerings are loaded — overrides the static formatPriceBRL fallback. */
   priceLabel?: string;
+  /** Billing-cycle suffix shown after the price (e.g. "mês", "ano", "3 meses"),
+   *  derived from the store's real subscriptionPeriod when the native Offering
+   *  is loaded. Falls back to the default monthly label (web / pre-load). */
+  periodLabel?: string;
   /** Per-card in-flight state — never a global spinner; the button disables
    *  itself to prevent a double-tap. */
   ctaLoading?: boolean;
@@ -41,7 +45,7 @@ function ctaLabelFor(plan: CommercialPlanDisplay, action: PlanCardAction): strin
   }
 }
 
-export default function SubscriptionPlanCard({ plan, recommended, action, onCta, priceLabel, ctaLoading, ctaDisabled }: Props) {
+export default function SubscriptionPlanCard({ plan, recommended, action, onCta, priceLabel, periodLabel, ctaLoading, ctaDisabled }: Props) {
   const benefits = buildPlanBenefitLines(plan, import.meta.env.DEV);
   const isCurrent = action === 'current';
   // 'next' = the plan a DEFERRED change is already scheduled to — badge only,
@@ -78,8 +82,10 @@ export default function SubscriptionPlanCard({ plan, recommended, action, onCta,
         <h3 className="text-base font-semibold text-slate-100">{plan.name}</h3>
         <p className="mt-1">
           <span className="text-2xl font-bold text-slate-100">{priceLabel ?? formatPriceBRL(plan.priceCents)}</span>
-          <span className="text-sm font-normal text-slate-400"> /mês</span>
+          <span className="text-sm font-normal text-slate-400"> /{periodLabel ?? SUBSCRIPTION_MESSAGES.defaultBillingPeriodLabel}</span>
         </p>
+        {/* Per-subscription auto-renewal disclosure (App Store Guideline 3.1.2(c)). */}
+        <p className="mt-0.5 text-xs text-slate-500">{SUBSCRIPTION_MESSAGES.autoRenewCardNote}</p>
       </div>
 
       <ul className="space-y-2 flex-1">

@@ -38,6 +38,20 @@ export const SUBSCRIPTION_MESSAGES = {
   // plans
   recommendedBadge: 'Recomendado',
   extraMinutePackagesNote: 'Possibilidade futura de comprar pacotes adicionais de minutos.',
+  /** Default billing-cycle suffix, shown after the price ("R$ 34,90 /mês").
+   *  Only a fallback — the store's real subscriptionPeriod overrides it when
+   *  the native offering is loaded (see subscription-period.ts). */
+  defaultBillingPeriodLabel: 'mês',
+  /** Per-card auto-renewal disclosure, shown right under the price so every
+   *  auto-renewable subscription declares it (App Store Guideline 3.1.2(c)). */
+  autoRenewCardNote: 'Renovação automática',
+
+  // legal / compliance (App Store Guideline 3.1.2(c)) — shown in the paywall
+  // BEFORE any purchase, on every platform. Never hidden inside settings.
+  autoRenewDisclosure: 'A assinatura é renovada automaticamente até ser cancelada. Você pode gerenciar ou cancelar a qualquer momento na loja.',
+  privacyPolicyLinkLabel: 'Política de Privacidade',
+  /** Apple's Standard EULA — label shown only on iOS/iPadOS. */
+  termsOfUseLinkLabel: 'Termos de Uso (EULA)',
   /** Shown only when import.meta.env.DEV — never in a production build. */
   conversationMinutesTbdDev: 'Franquia de conversação a definir (texto de desenvolvimento — não exibido em produção)',
 
