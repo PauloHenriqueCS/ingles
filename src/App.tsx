@@ -6,6 +6,7 @@ import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
 import { useOneSignalIdentitySync } from './hooks/useOneSignalIdentitySync';
+import { useAppsFlyerIdentitySync } from './hooks/useAppsFlyerIdentitySync';
 import { usePushPermissionPrompt } from './hooks/usePushPermissionPrompt';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
@@ -68,6 +69,7 @@ export default function App() {
   const { user, loading: authLoading } = useAuth();
   useRevenueCatIdentitySync(user?.id);
   useOneSignalIdentitySync(user?.id);
+  useAppsFlyerIdentitySync(user?.id);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
   const { status: placementStatus, loading: placementLoading, refresh: refreshPlacement } = usePlacementStatus(user?.id);
 
