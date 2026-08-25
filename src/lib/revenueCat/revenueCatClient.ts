@@ -218,6 +218,7 @@ export async function getOfferings(): Promise<OrodimProductOffering[]> {
       title: pkg.product.title,
       description: pkg.product.description,
       priceFormatted: pkg.product.priceString,
+      subscriptionPeriod: pkg.product.subscriptionPeriod ?? null,
     };
   });
 }

@@ -224,6 +224,7 @@ describe('revenueCatClient on Android — getOfferings', () => {
               title: 'Essencial',
               description: '30 minutos de conversação por mês',
               priceString: 'R$ 34,90',
+              subscriptionPeriod: 'P1M',
             },
           },
         ],
@@ -237,6 +238,7 @@ describe('revenueCatClient on Android — getOfferings', () => {
         title: 'Essencial',
         description: '30 minutos de conversação por mês',
         priceFormatted: 'R$ 34,90',
+        subscriptionPeriod: 'P1M',
       },
     ]);
   });

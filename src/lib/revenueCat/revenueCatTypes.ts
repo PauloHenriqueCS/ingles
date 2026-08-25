@@ -22,6 +22,11 @@ export interface OrodimProductOffering {
   /** Already formatted with currency by the store (e.g. "R$ 34,90") — never
    *  reformat or recompute a price client-side. */
   priceFormatted: string;
+  /** Subscription billing period as the store reports it, ISO-8601 (e.g. "P1M",
+   *  "P1Y"), or null when the store doesn't provide one. Source of truth for
+   *  the duration shown in the paywall (App Store Guideline 3.1.2(c)) — see
+   *  subscription-period.ts. Never hardcode the period when this is present. */
+  subscriptionPeriod: string | null;
 }
 
 export interface OrodimCustomerInfo {
