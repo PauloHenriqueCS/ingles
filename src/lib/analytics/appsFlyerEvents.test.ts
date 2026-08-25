@@ -11,9 +11,11 @@ vi.mock('../supabase', () => ({
 // log — the actual native bridge is exercised by appsFlyerClient.*.test.ts.
 const mockLogEvent = vi.fn();
 const mockSupported = vi.fn();
+const mockSetCUID = vi.fn();
 vi.mock('./appsFlyerClient', () => ({
   isAppsFlyerSupported: () => mockSupported(),
   logAppsFlyerEvent: (...args: unknown[]) => mockLogEvent(...args),
+  setAppsFlyerCustomerUserId: (...args: unknown[]) => mockSetCUID(...args),
 }));
 
 // Pretend we're on native Android (drives store = play_store for checkout).
@@ -25,15 +27,18 @@ import {
   trackPaywallViewed,
   trackCheckoutStarted,
   resetAppsFlyerMarketingCache,
+  syncAppsFlyerIdentityAndRegistration,
 } from './appsFlyerEvents';
 
 const ok = (data: unknown) => ({ data, error: null });
+const rpcErr = () => ({ data: null, error: { message: 'boom' } });
 
 beforeEach(() => {
   vi.clearAllMocks();
   resetAppsFlyerMarketingCache();
   mockSupported.mockReturnValue(true); // native by default
   mockLogEvent.mockResolvedValue(true);
+  mockSetCUID.mockResolvedValue(undefined);
 });
 
 describe('appsFlyerEvents — web / unsupported (1)', () => {
@@ -192,5 +197,117 @@ describe('fail-safe & no client-side purchase (15,16)', () => {
       'paywall_viewed',
       'af_initiated_checkout',
     ].includes(n))).toBe(true);
+  });
+});
+
+describe('CUID is set before af_complete_registration (order regression)', () => {
+  it('setCustomerUserId resolves BEFORE the registration event fires', async () => {
+    const order: string[] = [];
+    // CUID set completes on a later microtask — a racy (non-awaited) impl would
+    // let the registration log slip in first.
+    mockSetCUID.mockImplementation(async () => {
+      await Promise.resolve();
+      order.push('cuid');
+    });
+    mockLogEvent.mockImplementation(async () => {
+      order.push('log');
+      return true;
+    });
+    mockRpc.mockResolvedValue(ok(true)); // claim true, mark ok
+    await syncAppsFlyerIdentityAndRegistration('aaaaaaaa-0000-0000-0000-000000000001');
+    expect(order).toEqual(['cuid', 'log']);
+    expect(mockLogEvent).toHaveBeenCalledWith('af_complete_registration');
+  });
+
+  it('sign-out (null) sets no CUID event and fires no registration', async () => {
+    await syncAppsFlyerIdentityAndRegistration(null);
+    expect(mockSetCUID).toHaveBeenCalledWith(null);
+    expect(mockLogEvent).not.toHaveBeenCalled();
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+describe('delivery state — claim must not be consumed if AppsFlyer fails (2,6)', () => {
+  it('native log FAILS after claim → NOT marked sent (stays retryable)', async () => {
+    mockRpc.mockResolvedValue(ok(true));
+    mockLogEvent.mockResolvedValue(false); // delivery failed
+    await trackRegistrationCompleted();
+    expect(mockRpc).toHaveBeenCalledWith('claim_appsflyer_registration');
+    expect(mockRpc).not.toHaveBeenCalledWith('mark_appsflyer_event_sent', expect.anything());
+  });
+
+  it('native log SUCCEEDS → marked sent', async () => {
+    mockRpc.mockResolvedValue(ok(true));
+    mockLogEvent.mockResolvedValue(true);
+    await trackRegistrationCompleted();
+    expect(mockRpc).toHaveBeenCalledWith('mark_appsflyer_event_sent', { p_event_key: 'registration' });
+  });
+
+  it('retry after a failed delivery: later claim re-authorizes, then marks sent', async () => {
+    mockRpc.mockResolvedValue(ok(true)); // server re-authorizes the still-pending slot
+    mockLogEvent.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await trackRegistrationCompleted(); // fails → no mark
+    expect(mockRpc).not.toHaveBeenCalledWith('mark_appsflyer_event_sent', expect.anything());
+    await trackRegistrationCompleted(); // succeeds → mark
+    expect(mockRpc).toHaveBeenCalledWith('mark_appsflyer_event_sent', { p_event_key: 'registration' });
+  });
+
+  it('activity: log failure leaves first_activity retryable; success marks it sent', async () => {
+    mockRpc.mockResolvedValue(ok([{ first_activity: true, learning_day: false, days_since_registration: 0 }]));
+    mockLogEvent.mockResolvedValueOnce(false); // first_activity delivery fails
+    await trackActivityCompleted('writing');
+    expect(mockRpc).not.toHaveBeenCalledWith('mark_appsflyer_event_sent', { p_event_key: 'first_activity' });
+
+    mockLogEvent.mockResolvedValue(true);
+    await trackActivityCompleted('writing');
+    expect(mockRpc).toHaveBeenCalledWith('mark_appsflyer_event_sent', { p_event_key: 'first_activity' });
+  });
+
+  it('concurrency: a delivered event is not duplicated (server authorizes once)', async () => {
+    // The DB claim de-dupes: only the first concurrent claim is authorized.
+    let claimCall = 0;
+    mockRpc.mockImplementation((fn: string) => {
+      if (fn === 'claim_appsflyer_activity_events') {
+        claimCall += 1;
+        return Promise.resolve(ok([
+          claimCall === 1
+            ? { first_activity: true, learning_day: true, days_since_registration: 0 }
+            : { first_activity: false, learning_day: false, days_since_registration: 0 },
+        ]));
+      }
+      return Promise.resolve(ok(true)); // mark_appsflyer_event_sent
+    });
+    await Promise.all([trackActivityCompleted('writing'), trackActivityCompleted('writing')]);
+    const fired = mockLogEvent.mock.calls.map((c) => c[0]);
+    expect(fired.filter((n) => n === 'first_activity_completed')).toHaveLength(1);
+    expect(fired.filter((n) => n === 'learning_day_completed')).toHaveLength(1);
+  });
+});
+
+describe('ever-paid gate is FAIL-CLOSED (3,6)', () => {
+  it('gate RPC error → paywall_viewed NOT sent', async () => {
+    mockRpc.mockResolvedValue(rpcErr());
+    await trackPaywallViewed('gate');
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('gate RPC error → af_initiated_checkout NOT sent', async () => {
+    mockRpc.mockResolvedValue(rpcErr());
+    await trackCheckoutStarted('plus');
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('gate RPC throws → nothing sent', async () => {
+    mockRpc.mockRejectedValue(new Error('network'));
+    await trackPaywallViewed('gate');
+    await trackCheckoutStarted('essential');
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('ever-paid user stays blocked across calls (10,11)', async () => {
+    mockRpc.mockResolvedValue(ok(false)); // definitive: not allowed
+    await trackPaywallViewed();
+    await trackCheckoutStarted('plus');
+    expect(mockLogEvent).not.toHaveBeenCalled();
   });
 });
