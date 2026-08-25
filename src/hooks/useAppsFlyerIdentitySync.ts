@@ -1,13 +1,9 @@
 import { useEffect } from 'react';
 import {
   initializeAppsFlyer,
-  setAppsFlyerCustomerUserId,
   isAppsFlyerSupported,
 } from '../lib/analytics/appsFlyerClient';
-import {
-  trackRegistrationCompleted,
-  resetAppsFlyerMarketingCache,
-} from '../lib/analytics/appsFlyerEvents';
+import { syncAppsFlyerIdentityAndRegistration } from '../lib/analytics/appsFlyerEvents';
 
 /**
  * Bridges the Supabase session to AppsFlyer, mirroring
@@ -32,17 +28,13 @@ export function useAppsFlyerIdentitySync(userId: string | null | undefined): voi
     void initializeAppsFlyer();
   }, []);
 
-  // (2) Identity: re-run whenever the authoritative user id changes.
+  // (2) Identity: re-run whenever the authoritative user id changes. The CUID is
+  // set and CONFIRMED before af_complete_registration can fire (ordered inside
+  // syncAppsFlyerIdentityAndRegistration), so registration is never attributed
+  // before the Customer User ID exists. The server RPC still decides registration
+  // (never on login/restore/2nd device/retroactively). Native-only, fail-safe.
   useEffect(() => {
     if (!isAppsFlyerSupported()) return;
-    // A different signed-in user must be re-evaluated against the ever-paid gate.
-    resetAppsFlyerMarketingCache();
-    void setAppsFlyerCustomerUserId(userId ?? null);
-    if (userId) {
-      // af_complete_registration — one-shot for a genuinely new account. The
-      // server RPC (auth.uid()) decides; this never fires on login, session
-      // restore, a second device, or retroactively for a pre-existing user.
-      void trackRegistrationCompleted();
-    }
+    void syncAppsFlyerIdentityAndRegistration(userId ?? null);
   }, [userId]);
 }

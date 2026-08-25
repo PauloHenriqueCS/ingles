@@ -1,6 +1,6 @@
 import { supabase } from '../supabase';
 import { isIOSApp, isAndroidApp } from '../runtimeEnvironment';
-import { isAppsFlyerSupported, logAppsFlyerEvent } from './appsFlyerClient';
+import { isAppsFlyerSupported, logAppsFlyerEvent, setAppsFlyerCustomerUserId } from './appsFlyerClient';
 
 /**
  * AppsFlyer Phase 2 — the marketing/acquisition funnel, orchestrated on top of
@@ -54,16 +54,27 @@ async function marketingAllowed(): Promise<boolean> {
   if (marketingAllowedCache === false) return false;
   try {
     const { data, error } = await supabase.rpc('appsflyer_marketing_allowed');
-    if (error) {
-      // Fail-open for the funnel events: a transient gate failure should not
-      // silently drop acquisition data. The one-shot activity claims enforce
-      // ever-paid independently server-side, so this only affects paywall/checkout.
-      return marketingAllowedCache ?? true;
-    }
+    if (error) return false; // FAIL-CLOSED: never send if we can't confirm eligibility
+    // Only a definitive answer is cached. A definitive `false` (ever paid) sticks
+    // forever; a transient error above is not cached, so it is retried next time.
     marketingAllowedCache = data === true;
     return marketingAllowedCache;
   } catch {
-    return marketingAllowedCache ?? true;
+    return false; // FAIL-CLOSED: prefer losing a marketing event to sending post-payment
+  }
+}
+
+/**
+ * Mark a claimed event delivered — called ONLY after logAppsFlyerEvent returned
+ * true. Until this runs the slot stays 'pending' and a future completion can
+ * retry it, so a native logEvent failure never permanently consumes the one-shot.
+ * Fail-safe (a mark-sent failure just leaves the slot retryable).
+ */
+async function markEventSent(eventKey: 'registration' | 'first_activity' | 'learning_day'): Promise<void> {
+  try {
+    await supabase.rpc('mark_appsflyer_event_sent', { p_event_key: eventKey });
+  } catch {
+    // leave it 'pending' — a later claim will retry
   }
 }
 
@@ -84,9 +95,31 @@ export async function trackRegistrationCompleted(): Promise<void> {
   try {
     const { data, error } = await supabase.rpc('claim_appsflyer_registration');
     if (error || data !== true) return;
-    await logAppsFlyerEvent(EVENT_REGISTRATION);
+    // The slot is 'pending'; only mark it delivered once the native log succeeds,
+    // otherwise it stays retryable (never lost to a logEvent failure).
+    if (await logAppsFlyerEvent(EVENT_REGISTRATION)) {
+      await markEventSent('registration');
+    }
   } catch {
     // never throw from analytics
+  }
+}
+
+/**
+ * Identity → registration, in the RIGHT ORDER. The AppsFlyer Customer User ID
+ * (Supabase UUID) is set AND confirmed (setAppsFlyerCustomerUserId resolves after
+ * the native setCustomerUserId, which also initializes the SDK) BEFORE
+ * af_complete_registration fires — so the registration event can never be sent
+ * before the CUID exists on this install. Also resets the ever-paid gate cache so
+ * a different signed-in user is re-evaluated. Fail-safe throughout; sign-out
+ * (userId null) sets no CUID and fires no registration.
+ */
+export async function syncAppsFlyerIdentityAndRegistration(userId: string | null): Promise<void> {
+  if (!isAppsFlyerSupported()) return;
+  resetAppsFlyerMarketingCache();
+  await setAppsFlyerCustomerUserId(userId); // never rejects; resolves after the CUID is set
+  if (userId) {
+    await trackRegistrationCompleted();
   }
 }
 
@@ -109,15 +142,21 @@ export async function trackActivityCompleted(activityType: AppsFlyerActivityType
     const row = Array.isArray(data) ? data[0] : data;
     if (!row) return;
 
+    // Each authorized slot is 'pending'; flip it 'sent' only after its native log
+    // succeeds, so a logEvent failure leaves it retryable on the next completion.
     if (row.first_activity === true) {
-      await logAppsFlyerEvent(EVENT_FIRST_ACTIVITY, { activity_type: activityType });
+      if (await logAppsFlyerEvent(EVENT_FIRST_ACTIVITY, { activity_type: activityType })) {
+        await markEventSent('first_activity');
+      }
     }
     if (row.learning_day === true) {
       const value: Record<string, unknown> = { activity_type: activityType };
       if (row.days_since_registration != null) {
         value.days_since_registration = row.days_since_registration;
       }
-      await logAppsFlyerEvent(EVENT_LEARNING_DAY, value);
+      if (await logAppsFlyerEvent(EVENT_LEARNING_DAY, value)) {
+        await markEventSent('learning_day');
+      }
     }
   } catch {
     // never throw from analytics
