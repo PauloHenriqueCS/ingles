@@ -13,11 +13,15 @@ vi.mock('@capacitor/core', () => ({
 
 const mockInitSDK = vi.fn();
 const mockSetCustomerUserId = vi.fn();
+const mockLogEvent = vi.fn();
+const mockGetUID = vi.fn();
 
 vi.mock('appsflyer-capacitor-plugin', () => ({
   AppsFlyer: {
     initSDK: mockInitSDK,
     setCustomerUserId: mockSetCustomerUserId,
+    logEvent: mockLogEvent,
+    getAppsFlyerUID: mockGetUID,
   },
 }));
 
@@ -26,6 +30,8 @@ import {
   isAppsFlyerInitialized,
   initializeAppsFlyer,
   setAppsFlyerCustomerUserId,
+  logAppsFlyerEvent,
+  getAppsFlyerUidSafe,
   __resetAppsFlyerClientForTests,
 } from './appsFlyerClient';
 
@@ -50,5 +56,15 @@ describe('appsFlyerClient on the web build', () => {
     await setAppsFlyerCustomerUserId('aaaaaaaa-0000-0000-0000-000000000001');
     expect(mockInitSDK).not.toHaveBeenCalled();
     expect(mockSetCustomerUserId).not.toHaveBeenCalled();
+  });
+
+  it('logAppsFlyerEvent is an inert no-op on web (resolves false, never logs)', async () => {
+    await expect(logAppsFlyerEvent('paywall_viewed', { source: 'x' })).resolves.toBe(false);
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('getAppsFlyerUidSafe returns null on web without touching the SDK', async () => {
+    await expect(getAppsFlyerUidSafe()).resolves.toBeNull();
+    expect(mockGetUID).not.toHaveBeenCalled();
   });
 });

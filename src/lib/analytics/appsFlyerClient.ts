@@ -189,6 +189,63 @@ export function setAppsFlyerCustomerUserId(userId: string | null): Promise<void>
   return identityChain;
 }
 
+/**
+ * Log a custom AppsFlyer in-app event (Phase 2 marketing funnel). Native-only,
+ * fail-safe, and NEVER blocks the caller's flow: an analytics failure must never
+ * stop an activity, a registration, or a purchase — it resolves false instead of
+ * throwing. Ensures the SDK is initialized first (so events aren't dropped before
+ * initSDK), then calls AppsFlyer.logEvent. On web/unsupported it is an inert
+ * no-op (resolves false) and the SDK is never imported.
+ *
+ * `eventValue` must contain NO PII — no email, name, or user-authored text. The
+ * only identity AppsFlyer ever gets is the Supabase UUID via setCustomerUserId.
+ * Revenue/purchase events are deliberately NOT sent here — those flow server-side
+ * through the RevenueCat→AppsFlyer integration to avoid double-counting.
+ */
+export function logAppsFlyerEvent(
+  eventName: string,
+  eventValue?: Record<string, unknown>,
+): Promise<boolean> {
+  if (!isAppsFlyerSupported()) return Promise.resolve(false);
+  return (async () => {
+    try {
+      const ready = await initializeAppsFlyer();
+      if (!ready) return false;
+      const { AppsFlyer } = await loadAppsFlyer();
+      await AppsFlyer.logEvent({ eventName, eventValue: eventValue ?? {} });
+      return true;
+    } catch (err) {
+      console.warn('[appsFlyer] logEvent failed', err instanceof Error ? err.message : err);
+      return false;
+    }
+  })();
+}
+
+/**
+ * AppsFlyer's own unique device id (getAppsFlyerUID). This is a DIFFERENT
+ * identifier from the Customer User ID (Supabase UUID) — it is the value
+ * RevenueCat needs as its `$appsflyerId` subscriber attribute so the
+ * RevenueCat→AppsFlyer revenue integration can correlate. Native-only and
+ * fail-safe: resolves null on web/unsupported or any error (never throws), so a
+ * missing UID can never break the RevenueCat identity sync. Ensures the SDK is
+ * initialized first (the UID only exists once the SDK has started).
+ */
+export function getAppsFlyerUidSafe(): Promise<string | null> {
+  if (!isAppsFlyerSupported()) return Promise.resolve(null);
+  return (async () => {
+    try {
+      const ready = await initializeAppsFlyer();
+      if (!ready) return null;
+      const { AppsFlyer } = await loadAppsFlyer();
+      const { uid } = await AppsFlyer.getAppsFlyerUID();
+      return uid && uid.length > 0 ? uid : null;
+    } catch (err) {
+      console.warn('[appsFlyer] getAppsFlyerUID failed', err instanceof Error ? err.message : err);
+      return null;
+    }
+  })();
+}
+
 /** True once initSDK() has completed for this app session. */
 export function isAppsFlyerInitialized(): boolean {
   return initialized;

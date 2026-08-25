@@ -310,6 +310,25 @@ export type ReconcileStateOutcome =
  * the REVENUECAT_SANDBOX_TEST_USER_IDS allowlist (same central policy as the
  * webhook, via isSandboxBlockedHere).
  */
+/**
+ * Write-once "ever paid" marker (public.user_billing_facts.first_paid_at),
+ * consumed by the AppsFlyer acquisition-stop rule: once a user has EVER paid,
+ * the behavioural marketing events stop forever (surviving cancellation/expiry).
+ * A successfully reconciled RevenueCat subscription for a commercial plan is
+ * evidence of a real store payment — the app's own free trial is DB-granted
+ * (grant_signup_trial_v1) and never flows through RevenueCat, so it never
+ * reaches this path. Idempotent (mark_user_first_paid only sets first_paid_at
+ * when it is still NULL) and fully fail-safe: a marker failure must NEVER break
+ * subscription reconciliation.
+ */
+async function markFirstPaidSafe(supabase: SupabaseClient, userId: string): Promise<void> {
+  try {
+    await supabase.rpc('mark_user_first_paid', { p_user_id: userId, p_source: 'revenuecat_rest' });
+  } catch (err) {
+    console.warn('[billing] mark_user_first_paid failed', err instanceof Error ? err.message : err);
+  }
+}
+
 export async function reconcileSubscriptionStateFromRest(
   state: RevenueCatRestSubscriptionState,
   deps?: { supabase?: SupabaseClient; now?: Date },
@@ -422,6 +441,7 @@ export async function reconcileSubscriptionStateFromRest(
       .update(stateFields)
       .eq('id', (existing as { id: string }).id);
     if (updateError) throw new Error(`user_plan_assignments update failed: ${updateError.message}`);
+    await markFirstPaidSafe(supabase, state.appUserId);
     return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
   }
 
@@ -437,9 +457,11 @@ export async function reconcileSubscriptionStateFromRest(
         .update(stateFields)
         .eq('idempotency_key', idempotencyKey);
       if (updErr) throw new Error(`user_plan_assignments update-after-conflict failed: ${updErr.message}`);
+      await markFirstPaidSafe(supabase, state.appUserId);
       return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
     }
     throw new Error(`user_plan_assignments insert failed: ${insertError.message}`);
   }
+  await markFirstPaidSafe(supabase, state.appUserId);
   return { ok: true, action: isExpiredNow ? 'reconciled_expired' : 'reconciled_active' };
 }

@@ -1,5 +1,10 @@
 import { isIOSApp, isAndroidApp, isPluginAvailable } from '../runtimeEnvironment';
-import { planCodeForActiveEntitlements } from '../../domain/subscription/revenuecat-catalog';
+import { getAppsFlyerUidSafe } from '../analytics/appsFlyerClient';
+import { trackCheckoutStarted } from '../analytics/appsFlyerEvents';
+import {
+  planCodeForActiveEntitlements,
+  REVENUECAT_SUBSCRIPTION_PACKAGE_IDS,
+} from '../../domain/subscription/revenuecat-catalog';
 import type {
   OrodimCustomerInfo,
   OrodimPlanChange,
@@ -107,6 +112,32 @@ function apiKey(): string | null {
   return key && key.length > 0 ? key : null;
 }
 
+/**
+ * Link the RevenueCat subscriber to AppsFlyer so the server-side RevenueCat→
+ * AppsFlyer revenue integration can correlate this user's purchases. The
+ * `$appsflyerId` MUST be the AppsFlyer SDK's own device UID (getAppsFlyerUID) —
+ * a DIFFERENT identifier from the Customer User ID (Supabase UUID). RevenueCat
+ * requires configure()/logIn() to have run first (it rejects attribute calls
+ * before configure), and the attribute must be set before the first purchase;
+ * identity sync runs on app mount, well ahead of any checkout. Fully fail-safe:
+ * a missing UID or any SDK error never breaks identity or purchases, and no
+ * revenue is ever sent client-side (that stays a RevenueCat responsibility).
+ */
+async function linkAppsFlyerIdentity(
+  Purchases: Awaited<ReturnType<typeof loadPurchases>>['Purchases'],
+): Promise<void> {
+  try {
+    const uid = await getAppsFlyerUidSafe();
+    if (!uid) return;
+    await Purchases.setAppsflyerID({ appsflyerID: uid });
+    // Collect $gpsAdId/$androidId (Android) or $idfa/$idfv (iOS) + $ip so
+    // RevenueCat can match the AppsFlyer install for attribution.
+    await Purchases.collectDeviceIdentifiers();
+  } catch (err) {
+    console.warn('[revenueCat] AppsFlyer link failed', err instanceof Error ? err.message : err);
+  }
+}
+
 async function doSyncIdentity(userId: string | null): Promise<void> {
   if (!isRevenueCatSupported()) return;
 
@@ -138,6 +169,8 @@ async function doSyncIdentity(userId: string | null): Promise<void> {
     await Purchases.configure({ apiKey: key, appUserID: userId as string });
     configured = true;
     identifiedUserId = userId;
+    // Link this subscriber to AppsFlyer before anyone can reach checkout.
+    await linkAppsFlyerIdentity(Purchases);
     // The SDK is now usable — wake any screen waiting to load offerings so it
     // never sits on the empty list a pre-configure getOfferings() returned.
     notifyReady();
@@ -147,6 +180,9 @@ async function doSyncIdentity(userId: string | null): Promise<void> {
   if (userId && userId !== identifiedUserId) {
     await Purchases.logIn({ appUserID: userId });
     identifiedUserId = userId;
+    // Re-link on an account switch (the AppsFlyer UID is per-device, but the
+    // RevenueCat subscriber changed, so the attribute must be set on the new one).
+    await linkAppsFlyerIdentity(Purchases);
     // Offerings are per-identity — a screen must reload after a user switch.
     notifyReady();
   } else if (!userId && identifiedUserId) {
@@ -280,6 +316,16 @@ export async function purchasePackage(packageId: string, change?: OrodimPlanChan
   if (!pkg) {
     return { ok: false, customerInfo: null, error: { code: 'product_not_found', message: 'Produto não encontrado. Atualize e tente novamente.' } };
   }
+  // af_initiated_checkout — the real store purchase flow is about to open, after
+  // every early-return guard. Subscriptions only (never the consumable minute
+  // packs). Fire-and-forget & fail-safe: analytics must not delay/break checkout.
+  const afCheckoutPlan =
+    packageId === REVENUECAT_SUBSCRIPTION_PACKAGE_IDS.essencial
+      ? 'essential'
+      : packageId === REVENUECAT_SUBSCRIPTION_PACKAGE_IDS.plus
+        ? 'plus'
+        : null;
+  if (afCheckoutPlan) void trackCheckoutStarted(afCheckoutPlan);
   const { Purchases, PURCHASES_ERROR_CODE } = await loadPurchases();
   try {
     const options: Record<string, unknown> = { aPackage: pkg };

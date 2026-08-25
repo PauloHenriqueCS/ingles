@@ -4,6 +4,10 @@ import {
   setAppsFlyerCustomerUserId,
   isAppsFlyerSupported,
 } from '../lib/analytics/appsFlyerClient';
+import {
+  trackRegistrationCompleted,
+  resetAppsFlyerMarketingCache,
+} from '../lib/analytics/appsFlyerEvents';
 
 /**
  * Bridges the Supabase session to AppsFlyer, mirroring
@@ -31,6 +35,14 @@ export function useAppsFlyerIdentitySync(userId: string | null | undefined): voi
   // (2) Identity: re-run whenever the authoritative user id changes.
   useEffect(() => {
     if (!isAppsFlyerSupported()) return;
+    // A different signed-in user must be re-evaluated against the ever-paid gate.
+    resetAppsFlyerMarketingCache();
     void setAppsFlyerCustomerUserId(userId ?? null);
+    if (userId) {
+      // af_complete_registration — one-shot for a genuinely new account. The
+      // server RPC (auth.uid()) decides; this never fires on login, session
+      // restore, a second device, or retroactively for a pre-existing user.
+      void trackRegistrationCompleted();
+    }
   }, [userId]);
 }
