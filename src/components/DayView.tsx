@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
 import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
 import ScreenHeader from './ScreenHeader';
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
@@ -313,6 +314,9 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
       if (data.reviewId) {
         setReviewId(data.reviewId);
+        // Genuine writing completion persisted (english_reviews row) — AppsFlyer
+        // funnel. Fire-and-forget & fail-safe; never blocks the review flow.
+        void trackActivityCompleted('writing');
         setHistoryState('saved');
         setTimeout(() => setHistoryState('idle'), 6000);
         updateLearningMemory().catch((err) => console.error('Memory update failed:', err));

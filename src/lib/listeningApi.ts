@@ -1,4 +1,5 @@
 import { getAuthHeader } from './apiAuth';
+import { trackActivityCompleted } from './analytics/appsFlyerEvents';
 import { apiUrl } from './apiUrl';
 import type {
   EpisodeSessionResponse,
@@ -328,10 +329,15 @@ export async function completeStoryListening(sharedStoryId?: string | null): Pro
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await apiFetch<StoryCompletionResult>('/api/listening/story/complete', {
+      const result = await apiFetch<StoryCompletionResult>('/api/listening/story/complete', {
         method: 'POST',
         body,
       });
+      // Genuine listening completion (server marked the calendar assignment) —
+      // AppsFlyer funnel. Fire-and-forget & fail-safe; the server-authoritative
+      // claim RPC de-dupes first-activity / per-day, so idempotent re-sends are safe.
+      void trackActivityCompleted('listening');
+      return result;
     } catch (err) {
       lastErr = err;
       const status = err instanceof ListeningApiError ? err.status : 0;

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
 import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
@@ -464,6 +465,11 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
         : Promise.resolve();
       complete
         .then(() => {
+          // Genuine conversation completion: a conversation_sessions row (with
+          // duration>0, guaranteed by the elapsedMs>0 gate above) was written
+          // server-side only when there was an authorization to close. AppsFlyer
+          // funnel — fire-and-forget & fail-safe.
+          if (session.recordingAuthorizationId) void trackActivityCompleted('conversation');
           onComplete?.();
           entitlements.refetch(); // reconcile the monthly balance with the server, never optimistic-only
           return getDayTotalSeconds(today);

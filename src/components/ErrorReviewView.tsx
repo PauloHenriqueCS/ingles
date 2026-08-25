@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
 import { CheckCircle2, AlertTriangle, Loader2, Sparkles, RefreshCw } from 'lucide-react';
 import ScreenHeader from './ScreenHeader';
 import {
@@ -70,6 +71,10 @@ export default function ErrorReviewView({ onBack }: Props) {
     const submittedAnswer = answer;
     try {
       const res = await submitErrorReviewItem(submittedItemId, submittedAnswer);
+      // Genuine review completion (a review_item_attempts row was written) —
+      // AppsFlyer funnel. Fire-and-forget & fail-safe; the server-authoritative
+      // claim RPC de-dupes first-activity / per-day, so per-answer calls are safe.
+      void trackActivityCompleted('review');
       // Drop a stale / out-of-order response for a card the user already left.
       const view = buildResultView(res, submittedAnswer, submittedItemId, currentItemIdRef.current);
       if (view) setResult(view);

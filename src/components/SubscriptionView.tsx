@@ -18,6 +18,7 @@ import { REVENUECAT_SUBSCRIPTION_PACKAGE_IDS, type OrodimCommercialPlanCode } fr
 import { isNativeStoreSectionVisible, shouldShowManageSubscriptionButton } from '../domain/subscription/native-subscription-actions';
 import { formatBillingPeriodPtBr } from '../domain/subscription/subscription-period';
 import { isIOSApp } from '../lib/runtimeEnvironment';
+import { trackPaywallViewed } from '../lib/analytics/appsFlyerEvents';
 
 interface Props {
   onBack: () => void;
@@ -84,6 +85,19 @@ export default function SubscriptionView({ onBack, onNavigateToMinutePackages, i
   const reconcileRunningRef = useRef(false); // prevents overlapping runs
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // paywall_viewed (AppsFlyer) — fire once per genuine entry, when the plan
+  // cards (the actual paywall offered for purchase) first become visible. A ref
+  // guard absorbs StrictMode's dev double-mount and re-renders; the component
+  // unmounts on navigation away, so the ref resets per real visit (not
+  // once-per-life). Native-only, ever-paid-gated and fail-safe inside the tracker.
+  const paywallTrackedRef = useRef(false);
+  useEffect(() => {
+    if (vm?.showPlanCards && !paywallTrackedRef.current) {
+      paywallTrackedRef.current = true;
+      void trackPaywallViewed();
+    }
+  }, [vm?.showPlanCards]);
 
   const { supported: rcSupported, reloadStore } = nativePurchase;
 

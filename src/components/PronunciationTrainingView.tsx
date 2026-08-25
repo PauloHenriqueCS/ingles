@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, MutableRefObject } from 'react';
+import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
 import {
   Volume2, Mic, Square, Play, Pause,
   RefreshCw, Send, Loader2, CheckCircle, AlertCircle,
@@ -572,6 +573,9 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
         setWordResults(aligned);
         setAnalysis({ phase: 'completed', result });
         setMainPhase('results');
+        // Genuine pronunciation completion (pronunciation_training_sessions row,
+        // status='completed') — AppsFlyer funnel. Fire-and-forget & fail-safe.
+        void trackActivityCompleted('pronunciation');
       } else {
         setMainPhase('ready');
       }
