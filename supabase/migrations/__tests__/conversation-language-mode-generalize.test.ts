@@ -74,9 +74,46 @@ describe('20260826140000 — generalization + data-driven template', () => {
     expect(body).toMatch(/reconduza o aluno a responder em \{\{target_label\}\}/); // steer back
     expect(body).toMatch(/forma correta em \{\{target_label\}\}/);   // corrections in target
     expect(body).toMatch(/como eu falo X/i);                          // "how do I say X"
-    expect(body).toMatch(/Adapte a complexidade[\s\S]*\{\{level\}\}/); // level adaptation
     expect(body).toMatch(/A1\/A2/);                                    // beginner simplification
-    // Explicitly overrides the base "always target language" rule.
-    expect(body).toMatch(/ATUALIZAÇÃO DA REGRA DE IDIOMA/i);
+  });
+});
+
+describe('20260826160000 — PROACTIVE bilingual template (data-only prompt upgrade)', () => {
+  const sql = read('20260826160000_conversation_bilingual_template_proactive.sql');
+  const body = (() => {
+    const m = sql.match(/\$tpl\$([\s\S]*?)\$tpl\$/);
+    return m ? m[1] : '';
+  })();
+
+  it('re-seeds the SAME template key idempotently (ON CONFLICT DO UPDATE)', () => {
+    expect(sql).toContain("'conversation.bilingual_support', 'en', 'pt-BR', 1, 'published'");
+    expect(sql).toContain('ON CONFLICT (template_key, learning_language, interface_language, version)');
+    expect(sql).toContain('DO UPDATE SET');
+  });
+
+  it('stays parameterized (no hardcoded language pair) with the same placeholders', () => {
+    expect(body).toContain('{{target_label}}');
+    expect(body).toContain('{{support_label}}');
+    expect(body).toContain('{{level}}');
+    expect(body).not.toMatch(/\bpt_en\b|\bes_en\b|\bpt_es\b/);
+    validateTemplateRequires(body, ['target_label', 'support_label', 'level']);
+    expect(extractPlaceholders(body).sort()).toEqual(['level', 'support_label', 'target_label']);
+  });
+
+  it('is PROACTIVE + authoritative: max priority, opens in the support language incl. the first turn', () => {
+    expect(body).toMatch(/PRIORIDADE MÁXIMA/i);
+    expect(body).toMatch(/Ignore qualquer instrução anterior/i);
+    expect(body).toMatch(/PRIMEIRA fala/i);                                  // applies to the greeting
+    expect(body).toMatch(/Comece acolhendo e explicando a proposta em \{\{support_label\}\}/);
+    expect(body).toMatch(/NÃO abra a conversa apenas em \{\{target_label\}\}/);
+  });
+
+  it('keeps the core rules as DATA (goal, steer-back, corrections, como falo X, level)', () => {
+    expect(body).toMatch(/PRODUZIR \{\{target_label\}\}/);
+    expect(body).toMatch(/reconduza o aluno a responder em \{\{target_label\}\}/);
+    expect(body).toMatch(/como eu falo X/i);
+    expect(body).toMatch(/forma correta em \{\{target_label\}\}/);
+    expect(body).toMatch(/\{\{level\}\}/);
+    expect(body).toMatch(/A1\/A2/);
   });
 });

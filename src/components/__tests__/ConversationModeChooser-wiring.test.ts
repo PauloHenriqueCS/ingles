@@ -21,8 +21,8 @@ const chooser = viewSrc.slice(
 );
 
 describe('conversation mode chooser — default & recommendation rule', () => {
-  it('defaults to guided when Conversation IS in the plan, free otherwise', () => {
-    expect(viewSrc).toMatch(/const defaultMode:[^\n]*conversationInPlan \? 'guided' : 'free'/);
+  it('defaults the pre-selection to Guided (user can switch to Free)', () => {
+    expect(viewSrc).toMatch(/const defaultMode: 'guided' \| 'free' = 'guided'/);
     expect(viewSrc).toMatch(/const effectiveMode:[^\n]*selectedMode \?\? defaultMode/);
   });
 
