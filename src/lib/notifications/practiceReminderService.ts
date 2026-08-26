@@ -121,10 +121,18 @@ export async function requestPracticeReminderPermission(): Promise<NotificationP
   }
 }
 
-async function ensureChannel(copy: PracticeReminderCopy): Promise<void> {
-  // Channels are an Android concept; iOS has no channels. createChannel is a
-  // no-op we simply skip off-Android. Recreating an existing channel is safe.
-  if (!isAndroidApp) return;
+/**
+ * Ensure the Android notification channel exists. Returns whether a channelId
+ * is available to attach to a notification:
+ *   - non-Android (iOS/web): false — there is no channel concept (iOS ignores
+ *     channelId anyway), so the caller schedules without one.
+ *   - Android success: true.
+ *   - Android failure: false — the caller then schedules WITHOUT channelId so
+ *     the notification falls back to the default channel instead of referencing
+ *     a channel that does not exist (which could stop it from firing).
+ */
+async function ensureChannel(copy: PracticeReminderCopy): Promise<boolean> {
+  if (!isAndroidApp) return false;
   try {
     const plugin = await loadPlugin();
     await plugin.createChannel({
@@ -135,8 +143,11 @@ async function ensureChannel(copy: PracticeReminderCopy): Promise<void> {
       visibility: 1, // VISIBILITY_PUBLIC
     });
     channelReady = true;
+    return true;
   } catch {
     // Non-fatal: scheduling still works on the default channel.
+    channelReady = false;
+    return false;
   }
 }
 
@@ -203,7 +214,7 @@ export async function schedulePracticeReminders(
     return 0;
   }
 
-  await ensureChannel(copy);
+  const channelAvailable = await ensureChannel(copy);
   await ensureTapListener();
 
   let count = 0;
@@ -220,23 +231,27 @@ export async function schedulePracticeReminders(
         id: practiceReminderIdForIsoDay(isoDay),
         title: copy.title,
         body: copy.body,
-        channelId: CHANNEL_ID,
+        // Only attach our channelId when the channel is actually available.
+        // If createChannel failed (or off-Android), omit it so the notification
+        // falls back to the default channel rather than referencing a missing
+        // channel — which on Android could prevent it from firing.
+        ...(channelAvailable ? { channelId: CHANNEL_ID } : {}),
         smallIcon: 'ic_stat_onesignal_default',
+        // INEXACT alarm — set on the NOTIFICATION (LocalNotificationSchema), as
+        // a SIBLING of `schedule`, which is where the plugin reads it (NOT inside
+        // Schedule). The plugin defaults this to TRUE, so setting it explicitly
+        // is what actually avoids requiring SCHEDULE_EXACT_ALARM / the "Alarms &
+        // reminders" screen and keeps the app Play-policy clean.
+        isExactNotification: false,
         schedule: {
           on: {
             weekday: isoToPluginWeekday(isoDay) as Weekday,
             hour: pref.hour,
             minute: pref.minute,
           },
-          // A practice reminder tolerates the OS batching it by a few minutes,
-          // so it is scheduled as an INEXACT alarm. Set explicitly (the plugin
-          // defaults isExactNotification to TRUE) so we never require the
-          // SCHEDULE_EXACT_ALARM special-access permission, never open the
-          // "Alarms & reminders" screen, and stay Play-policy clean. allowWhileIdle
-          // is kept: it lets the inexact alarm still fire during Doze maintenance
-          // windows and needs no special permission.
+          // Kept: lets the inexact alarm still fire during Doze maintenance
+          // windows; needs no special permission.
           allowWhileIdle: true,
-          isExactNotification: false,
         },
       }));
       await plugin.schedule({ notifications });
