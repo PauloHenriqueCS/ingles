@@ -32,6 +32,14 @@ export interface AIPreferences {
   focusAreas: string[];
   // Practice goal
   dailyConversationGoalMinutes: number;
+  // Pre-conversation choices persisted as user preferences (see the "Antes de
+  // começar" step and the Personalizar tutor sheet). null = never chosen, so the
+  // UI can detect first use and the setup step / recommendation applies.
+  //  - conversationLanguageMode: generalized target_only | bilingual_support
+  //    (legacy english_only/bilingual_pt_en are normalized on read).
+  //  - conversationSessionMode: guided | free (guided is the product default).
+  conversationLanguageMode: 'target_only' | 'bilingual_support' | null;
+  conversationSessionMode: 'guided' | 'free' | null;
 }
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 

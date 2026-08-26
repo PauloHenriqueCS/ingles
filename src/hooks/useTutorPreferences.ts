@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { ASSISTANT_NAME, BASE_DEFAULTS, getDefaultsForLevel, resolvePreset } from '../lib/tutorPreferences';
 import { DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
+import { normalizeConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
 import type { AIPreferences } from '../types';
 
 export interface UseTutorPreferences {
@@ -14,8 +15,19 @@ export interface UseTutorPreferences {
   saveResult: 'success' | 'error' | null;
   isDirty: boolean;
   cefrLevel: string;
+  /** True once the user has explicitly chosen the pre-conversation preferences
+   *  (language mode). false = first use → the "Antes de começar" step is shown. */
+  conversationConfigured: boolean;
   updateDraft: (updates: Partial<AIPreferences>) => void;
   save: () => Promise<void>;
+  /** Persist ONLY the pre-conversation choices (language + mode) with explicit
+   *  values, writing a COMPLETE row (merged over the last-saved prefs so no other
+   *  tutor field is clobbered) and updating local state so the summary reacts
+   *  immediately. Used by the "Antes de começar" step (no draft-timing races). */
+  saveConversationPrefs: (updates: {
+    conversationLanguageMode?: AIPreferences['conversationLanguageMode'];
+    conversationSessionMode?: AIPreferences['conversationSessionMode'];
+  }) => Promise<boolean>;
   resetToDefault: () => void;
   clearSaveResult: () => void;
 }
@@ -41,6 +53,13 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
     correctionDetail:   (row.correction_detail    as AIPreferences['correctionDetail'])   ?? BASE_DEFAULTS.correctionDetail,
     focusAreas:         Array.isArray(row.focus_areas) ? (row.focus_areas as string[]) : BASE_DEFAULTS.focusAreas,
     dailyConversationGoalMinutes: (row.daily_conversation_goal_minutes as number | null) ?? DEFAULT_CONVERSATION_GOAL_MINUTES,
+    // Nullable pre-conversation choices. Language legacy values are normalized to
+    // the generalized enum on read; an unset/invalid value stays null (first-use).
+    conversationLanguageMode: normalizeConversationLanguageMode(row.conversation_language_mode),
+    conversationSessionMode:
+      row.conversation_session_mode === 'guided' || row.conversation_session_mode === 'free'
+        ? row.conversation_session_mode
+        : null,
   };
   // Auto-resolve preset from manual controls in case DB preset tag is stale
   prefs.personalityPreset = resolvePreset(prefs);
@@ -65,6 +84,8 @@ function prefsToRow(p: AIPreferences): Record<string, unknown> {
     correction_detail:   p.correctionDetail,
     focus_areas:         p.focusAreas,
     daily_conversation_goal_minutes: p.dailyConversationGoalMinutes,
+    conversation_language_mode: p.conversationLanguageMode,
+    conversation_session_mode:  p.conversationSessionMode,
   };
 }
 
@@ -75,6 +96,11 @@ export function useTutorPreferences(): UseTutorPreferences {
   const [loading, setLoading]     = useState(true);
   const [saving, setSaving]       = useState(false);
   const [saveResult, setSaveResult] = useState<'success' | 'error' | null>(null);
+
+  // Mirror of `saved` so saveConversationPrefs can build a COMPLETE row from the
+  // last-persisted prefs without depending on draft/state timing.
+  const savedRef = useRef<AIPreferences>(saved);
+  useEffect(() => { savedRef.current = saved; }, [saved]);
 
   useEffect(() => {
     let cancelled = false;
@@ -158,11 +184,39 @@ export function useTutorPreferences(): UseTutorPreferences {
     }
   }, [draft, saving]);
 
+  // Persist ONLY the pre-conversation choices with explicit values. Writes a
+  // COMPLETE row (merged over the last-saved prefs) so no other tutor field is
+  // clobbered and a brand-new row is never half-baked, and updates local state
+  // so the summary reacts immediately. Returns whether the write succeeded.
+  const saveConversationPrefs = useCallback(async (updates: {
+    conversationLanguageMode?: AIPreferences['conversationLanguageMode'];
+    conversationSessionMode?: AIPreferences['conversationSessionMode'];
+  }): Promise<boolean> => {
+    const merged: AIPreferences = { ...savedRef.current, ...updates };
+    try {
+      const { error } = await supabase
+        .from('ai_conversation_preferences')
+        .upsert(prefsToRow(merged), { onConflict: 'user_id' });
+      if (error) throw error;
+      setSaved(merged);
+      setDraft((prev) => ({ ...prev, ...updates }));
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const resetToDefault = useCallback(() => {
     const defaults = getDefaultsForLevel(cefrLevel);
-    setDraft(defaults);
+    // Preserve the pre-conversation choices — "Restaurar padrão" resets the tutor
+    // personality/voice, not the language/mode the user picked for conversations.
+    setDraft({
+      ...defaults,
+      conversationLanguageMode: saved.conversationLanguageMode,
+      conversationSessionMode: saved.conversationSessionMode,
+    });
     setSaveResult(null);
-  }, [cefrLevel]);
+  }, [cefrLevel, saved.conversationLanguageMode, saved.conversationSessionMode]);
 
   const clearSaveResult = useCallback(() => setSaveResult(null), []);
 
@@ -174,8 +228,10 @@ export function useTutorPreferences(): UseTutorPreferences {
     saveResult,
     isDirty,
     cefrLevel,
+    conversationConfigured: saved.conversationLanguageMode !== null,
     updateDraft,
     save,
+    saveConversationPrefs,
     resetToDefault,
     clearSaveResult,
   };

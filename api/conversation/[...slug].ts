@@ -440,6 +440,12 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
     correctionDetail:   (row.correction_detail   as AIPreferences['correctionDetail'])   ?? BASE_DEFAULTS.correctionDetail,
     focusAreas:         Array.isArray(row.focus_areas) ? (row.focus_areas as string[]) : BASE_DEFAULTS.focusAreas,
     dailyConversationGoalMinutes: (row.daily_conversation_goal_minutes as number | null) ?? BASE_DEFAULTS.dailyConversationGoalMinutes,
+    // The pre-conversation choices are UI preferences only; this server-side
+    // prefs object (which feeds the realtime voice/personality prompt) never
+    // reads them — the session's language/mode come from the request enum +
+    // resolveConversationLanguageMode/resolveSessionMode, not from here.
+    conversationLanguageMode: null,
+    conversationSessionMode: null,
   };
 }
 

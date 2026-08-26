@@ -178,6 +178,10 @@ export const BASE_DEFAULTS: AIPreferences = {
   correctionDetail: 'brief',
   focusAreas: [],
   dailyConversationGoalMinutes: DEFAULT_CONVERSATION_GOAL_MINUTES,
+  // null = never chosen (drives first-use detection); the recommendation /
+  // product default applies at use-site until the user configures them.
+  conversationLanguageMode: null,
+  conversationSessionMode: null,
 };
 
 /** Returns defaults tuned to the user's CEFR level. */
