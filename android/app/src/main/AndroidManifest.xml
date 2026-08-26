@@ -63,4 +63,15 @@
          "Unable to select audio device!"). Normal protection level: granted at
          install time, no runtime prompt. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Local practice-reminder notifications (@capacitor/local-notifications).
+         Android 13+ (API 33) requires this runtime permission to POST any
+         notification; requested from the app only when the user first enables
+         the reminder (never at startup) — see practiceReminderService.ts /
+         PracticeReminderView.tsx. Declared explicitly here (rather than relying
+         on the OneSignal plugin's transitive merge) so the capability is owned
+         by the app. NOTE: no SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM — the
+         reminder uses an inexact weekly repeating schedule, which needs no
+         special-access permission and keeps the app Play-policy clean. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
