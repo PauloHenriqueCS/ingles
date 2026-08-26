@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Bell, Loader2, AlertCircle, Check, BellOff } from 'lucide-react';
 import ScreenHeader from './ScreenHeader';
 import { isNativeApp } from '../lib/runtimeEnvironment';
+import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
+import { buildReminderCopy } from '../lib/notifications/practiceReminderCopy';
 import { practiceReminderUiStrings } from '../i18n/practiceReminderUiStrings';
 import {
   fetchPracticeReminder,
@@ -21,13 +23,12 @@ import {
   syncPracticeReminders,
   cancelPracticeReminders,
   isPracticeReminderSupported,
-  type PracticeReminderCopy,
   type NotificationPermission,
 } from '../lib/notifications/practiceReminderService';
 
 interface Props {
   onBack: () => void;
-  /** From the curriculum progress payload; falls back to pt-BR when absent. */
+  /** Optional override; otherwise resolved from the curriculum progress payload. */
   interfaceLanguage?: string | null;
 }
 
@@ -36,8 +37,13 @@ type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type PermissionUi = NotificationPermission | 'unsupported' | 'unknown';
 
 export default function PracticeReminderView({ onBack, interfaceLanguage }: Props) {
-  const t = practiceReminderUiStrings(interfaceLanguage);
-  const conjunction = interfaceLanguage?.startsWith('en') ? 'and' : 'e';
+  // Resolve the UI language from the OFFICIAL source (same as Home), with the
+  // prop as an optional override — so the screen chrome AND the saved
+  // notification copy match the user's interface language.
+  const focus = useCurriculumFocus();
+  const lang = interfaceLanguage ?? focus.data?.interfaceLanguage ?? null;
+  const t = practiceReminderUiStrings(lang);
+  const conjunction = (lang ?? '').startsWith('en') ? 'and' : 'e';
 
   const [pref, setPref] = useState<PracticeReminderPreference>(DEFAULT_PRACTICE_REMINDER);
   const [loadState, setLoadState] = useState<LoadState>('loading');
@@ -59,11 +65,6 @@ export default function PracticeReminderView({ onBack, interfaceLanguage }: Prop
       active = false;
     };
   }, []);
-
-  const copy: PracticeReminderCopy = useMemo(
-    () => ({ title: t.notificationTitle, body: t.notificationBody, channelName: t.title }),
-    [t],
-  );
 
   const timeValue = formatTime(pref.hour, pref.minute);
   const summary =
@@ -124,7 +125,7 @@ export default function PracticeReminderView({ onBack, interfaceLanguage }: Prop
       // 3) Reconcile the DEVICE schedules with the saved intent.
       if (isPracticeReminderSupported()) {
         if (saved.enabled && effectivePermission === 'granted') {
-          await syncPracticeReminders(saved, copy);
+          await syncPracticeReminders(saved, buildReminderCopy(lang));
         } else {
           // Disabled, or enabled-but-blocked: clear our reserved reminders so
           // nothing fires. The denied banner (below) explains the block.

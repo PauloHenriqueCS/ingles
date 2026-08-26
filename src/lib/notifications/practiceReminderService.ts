@@ -228,7 +228,15 @@ export async function schedulePracticeReminders(
             hour: pref.hour,
             minute: pref.minute,
           },
+          // A practice reminder tolerates the OS batching it by a few minutes,
+          // so it is scheduled as an INEXACT alarm. Set explicitly (the plugin
+          // defaults isExactNotification to TRUE) so we never require the
+          // SCHEDULE_EXACT_ALARM special-access permission, never open the
+          // "Alarms & reminders" screen, and stay Play-policy clean. allowWhileIdle
+          // is kept: it lets the inexact alarm still fire during Doze maintenance
+          // windows and needs no special permission.
           allowWhileIdle: true,
+          isExactNotification: false,
         },
       }));
       await plugin.schedule({ notifications });
