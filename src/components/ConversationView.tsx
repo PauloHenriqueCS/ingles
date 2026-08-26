@@ -565,7 +565,11 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const conversationInPlan = focusData?.conversationInPlan ?? false;
   const currentFocus = focusData?.currentFocus?.trim() || null;
   const focusStrings = curriculumUiStrings(focusData?.interfaceLanguage ?? null);
-  const defaultMode: 'guided' | 'free' = conversationInPlan ? 'guided' : 'free';
+  // Guided is the default pre-selection (the user can switch to Free). The
+  // "Recomendado" badge still only appears when Conversation is a selected
+  // modality (recommendGuided below), but the initial selection is always
+  // Guided so the curricular practice is one tap away.
+  const defaultMode: 'guided' | 'free' = 'guided';
   const effectiveMode: 'guided' | 'free' = selectedMode ?? defaultMode;
 
   // Recommended language mode by CEFR level (A1/A2 → bilingual, else English).
