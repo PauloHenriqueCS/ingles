@@ -104,6 +104,21 @@ describe('schedulePracticeReminders', () => {
     expect(notifs[0].schedule.allowWhileIdle).toBe(true);
   });
 
+  it('schedules every reminder as an INEXACT alarm (isExactNotification: false)', async () => {
+    // Single day (Monday) …
+    await schedulePracticeReminders({ enabled: true, weekdays: [1], hour: 9, minute: 0 }, COPY);
+    expect(scheduledNotifications()).toHaveLength(1);
+    expect(scheduledNotifications()[0].schedule.isExactNotification).toBe(false);
+
+    // … and every day across a multi-day config.
+    await schedulePracticeReminders(monWedFri, COPY);
+    const notifs = scheduledNotifications();
+    expect(notifs).toHaveLength(3);
+    for (const n of notifs) expect(n.schedule.isExactNotification).toBe(false);
+    // Never requests a mandatory exact alarm.
+    for (const n of notifs) expect(n.schedule.allowWhileIdle).toBe(true);
+  });
+
   it('clears the whole reserved range before scheduling (no leftovers)', async () => {
     await schedulePracticeReminders(monWedFri, COPY);
     // cancel was called with all 7 reserved ids prior to schedule.
@@ -165,6 +180,13 @@ describe('syncPracticeReminders (reconcile intent → device)', () => {
     const res = await syncPracticeReminders(active, COPY);
     expect(res).toMatchObject({ supported: true, permission: 'granted', scheduled: true, count: 2 });
     expect(mockSchedule).toHaveBeenCalledTimes(1);
+  });
+
+  it('a re-sync still schedules INEXACT alarms', async () => {
+    await syncPracticeReminders(active, COPY);
+    for (const n of scheduledNotifications()) {
+      expect(n.schedule.isExactNotification).toBe(false);
+    }
   });
 
   it('does NOT schedule when the preference is disabled — it cancels', async () => {
