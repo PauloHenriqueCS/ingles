@@ -26,6 +26,17 @@ const config: CapacitorConfig = {
   // this is no longer the primary UI — it's just where the local offline-
   // fallback page (errorPath below) lives (public/mobile-fallback.html).
   webDir: 'dist',
+  plugins: {
+    // Practice-reminder local notifications (src/lib/notifications/
+    // practiceReminderService.ts). smallIcon reuses the OneSignal status-bar
+    // icon already shipped in res/drawable-*/ic_stat_onesignal_default.png so
+    // Android shows a proper monochrome glyph instead of a gray square. No
+    // sound override — the default notification sound is fine for a reminder.
+    LocalNotifications: {
+      smallIcon: 'ic_stat_onesignal_default',
+      iconColor: '#F5C518',
+    },
+  },
   ...(isBundledMode
     ? {}
     : {

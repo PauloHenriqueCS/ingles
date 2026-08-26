@@ -6,6 +6,12 @@ import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
 import { useOneSignalIdentitySync } from './hooks/useOneSignalIdentitySync';
+import { usePracticeReminderSync } from './hooks/usePracticeReminderSync';
+import {
+  setPracticeReminderTapHandler,
+  ensurePracticeReminderListeners,
+  isPracticeReminderSupported,
+} from './lib/notifications/practiceReminderService';
 import { useAppsFlyerIdentitySync } from './hooks/useAppsFlyerIdentitySync';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
@@ -28,6 +34,7 @@ import MemoryView from './components/MemoryView';
 import ConversationView from './components/ConversationView';
 import ListeningView from './components/ListeningView';
 import AudioSettingsView from './components/AudioSettingsView';
+import PracticeReminderView from './components/PracticeReminderView';
 import PronunciationTrainingView from './components/PronunciationTrainingView';
 import ErrorReviewView from './components/ErrorReviewView';
 import SettingsView from './components/SettingsView';
@@ -68,6 +75,19 @@ export default function App() {
   useRevenueCatIdentitySync(user?.id);
   useOneSignalIdentitySync(user?.id);
   useAppsFlyerIdentitySync(user?.id);
+  // Keeps the device's local practice-reminder schedules in lockstep with the
+  // session (login restores, logout cancels) and re-heals them on resume.
+  usePracticeReminderSync(user?.id);
+  // Tapping a practice reminder should bring the user to a useful practice area.
+  // The reminder is general (not a specific activity), so we route to Home — the
+  // hub of all practices. Registered once at boot (native-only) so a tap that
+  // cold-starts the app is caught; a warm tap just foregrounds + lands on Home.
+  useEffect(() => {
+    if (!isPracticeReminderSupported()) return;
+    setPracticeReminderTapHandler(() => setView('home'));
+    void ensurePracticeReminderListeners();
+    return () => setPracticeReminderTapHandler(null);
+  }, []);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
   const { status: placementStatus, loading: placementLoading, refresh: refreshPlacement } = usePlacementStatus(user?.id);
 
@@ -335,6 +355,9 @@ export default function App() {
         )}
         {view === 'audio-settings' && (
           <AudioSettingsView onBack={() => setView('home')} />
+        )}
+        {view === 'practice-reminder' && (
+          <PracticeReminderView onBack={() => setView('home')} />
         )}
         {view === 'pronunciation-training' && (
           <PronunciationTrainingView onBack={() => setView('home')} onNavigateToSubscription={() => setView('subscription')} />
