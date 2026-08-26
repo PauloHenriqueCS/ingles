@@ -98,6 +98,29 @@ describe('getDisplayCaption', () => {
     expect(result).toContain('D.');
     expect(result).not.toContain('A.');
   });
+
+  it('caps long text to a short window that ENDS at the current words (older text trimmed)', () => {
+    // A long, boundary-less utterance longer than the cap.
+    const long = 'palavra '.repeat(60).trim(); // ~470 chars, no sentence boundaries
+    const out = getDisplayCaption(long, 130);
+    expect(out.length).toBeLessThanOrEqual(132);         // cap (+ "… ")
+    expect(out.startsWith('… ')).toBe(true);              // older text trimmed from the left
+    expect(out.endsWith('palavra')).toBe(true);           // last word = the current position
+  });
+
+  it('does not truncate text within the cap (short replies unchanged)', () => {
+    const short = 'How was your day today?';
+    expect(getDisplayCaption(short, 130)).toBe(short);
+  });
+
+  it('trims from the left at a word boundary (never cuts a word mid-way)', () => {
+    const long = 'alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima mike november oscar papa quebec romeo';
+    const out = getDisplayCaption(long, 40);
+    expect(out.startsWith('… ')).toBe(true);
+    // The first shown token after the ellipsis is a whole word from the source.
+    const firstWord = out.replace(/^…\s*/, '').split(' ')[0];
+    expect(long.split(' ')).toContain(firstWord);
+  });
 });
 
 // ── Preference persistence tests ──────────────────────────────────────────────
@@ -310,25 +333,27 @@ describe('AiSpeechCaption mobile layout', () => {
 // with the actual audio playback speed across all three speed modes.
 
 describe('caption reveal timer — playback rate scaling', () => {
-  const BASE_INTERVAL_MS = 140;
+  // Calibrated to the tutor's real TTS speaking rate (~13 chars/sec) so the
+  // caption tracks the audio instead of lagging behind it (was 140ms).
+  const BASE_INTERVAL_MS = 75;
 
   function computeInterval(playbackRate: number): number {
     return Math.round(BASE_INTERVAL_MS / playbackRate);
   }
 
-  it('Normal (1.0×) uses the base interval of 140 ms', () => {
-    expect(computeInterval(1.0)).toBe(140);
+  it('Normal (1.0×) uses the base interval of 75 ms', () => {
+    expect(computeInterval(1.0)).toBe(75);
   });
 
-  it('Devagar (0.80×) uses a longer interval (~175 ms)', () => {
+  it('Devagar (0.80×) uses a longer interval (~94 ms)', () => {
     const interval = computeInterval(0.80);
-    expect(interval).toBe(175);
+    expect(interval).toBe(94);
     expect(interval).toBeGreaterThan(BASE_INTERVAL_MS);
   });
 
-  it('Superdevagar (0.65×) uses an even longer interval (~215 ms)', () => {
+  it('Superdevagar (0.65×) uses an even longer interval (~115 ms)', () => {
     const interval = computeInterval(0.65);
-    expect(interval).toBe(215);
+    expect(interval).toBe(115);
     expect(interval).toBeGreaterThan(computeInterval(0.80));
   });
 
