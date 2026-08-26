@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
-import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock } from 'lucide-react';
+import { Mic, AlertTriangle, Settings, XCircle, CheckCircle2, Lock, Globe, MessageSquare, X, Info } from 'lucide-react';
 import { useRealtimeSession } from '../hooks/useRealtimeSession';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
 import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
@@ -16,7 +16,7 @@ import AIAvatar, { type AvatarState } from './AIAvatar';
 import CaptionToggle from './CaptionToggle';
 import AiSpeechCaption from './AiSpeechCaption';
 import { getPrefsSummaryChips, PACE_PLAYBACK_RATE } from '../lib/tutorPreferences';
-import { completeConversationSession, getDayTotalSeconds, isConversationGoalMet } from '../lib/conversationSessions';
+import { completeConversationSession, getDayTotalSeconds } from '../lib/conversationSessions';
 import { getTodaySP } from '../lib/timezone';
 import ConversationDailyGoalCard from './ConversationDailyGoalCard';
 import type { ConversationEntitlements } from '../domain/entitlements/entitlement-types';
@@ -25,7 +25,6 @@ import { MINUTE_PACKAGES_MESSAGES } from '../domain/conversation/minute-packages
 import { formatMonthlyRemaining, formatTrialRemaining, formatTotalMinutesAvailable, formatConversationBalanceBreakdown, formatExtraMinutesAvailable } from '../domain/entitlements/entitlement-formatting';
 import { deriveMinuteBalance } from '../domain/conversation/minute-balance';
 import { recommendConversationLanguageMode, type ConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
-import { loadLastConversationLanguageMode, saveLastConversationLanguageMode } from '../lib/conversationLanguageModePrefs';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -39,38 +38,6 @@ function formatTime(ms: number) {
 // Once a real commercial ceiling is known, the warning is computed from it
 // instead — see nearLimit below.
 const FALLBACK_WARNING_MS = 25 * 60 * 1000;
-
-// ── Goal progress bar ─────────────────────────────────────────────────────────
-
-function GoalProgress({ todayTotalSec, goalMinutes }: { todayTotalSec: number; goalMinutes: number }) {
-  const totalMin = todayTotalSec / 60;
-  const pct = Math.min(100, Math.round((totalMin / goalMinutes) * 100));
-  const met = isConversationGoalMet(todayTotalSec, goalMinutes);
-  const displayedMin = Math.floor(totalMin);
-  const remaining = Math.ceil(goalMinutes - totalMin);
-
-  return (
-    <div className="mt-2 space-y-2 text-left">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-slate-400">Meta diária</span>
-        <span className={met ? 'text-green-400 font-semibold' : 'text-slate-300'}>
-          {met ? '✓ Meta concluída' : `${displayedMin}/${goalMinutes} min`}
-        </span>
-      </div>
-      <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all ${met ? 'bg-green-500' : 'bg-blue-500'}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      {!met && (
-        <p className="text-xs text-slate-500">
-          Faltam {remaining} minuto{remaining !== 1 ? 's' : ''}
-        </p>
-      )}
-    </div>
-  );
-}
 
 // ── Monthly conversation balance indicator (commercial plan, not the daily goal) ──
 
@@ -311,6 +278,17 @@ interface ModeChooserProps {
   /** Localized current recorte title, or null when not resolvable. */
   currentFocus: string | null;
   onSelect: (mode: 'guided' | 'free') => void;
+  /** Optional numbered badge shown before the title (used in the setup step). */
+  stepNumber?: number;
+}
+
+/** Small numbered step badge for the "Antes de começar" setup sections. */
+function StepBadge({ n }: { n: number }) {
+  return (
+    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0" aria-hidden="true">
+      {n}
+    </span>
+  );
 }
 
 /**
@@ -371,10 +349,13 @@ function ModeOptionRow({
  * modality — Free never does. The chosen mode is passed to session.start(); the
  * server remains the sole authority on mode + curricular credit.
  */
-function ConversationModeChooser({ t, selected, recommendGuided, currentFocus, onSelect }: ModeChooserProps) {
+function ConversationModeChooser({ t, selected, recommendGuided, currentFocus, onSelect, stepNumber }: ModeChooserProps) {
   return (
     <div className="space-y-2.5" role="radiogroup" aria-label={t.conversationChooserTitle}>
-      <p className="text-sm font-semibold text-slate-200">{t.conversationChooserTitle}</p>
+      <div className="flex items-center gap-2">
+        {stepNumber != null && <StepBadge n={stepNumber} />}
+        <p className="text-sm font-semibold text-slate-200">{t.conversationChooserTitle}</p>
+      </div>
       <ModeOptionRow
         active={selected === 'guided'}
         title={t.conversationGuidedTitle}
@@ -403,6 +384,8 @@ interface LanguageChooserProps {
    *  never blocks: any level can pick either option. */
   recommended: ConversationLanguageMode;
   onSelect: (mode: ConversationLanguageMode) => void;
+  /** Optional numbered badge shown before the title (used in the setup step). */
+  stepNumber?: number;
 }
 
 /**
@@ -416,10 +399,13 @@ interface LanguageChooserProps {
  * copy comes from the i18n table (conversationLanguage* keys) — product copy,
  * kept as-is — while the internal identity is language-pair agnostic.
  */
-function ConversationLanguageChooser({ t, selected, recommended, onSelect }: LanguageChooserProps) {
+function ConversationLanguageChooser({ t, selected, recommended, onSelect, stepNumber }: LanguageChooserProps) {
   return (
     <div className="space-y-2.5" role="radiogroup" aria-label={t.conversationLanguageChooserTitle}>
-      <p className="text-sm font-semibold text-slate-200">{t.conversationLanguageChooserTitle}</p>
+      <div className="flex items-center gap-2">
+        {stepNumber != null && <StepBadge n={stepNumber} />}
+        <p className="text-sm font-semibold text-slate-200">{t.conversationLanguageChooserTitle}</p>
+      </div>
       <ModeOptionRow
         active={selected === 'target_only'}
         title={t.conversationLanguageEnglishTitle}
@@ -438,6 +424,133 @@ function ConversationLanguageChooser({ t, selected, recommended, onSelect }: Lan
   );
 }
 
+// ── Settings summary (compact, informative — not a selector) ────────────────────
+
+function ConversationSettingsSummary({
+  t, languageMode, sessionMode, currentFocus,
+}: {
+  t: ReturnType<typeof curriculumUiStrings>;
+  languageMode: ConversationLanguageMode;
+  sessionMode: 'guided' | 'free';
+  currentFocus: string | null;
+}) {
+  const langLabel = languageMode === 'bilingual_support' ? t.conversationLanguageBilingualTitle : t.conversationLanguageEnglishTitle;
+  const modeLabel = sessionMode === 'free' ? t.conversationFreeTitle : t.conversationGuidedTitle;
+  return (
+    <div className="bg-slate-800 rounded-2xl p-4 space-y-2.5" data-testid="conversation-settings-summary">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 text-sm text-slate-300 min-w-0">
+          <Globe className="w-4 h-4 text-teal-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+          {t.conversationSummaryLanguageLabel}
+        </span>
+        <span className="text-sm font-medium text-teal-300 text-right shrink-0">{langLabel}</span>
+      </div>
+      <div className="flex items-start justify-between gap-3">
+        <span className="flex items-center gap-2 text-sm text-slate-300 min-w-0">
+          <MessageSquare className="w-4 h-4 text-teal-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+          {t.conversationSummaryModeLabel}
+        </span>
+        <span className="text-right shrink-0">
+          <span className="block text-sm font-medium text-teal-300">{modeLabel}</span>
+          {sessionMode === 'guided' && currentFocus && (
+            <span className="block text-xs text-slate-500 mt-0.5">{t.conversationFocusLabel(currentFocus)}</span>
+          )}
+        </span>
+      </div>
+      <p className="text-xs text-slate-500 pt-0.5">{t.conversationSummaryHelper}</p>
+    </div>
+  );
+}
+
+// ── "Antes de começar" setup step (bottom sheet, shown on first start) ──────────
+
+function BeforeStartSheet({
+  t, initialLanguage, initialMode, recommendedLanguage, recommendGuided, currentFocus, saving, onSaveAndStart, onClose,
+}: {
+  t: ReturnType<typeof curriculumUiStrings>;
+  initialLanguage: ConversationLanguageMode;
+  initialMode: 'guided' | 'free';
+  recommendedLanguage: ConversationLanguageMode;
+  recommendGuided: boolean;
+  currentFocus: string | null;
+  saving: boolean;
+  onSaveAndStart: (language: ConversationLanguageMode, mode: 'guided' | 'free') => void;
+  onClose: () => void;
+}) {
+  const [language, setLanguage] = useState<ConversationLanguageMode>(initialLanguage);
+  const [mode, setMode] = useState<'guided' | 'free'>(initialMode);
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/60 z-40" onClick={onClose} aria-hidden="true" />
+      <div
+        className="fixed inset-x-0 bottom-0 z-50 bg-slate-900 border-t border-slate-700 rounded-t-2xl max-h-[92dvh] flex flex-col sm:inset-auto sm:left-1/2 sm:-translate-x-1/2 sm:top-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-lg sm:rounded-2xl sm:border"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.conversationBeforeStartTitle}
+        data-testid="conversation-before-start-sheet"
+      >
+        {/* Drag handle + close */}
+        <div className="relative pt-3 shrink-0">
+          <div className="mx-auto h-1 w-10 rounded-full bg-slate-600" aria-hidden="true" />
+          <button
+            onClick={onClose}
+            className="absolute right-3 top-2 w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Fechar"
+          ><X className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" /></button>
+        </div>
+
+        {/* Header */}
+        <div className="px-5 pt-2 pb-1 shrink-0">
+          <h2 className="text-xl font-bold text-slate-100">{t.conversationBeforeStartTitle}</h2>
+          <p className="text-sm text-slate-400 mt-1 leading-relaxed">{t.conversationBeforeStartHelper}</p>
+        </div>
+
+        {/* Sections */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          <ConversationLanguageChooser
+            t={t}
+            selected={language}
+            recommended={recommendedLanguage}
+            onSelect={setLanguage}
+            stepNumber={1}
+          />
+          <ConversationModeChooser
+            t={t}
+            selected={mode}
+            recommendGuided={recommendGuided}
+            currentFocus={currentFocus}
+            onSelect={setMode}
+            stepNumber={2}
+          />
+        </div>
+
+        {/* Footer */}
+        <div
+          className="shrink-0 border-t border-slate-700 px-5 py-3 flex items-center justify-between gap-3"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
+          <button
+            onClick={onClose}
+            disabled={saving}
+            className="px-3 py-2 text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors focus:outline-none focus:underline disabled:opacity-50"
+          >
+            {t.conversationNotNow}
+          </button>
+          <button
+            onClick={() => onSaveAndStart(language, mode)}
+            disabled={saving}
+            data-testid="conversation-save-and-start"
+            className="px-5 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] disabled:opacity-60"
+          >
+            {saving ? 'Salvando…' : t.conversationSaveAndStart}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function ConversationView({ onBack, onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
@@ -452,26 +565,14 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const conversationBlocked = conversation ? !conversation.monthlyTime.canStart : false;
   const startDisabled = conversationLoading || conversationDisabledByPlan || conversationBlocked;
 
-  // Explicit Guided/Free choice. null = user hasn't overridden; the effective
-  // mode then follows the plan-derived default (guided iff Conversation is a
-  // selected modality). Reset per-session is unnecessary — the last choice is a
-  // fine sticky default within the screen.
+  // Language + mode are now persisted user PREFERENCES (via useTutorPreferences)
+  // rather than an inline per-screen selection: the main screen shows a compact
+  // summary, and the choices are made in the "Antes de começar" setup step (first
+  // use) or in Personalizar tutor. The effective values are the saved prefs, else
+  // the product default/recommendation (computed below).
   const curriculumFocus = useCurriculumFocus();
-  const [selectedMode, setSelectedMode] = useState<'guided' | 'free' | null>(null);
-
-  // Language mode (English-only vs Bilingual PT+EN). null = not yet loaded /
-  // not overridden; the effective mode then follows the level-based
-  // recommendation. The chooser is shown before EVERY new session (so the user
-  // can switch easily), but the last saved choice pre-selects it. Restored once
-  // on mount from the user's saved preference (fail-safe: absence keeps null →
-  // recommendation). A session already in progress is never re-prompted — its
-  // mode was frozen server-side at start.
-  const [selectedLanguageMode, setSelectedLanguageMode] = useState<ConversationLanguageMode | null>(null);
-  useEffect(() => {
-    let active = true;
-    void loadLastConversationLanguageMode().then((m) => { if (active && m) setSelectedLanguageMode(m); });
-    return () => { active = false; };
-  }, []);
+  const [showBeforeStart, setShowBeforeStart] = useState(false);
+  const [startSaving, setStartSaving] = useState(false);
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showExhaustedModal, setShowExhaustedModal] = useState(false);
@@ -565,19 +666,35 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const conversationInPlan = focusData?.conversationInPlan ?? false;
   const currentFocus = focusData?.currentFocus?.trim() || null;
   const focusStrings = curriculumUiStrings(focusData?.interfaceLanguage ?? null);
-  // Guided is the default pre-selection (the user can switch to Free). The
-  // "Recomendado" badge still only appears when Conversation is a selected
-  // modality (recommendGuided below), but the initial selection is always
-  // Guided so the curricular practice is one tap away.
-  const defaultMode: 'guided' | 'free' = 'guided';
-  const effectiveMode: 'guided' | 'free' = selectedMode ?? defaultMode;
 
-  // Recommended language mode by CEFR level (A1/A2 → bilingual, else English).
-  // A soft badge only — never blocks. The effective mode is the user's saved/
-  // clicked choice, else the recommendation (so a selection always exists and
-  // the Start button can proceed).
-  const recommendedLanguageMode = recommendConversationLanguageMode(focusData?.currentLevel ?? null);
-  const effectiveLanguageMode: ConversationLanguageMode = selectedLanguageMode ?? recommendedLanguageMode;
+  // Effective preferences applied to the next session: the SAVED user pref, else
+  // the product default (guided) / level-based recommendation (A1/A2 → bilingual,
+  // else target-only). The server stays authoritative on mode + curricular credit.
+  const recommendedLanguageMode = recommendConversationLanguageMode(focusData?.currentLevel ?? hp.cefrLevel);
+  const effectiveLanguageMode: ConversationLanguageMode = hp.saved.conversationLanguageMode ?? recommendedLanguageMode;
+  const effectiveMode: 'guided' | 'free' = hp.saved.conversationSessionMode ?? 'guided';
+  // First use = the user has not yet saved these preferences. On the first start
+  // we open the setup step; afterwards we start straight from the saved prefs.
+  const needsSetup = !hp.conversationConfigured;
+
+  // The fixed CTA. First click with no saved prefs → open the setup step; else
+  // start immediately with the effective (saved) prefs. Double-click safe: the
+  // session hook ignores start() while connecting/active, and startDisabled gates.
+  const handlePressStart = () => {
+    if (startDisabled) return;
+    if (needsSetup) { setShowBeforeStart(true); return; }
+    session.start(effectiveMode, effectiveLanguageMode);
+  };
+  // Setup step "Salvar e iniciar": persist BOTH choices, then start immediately
+  // with those exact values (never rely on async state). Persist failure is
+  // non-blocking — the session still starts with the chosen values.
+  const handleSaveAndStart = async (language: ConversationLanguageMode, mode: 'guided' | 'free') => {
+    setStartSaving(true);
+    await hp.saveConversationPrefs({ conversationLanguageMode: language, conversationSessionMode: mode });
+    setStartSaving(false);
+    setShowBeforeStart(false);
+    session.start(mode, language);
+  };
 
   // The technical gateway ceiling ('technical') must never be surfaced to
   // the user as if it were a commercial benefit/countdown — only show a
@@ -634,7 +751,12 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
 
       {onBack && <ScreenHeader onBack={onBack} title="Conversar com IA" />}
 
-      <div className="flex-1 flex flex-col px-4 pt-6 pb-8 max-w-lg mx-auto w-full">
+      <div
+        className="flex-1 flex flex-col px-4 pt-6 max-w-lg mx-auto w-full"
+        // Extra bottom padding in the pre-conversation state so the scrollable
+        // content is never hidden behind the fixed "Iniciar conversa" CTA.
+        style={{ paddingBottom: canStart ? 'calc(6.5rem + env(safe-area-inset-bottom))' : '2rem' }}
+      >
 
         {/* Page header */}
         <div className="mb-5">
@@ -696,6 +818,24 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
               </div>
             )}
 
+            {/* ── Settings summary (compact, informative) + first-time hint ── */}
+            {canStart && (
+              <>
+                <ConversationSettingsSummary
+                  t={focusStrings}
+                  languageMode={effectiveLanguageMode}
+                  sessionMode={effectiveMode}
+                  currentFocus={currentFocus}
+                />
+                {needsSetup && (
+                  <div className="flex items-start gap-2 px-1">
+                    <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" strokeWidth={2} aria-hidden="true" />
+                    <p className="text-xs text-slate-500 leading-relaxed">{focusStrings.conversationFirstTimeHint}</p>
+                  </div>
+                )}
+              </>
+            )}
+
             {/* ── First-access banner ────────────────────────────────────── */}
             {showFirstAccess && !isActive && !isConnecting && (
               <FirstAccessBanner
@@ -744,24 +884,16 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
               </div>
             )}
 
-            {/* ── Session ended ──────────────────────────────────────────── */}
+            {/* ── Session ended — compact indicator (never a big card that
+                 pushes the CTA down or competes with the tutor hierarchy) ── */}
             {isEnded && (
-              <div className="bg-slate-800 rounded-2xl p-6 space-y-3">
-                <div className="text-center">
-                  <CheckCircle2 className="w-10 h-10 text-green-400 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-                  <p className="text-slate-200 font-semibold mt-2">Sessão encerrada</p>
-                  <p className="text-sm text-slate-400 mt-0.5">
-                    Duração: {formatTime(session.elapsedMs)}
-                  </p>
-                  {session.stopMessage && (
-                    <p className="text-xs text-amber-400 mt-2 leading-relaxed">{session.stopMessage}</p>
-                  )}
-                </div>
-                {todayTotalSec !== null && (
-                  <GoalProgress
-                    todayTotalSec={todayTotalSec}
-                    goalMinutes={hp.prefs.dailyConversationGoalMinutes}
-                  />
+              <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2">
+                <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" strokeWidth={2} aria-hidden="true" />
+                <p className="text-sm text-slate-300">
+                  Sessão encerrada · {formatTime(session.elapsedMs)}
+                </p>
+                {session.stopMessage && (
+                  <p className="text-xs text-amber-400 leading-snug ml-auto text-right">{session.stopMessage}</p>
                 )}
               </div>
             )}
@@ -785,52 +917,17 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
               </div>
             )}
 
-            {/* ── Start / restart button ─────────────────────────────────── */}
-            {canStart && (
-              <>
-                {/* Idioma da conversa — explicit choice BEFORE starting a session */}
-                <ConversationLanguageChooser
-                  t={focusStrings}
-                  selected={effectiveLanguageMode}
-                  recommended={recommendedLanguageMode}
-                  onSelect={setSelectedLanguageMode}
-                />
-                {/* Guided vs Free — explicit choice BEFORE starting a session */}
-                <ConversationModeChooser
-                  t={focusStrings}
-                  selected={effectiveMode}
-                  recommendGuided={conversationInPlan}
-                  currentFocus={currentFocus}
-                  onSelect={setSelectedMode}
-                />
-                {!conversationLoading && conversationDisabledByPlan && (
-                  <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationUnavailable}</p>
-                )}
-                {!conversationLoading && !conversationDisabledByPlan && conversationBlocked && conversation && (
-                  <BuyMoreMinutesCta
-                    conversation={conversation}
-                    onBuyMinutes={onNavigateToMinutePackages}
-                    onSubscribe={onNavigateToSubscription}
-                  />
-                )}
-                <button
-                  onClick={() => {
-                    if (startDisabled) return;
-                    // Remember the choice for next time (fail-safe, non-blocking)
-                    // and pass it explicitly to session creation.
-                    void saveLastConversationLanguageMode(effectiveLanguageMode);
-                    session.start(effectiveMode, effectiveLanguageMode);
-                  }}
-                  disabled={startDisabled}
-                  aria-disabled={startDisabled}
-                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <span className="flex items-center justify-center gap-2">
-                    <Mic className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                    {isEnded ? 'Nova conversa' : 'Iniciar conversa'}
-                  </span>
-                </button>
-              </>
+            {/* ── Access / balance CTAs (the primary start CTA is the fixed
+                 bottom bar; these only appear when start is blocked) ──────── */}
+            {canStart && !conversationLoading && conversationDisabledByPlan && (
+              <p className="text-xs text-amber-400 text-center">{ENTITLEMENT_MESSAGES.conversationUnavailable}</p>
+            )}
+            {canStart && !conversationLoading && !conversationDisabledByPlan && conversationBlocked && conversation && (
+              <BuyMoreMinutesCta
+                conversation={conversation}
+                onBuyMinutes={onNavigateToMinutePackages}
+                onSubscribe={onNavigateToSubscription}
+              />
             )}
 
             {/* ── Personalizar tutor button ─────────────────────────────── */}
@@ -847,6 +944,44 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
           </div>
         )}
       </div>
+
+      {/* ── Fixed bottom CTA (pre-conversation only) — always reachable, above
+           the iOS safe area, with its own opaque bar so scrolling content never
+           bleeds through. The setup sheet (z-40/50) overlays it when open. ── */}
+      {!hp.loading && canStart && (
+        <div
+          className="fixed inset-x-0 bottom-0 z-30 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-4 pt-3"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="max-w-lg mx-auto">
+            <button
+              onClick={handlePressStart}
+              disabled={startDisabled}
+              aria-disabled={startDisabled}
+              data-testid="conversation-start-cta"
+              className="w-full py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white text-base font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[52px] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              <Mic className="w-5 h-5 shrink-0" strokeWidth={2} aria-hidden="true" />
+              {focusStrings.conversationStartCta}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* "Antes de começar" setup step — first start with no saved prefs */}
+      {showBeforeStart && (
+        <BeforeStartSheet
+          t={focusStrings}
+          initialLanguage={effectiveLanguageMode}
+          initialMode={effectiveMode}
+          recommendedLanguage={recommendedLanguageMode}
+          recommendGuided={conversationInPlan}
+          currentFocus={currentFocus}
+          saving={startSaving}
+          onSaveAndStart={handleSaveAndStart}
+          onClose={() => setShowBeforeStart(false)}
+        />
+      )}
 
       {/* Personalization sheet */}
       {showSheet && (

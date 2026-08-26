@@ -18,11 +18,12 @@ import {
 import { AVAILABLE_CONVERSATION_GOALS, DEFAULT_CONVERSATION_GOAL_MINUTES } from '../lib/conversationGoal';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
+import { recommendConversationLanguageMode, type ConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
 
 // Re-export hook type for convenience
 export type { UseTutorPreferences };
 
-type Tab = 'voz' | 'personalidade' | 'correcoes' | 'meta';
+type Tab = 'conversa' | 'voz' | 'personalidade' | 'correcoes' | 'meta';
 
 interface Props {
   hp: ReturnType<typeof import('../hooks/useTutorPreferences').useTutorPreferences>;
@@ -467,6 +468,56 @@ function CorrecoesSection({
   );
 }
 
+// ── Conversa section (language + mode preferences) ─────────────────────────────
+
+function ConversaSection({
+  prefs, update, cefrLevel, sessionActive,
+}: {
+  prefs: AIPreferences;
+  update: (u: Partial<AIPreferences>) => void;
+  cefrLevel: string;
+  sessionActive: boolean;
+}) {
+  // Show a concrete selection: the saved pref, else the product default
+  // (recommendation for language / guided for mode). Saving persists the choice.
+  const langValue: ConversationLanguageMode = prefs.conversationLanguageMode ?? recommendConversationLanguageMode(cefrLevel);
+  const modeValue: 'guided' | 'free' = prefs.conversationSessionMode ?? 'guided';
+
+  return (
+    <div className="space-y-6">
+      {sessionActive && (
+        <div className="bg-amber-900/20 border border-amber-700/50 rounded-xl px-3 py-2 text-xs text-amber-300">
+          A conversa em andamento mantém suas configurações; a alteração vale a partir da próxima conversa.
+        </div>
+      )}
+
+      <div>
+        <SectionTitle>Idioma da conversa</SectionTitle>
+        <OptionGroup<ConversationLanguageMode>
+          value={langValue}
+          onChange={(v) => update({ conversationLanguageMode: v })}
+          options={[
+            { id: 'target_only', label: 'Inglês', description: 'Conversa totalmente em inglês.' },
+            { id: 'bilingual_support', label: 'Português + Inglês', description: 'Receba explicações em português enquanto pratica inglês.' },
+          ]}
+        />
+      </div>
+
+      <div>
+        <SectionTitle>Modo da conversa</SectionTitle>
+        <OptionGroup<'guided' | 'free'>
+          value={modeValue}
+          onChange={(v) => update({ conversationSessionMode: v })}
+          options={[
+            { id: 'guided', label: 'Conversa guiada', description: 'Pratique o foco atual do seu plano.' },
+            { id: 'free', label: 'Conversa livre', description: 'Converse livremente sobre qualquer assunto.' },
+          ]}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ── Meta section ──────────────────────────────────────────────────────────────
 
 function MetaSection({
@@ -500,8 +551,9 @@ function MetaSection({
 // ── Main sheet ────────────────────────────────────────────────────────────────
 
 export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }: Props) {
-  const [tab, setTab] = useState<Tab>('voz');
+  const [tab, setTab] = useState<Tab>('conversa');
   const TABS: { id: Tab; label: string }[] = [
+    { id: 'conversa',     label: 'Conversa' },
     { id: 'voz',          label: 'Voz' },
     { id: 'personalidade', label: 'Personalidade' },
     { id: 'correcoes',    label: 'Correções' },
@@ -558,6 +610,7 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-4 py-4">
+          {tab === 'conversa'     && <ConversaSection      prefs={hp.prefs} update={hp.updateDraft} cefrLevel={hp.cefrLevel} sessionActive={sessionActive} />}
           {tab === 'voz'          && <VozSection          prefs={hp.prefs} update={hp.updateDraft} sessionActive={sessionActive} />}
           {tab === 'personalidade' && <PersonalidadeSection prefs={hp.prefs} update={hp.updateDraft} />}
           {tab === 'correcoes'    && <CorrecoesSection     prefs={hp.prefs} update={hp.updateDraft} />}

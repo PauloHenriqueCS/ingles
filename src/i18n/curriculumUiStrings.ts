@@ -80,6 +80,16 @@ export interface CurriculumUiStrings {
   conversationLanguageEnglishDesc: string;
   conversationLanguageBilingualTitle: string;
   conversationLanguageBilingualDesc: string;
+  // Pre-conversation settings summary (main screen) + "Antes de começar" setup step
+  conversationSummaryLanguageLabel: string; // "Idioma da conversa:"
+  conversationSummaryModeLabel: string;     // "Modo:"
+  conversationSummaryHelper: string;         // "Você pode alterar em Personalizar tutor."
+  conversationFirstTimeHint: string;         // shown before first setup
+  conversationBeforeStartTitle: string;      // "Antes de começar"
+  conversationBeforeStartHelper: string;
+  conversationSaveAndStart: string;          // primary CTA in the setup step
+  conversationNotNow: string;                // secondary dismiss
+  conversationStartCta: string;              // fixed bottom CTA ("Iniciar conversa")
 }
 
 const PT_BR: CurriculumUiStrings = {
@@ -139,6 +149,15 @@ const PT_BR: CurriculumUiStrings = {
   conversationLanguageEnglishDesc: 'Conversa totalmente em inglês.',
   conversationLanguageBilingualTitle: 'Português + Inglês',
   conversationLanguageBilingualDesc: 'Receba explicações em português enquanto pratica inglês.',
+  conversationSummaryLanguageLabel: 'Idioma da conversa:',
+  conversationSummaryModeLabel: 'Modo:',
+  conversationSummaryHelper: 'Você poderá alterar isso em Personalizar tutor.',
+  conversationFirstTimeHint: 'Na primeira conversa, você poderá revisar essas preferências antes de começar.',
+  conversationBeforeStartTitle: 'Antes de começar',
+  conversationBeforeStartHelper: 'Escolha essas preferências para sua conversa. Você poderá mudar tudo depois em Personalizar tutor.',
+  conversationSaveAndStart: 'Salvar e iniciar conversa',
+  conversationNotNow: 'Agora não',
+  conversationStartCta: 'Iniciar conversa',
 };
 
 const EN: CurriculumUiStrings = {
@@ -198,6 +217,15 @@ const EN: CurriculumUiStrings = {
   conversationLanguageEnglishDesc: 'A conversation entirely in English.',
   conversationLanguageBilingualTitle: 'Portuguese + English',
   conversationLanguageBilingualDesc: 'Get explanations in Portuguese while you practise English.',
+  conversationSummaryLanguageLabel: 'Conversation language:',
+  conversationSummaryModeLabel: 'Mode:',
+  conversationSummaryHelper: 'You can change this in Customize tutor.',
+  conversationFirstTimeHint: 'On your first conversation, you can review these preferences before starting.',
+  conversationBeforeStartTitle: 'Before you start',
+  conversationBeforeStartHelper: 'Choose these preferences for your conversation. You can change everything later in Customize tutor.',
+  conversationSaveAndStart: 'Save and start conversation',
+  conversationNotNow: 'Not now',
+  conversationStartCta: 'Start conversation',
 };
 
 const STRINGS: Record<string, CurriculumUiStrings> = { 'pt-BR': PT_BR, en: EN };
