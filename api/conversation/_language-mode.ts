@@ -88,15 +88,29 @@ export function resolveConversationLanguagePair(
 }
 
 /**
- * Compose the final instructions from the resolved base template and an OPTIONAL
- * support-directive fragment (already resolved from data). Pure concatenation —
- * contains ZERO pedagogical content. A null/empty fragment (target_only) returns
- * the base UNCHANGED, byte-for-byte.
+ * The language directive that fills the base template's
+ * {{conversation_language_directive}} placeholder for TARGET-ONLY mode. It
+ * reproduces the strong "speak only in the target language" rule the base
+ * template used to hardcode, so existing behavior is preserved — now as a single
+ * coherent rule (bilingual mode replaces it with its own directive, so the two
+ * never contradict). `style` matches the template's own voice: the guided
+ * template is in the target language (English), the free template in the base
+ * language (Portuguese); the caller passes the correctly-localized names.
  */
-export function composeConversationInstructions(
-  baseInstructions: string,
-  supportDirective: string | null,
+export function buildTargetOnlyDirective(
+  style: 'guided' | 'free',
+  params: { targetName: string; supportName: string },
 ): string {
-  if (!supportDirective || !supportDirective.trim()) return baseInstructions;
-  return `${baseInstructions.trimEnd()}\n\n${supportDirective.trim()}`;
+  const { targetName, supportName } = params;
+  if (style === 'guided') {
+    return [
+      `Speak to the learner only in ${targetName}.`,
+      `Only brief correction explanations may use ${supportName}.`,
+      `Never switch the conversation itself to ${supportName}.`,
+    ].join(' ');
+  }
+  return [
+    `- Responda SEMPRE em ${targetName}, mesmo que o aprendiz escreva em outro idioma.`,
+    `- Exceção: explicações de correção podem ser em ${supportName}.`,
+  ].join('\n');
 }

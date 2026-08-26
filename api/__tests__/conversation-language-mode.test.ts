@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveConversationLanguageMode,
   normalizeConversationLanguageMode,
-  composeConversationInstructions,
+  buildTargetOnlyDirective,
   resolveConversationLanguagePair,
   isConversationLanguageMode,
   CONVERSATION_LANGUAGE_MODES,
@@ -77,19 +77,22 @@ describe('resolveConversationLanguagePair — target/base decoupled from fixed v
   });
 });
 
-describe('composeConversationInstructions — pure, no pedagogy', () => {
-  const base = 'You are a tutor. Responda SEMPRE em inglês.';
-
-  it('target_only path: a null/empty fragment leaves the base UNCHANGED', () => {
-    expect(composeConversationInstructions(base, null)).toBe(base);
-    expect(composeConversationInstructions(base, '   ')).toBe(base);
+describe('buildTargetOnlyDirective — reproduces the strong target-only rule per template voice', () => {
+  it('guided (target-language voice): "speak only in target, never switch"', () => {
+    const d = buildTargetOnlyDirective('guided', { targetName: 'English', supportName: 'Portuguese' });
+    expect(d).toMatch(/Speak to the learner only in English/);
+    expect(d).toMatch(/Never switch the conversation itself to Portuguese/);
   });
 
-  it('bilingual_support path: appends the data-driven fragment after the base', () => {
-    const fragment = '## Modo bilíngue\nUse português para explicar.';
-    const out = composeConversationInstructions(base, fragment);
-    expect(out.startsWith(base)).toBe(true);
-    expect(out).toContain(fragment);
-    expect(out.length).toBeGreaterThan(base.length);
+  it('free (base-language voice): "responda SEMPRE em <alvo>"', () => {
+    const d = buildTargetOnlyDirective('free', { targetName: 'inglês', supportName: 'português' });
+    expect(d).toMatch(/Responda SEMPRE em inglês/);
+    expect(d).toMatch(/correção podem ser em português/);
+  });
+
+  it('is parameterized by the resolved names (not brittle-hardcoded)', () => {
+    const d = buildTargetOnlyDirective('guided', { targetName: 'Spanish', supportName: 'Portuguese' });
+    expect(d).toContain('Spanish');
+    expect(d).not.toContain('English');
   });
 });

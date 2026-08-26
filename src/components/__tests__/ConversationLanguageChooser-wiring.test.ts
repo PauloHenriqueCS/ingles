@@ -121,11 +121,13 @@ describe('language mode — client→server + server-side freeze (unchanged pipe
     expect(hookSrc).toMatch(/\.\.\.\(languageMode \? \{ languageMode \} : \{\}\)/);
   });
 
-  it('the server resolves + freezes it and composes the data-driven bilingual template', () => {
+  it('the server resolves + freezes it and injects a single coherent language directive', () => {
     expect(apiSrc).toMatch(/resolveConversationLanguageMode\(\(req\.body \?\? \{\}\)\.languageMode\)/);
     expect(apiSrc).toMatch(/conversation_language_mode: languageMode/);
-    expect(apiSrc).toMatch(/languageMode === 'bilingual_support'/);
-    expect(apiSrc).toContain('composeConversationInstructions(instructions, support.system)');
+    // One directive fills the base template placeholder (no contradictory append).
+    expect(apiSrc).toContain('resolveConversationLanguageDirective(');
+    expect(apiSrc).toMatch(/conversation_language_directive: conversationLanguageDirective/);
+    expect(apiSrc).not.toContain('composeConversationInstructions');
   });
 });
 
