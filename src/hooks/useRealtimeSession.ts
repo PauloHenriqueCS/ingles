@@ -59,9 +59,11 @@ export interface UseRealtimeSession {
    * failed) — the caller simply has nothing to complete in that case.
    */
   recordingAuthorizationId: string | null;
-  /** Start a session. `mode` is the user's explicit Guided/Free choice; omit to
-   *  let the server keep its plan-derived default. */
-  start: (mode?: 'guided' | 'free') => Promise<void>;
+  /** Start a session. `mode` is the user's explicit Guided/Free choice (omit to
+   *  let the server keep its plan-derived default); `languageMode` is the
+   *  English-only vs Bilingual PT+EN choice (omit → server defaults to
+   *  english_only). Both are requests only; the server stays authoritative. */
+  start: (mode?: 'guided' | 'free', languageMode?: 'english_only' | 'bilingual_pt_en') => Promise<void>;
   end: () => void;
   updateInstructions: (instructions: string) => void;
 }
@@ -338,7 +340,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     setErrorMessage(message);
   }, [cleanup]);
 
-  const start = useCallback(async (mode?: 'guided' | 'free') => {
+  const start = useCallback(async (mode?: 'guided' | 'free', languageMode?: 'english_only' | 'bilingual_pt_en') => {
     if (status === 'connecting' || status === 'active') return;
 
     endCalledRef.current = false;
@@ -393,8 +395,15 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
         // as a request only: it decides the actual mode and, independently,
         // whether the session may earn curricular credit — a client flag can
         // never falsify progression credit. Omitted → server keeps its
-        // plan-derived default (backward compatible).
-        body: JSON.stringify({ sessionAttemptId: crypto.randomUUID(), ...(mode ? { mode } : {}) }),
+        // plan-derived default (backward compatible). `languageMode` is the
+        // English-only vs Bilingual PT+EN choice; omitted → server defaults to
+        // english_only (unchanged historical behavior). It only shapes the AI
+        // instructions — never minute accounting or credit.
+        body: JSON.stringify({
+          sessionAttemptId: crypto.randomUUID(),
+          ...(mode ? { mode } : {}),
+          ...(languageMode ? { languageMode } : {}),
+        }),
       });
 
       if (!resp.ok) {

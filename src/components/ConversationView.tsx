@@ -24,6 +24,8 @@ import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-message
 import { MINUTE_PACKAGES_MESSAGES } from '../domain/conversation/minute-packages-copy';
 import { formatMonthlyRemaining, formatTrialRemaining, formatTotalMinutesAvailable, formatConversationBalanceBreakdown, formatExtraMinutesAvailable } from '../domain/entitlements/entitlement-formatting';
 import { deriveMinuteBalance } from '../domain/conversation/minute-balance';
+import { recommendConversationLanguageMode, type ConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
+import { loadLastConversationLanguageMode, saveLastConversationLanguageMode } from '../lib/conversationLanguageModePrefs';
 
 function formatTime(ms: number) {
   const totalSec = Math.floor(ms / 1000);
@@ -392,6 +394,47 @@ function ConversationModeChooser({ t, selected, recommendGuided, currentFocus, o
   );
 }
 
+// ── Language chooser (English-only vs Bilingual PT+EN) ──────────────────────────
+
+interface LanguageChooserProps {
+  t: ReturnType<typeof curriculumUiStrings>;
+  selected: ConversationLanguageMode;
+  /** Which option carries the "Recomendado" badge — a level-based hint that
+   *  never blocks: any level can pick either option. */
+  recommended: ConversationLanguageMode;
+  onSelect: (mode: ConversationLanguageMode) => void;
+}
+
+/**
+ * Lets the user choose the conversation LANGUAGE before every new session:
+ * fully in English, or bilingual (Portuguese support while practising English).
+ * Orthogonal to Guided/Free. The recommended option (bilingual for A1/A2,
+ * English otherwise) carries a badge but never blocks — either can be picked.
+ * The chosen mode is passed to session.start() and remembered as the next
+ * session's default; the server owns all pedagogical behavior.
+ */
+function ConversationLanguageChooser({ t, selected, recommended, onSelect }: LanguageChooserProps) {
+  return (
+    <div className="space-y-2.5" role="radiogroup" aria-label={t.conversationLanguageChooserTitle}>
+      <p className="text-sm font-semibold text-slate-200">{t.conversationLanguageChooserTitle}</p>
+      <ModeOptionRow
+        active={selected === 'english_only'}
+        title={t.conversationLanguageEnglishTitle}
+        description={t.conversationLanguageEnglishDesc}
+        badge={recommended === 'english_only' ? t.conversationRecommended : null}
+        onClick={() => onSelect('english_only')}
+      />
+      <ModeOptionRow
+        active={selected === 'bilingual_pt_en'}
+        title={t.conversationLanguageBilingualTitle}
+        description={t.conversationLanguageBilingualDesc}
+        badge={recommended === 'bilingual_pt_en' ? t.conversationRecommended : null}
+        onClick={() => onSelect('bilingual_pt_en')}
+      />
+    </div>
+  );
+}
+
 export default function ConversationView({ onBack, onComplete, onNavigateToSubscription, onNavigateToMinutePackages }: Props) {
   const hp           = useTutorPreferences();
   const playbackRate = PACE_PLAYBACK_RATE[hp.prefs.speechPace] ?? 1.0;
@@ -412,6 +455,20 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   // fine sticky default within the screen.
   const curriculumFocus = useCurriculumFocus();
   const [selectedMode, setSelectedMode] = useState<'guided' | 'free' | null>(null);
+
+  // Language mode (English-only vs Bilingual PT+EN). null = not yet loaded /
+  // not overridden; the effective mode then follows the level-based
+  // recommendation. The chooser is shown before EVERY new session (so the user
+  // can switch easily), but the last saved choice pre-selects it. Restored once
+  // on mount from the user's saved preference (fail-safe: absence keeps null →
+  // recommendation). A session already in progress is never re-prompted — its
+  // mode was frozen server-side at start.
+  const [selectedLanguageMode, setSelectedLanguageMode] = useState<ConversationLanguageMode | null>(null);
+  useEffect(() => {
+    let active = true;
+    void loadLastConversationLanguageMode().then((m) => { if (active && m) setSelectedLanguageMode(m); });
+    return () => { active = false; };
+  }, []);
 
   const [showSheet,       setShowSheet]       = useState(false);
   const [showExhaustedModal, setShowExhaustedModal] = useState(false);
@@ -507,6 +564,13 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const focusStrings = curriculumUiStrings(focusData?.interfaceLanguage ?? null);
   const defaultMode: 'guided' | 'free' = conversationInPlan ? 'guided' : 'free';
   const effectiveMode: 'guided' | 'free' = selectedMode ?? defaultMode;
+
+  // Recommended language mode by CEFR level (A1/A2 → bilingual, else English).
+  // A soft badge only — never blocks. The effective mode is the user's saved/
+  // clicked choice, else the recommendation (so a selection always exists and
+  // the Start button can proceed).
+  const recommendedLanguageMode = recommendConversationLanguageMode(focusData?.currentLevel ?? null);
+  const effectiveLanguageMode: ConversationLanguageMode = selectedLanguageMode ?? recommendedLanguageMode;
 
   // The technical gateway ceiling ('technical') must never be surfaced to
   // the user as if it were a commercial benefit/countdown — only show a
@@ -717,6 +781,13 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
             {/* ── Start / restart button ─────────────────────────────────── */}
             {canStart && (
               <>
+                {/* Idioma da conversa — explicit choice BEFORE starting a session */}
+                <ConversationLanguageChooser
+                  t={focusStrings}
+                  selected={effectiveLanguageMode}
+                  recommended={recommendedLanguageMode}
+                  onSelect={setSelectedLanguageMode}
+                />
                 {/* Guided vs Free — explicit choice BEFORE starting a session */}
                 <ConversationModeChooser
                   t={focusStrings}
@@ -736,7 +807,13 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
                   />
                 )}
                 <button
-                  onClick={() => { if (!startDisabled) session.start(effectiveMode); }}
+                  onClick={() => {
+                    if (startDisabled) return;
+                    // Remember the choice for next time (fail-safe, non-blocking)
+                    // and pass it explicitly to session creation.
+                    void saveLastConversationLanguageMode(effectiveLanguageMode);
+                    session.start(effectiveMode, effectiveLanguageMode);
+                  }}
                   disabled={startDisabled}
                   aria-disabled={startDisabled}
                   className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"

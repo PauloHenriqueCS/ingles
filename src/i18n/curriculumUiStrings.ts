@@ -73,6 +73,13 @@ export interface CurriculumUiStrings {
   /** "Foco: <recorte>" — parameterized by the localized recorte title (data). */
   conversationFocusLabel: (focus: string) => string;
   conversationRecommended: string;   // badge on the recommended (guided) option
+  // Conversation LANGUAGE chooser (English-only vs Bilingual PT+EN) — shown
+  // before every new session, orthogonal to guided/free.
+  conversationLanguageChooserTitle: string;
+  conversationLanguageEnglishTitle: string;
+  conversationLanguageEnglishDesc: string;
+  conversationLanguageBilingualTitle: string;
+  conversationLanguageBilingualDesc: string;
 }
 
 const PT_BR: CurriculumUiStrings = {
@@ -127,6 +134,11 @@ const PT_BR: CurriculumUiStrings = {
   conversationFreeDesc: 'Converse livremente sobre qualquer assunto.',
   conversationFocusLabel: (focus) => `Foco: ${focus}`,
   conversationRecommended: 'Recomendado',
+  conversationLanguageChooserTitle: 'Idioma da conversa',
+  conversationLanguageEnglishTitle: 'Inglês',
+  conversationLanguageEnglishDesc: 'Conversa totalmente em inglês.',
+  conversationLanguageBilingualTitle: 'Português + Inglês',
+  conversationLanguageBilingualDesc: 'Receba explicações em português enquanto pratica inglês.',
 };
 
 const EN: CurriculumUiStrings = {
@@ -181,6 +193,11 @@ const EN: CurriculumUiStrings = {
   conversationFreeDesc: 'Talk freely about any topic.',
   conversationFocusLabel: (focus) => `Focus: ${focus}`,
   conversationRecommended: 'Recommended',
+  conversationLanguageChooserTitle: 'Conversation language',
+  conversationLanguageEnglishTitle: 'English',
+  conversationLanguageEnglishDesc: 'A conversation entirely in English.',
+  conversationLanguageBilingualTitle: 'Portuguese + English',
+  conversationLanguageBilingualDesc: 'Get explanations in Portuguese while you practise English.',
 };
 
 const STRINGS: Record<string, CurriculumUiStrings> = { 'pt-BR': PT_BR, en: EN };

@@ -49,7 +49,8 @@ describe('conversation mode chooser — selection + start behavior', () => {
   });
 
   it('starting the session uses the SELECTED (effective) mode', () => {
-    expect(viewSrc).toMatch(/session\.start\(effectiveMode\)/);
+    // Now also carries the effective language mode as a second argument.
+    expect(viewSrc).toMatch(/session\.start\(effectiveMode, effectiveLanguageMode\)/);
   });
 
   it('the guided option shows the localized current focus (never a technical key)', () => {

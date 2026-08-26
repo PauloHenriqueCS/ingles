@@ -11,6 +11,7 @@ import { getLanguageDisplayName } from '../_curriculum/presentation-i18n';
 import { getCurriculumServiceClient } from '../_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, ensureUserCurriculum, CurriculumConfigError } from '../_curriculum/curriculum-runtime';
 import { resolveSessionMode, computeGuidedEligible } from './_session-mode';
+import { resolveConversationLanguageMode, applyConversationLanguageMode } from './_language-mode';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
@@ -694,6 +695,13 @@ async function handleSession(req: any, res: any) {
     requestedMode: (req.body ?? {}).mode,
     conversationInPlan,
   });
+  // Language mode is an EXPLICIT user choice (English-only vs Bilingual PT+EN),
+  // orthogonal to Guided/Free. Resolved server-side from the request enum ONLY
+  // (never client prose); an absent/unknown value falls back to english_only —
+  // the historical behavior, so older clients are unaffected. It is FROZEN onto
+  // the authorization row (identityCols) and only changes the AI instructions;
+  // it never touches minute accounting or curricular credit.
+  const languageMode = resolveConversationLanguageMode((req.body ?? {}).languageMode);
   let guidedInstructions: string | null = null;
   if (sessionMode === 'guided') {
     try {
@@ -899,6 +907,21 @@ async function handleSession(req: any, res: any) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
 
+  // Language-mode overlay (orthogonal to Guided/Free). english_only leaves the
+  // resolved template instructions UNCHANGED — existing English behavior is
+  // preserved byte-for-byte. bilingual_pt_en APPENDS a server-authored override
+  // directive (support-language explanations, always steering back to producing
+  // the learning language). Language display NAMES are DATA (presentation-i18n),
+  // resolved only when actually bilingual, so the directive is not brittle-hardcoded.
+  if (languageMode === 'bilingual_pt_en') {
+    const svc = getCurriculumServiceClient();
+    const [targetLabel, supportLabel] = await Promise.all([
+      getLanguageDisplayName(svc, languageContext.learningLanguage, languageContext.interfaceLanguage),
+      getLanguageDisplayName(svc, languageContext.interfaceLanguage, languageContext.interfaceLanguage),
+    ]);
+    instructions = applyConversationLanguageMode(instructions, languageMode, { targetLabel, supportLabel, cefrLevel });
+  }
+
   const sessionConfig = {
     expires_after: { anchor: 'created_at', seconds: 120 },
     session: {
@@ -1076,6 +1099,11 @@ async function handleSession(req: any, res: any) {
   });
   const identityCols = {
     session_mode: sessionMode,
+    // FROZEN with the row so the session's language mode stays consistent for
+    // its whole lifetime (mirrors session_mode). Purely informational for
+    // accounting/credit — those never read it. Inserted atomically in the
+    // commercial path and re-applied by the freeze UPDATE for the trial path.
+    conversation_language_mode: languageMode,
     curriculum_practice_eligible: guidedEligible,
     curriculum_version_id: guidedEligible ? conversationCurricularIdentity!.versionId : null,
     curriculum_subtopic_key: guidedEligible ? conversationCurricularIdentity!.subtopicKey : null,
