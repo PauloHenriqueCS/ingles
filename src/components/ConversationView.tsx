@@ -407,29 +407,32 @@ interface LanguageChooserProps {
 
 /**
  * Lets the user choose the conversation LANGUAGE before every new session:
- * fully in English, or bilingual (Portuguese support while practising English).
- * Orthogonal to Guided/Free. The recommended option (bilingual for A1/A2,
- * English otherwise) carries a badge but never blocks — either can be picked.
- * The chosen mode is passed to session.start() and remembered as the next
- * session's default; the server owns all pedagogical behavior.
+ * target-only (fully in the learned language), or bilingual-support (base
+ * language for explanations while practising the target). Orthogonal to
+ * Guided/Free. The recommended option (bilingual for A1/A2, target-only
+ * otherwise) carries a badge but never blocks — either can be picked. The
+ * generalized mode is passed to session.start() and remembered as the next
+ * session's default; the server owns all pedagogical behavior. The user-facing
+ * copy comes from the i18n table (conversationLanguage* keys) — product copy,
+ * kept as-is — while the internal identity is language-pair agnostic.
  */
 function ConversationLanguageChooser({ t, selected, recommended, onSelect }: LanguageChooserProps) {
   return (
     <div className="space-y-2.5" role="radiogroup" aria-label={t.conversationLanguageChooserTitle}>
       <p className="text-sm font-semibold text-slate-200">{t.conversationLanguageChooserTitle}</p>
       <ModeOptionRow
-        active={selected === 'english_only'}
+        active={selected === 'target_only'}
         title={t.conversationLanguageEnglishTitle}
         description={t.conversationLanguageEnglishDesc}
-        badge={recommended === 'english_only' ? t.conversationRecommended : null}
-        onClick={() => onSelect('english_only')}
+        badge={recommended === 'target_only' ? t.conversationRecommended : null}
+        onClick={() => onSelect('target_only')}
       />
       <ModeOptionRow
-        active={selected === 'bilingual_pt_en'}
+        active={selected === 'bilingual_support'}
         title={t.conversationLanguageBilingualTitle}
         description={t.conversationLanguageBilingualDesc}
-        badge={recommended === 'bilingual_pt_en' ? t.conversationRecommended : null}
-        onClick={() => onSelect('bilingual_pt_en')}
+        badge={recommended === 'bilingual_support' ? t.conversationRecommended : null}
+        onClick={() => onSelect('bilingual_support')}
       />
     </div>
   );

@@ -28,15 +28,18 @@ const chooser = viewSrc.slice(
 );
 
 describe('language chooser — options + recommendation', () => {
-  it('offers exactly the two modes as radio rows', () => {
+  it('offers exactly the two GENERALIZED modes as radio rows', () => {
     expect(chooser).toContain('role="radiogroup"');
-    expect(chooser).toMatch(/onClick=\{\(\) => onSelect\('english_only'\)\}/);
-    expect(chooser).toMatch(/onClick=\{\(\) => onSelect\('bilingual_pt_en'\)\}/);
+    expect(chooser).toMatch(/onClick=\{\(\) => onSelect\('target_only'\)\}/);
+    expect(chooser).toMatch(/onClick=\{\(\) => onSelect\('bilingual_support'\)\}/);
+    // The language-pair-specific legacy values must NOT appear in the UI code.
+    expect(chooser).not.toContain('english_only');
+    expect(chooser).not.toContain('bilingual_pt_en');
   });
 
   it('badges the recommended option (either can be recommended; never blocks)', () => {
-    expect(chooser).toMatch(/badge=\{recommended === 'english_only' \? t\.conversationRecommended : null\}/);
-    expect(chooser).toMatch(/badge=\{recommended === 'bilingual_pt_en' \? t\.conversationRecommended : null\}/);
+    expect(chooser).toMatch(/badge=\{recommended === 'target_only' \? t\.conversationRecommended : null\}/);
+    expect(chooser).toMatch(/badge=\{recommended === 'bilingual_support' \? t\.conversationRecommended : null\}/);
   });
 
   it('derives the recommendation from the user CEFR level', () => {
@@ -103,8 +106,13 @@ describe('language mode — client→server + server-side freeze', () => {
     expect(apiSrc).toMatch(/conversation_language_mode: languageMode/);
   });
 
-  it('the server only appends the bilingual directive (english_only left unchanged)', () => {
-    expect(apiSrc).toMatch(/languageMode === 'bilingual_pt_en'/);
-    expect(apiSrc).toContain('applyConversationLanguageMode(instructions, languageMode');
+  it('bilingual_support COMPOSES a data-driven template; target_only is left unchanged', () => {
+    expect(apiSrc).toMatch(/languageMode === 'bilingual_support'/);
+    // Directive comes from the template mechanism (not hardcoded prose).
+    expect(apiSrc).toContain('BILINGUAL_SUPPORT_TEMPLATE_KEY');
+    expect(apiSrc).toContain('resolveActivityPrompt(svc, userId, {');
+    expect(apiSrc).toContain('composeConversationInstructions(instructions, support.system)');
+    // Target/base pair resolved via the single decoupled resolver.
+    expect(apiSrc).toContain('resolveConversationLanguagePair(languageContext)');
   });
 });

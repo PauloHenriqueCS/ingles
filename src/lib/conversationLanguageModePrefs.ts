@@ -11,9 +11,12 @@
  * the last choice must never block starting a conversation.
  */
 import { supabase } from './supabase';
-import { isConversationLanguageMode, type ConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
+import { normalizeConversationLanguageMode, type ConversationLanguageMode } from '../domain/conversation/conversationLanguageMode';
 
-/** Reads the user's last chosen language mode, or null if none/unavailable. */
+/** Reads the user's last chosen language mode, or null if none/unavailable.
+ *  Legacy stored values ('english_only'/'bilingual_pt_en') are normalized to the
+ *  generalized modes on read, so a pre-generalization row still pre-selects
+ *  correctly. */
 export async function loadLastConversationLanguageMode(): Promise<ConversationLanguageMode | null> {
   try {
     const { data, error } = await supabase
@@ -22,7 +25,7 @@ export async function loadLastConversationLanguageMode(): Promise<ConversationLa
       .maybeSingle();
     if (error) return null;
     const value = (data as { conversation_language_mode?: unknown } | null)?.conversation_language_mode;
-    return isConversationLanguageMode(value) ? value : null;
+    return normalizeConversationLanguageMode(value);
   } catch {
     return null;
   }
