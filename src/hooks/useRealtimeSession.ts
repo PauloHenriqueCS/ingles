@@ -91,8 +91,13 @@ const SESSION_CONTROL_POLL_MS = 5000;
 const WEBRTC_CONNECT_URL = '/api/conversation/webrtc-connect';
 
 /** Base interval (ms per character) for the paced caption reveal at 1× speed.
- *  Scaled by playbackRate: slower speed → more ms per char → captions stay in sync. */
-const BASE_REVEAL_INTERVAL_MS = 140;
+ *  Calibrated to the tutor's actual TTS speaking rate (~13 chars/sec ≈ 75ms/char)
+ *  so the caption tracks the audio instead of lagging behind it. The old 140ms
+ *  (~7 chars/sec) revealed at roughly HALF the speech rate, so on longer replies
+ *  the caption fell progressively behind ("sometimes doesn't match what he says")
+ *  until response.done snapped it. Scaled by playbackRate: slower playback → more
+ *  ms per char → the reveal slows with the audio and stays in sync at every pace. */
+const BASE_REVEAL_INTERVAL_MS = 75;
 
 function stopStream(stream: MediaStream | null) {
   if (!stream) return;
@@ -182,8 +187,14 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     const intervalMs = Math.round(BASE_REVEAL_INTERVAL_MS / playbackRateRef.current);
     revealTimerRef.current = setInterval(() => {
       const full = transcriptAccumRef.current;
-      if (displayCountRef.current >= full.length) return;
-      displayCountRef.current++;
+      const behind = full.length - displayCountRef.current;
+      if (behind <= 0) return;
+      // One char per tick at the calibrated pace; if we've fallen well behind
+      // (a reply spoken faster than the base estimate), advance a little quicker
+      // to catch up. Capped at 2/tick and never past what has arrived, so the
+      // caption can never jump ahead of the audio — it only stops trailing.
+      const step = behind > 40 ? 2 : 1;
+      displayCountRef.current = Math.min(full.length, displayCountRef.current + step);
       setTranscriptText(full.slice(0, displayCountRef.current));
     }, intervalMs);
   }, []);

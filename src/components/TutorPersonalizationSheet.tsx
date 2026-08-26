@@ -593,9 +593,11 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
           ><X className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" /></button>
         </div>
 
-        {/* Tabs — horizontally scrollable so every tab is reachable even when
-            they overflow the width (the row itself never gets clipped). */}
-        <div className="flex border-b border-slate-700 px-4 shrink-0 overflow-x-auto">
+        {/* Tabs — horizontally scrollable so every tab is reachable when they
+            overflow the width. overflow-y-hidden because setting overflow-x
+            alone makes the cross-axis compute to 'auto' (CSS), which was adding
+            a spurious VERTICAL scrollbar to the tab row. */}
+        <div className="flex border-b border-slate-700 px-4 shrink-0 overflow-x-auto overflow-y-hidden">
           {TABS.map((t) => (
             <button
               key={t.id}
