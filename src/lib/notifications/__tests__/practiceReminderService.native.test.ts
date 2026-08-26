@@ -105,18 +105,40 @@ describe('schedulePracticeReminders', () => {
   });
 
   it('schedules every reminder as an INEXACT alarm (isExactNotification: false)', async () => {
-    // Single day (Monday) …
+    // Single day (Monday) — flag lives on the NOTIFICATION, not on schedule.
     await schedulePracticeReminders({ enabled: true, weekdays: [1], hour: 9, minute: 0 }, COPY);
     expect(scheduledNotifications()).toHaveLength(1);
-    expect(scheduledNotifications()[0].schedule.isExactNotification).toBe(false);
+    expect(scheduledNotifications()[0].isExactNotification).toBe(false);
+    // It must NOT be nested inside schedule (where the plugin ignores it).
+    expect(scheduledNotifications()[0].schedule).not.toHaveProperty('isExactNotification');
 
     // … and every day across a multi-day config.
     await schedulePracticeReminders(monWedFri, COPY);
     const notifs = scheduledNotifications();
     expect(notifs).toHaveLength(3);
-    for (const n of notifs) expect(n.schedule.isExactNotification).toBe(false);
-    // Never requests a mandatory exact alarm.
-    for (const n of notifs) expect(n.schedule.allowWhileIdle).toBe(true);
+    for (const n of notifs) {
+      expect(n.isExactNotification).toBe(false); // notification level
+      expect(n.schedule).not.toHaveProperty('isExactNotification'); // never on schedule
+      expect(n.schedule.allowWhileIdle).toBe(true); // never a mandatory exact alarm
+    }
+  });
+
+  it('attaches the practice-reminders channelId when the channel is available', async () => {
+    await schedulePracticeReminders(monWedFri, COPY);
+    for (const n of scheduledNotifications()) expect(n.channelId).toBe('practice-reminders');
+  });
+
+  it('schedules WITHOUT channelId when the channel could not be created (default-channel fallback)', async () => {
+    mockCreateChannel.mockRejectedValueOnce(new Error('channel create failed'));
+    const count = await schedulePracticeReminders(monWedFri, COPY);
+    expect(count).toBe(3);
+    expect(mockSchedule).toHaveBeenCalledTimes(1);
+    // No notification references the (missing) channel — it would fall back to
+    // the default channel rather than silently not firing.
+    for (const n of scheduledNotifications()) {
+      expect(n).not.toHaveProperty('channelId');
+      expect(n.isExactNotification).toBe(false); // still inexact
+    }
   });
 
   it('clears the whole reserved range before scheduling (no leftovers)', async () => {
@@ -185,7 +207,8 @@ describe('syncPracticeReminders (reconcile intent → device)', () => {
   it('a re-sync still schedules INEXACT alarms', async () => {
     await syncPracticeReminders(active, COPY);
     for (const n of scheduledNotifications()) {
-      expect(n.schedule.isExactNotification).toBe(false);
+      expect(n.isExactNotification).toBe(false);
+      expect(n.schedule).not.toHaveProperty('isExactNotification');
     }
   });
 
