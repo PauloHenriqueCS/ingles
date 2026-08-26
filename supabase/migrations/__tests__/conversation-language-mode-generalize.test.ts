@@ -1,0 +1,82 @@
+/**
+ * Static assertions on the conversation-language-mode generalization migrations.
+ * They don't run SQL; they lock in the structural invariants: generalized +
+ * legacy CHECK union, preference normalization, and the DATA-DRIVEN bilingual
+ * support template (pedagogical prose lives here, not in TypeScript).
+ */
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { validateTemplateRequires, extractPlaceholders } from '../../../src/domain/curriculum-engine/template-engine';
+
+const MIG = join(__dirname, '..');
+const read = (f: string) => readFileSync(join(MIG, f), 'utf8');
+
+describe('20260826120000 — base columns (nullable, frozen per session)', () => {
+  const sql = read('20260826120000_conversation_language_mode.sql');
+  it('adds a nullable conversation_language_mode to both tables', () => {
+    expect(sql).toMatch(/ALTER TABLE public\.conversation_session_authorizations[\s\S]*ADD COLUMN IF NOT EXISTS conversation_language_mode text/);
+    expect(sql).toMatch(/ALTER TABLE public\.ai_conversation_preferences[\s\S]*ADD COLUMN IF NOT EXISTS conversation_language_mode text/);
+  });
+});
+
+describe('20260826140000 — generalization + data-driven template', () => {
+  const sql = read('20260826140000_conversation_language_mode_generalize.sql');
+
+  it('drops any existing check on the column before recreating (safe rename)', () => {
+    expect(sql).toMatch(/pg_get_constraintdef\(con\.oid\) ILIKE '%conversation_language_mode%'/);
+    expect(sql).toMatch(/DROP CONSTRAINT %I/);
+  });
+
+  it('CHECK accepts BOTH generalized and legacy values (no broken rows/history)', () => {
+    for (const table of ['conversation_session_authorizations', 'ai_conversation_preferences']) {
+      const block = sql.slice(sql.indexOf(`ALTER TABLE public.${table}\n  ADD CONSTRAINT`));
+      expect(block).toContain("'target_only'");
+      expect(block).toContain("'bilingual_support'");
+      expect(block).toContain("'english_only'");
+      expect(block).toContain("'bilingual_pt_en'");
+    }
+  });
+
+  it('normalizes the mutable PREFERENCE legacy → generalized (not the auth history)', () => {
+    expect(sql).toMatch(/UPDATE public\.ai_conversation_preferences\s*SET conversation_language_mode = 'target_only'\s*WHERE conversation_language_mode = 'english_only'/);
+    expect(sql).toMatch(/UPDATE public\.ai_conversation_preferences\s*SET conversation_language_mode = 'bilingual_support'\s*WHERE conversation_language_mode = 'bilingual_pt_en'/);
+    // Session authorizations (history) are NOT rewritten.
+    expect(sql).not.toMatch(/UPDATE public\.conversation_session_authorizations\s*SET conversation_language_mode/);
+  });
+
+  it('seeds the composable bilingual template via the SAME prompt_templates mechanism', () => {
+    expect(sql).toMatch(/INSERT INTO public\.prompt_templates/);
+    expect(sql).toContain("'conversation.bilingual_support', 'en', 'pt-BR', 1, 'published'");
+    expect(sql).toContain('ON CONFLICT (template_key, learning_language, interface_language, version)');
+  });
+
+  // Extract the template body ($tpl$...$tpl$) and validate it as a real template.
+  const body = (() => {
+    const m = sql.match(/\$tpl\$([\s\S]*?)\$tpl\$/);
+    return m ? m[1] : '';
+  })();
+
+  it('the template body is parameterized by the language pair + level (NOT a fixed pair)', () => {
+    expect(body).toContain('{{target_label}}');
+    expect(body).toContain('{{support_label}}');
+    expect(body).toContain('{{level}}');
+    // No hardcoded language pair in the pedagogical text.
+    expect(body).not.toMatch(/\bpt_en\b|\bes_en\b|\bpt_es\b/);
+    // Declared required placeholders actually appear in the body.
+    validateTemplateRequires(body, ['target_label', 'support_label', 'level']);
+    expect(extractPlaceholders(body).sort()).toEqual(['level', 'support_label', 'target_label']);
+  });
+
+  it('encodes the bilingual pedagogy in DATA: goal, support, steer-back, corrections, "como falo X", level adaptation', () => {
+    expect(body).toMatch(/PRODUZIR \{\{target_label\}\}/);            // goal is the target language
+    expect(body).toMatch(/\{\{support_label\}\} é apoio/);            // base is only support
+    expect(body).toMatch(/reconduza o aluno a responder em \{\{target_label\}\}/); // steer back
+    expect(body).toMatch(/forma correta em \{\{target_label\}\}/);   // corrections in target
+    expect(body).toMatch(/como eu falo X/i);                          // "how do I say X"
+    expect(body).toMatch(/Adapte a complexidade[\s\S]*\{\{level\}\}/); // level adaptation
+    expect(body).toMatch(/A1\/A2/);                                    // beginner simplification
+    // Explicitly overrides the base "always target language" rule.
+    expect(body).toMatch(/ATUALIZAÇÃO DA REGRA DE IDIOMA/i);
+  });
+});

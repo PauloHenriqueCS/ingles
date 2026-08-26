@@ -1,108 +1,102 @@
 /**
  * Server-authoritative resolution of a conversation session's LANGUAGE MODE and
- * the tutor directive it implies. Kept as small pure functions (mirrors
- * _session-mode.ts) so the rules can be unit-tested and reused, and so the ONE
- * security-relevant guarantee lives in an obvious place: the client sends only
- * an ENUM — never prose — and the actual instruction text is authored here,
- * server-side, and appended to the resolved template instructions.
+ * the composition of its instructions. Small pure functions (mirrors
+ * _session-mode.ts) so the rules are unit-tested and reused.
  *
- * Two modes, orthogonal to Guided/Free:
- *   - 'english_only'   — the conversation stays fully in the learning language.
- *                        The base template instructions are used UNCHANGED, so
- *                        existing English behavior is preserved byte-for-byte.
- *   - 'bilingual_pt_en'— the tutor may use the student's support language to
- *                        explain/scaffold, while the pedagogical goal remains
- *                        producing the learning language. A scoped OVERRIDE
- *                        directive is APPENDED to the base instructions.
+ * The mode is GENERALIZED — it never encodes a specific language pair:
+ *   - 'target_only'       — the conversation stays fully in the TARGET (learned)
+ *                           language. The base template instructions are used
+ *                           UNCHANGED, so existing behavior is preserved.
+ *   - 'bilingual_support' — the BASE (interface) language may be used to
+ *                           explain/scaffold, while the goal stays producing the
+ *                           target language. The pedagogical directive is DATA
+ *                           (public.prompt_templates → conversation.bilingual_support),
+ *                           composed by the server onto the base instructions —
+ *                           NOT hardcoded here.
+ *
+ * The actual language pair (which language is target, which is base, and their
+ * friendly names) is resolved SEPARATELY (see resolveConversationLanguagePair)
+ * from the curriculum's language context — the single existing source of truth —
+ * so this feature is not tied to Portuguese→English.
  *
  * The mode is resolved at session START and FROZEN onto
- * conversation_session_authorizations.conversation_language_mode, so it stays
- * consistent for the whole session (same guarantee as session_mode). Old rows
- * without the column read back as english_only via DEFAULT_CONVERSATION_LANGUAGE_MODE.
+ * conversation_session_authorizations.conversation_language_mode (mirrors
+ * session_mode). Legacy values ('english_only'/'bilingual_pt_en') and legacy
+ * rows are accepted on read and normalized to the generalized values.
  */
 
-export type ConversationLanguageMode = 'english_only' | 'bilingual_pt_en';
+export type ConversationLanguageMode = 'target_only' | 'bilingual_support';
 
-/** Safe fallback for sessions/clients that never sent a language mode (and for
- *  legacy authorization rows whose column is NULL): the historical behavior. */
-export const DEFAULT_CONVERSATION_LANGUAGE_MODE: ConversationLanguageMode = 'english_only';
+/** Safe fallback for clients/rows that never sent a language mode: preserve the
+ *  historical behavior (fully in the target language). */
+export const DEFAULT_CONVERSATION_LANGUAGE_MODE: ConversationLanguageMode = 'target_only';
 
 export const CONVERSATION_LANGUAGE_MODES: readonly ConversationLanguageMode[] = [
-  'english_only',
-  'bilingual_pt_en',
+  'target_only',
+  'bilingual_support',
 ];
 
+/** Data-driven template key for the composable bilingual-support directive. */
+export const BILINGUAL_SUPPORT_TEMPLATE_KEY = 'conversation.bilingual_support';
+
+/**
+ * Normalize any accepted value (generalized OR legacy) to a generalized mode,
+ * or null if unrecognized. Legacy compatibility (temporary): 'english_only' →
+ * 'target_only', 'bilingual_pt_en' → 'bilingual_support'.
+ */
+export function normalizeConversationLanguageMode(value: unknown): ConversationLanguageMode | null {
+  if (value === 'target_only' || value === 'bilingual_support') return value;
+  if (value === 'english_only') return 'target_only';
+  if (value === 'bilingual_pt_en') return 'bilingual_support';
+  return null;
+}
+
 export function isConversationLanguageMode(value: unknown): value is ConversationLanguageMode {
-  return value === 'english_only' || value === 'bilingual_pt_en';
+  return value === 'target_only' || value === 'bilingual_support';
 }
 
 /**
- * Resolve the language mode from the (optional) client request. An unknown /
- * absent value falls back to english_only — the historical behavior — so older
- * clients that send nothing keep working exactly as before, and a malformed
- * value can never silently enable a different mode.
+ * Resolve the language mode from the (optional) client request. Accepts the
+ * generalized values and, temporarily, the legacy ones; an unknown/absent value
+ * falls back to target_only — the historical behavior — so older clients keep
+ * working and a malformed value can never silently enable a different mode.
  */
 export function resolveConversationLanguageMode(requested: unknown): ConversationLanguageMode {
-  return isConversationLanguageMode(requested) ? requested : DEFAULT_CONVERSATION_LANGUAGE_MODE;
-}
-
-export interface BilingualDirectiveParams {
-  /** Display name of the learning language (e.g. "inglês") — data-driven. */
-  targetLabel: string;
-  /** Display name of the support/interface language (e.g. "português") — data-driven. */
-  supportLabel: string;
-  /** CEFR level of the student (e.g. "A1"), used to tune verbosity. */
-  cefrLevel: string;
+  return normalizeConversationLanguageMode(requested) ?? DEFAULT_CONVERSATION_LANGUAGE_MODE;
 }
 
 /**
- * Builds the bilingual-tutor OVERRIDE directive (authored in the support
- * language). It is written to explicitly AMEND any "always speak the learning
- * language" rule the base template may contain, so there is no ambiguity for
- * the model. Parameterized by the resolved language display names so it is not
- * brittle-hardcoded and generalizes to other support/target pairs later.
+ * The TARGET (language being learned) and BASE (interface/support) languages for
+ * a conversation, derived from the curriculum's single language-context source
+ * of truth. Isolated here so the target/base mapping lives in ONE place and can
+ * be swapped for a richer product-level language source later without touching
+ * callers. Today defaults resolve to target=en / base=pt-BR via the curriculum
+ * bootstrap default — never hardcoded in this function.
  */
-export function buildBilingualDirective(params: BilingualDirectiveParams): string {
-  const { targetLabel, supportLabel, cefrLevel } = params;
-  const isBeginner = /^A[12]$/i.test(cefrLevel.trim());
+export interface ConversationLanguagePair {
+  targetLanguage: string;
+  baseLanguage: string;
+}
 
-  const beginnerLine = isBeginner
-    ? `- O aluno está em nível inicial (${cefrLevel}): use frases curtas e simples, explicações breves e bastante apoio em ${supportLabel}, sem sobrecarregar.`
-    : `- O aluno está em nível ${cefrLevel}: reduza progressivamente a dependência de ${supportLabel} e prefira ${targetLabel} sempre que ele acompanhar.`;
-
-  return [
-    `## Modo bilíngue (ATUALIZAÇÃO DA REGRA DE IDIOMA ACIMA — tem prioridade sobre ela)`,
-    `Esta é uma sessão de tutoria BILÍNGUE ${supportLabel}–${targetLabel}. Qualquer instrução anterior de "responder sempre em ${targetLabel}" fica AJUSTADA por esta seção. Você é um tutor bilíngue e pode usar ${supportLabel} como idioma de APOIO.`,
-    ``,
-    `Objetivo pedagógico (inalterado): fazer o aluno PRODUZIR ${targetLabel}. ${supportLabel} é apoio, nunca o idioma predominante da atividade.`,
-    ``,
-    `Você PODE usar ${supportLabel} para:`,
-    `- explicar uma pergunta que o aluno não entendeu;`,
-    `- explicar vocabulário, gramática ou uma correção;`,
-    `- responder quando o aluno disser que não entendeu;`,
-    `- ajudar o aluno a construir uma frase;`,
-    `- explicar as instruções da atividade.`,
-    ``,
-    `Regras:`,
-    `- Depois de explicar em ${supportLabel}, sempre reconduza o aluno a responder em ${targetLabel} (ex.: "Agora tente responder em ${targetLabel}: …").`,
-    `- Prefira ${targetLabel} durante a prática; use ${supportLabel} apenas quando ajudar de fato. Não responda longamente em ${supportLabel} quando uma explicação curta resolver, e nunca conduza a atividade inteira em ${supportLabel}.`,
-    `- Exemplos, frases sugeridas, vocabulário-alvo e as respostas que o aluno deve praticar permanecem em ${targetLabel}.`,
-    `- Correções devem mostrar claramente a forma correta em ${targetLabel}; a explicação da correção pode ser em ${supportLabel}.`,
-    `- Quando o aluno perguntar "como eu falo X?", forneça a expressão em ${targetLabel} e incentive-o a usá-la.`,
-    beginnerLine,
-  ].join('\n');
+export function resolveConversationLanguagePair(
+  languageContext: { learningLanguage: string; interfaceLanguage: string },
+): ConversationLanguagePair {
+  return {
+    targetLanguage: languageContext.learningLanguage,
+    baseLanguage: languageContext.interfaceLanguage,
+  };
 }
 
 /**
- * Returns the final instruction string for the chosen language mode. For
- * english_only the base instructions are returned UNCHANGED (zero behavior
- * change). For bilingual_pt_en the override directive is appended.
+ * Compose the final instructions from the resolved base template and an OPTIONAL
+ * support-directive fragment (already resolved from data). Pure concatenation —
+ * contains ZERO pedagogical content. A null/empty fragment (target_only) returns
+ * the base UNCHANGED, byte-for-byte.
  */
-export function applyConversationLanguageMode(
+export function composeConversationInstructions(
   baseInstructions: string,
-  mode: ConversationLanguageMode,
-  params: BilingualDirectiveParams,
+  supportDirective: string | null,
 ): string {
-  if (mode !== 'bilingual_pt_en') return baseInstructions;
-  return `${baseInstructions.trimEnd()}\n\n${buildBilingualDirective(params)}`;
+  if (!supportDirective || !supportDirective.trim()) return baseInstructions;
+  return `${baseInstructions.trimEnd()}\n\n${supportDirective.trim()}`;
 }
