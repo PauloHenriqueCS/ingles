@@ -593,13 +593,14 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
           ><X className="w-4 h-4 shrink-0" strokeWidth={2} aria-hidden="true" /></button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-slate-700 px-4 shrink-0">
+        {/* Tabs — horizontally scrollable so every tab is reachable even when
+            they overflow the width (the row itself never gets clipped). */}
+        <div className="flex border-b border-slate-700 px-4 shrink-0 overflow-x-auto">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`py-2.5 px-1 mr-4 text-sm font-medium border-b-2 -mb-px transition-colors focus:outline-none ${
+              className={`py-2.5 px-1 mr-4 text-sm font-medium border-b-2 -mb-px transition-colors focus:outline-none shrink-0 whitespace-nowrap ${
                 tab === t.id
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -617,8 +618,11 @@ export default function TutorPersonalizationSheet({ hp, sessionActive, onClose }
           {tab === 'meta'         && <MetaSection          prefs={hp.prefs} update={hp.updateDraft} />}
         </div>
 
-        {/* Footer */}
-        <div className="shrink-0 border-t border-slate-700 px-4 py-3 space-y-2">
+        {/* Footer — clears the iOS home indicator / browser bottom bar. */}
+        <div
+          className="shrink-0 border-t border-slate-700 px-4 py-3 space-y-2"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
           {hp.saveResult === 'success' && (
             <p className="text-xs text-green-400 text-center">Configurações salvas!</p>
           )}

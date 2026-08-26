@@ -14,7 +14,7 @@ import { resolveSessionMode, computeGuidedEligible } from './_session-mode';
 import {
   resolveConversationLanguageMode,
   resolveConversationLanguagePair,
-  composeConversationInstructions,
+  buildTargetOnlyDirective,
   BILINGUAL_SUPPORT_TEMPLATE_KEY,
 } from './_language-mode';
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
@@ -449,6 +449,65 @@ function rowToPrefs(row: Record<string, unknown>): AIPreferences {
   };
 }
 
+/**
+ * Resolves the value for the base template's {{conversation_language_directive}}
+ * placeholder. Returns the directive string, or null if it sent a 503 (bilingual
+ * template misconfigured) — the caller must then return. target_only reproduces
+ * the strong target-only rule (localized to the template's own voice); bilingual
+ * resolves the data-driven proactive directive (conversation.bilingual_support).
+ */
+async function resolveConversationLanguageDirective(params: {
+  languageMode: 'target_only' | 'bilingual_support';
+  style: 'guided' | 'free';
+  languageContext: { learningLanguage: string; interfaceLanguage: string };
+  cefrLevel: string;
+  userId: string;
+  res: any;
+}): Promise<string | null> {
+  const { languageMode, style, languageContext, cefrLevel, userId, res } = params;
+  const svc = getCurriculumServiceClient();
+  const pair = resolveConversationLanguagePair(languageContext);
+
+  if (languageMode === 'bilingual_support') {
+    try {
+      const [targetLabel, supportLabel] = await Promise.all([
+        getLanguageDisplayName(svc, pair.targetLanguage, languageContext.interfaceLanguage),
+        getLanguageDisplayName(svc, pair.baseLanguage, languageContext.interfaceLanguage),
+      ]);
+      const support = await resolveActivityPrompt(svc, userId, {
+        templateKey: BILINGUAL_SUPPORT_TEMPLATE_KEY,
+        activityType: 'conversation',
+        requireSubtopic: false,
+        userContext: { target_label: targetLabel, support_label: supportLabel, level: cefrLevel },
+      });
+      return support.system;
+    } catch (err) {
+      if (err instanceof CurriculumConfigError) {
+        safeLog('conversation/session', 'bilingual_support_not_configured', 503, { message: err.message });
+        jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O modo bilíngue de conversa ainda não está configurado.');
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  // target_only — names in the template's own voice: guided (target language) uses
+  // the endonyms (learning/interface NAME); free (base language) uses the
+  // interface-localized labels, matching each base template's original wording.
+  if (style === 'guided') {
+    const [targetName, supportName] = await Promise.all([
+      getLanguageDisplayName(svc, pair.targetLanguage, pair.targetLanguage),
+      getLanguageDisplayName(svc, pair.baseLanguage, pair.targetLanguage),
+    ]);
+    return buildTargetOnlyDirective('guided', { targetName, supportName });
+  }
+  const [targetLabel, supportLabel] = await Promise.all([
+    getLanguageDisplayName(svc, pair.targetLanguage, languageContext.interfaceLanguage),
+    getLanguageDisplayName(svc, pair.baseLanguage, languageContext.interfaceLanguage),
+  ]);
+  return buildTargetOnlyDirective('free', { targetName: targetLabel, supportName: supportLabel });
+}
+
 async function handleSession(req: any, res: any) {
   if (!methodGuard(req, res, ['POST'])) return;
   if (!sizeGuard(req, res, PAYLOAD_LIMITS.CONVERSATION)) return;
@@ -714,12 +773,31 @@ async function handleSession(req: any, res: any) {
   // (identityCols) and only changes the AI instructions; it never touches minute
   // accounting or curricular credit.
   const languageMode = resolveConversationLanguageMode((req.body ?? {}).languageMode);
+
+  // Resolve the SINGLE language directive that fills the base template's
+  // {{conversation_language_directive}} placeholder — so guided/free carry ONE
+  // coherent language rule (no hardcoded "never switch to Portuguese" fighting a
+  // bilingual overlay). target_only reproduces the strong target-only rule (in
+  // the template's own voice: guided=target language, free=base language);
+  // bilingual_support injects the DATA-DRIVEN proactive directive
+  // (conversation.bilingual_support). Names/labels are DATA (presentation-i18n).
+  const conversationLanguageDirective = await resolveConversationLanguageDirective({
+    languageMode,
+    style: sessionMode,
+    languageContext,
+    cefrLevel,
+    userId,
+    res,
+  });
+  if (conversationLanguageDirective === null) return; // 503 already sent
+
   let guidedInstructions: string | null = null;
   if (sessionMode === 'guided') {
     try {
       const resolved = await resolveActivityPrompt(getCurriculumServiceClient(), userId, {
         templateKey: 'conversation.tutor',
         activityType: 'conversation',
+        userContext: { conversation_language_directive: conversationLanguageDirective },
       });
       guidedInstructions = resolved.system;
     } catch (err) {
@@ -904,6 +982,7 @@ async function handleSession(req: any, res: any) {
           interface_label: interfaceLabel,
           personalization,
           session_context: buildConversationContextSection(ctx),
+          conversation_language_directive: conversationLanguageDirective,
         },
       });
       instructions = freeResolved.system;
@@ -918,41 +997,11 @@ async function handleSession(req: any, res: any) {
   if (!instructions) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao preparar a sessão.' });
   }
-
-  // Language-mode overlay (orthogonal to Guided/Free). target_only leaves the
-  // resolved template instructions UNCHANGED — existing behavior is preserved
-  // byte-for-byte (no template resolved, nothing appended). bilingual_support
-  // COMPOSES the base instructions with a DATA-DRIVEN directive fragment
-  // (prompt_templates → conversation.bilingual_support), resolved via the SAME
-  // template mechanism as tutor/free. The pedagogical content lives in Postgres,
-  // not here; the server only interpolates the target/base language labels
-  // (from the single language-pair source of truth) and the CEFR level, then
-  // concatenates. Works for BOTH guided and free (base already built above).
-  if (languageMode === 'bilingual_support') {
-    const svc = getCurriculumServiceClient();
-    const pair = resolveConversationLanguagePair(languageContext);
-    try {
-      const [targetLabel, supportLabel] = await Promise.all([
-        getLanguageDisplayName(svc, pair.targetLanguage, languageContext.interfaceLanguage),
-        getLanguageDisplayName(svc, pair.baseLanguage, languageContext.interfaceLanguage),
-      ]);
-      const support = await resolveActivityPrompt(svc, userId, {
-        templateKey: BILINGUAL_SUPPORT_TEMPLATE_KEY,
-        activityType: 'conversation',
-        requireSubtopic: false,
-        userContext: { target_label: targetLabel, support_label: supportLabel, level: cefrLevel },
-      });
-      instructions = composeConversationInstructions(instructions, support.system);
-    } catch (err) {
-      // Explicit, observable operational failure — NEVER a silent fallback that
-      // would drop the student into target-only when they chose bilingual.
-      if (err instanceof CurriculumConfigError) {
-        safeLog('conversation/session', 'bilingual_support_not_configured', 503, { message: err.message });
-        return jsonError(res, 503, 'CURRICULUM_NOT_CONFIGURED', 'O modo bilíngue de conversa ainda não está configurado.');
-      }
-      throw err;
-    }
-  }
+  // NOTE: the language mode no longer appends anything here — it is composed
+  // INLINE via the base template's {{conversation_language_directive}} placeholder
+  // (resolved above), so there is a single coherent language rule with no
+  // contradiction. target_only reproduces the strong target-only rule; bilingual
+  // injects the proactive directive in its place.
 
   const sessionConfig = {
     expires_after: { anchor: 'created_at', seconds: 120 },

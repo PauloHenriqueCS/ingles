@@ -117,3 +117,26 @@ describe('20260826160000 — PROACTIVE bilingual template (data-only prompt upgr
     expect(body).toMatch(/A1\/A2/);
   });
 });
+
+describe('20260826200000 — base templates use a single {{conversation_language_directive}}', () => {
+  const sql = read('20260826200000_conversation_templates_language_directive.sql');
+
+  it('removes the guided hardcoded NON-NEGOTIABLE language rule, replacing it with the placeholder', () => {
+    // The exact block being removed is referenced as the replace() source…
+    expect(sql).toContain('=== OUTPUT LANGUAGE (NON-NEGOTIABLE) ===');
+    expect(sql).toContain('Never switch the conversation itself to {{interface_language_name}}.');
+    // …and the target of that replace is the data-driven placeholder.
+    expect(sql).toContain('{{conversation_language_directive}}');
+    expect(sql).toMatch(/template_key = 'conversation\.tutor'/);
+  });
+
+  it('replaces the free hardcoded "Responda SEMPRE em" language lines with the placeholder', () => {
+    expect(sql).toContain('- Responda SEMPRE em {{learning_label}}, mesmo que o aprendiz escreva em outro idioma.');
+    expect(sql).toMatch(/template_key = 'conversation\.free'/);
+  });
+
+  it('only adds the required placeholder WHERE the body actually contains it (guard against divergence)', () => {
+    expect(sql).toMatch(/system_body LIKE '%\{\{conversation_language_directive\}\}%'/);
+    expect(sql).toContain("'conversation_language_directive'");
+  });
+});
