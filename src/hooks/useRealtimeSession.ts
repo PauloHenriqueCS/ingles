@@ -180,6 +180,11 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
   const recordingAuthIdRef       = useRef<string | null>(null);
   const finalizedAuthIdRef       = useRef<string | null>(null);
   const heartbeatTimerRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The caption reveal is started when the AUDIO actually begins (first
+  // output_audio.delta), NOT at response.created — otherwise the reveal runs
+  // during the pre-audio latency and the caption leads the speech for the whole
+  // turn. This flag guards "start once per response".
+  const revealStartedRef         = useRef(false);
 
   // ── Reveal timer factory (shared by initial setup and speed-change restart) ──
   const startRevealTimer = useCallback(() => {
@@ -187,14 +192,11 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     const intervalMs = Math.round(BASE_REVEAL_INTERVAL_MS / playbackRateRef.current);
     revealTimerRef.current = setInterval(() => {
       const full = transcriptAccumRef.current;
-      const behind = full.length - displayCountRef.current;
-      if (behind <= 0) return;
-      // One char per tick at the calibrated pace; if we've fallen well behind
-      // (a reply spoken faster than the base estimate), advance a little quicker
-      // to catch up. Capped at 2/tick and never past what has arrived, so the
-      // caption can never jump ahead of the audio — it only stops trailing.
-      const step = behind > 40 ? 2 : 1;
-      displayCountRef.current = Math.min(full.length, displayCountRef.current + step);
+      if (displayCountRef.current >= full.length) return;
+      // Exactly one char per tick at the audio-matched pace — never a catch-up
+      // burst, which would let the caption run ahead of the voice (the whole
+      // point is to pace the already-arrived transcript DOWN to speech speed).
+      displayCountRef.current++;
       setTranscriptText(full.slice(0, displayCountRef.current));
     }, intervalMs);
   }, []);
@@ -211,9 +213,10 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
       audioEl.playbackRate = playbackRate;
     }
 
-    // If a response is in progress, restart the reveal timer at the new rate
-    // so captions stay in sync with the updated playback speed.
-    if (responseActiveRef.current) {
+    // If a response's caption is already revealing, restart the timer at the new
+    // rate so it stays in sync. Only when the reveal has actually started (audio
+    // playing) — never kick it off early from a rate change.
+    if (responseActiveRef.current && revealStartedRef.current) {
       startRevealTimer();
     }
   }, [playbackRate, startRevealTimer]);
@@ -241,6 +244,7 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
     startTimeRef.current = null;
     transcriptAccumRef.current = '';
     displayCountRef.current = 0;
+    revealStartedRef.current = false;
     responseActiveRef.current = false;
     setIsSpeaking(false);
     setSessionInfo(null);
@@ -588,19 +592,28 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
           response?: { id?: string; usage?: Record<string, unknown> };
         };
 
-        // Reset transcript and start paced reveal on new response
+        // Reset transcript on a new response. The reveal is NOT started here —
+        // it begins with the first audio chunk (below) so the caption is aligned
+        // with when the tutor actually starts speaking, not with the earlier
+        // response.created (which precedes audio by the model's first-token
+        // latency and would make the caption run ahead of the voice).
         if (ev.type === 'response.created') {
           responseActiveRef.current = true;
           transcriptAccumRef.current = '';
           displayCountRef.current = 0;
+          revealStartedRef.current = false;
           setTranscriptText('');
-          // Start reveal timer scaled to current playback rate.
-          // Slower speed → larger interval → captions advance in sync with audio.
-          startRevealTimer();
         }
 
         if (ev.type === 'response.output_audio.delta') {
           setIsSpeaking(true);
+          // First audio chunk of this response → align the caption reveal with
+          // the actual start of speech (scaled by playbackRate so it tracks the
+          // audio at every pace).
+          if (!revealStartedRef.current) {
+            revealStartedRef.current = true;
+            startRevealTimer();
+          }
         }
 
         // Accumulate transcript deltas into ref only — reveal timer controls display

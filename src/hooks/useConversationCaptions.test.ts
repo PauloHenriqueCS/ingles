@@ -403,6 +403,30 @@ describe('caption reveal timer — playback rate scaling', () => {
     expect(displayCount).toBe(0);
   });
 
+  it('starts the reveal on the FIRST audio chunk, not on response.created (no lead offset)', async () => {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    const code = (src as unknown as { default: string }).default;
+    const createdIdx = code.indexOf("ev.type === 'response.created'");
+    const audioIdx = code.indexOf("ev.type === 'response.output_audio.delta'");
+    expect(createdIdx).toBeGreaterThan(-1);
+    expect(audioIdx).toBeGreaterThan(-1);
+    // The response.created block must NOT start the reveal (it precedes audio).
+    const createdBlock = code.slice(createdIdx, audioIdx);
+    expect(createdBlock).not.toContain('startRevealTimer');
+    // The audio-delta block starts it, guarded so it fires once per response.
+    const audioBlock = code.slice(audioIdx, audioIdx + 400);
+    expect(audioBlock).toContain('revealStartedRef.current = true');
+    expect(audioBlock).toContain('startRevealTimer()');
+  });
+
+  it('reveals one char per tick with no catch-up burst (never runs ahead of the voice)', async () => {
+    const src = await import('../hooks/useRealtimeSession?raw');
+    const code = (src as unknown as { default: string }).default;
+    // The reveal advances by a single increment; no "step" catch-up logic.
+    expect(code).toContain('displayCountRef.current++');
+    expect(code).not.toMatch(/behind > \d+ \? 2 : 1/);
+  });
+
   it('no additional OpenAI call is made for caption text — captions use audio transcript', async () => {
     const src = await import('../hooks/useRealtimeSession?raw');
     const code = (src as unknown as { default: string }).default;
