@@ -133,6 +133,10 @@ export interface EnglishReviewSaved {
   version2Comparison: RewriteComparisonResult | null;
   version2ImprovementScore: number | null;
   version2FinalText: string | null;
+  /** When the learner explicitly concluded the activity from Feedback (V1-only
+   *  path). Presentation milestone only; may be undefined on older rows / before
+   *  the concluded_at column exists. */
+  concludedAt: string | null;
 }
 
 export interface DaySchedule {

@@ -33,3 +33,19 @@ export async function updateV2FinalText(
     .eq('id', reviewId);
   if (error) throw new Error(error.message);
 }
+
+/**
+ * Records that the learner explicitly concluded the writing activity from the
+ * Feedback step (the V1-only path). This is a presentation milestone only — the
+ * calendar/streak/curriculum credit already counts the writing at 'corrigido',
+ * so this never affects any commercial accounting. Idempotent: the caller only
+ * needs it set once. Owner-update path, same as updateV2FinalText.
+ */
+export async function markReviewConcluded(reviewId: string): Promise<void> {
+  const { error } = await supabase
+    .from('english_reviews')
+    .update({ concluded_at: new Date().toISOString() })
+    .eq('id', reviewId)
+    .is('concluded_at', null);
+  if (error) throw new Error(error.message);
+}

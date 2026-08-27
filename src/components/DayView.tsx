@@ -1,16 +1,27 @@
 import { useState, useEffect, useRef } from 'react';
 import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
-import { BrainCircuit, CheckCircle2, AlertTriangle, Target, Loader2, Moon, BookOpen, CalendarDays } from 'lucide-react';
+import { BrainCircuit, Moon, BookOpen, CalendarDays, Target as TargetIcon, Loader2 } from 'lucide-react';
 import ScreenHeader from './ScreenHeader';
-import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, MainMistake, VocabularyItem, EnglishDailyTheme, RewriteComparisonResult } from '../types';
+import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
+import { writingUiStrings } from '../i18n/writingUiStrings';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { canOfferNewWriting } from '../domain/writing/writing-practice';
+import {
+  deriveInitialStep,
+  evidenceFurthestSlot,
+  isSlotReachable,
+  maxSlot,
+  type WritingStep,
+  type WritingStepSlot,
+  type WritingFlowEvidence,
+} from '../domain/writing/writing-flow-steps';
 import { getScheduleForDate } from '../data/calendar2026';
 import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learningSettings';
 import { countWords } from '../utils/wordCount';
 import { countCharacters } from '../domain/text/text-normalization';
-import { updateReviewV2, updateV2FinalText } from '../lib/reviews';
+import { updateReviewV2, updateV2FinalText, markReviewConcluded } from '../lib/reviews';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
@@ -20,9 +31,12 @@ import { apiUrl } from '../lib/apiUrl';
 import CollapsibleBlock from './CollapsibleBlock';
 import DailyThemeCard from './DailyThemeCard';
 import MissionGrammarGuide from './MissionGrammarGuide';
-import RewriteSection from './RewriteSection';
-import PronunciationRecorder from './PronunciationRecorder';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
+import WritingStepper from './writing/WritingStepper';
+import MissionSheet from './writing/MissionSheet';
+import FeedbackStep from './writing/FeedbackStep';
+import ImproveStep from './writing/ImproveStep';
+import DoneStep from './writing/DoneStep';
 
 interface Props {
   date: string;
@@ -34,17 +48,16 @@ interface Props {
   onActivateDay?: (date: string) => Promise<void>;
 }
 
-const DIFF_OPTS: { value: Difficulty; label: string; cls: string }[] = [
-  { value: 'facil', label: 'Fácil', cls: 'bg-green-700 text-green-100' },
-  { value: 'medio', label: 'Médio', cls: 'bg-amber-700 text-amber-100' },
-  { value: 'dificil', label: 'Difícil', cls: 'bg-red-700 text-red-100' },
+const DIFF_OPTS: { value: Difficulty; label: (t: ReturnType<typeof writingUiStrings>) => string; cls: string }[] = [
+  { value: 'facil', label: (t) => t.diffEasy, cls: 'bg-green-700 text-green-100' },
+  { value: 'medio', label: (t) => t.diffMedium, cls: 'bg-amber-700 text-amber-100' },
+  { value: 'dificil', label: (t) => t.diffHard, cls: 'bg-red-700 text-red-100' },
 ];
 
 type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-type HistoryState = 'idle' | 'saved';
 
-export default function DayView({ date, entry, onSave, onBack, onNavigateToSubscription, activeWeekdays = [1,2,3,4,5], onActivateDay }: Props) {
+export default function DayView({ date, entry, onSave, onBack, onNavigateToSubscription, activeWeekdays = [1, 2, 3, 4, 5], onActivateDay }: Props) {
   const dow = new Date(date + 'T12:00:00').getDay();
   const isScheduledDay = activeWeekdays.includes(dow);
 
@@ -64,6 +77,9 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const hasContent = !!(entry?.originalText?.trim());
   const showInactiveMessage = !isPracticeDay && hasOverride !== null && !hasContent;
 
+  const focus = useCurriculumFocus();
+  const t = writingUiStrings(focus.data?.interfaceLanguage);
+
   const [title, setTitle] = useState(entry?.title ?? '');
   const [originalText, setOriginalText] = useState(entry?.originalText ?? '');
   const [difficulty, setDifficulty] = useState<Difficulty>(entry?.difficulty ?? null);
@@ -73,7 +89,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const [reviewState, setReviewState] = useState<ReviewState>(entry?.aiReview ? 'done' : 'idle');
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
-  const [historyState, setHistoryState] = useState<HistoryState>('idle');
   const [dailyTheme, setDailyTheme] = useState<EnglishDailyTheme | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [existingV2Text, setExistingV2Text] = useState<string | null>(null);
@@ -81,22 +96,72 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const [existingV2FinalText, setExistingV2FinalText] = useState<string | null>(null);
   const [ptDraft, setPtDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // True while the user is inside a freshly-started EXTRA practice of the same
-  // day ("Nova missão"). While true, the day's stored entry must NOT restore
-  // over the blank practice — the active practice is driven by local state and
-  // its own new english_reviews record. Cleared on day navigation.
-  const freshPracticeRef = useRef(false);
 
-  // Reset mission + schedule only when navigating to a different day,
-  // NOT when entry changes (draft save), so dailyTheme survives draft saves
+  // Guided-flow navigation state (a projection of the persisted work — see
+  // src/domain/writing/writing-flow-steps.ts). `step` is what the user is
+  // looking at; `furthestSlot` is how far the stepper is unlocked.
+  const [step, setStep] = useState<WritingStep>('mission');
+  const [furthestSlot, setFurthestSlot] = useState<WritingStepSlot>('mission');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [concluding, setConcluding] = useState(false);
+  const [exitConfirm, setExitConfirm] = useState(false);
+  // Which date the step was last hydrated for — so entry updates on the SAME
+  // date (e.g. a draft save) never yank the user off their current step.
+  const hydratedRef = useRef<string | null>(null);
+
+  // True while inside a freshly-started EXTRA practice ("Nova missão"): the
+  // day's stored entry must NOT restore over the blank practice. Cleared on day
+  // navigation.
+  const freshPracticeRef = useRef(false);
+  // Guards the step-independent mission restore below (fires at most once/date).
+  const themeRestoreStartedRef = useRef(false);
+
+  function advanceFurthest(slot: WritingStepSlot) {
+    setFurthestSlot((prev) => maxSlot(prev, slot));
+  }
+
+  // Restore today's already-assigned mission WITHOUT mounting DailyThemeCard.
+  // DailyThemeCard self-restores, but it only renders on the Missão step — when
+  // the flow resumes directly into Escrever/Feedback/Concluído (a saved draft or
+  // a completed review), the mission would otherwise be missing, breaking the
+  // mission summary/sheet and, on a resumed draft, the exact-mission credit
+  // binding (generatedThemeId). This read-only 'retrieve' makes NO AI call and
+  // consumes nothing; it only fills dailyTheme if still empty.
+  function ensureThemeRestored() {
+    if (themeRestoreStartedRef.current) return;
+    themeRestoreStartedRef.current = true;
+    (async () => {
+      try {
+        const authHeader = await getAuthHeader();
+        const res = await fetch(apiUrl('/api/generate-theme'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ mode: 'retrieve' }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data?.theme) return;
+        setDailyTheme((prev) => prev ?? { ...(data.theme as EnglishDailyTheme), id: data.themeId ?? undefined });
+      } catch {
+        // best-effort — never blocks the resumed step
+      }
+    })();
+  }
+
+  // Reset mission + schedule only when navigating to a different day.
   useEffect(() => {
     setDailyTheme(null);
     freshPracticeRef.current = false;
+    themeRestoreStartedRef.current = false;
+    hydratedRef.current = null;
   }, [date]);
 
+  // Seed the editor surface from the stored entry AND hydrate the stepper from
+  // the strongest persisted evidence (entry + english_reviews). Step hydration
+  // happens ONCE per date (hydratedRef) — after the async review fetch settles,
+  // so a concluded/V2 writing restores to Concluído and not to Feedback. Plain
+  // entry updates on the same date only re-seed fields, never the step.
   useEffect(() => {
-    // A "Nova missão" extra practice owns the screen from local state; never let
-    // the day's stored entry clobber it (a date change clears the flag above).
     if (freshPracticeRef.current) return;
     setTitle(entry?.title ?? '');
     setOriginalText(entry?.originalText ?? '');
@@ -107,22 +172,60 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     setReviewState(entry?.aiReview ? 'done' : 'idle');
     setReviewError(null);
     setSaveState('idle');
-    setHistoryState('idle');
     setReviewId(null);
     setExistingV2Text(null);
     setExistingV2Comparison(null);
     setExistingV2FinalText(null);
+
+    const shouldHydrate = hydratedRef.current !== date;
+
     if (entry?.aiReview) {
+      // A reviewed writing resumes past the Missão step, so restore the mission
+      // independently (DailyThemeCard won't mount here).
+      ensureThemeRestored();
+      // Provisional (no V2/concluded info yet); the fetch below refines it.
+      if (shouldHydrate) {
+        setStep('feedback');
+        setFurthestSlot('feedback');
+      }
       fetchReviewByDate(date)
         .then((r) => {
-          if (r) {
-            setReviewId(r.id);
-            setExistingV2Text(r.version2Text ?? null);
-            setExistingV2Comparison(r.version2Comparison ?? null);
-            setExistingV2FinalText(r.version2FinalText ?? null);
+          if (!r) return;
+          setReviewId(r.id);
+          setExistingV2Text(r.version2Text ?? null);
+          setExistingV2Comparison(r.version2Comparison ?? null);
+          setExistingV2FinalText(r.version2FinalText ?? null);
+          const ev: WritingFlowEvidence = {
+            hasTheme: true,
+            hasText: !!entry?.originalText?.trim(),
+            hasReview: true,
+            hasV2: !!r.version2Comparison,
+            hasFinalVersion: !!r.version2FinalText,
+            concluded: !!r.concludedAt || !!r.version2FinalText,
+          };
+          if (shouldHydrate) {
+            setStep(deriveInitialStep(ev));
+            setFurthestSlot((prev) => maxSlot(prev, evidenceFurthestSlot(ev)));
+            hydratedRef.current = date;
           }
         })
-        .catch(() => {});
+        .catch(() => { if (shouldHydrate) hydratedRef.current = date; });
+    } else if (shouldHydrate) {
+      const ev: WritingFlowEvidence = {
+        hasTheme: false,
+        hasText: !!entry?.originalText?.trim(),
+        hasReview: false,
+        hasV2: false,
+        hasFinalVersion: false,
+        concluded: false,
+      };
+      const initial = deriveInitialStep(ev);
+      // A resumed draft lands on Escrever without mounting DailyThemeCard —
+      // restore the mission so the summary/sheet + credit binding are present.
+      if (initial !== 'mission') ensureThemeRestored();
+      setStep(initial);
+      setFurthestSlot(evidenceFurthestSlot(ev));
+      hydratedRef.current = date;
     }
   }, [date, entry]);
 
@@ -138,17 +241,13 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   // Persistence of the final corrected version is normally done server-side by
   // /api/compare-rewrite (idempotent, bound to the review). We only persist here
   // as a fallback when the backend reported it did not (no reviewId). Local UI
-  // state is set ONLY after persistence is confirmed, and any failure is thrown
-  // so the caller can surface it instead of showing a false "done".
+  // state is set ONLY after persistence is confirmed, and any failure is thrown.
   async function handleV2FinalText(finalText: string, alreadyPersisted: boolean) {
     if (!alreadyPersisted) {
       if (!reviewId) throw new Error('missing reviewId — cannot persist final text');
       await updateV2FinalText(reviewId, finalText);
     }
     setExistingV2FinalText(finalText);
-    // Item 9: the final corrected version marks the entry as "revisado".
-    // Reflect it locally right away; the backend already persisted the same
-    // status transition on writing_entries.
     setStatus('revisado');
   }
 
@@ -164,13 +263,8 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
   // Clears EVERY piece of the writing/review surface that belongs to a specific
   // mission, so the next mission starts identical to a freshly-generated,
-  // not-yet-answered one: título, ideia em português, seu texto + local draft,
-  // dificuldade, and the whole AI report (nota geral, Writing Level, gramática/
-  // vocabulário/naturalidade/fluência, resumo do professor, texto corrigido,
-  // próxima prática, feedback detalhado, estado "Revisado"), Versão 2, and the
-  // reviewId the report/Versão 2/pronúncia bind to. It deliberately does NOT
-  // touch dailyTheme (the caller sets the next mission) and performs NO network
-  // call and consumes nothing — the previous mission's history stays untouched.
+  // not-yet-answered one. Deliberately does NOT touch dailyTheme (the caller
+  // sets the next mission) and performs NO network call and consumes nothing.
   function resetWritingState() {
     setTitle('');
     setOriginalText('');
@@ -182,26 +276,18 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     setReviewState('idle');
     setReviewError(null);
     setSaveState('idle');
-    setHistoryState('idle');
     setReviewId(null);
     setExistingV2Text(null);
     setExistingV2Comparison(null);
     setExistingV2FinalText(null);
+    setStep('mission');
+    setFurthestSlot('mission');
   }
 
-  // "Nova missão": start a NEW, independent writing practice for the same day
-  // (only offered when the plan still allows another writing today — see the
-  // completion UI). This ONLY resets the on-screen practice to a blank state and
-  // refreshes the server-authoritative quota; it never generates a mission or
-  // consumes anything by itself, so a double-tap is harmless. The user then
-  // requests a fresh mission (DailyThemeCard, for the CURRENT recorte) and
-  // submits a new review — a distinct english_reviews record + its own curricular
-  // credit, re-validated server-side (reserve_writing_review) before any AI call.
-  // The calendar day stays "concluído"; no previous review is lost (history reads
-  // every english_reviews row).
+  // "Nova missão": start a NEW, independent writing practice for the same day.
+  // Resets the on-screen practice to blank and refreshes the server-authoritative
+  // quota; never generates a mission or consumes anything by itself.
   function handleNewMission() {
-    // A fresh extra practice owns the screen from local state; the day's stored
-    // entry (the previous mission) must not restore over it. Cleared on day nav.
     freshPracticeRef.current = true;
     resetWritingState();
     setDailyTheme(null); // re-open "Receber missão" for a brand-new mission
@@ -209,18 +295,46 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  // A genuinely NEW mission was generated in DailyThemeCard (re-roll "Outra
-  // missão" or first "Receber missão"). The new mission has its OWN identity, so
-  // adopt its theme AND wipe the previous mission's writing/review surface in the
-  // same commit — otherwise the old text/report/"Revisado" state would leak into
-  // it (the reported bug). Marked a fresh practice so the stored entry can't
-  // clobber the blank surface. Restoring a mission on entry uses onThemeReady
-  // instead and must NOT reset — hence two separate callbacks.
+  // A genuinely NEW mission was generated in DailyThemeCard. Adopt its theme AND
+  // wipe the previous mission's writing/review surface in the same commit.
   function handleMissionGenerated(newTheme: EnglishDailyTheme) {
     freshPracticeRef.current = true;
     resetWritingState();
     setDailyTheme(newTheme);
     entitlements.refetch();
+  }
+
+  function handleStartWriting() {
+    setStep('write');
+    advanceFurthest('write');
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+    // Focus the textarea after the step renders.
+    setTimeout(() => textareaRef.current?.focus(), 60);
+  }
+
+  function handleNavigate(slot: WritingStepSlot) {
+    if (!isSlotReachable(slot, furthestSlot)) return;
+    setSheetOpen(false);
+    setStep(slot); // 'feedback' slot also exits the improve sub-state
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function handleImprove() {
+    setStep('improve');
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function handleConclude() {
+    setConcluding(true);
+    if (reviewId) {
+      // Best-effort — the calendar/curriculum credit already counts this writing
+      // at 'corrigido'; this only makes the Concluído screen sticky on refresh.
+      markReviewConcluded(reviewId).catch((err) => console.error('conclude persist failed:', err));
+    }
+    setStep('done');
+    advanceFurthest('done');
+    setConcluding(false);
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function handleSaveDraft() {
@@ -248,11 +362,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     if (!originalText.trim()) return;
     setReviewState('loading');
     setReviewError(null);
-    // One id per submit action (this click) — reused only if the browser
-    // itself retries this exact fetch. The backend uses it to atomically
-    // reserve today's review slot before calling the AI, so a retry or a
-    // second overlapping request for this exact attempt never double-counts
-    // or double-charges.
     const attemptId = crypto.randomUUID();
     try {
       const authHeader = await getAuthHeader();
@@ -262,15 +371,9 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
         body: JSON.stringify({
           entryId: date,
           originalText,
-          // Pedagogy (theme/objective/tense/level) comes ONLY from the
-          // curriculum-driven mission (dailyTheme) — never from the legacy
-          // calendar schedule. These are contextual hints; review-text resolves
-          // the authoritative pedagogy from the user's CURRENT recorte server-side.
           theme: dailyTheme?.themeEn ?? '',
           grammarGoal: dailyTheme?.objective ?? '',
           mainTense: dailyTheme?.verbTense ?? '',
-          // A Escrita é sempre uma Escrita normal — a revisão de erros virou
-          // uma atividade independente ("Revisar meus erros").
           mode: 'normal',
           missionTitle: dailyTheme?.title ?? '',
           studentLevel: dailyTheme?.level ?? '',
@@ -278,10 +381,6 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
           reviewCategory: dailyTheme?.category ?? null,
           reviewDifficulty: difficulty ?? dailyTheme?.difficulty ?? null,
           missionSnapshot: dailyTheme ? buildMissionSnapshot(dailyTheme) : null,
-          // The EXACT mission this writing was generated for. The server
-          // validates ownership + identity and binds the curricular credit to
-          // THIS recorte — never "the latest theme" (blocker 2). Client sends
-          // only the resource id; it can never forge a recorte/version.
           generatedThemeId: dailyTheme?.id ?? null,
         }),
       });
@@ -294,15 +393,17 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
       if (!res.ok) {
         throw new Error(data.message ?? data.error ?? `Erro ${res.status}`);
       }
-      // The backend has already recorded the review (and its consumption)
-      // atomically by the time this response arrives — refetch now reflects
-      // the true, final count, never a stale pre-save snapshot.
       entitlements.refetch();
       const feedback = data.feedback!;
       const ts = data.reviewedAt ?? new Date().toISOString();
       setAiReview(feedback);
       setReviewedAt(ts);
       setReviewState('done');
+      // Advance to the Feedback step now that V1 has a report.
+      setStep('feedback');
+      advanceFurthest('feedback');
+      hydratedRef.current = date;
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
       await onSave({
         date, title, originalText,
         correctedText: feedback.correctedText,
@@ -314,11 +415,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
       if (data.reviewId) {
         setReviewId(data.reviewId);
-        // Genuine writing completion persisted (english_reviews row) — AppsFlyer
-        // funnel. Fire-and-forget & fail-safe; never blocks the review flow.
         void trackActivityCompleted('writing');
-        setHistoryState('saved');
-        setTimeout(() => setHistoryState('idle'), 6000);
         updateLearningMemory().catch((err) => console.error('Memory update failed:', err));
         if (feedback.mainMistakes.length > 0) {
           createReviewGroupFromReview({
@@ -339,9 +436,14 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     }
   }
 
-  function scrollToWritingField() {
-    textareaRef.current?.focus();
-    textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  function handleBackRequest() {
+    const hasUnsavedDraft =
+      !aiReview && originalText.trim().length > 0 && originalText !== (entry?.originalText ?? '');
+    if (hasUnsavedDraft) {
+      setExitConfirm(true);
+      return;
+    }
+    onBack();
   }
 
   const words = countWords(originalText);
@@ -352,18 +454,12 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
   const entitlements = usePlanEntitlements();
   const writingEntitlements = entitlements.data?.writing ?? null;
+  const pronunciationEntitlements = entitlements.data?.pronunciation ?? null;
   const writingLoading = entitlements.data === null;
   const writingDisabledByPlan = writingEntitlements ? !writingEntitlements.enabled : false;
   const reviewsBlocked = writingEntitlements ? !writingEntitlements.reviews.canStart : false;
-  // Character counts use the SHARED code-point counter (countCharacters), the
-  // exact rule the backend enforces (api/_entitlements/require-feature-access),
-  // so the client never accepts a text the server would reject on length.
   const charCount = countCharacters(originalText);
   const titleCharCount = countCharacters(title);
-  // The limit comes from the active plan entitlement (writing.max_characters_per_text)
-  // — never hardcoded. A configured limit is only enforced when it is a positive,
-  // finite number; unlimited plans, or a not-yet-loaded/absent config, mean "no
-  // enforceable limit" here — we never silently assume an arbitrary cap.
   const rawMaxChars = writingEntitlements && !writingEntitlements.maxCharactersUnlimited
     ? writingEntitlements.maxCharactersPerText
     : null;
@@ -372,531 +468,326 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const nearLimit = maxChars !== null && overLimitBy === 0 && charCount >= Math.floor(maxChars * 0.9);
 
   const canSubmit = !writingLoading && !writingDisabledByPlan && !reviewsBlocked && overLimitBy === 0;
-
-  // The current mission is finished once its AI report is on screen. A top-of-
-  // screen "Nova missão" is offered only when the plan still allows another
-  // writing today — the SAME server-authoritative gate as the bottom action
-  // (reviews.canStart, refreshed after each review). It never bypasses the limit:
-  // reserve_writing_review re-checks it server-side before any AI call.
-  const missionReviewed = reviewState === 'done' && !!aiReview;
   const canStartNewWriting = canOfferNewWriting(writingEntitlements, writingDisabledByPlan);
-  const remainingWritingsLabel = writingEntitlements && !writingEntitlements.reviews.unlimited
-    ? `${writingEntitlements.reviews.remaining} escrit${writingEntitlements.reviews.remaining === 1 ? 'a restante' : 'as restantes'} hoje`
+  const remainingWritings = writingEntitlements && !writingEntitlements.reviews.unlimited
+    ? writingEntitlements.reviews.remaining
     : null;
 
-  const saveBtnCls =
-    saveState === 'saved' ? 'bg-green-700 text-white' :
-    saveState === 'error' ? 'bg-red-800 text-white' :
-    saveState === 'saving' ? 'bg-slate-700 text-slate-400' :
-    'bg-slate-700 hover:bg-slate-600 text-slate-200';
-
-  const saveBtnLabel =
-    saveState === 'saving' ? 'Salvando...' :
-    saveState === 'saved' ? '✓ Salvo!' :
-    saveState === 'error' ? 'Erro' :
-    'Salvar rascunho';
+  const v1Locked = !!aiReview; // once V1 is analyzed, its text is read-only
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
-      {/* Standardized header (back + Orodim logo), present through EVERY writing
-          sub-state (mission creating/loaded, filling, analysis, versão 2,
-          result) because it sits outside the conditional content below. The
-          date is the title, the current mission the subtitle, and the save/
-          review status stays as the trailing pill. */}
       <ScreenHeader
-        onBack={onBack}
+        onBack={handleBackRequest}
         title={dateLabel}
         subtitle={dailyTheme?.title ?? '—'}
-        right={<StatusBadgePill status={status} />}
       />
+
+      {!showInactiveMessage && (
+        <div className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 py-2.5 max-w-lg mx-auto w-full">
+          <WritingStepper
+            current={step}
+            furthest={furthestSlot}
+            improving={step === 'improve'}
+            onNavigate={handleNavigate}
+            t={t}
+          />
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-4 pb-10">
         {showInactiveMessage ? (
           <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
         ) : (
           <>
-        {/* Top-of-screen "Nova missão": once the current mission is revisada and
-            the plan still allows another writing today, the action is available
-            here — pinned to the top of the scroll area — so the user never has to
-            scroll to the end to start the next one. Same handler and same
-            server-authoritative gate as the bottom action. */}
-        {missionReviewed && canStartNewWriting && (
-          <div className="sticky top-0 z-10 -mx-4 -mt-4 px-4 pt-4 pb-3 bg-slate-900/95 backdrop-blur">
-            <div className="flex items-center justify-between gap-3 bg-slate-800 border border-blue-800/40 rounded-xl p-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <CheckCircle2 className="w-4 h-4 shrink-0 text-green-400" strokeWidth={2} aria-hidden="true" />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-200 truncate">Missão revisada</p>
-                  {remainingWritingsLabel && (
-                    <p className="text-xs text-slate-500 truncate">{remainingWritingsLabel}</p>
+            {!writingLoading && writingDisabledByPlan && (
+              <ActivityAccessBlocked compact onSubscribe={onNavigateToSubscription} />
+            )}
+
+            {/* ── Step: Missão ── */}
+            {step === 'mission' && (
+              <>
+                <DailyThemeCard
+                  theme={dailyTheme}
+                  onThemeReady={(t2) => { setDailyTheme(t2); entitlements.refetch(); }}
+                  onMissionGenerated={handleMissionGenerated}
+                  onStartWriting={handleStartWriting}
+                  writingEntitlements={writingEntitlements}
+                  startLabel={t.startWriting}
+                />
+                {dailyTheme && (
+                  <MissionGrammarGuide
+                    key={dailyTheme.id ?? dailyTheme.title}
+                    theme={dailyTheme}
+                    onSkipToWriting={handleStartWriting}
+                  />
+                )}
+              </>
+            )}
+
+            {/* ── Step: Escrever ── */}
+            {step === 'write' && (
+              <>
+                {dailyTheme && (
+                  <button
+                    type="button"
+                    onClick={() => setSheetOpen(true)}
+                    className="w-full flex items-center justify-between gap-3 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-left hover:border-slate-600 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-100 truncate">{dailyTheme.title}</p>
+                      <p className="text-xs text-slate-500 truncate">
+                        {dailyTheme.objective || dailyTheme.mission || dailyTheme.themePtBr || ''}
+                      </p>
+                    </div>
+                    <span className="shrink-0 flex items-center gap-1 text-xs text-blue-400 font-medium">
+                      <TargetIcon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
+                      {t.missionSummaryAction}
+                    </span>
+                  </button>
+                )}
+
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label className="text-xs text-slate-400">{t.titleLabel} <span className="text-slate-600">· {t.titleOptional}</span></label>
+                    <span className="text-xs text-slate-500">{`${titleCharCount.toLocaleString('pt-BR')} caracteres`}</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    readOnly={v1Locked}
+                    placeholder={t.titlePlaceholder}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500 read-only:opacity-70"
+                  />
+                </div>
+
+                {!v1Locked && (
+                  <CollapsibleBlock title={t.ptIdeaTitle} badge={t.optional} defaultOpen={false}>
+                    <div className="space-y-2 pt-1">
+                      <p className="text-xs text-slate-500">{t.ptIdeaHint}</p>
+                      <textarea
+                        value={ptDraft}
+                        onChange={(e) => setPtDraft(e.target.value)}
+                        placeholder={t.ptIdeaPlaceholder}
+                        className="w-full bg-slate-700 border border-slate-600 rounded-lg p-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-slate-500 min-h-[120px] resize-none"
+                      />
+                      {ptDraft && (
+                        <button type="button" onClick={() => setPtDraft('')} className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+                          {t.ptIdeaClear}
+                        </button>
+                      )}
+                    </div>
+                  </CollapsibleBlock>
+                )}
+
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label className="text-xs text-slate-400">{t.yourTextLabel}</label>
+                    <span className={`text-xs ${overLimitBy > 0 ? 'text-red-400' : nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {maxChars !== null ? t.charsOfMax(charCount, maxChars) : t.wordsChars(words, charCount)}
+                    </span>
+                  </div>
+                  <textarea
+                    ref={textareaRef}
+                    value={originalText}
+                    onChange={(e) => setOriginalText(e.target.value)}
+                    readOnly={v1Locked}
+                    placeholder={t.yourTextPlaceholder}
+                    aria-invalid={overLimitBy > 0}
+                    className={`w-full bg-slate-800 border rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none min-h-[200px] resize-none read-only:opacity-80 ${overLimitBy > 0 ? 'border-red-500 focus:border-red-500' : 'border-slate-700 focus:border-blue-500'}`}
+                  />
+                  {overLimitBy > 0 && (
+                    <p className="text-xs text-red-400 mt-1.5">{ENTITLEMENT_MESSAGES.characterOverLimitAfterPlanChange(overLimitBy)}</p>
                   )}
                 </div>
-              </div>
-              <button
-                onClick={handleNewMission}
-                className="shrink-0 px-4 py-2 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-              >
-                Nova missão
-              </button>
-            </div>
-          </div>
-        )}
 
-        {/* No valid trial/subscription access — banner only, never replaces
-            the page: past content on this day (if any) must stay viewable,
-            only starting new writing/review activity is blocked. */}
-        {!writingLoading && writingDisabledByPlan && (
-          <ActivityAccessBlocked compact onSubscribe={onNavigateToSubscription} />
-        )}
+                {!v1Locked && (
+                  <div>
+                    <label className="text-xs text-slate-400 mb-2 block">{t.difficultyLabel}</label>
+                    <div className="flex gap-2">
+                      {DIFF_OPTS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => setDifficulty(difficulty === opt.value ? null : opt.value)}
+                          className={`px-3 py-1.5 rounded-md text-xs font-medium transition-opacity ${opt.cls} ${difficulty === opt.value ? 'opacity-100 ring-2 ring-white/30' : 'opacity-40'}`}
+                        >
+                          {opt.label(t)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-        <DailyThemeCard
-          theme={dailyTheme}
-          // Restore-only: re-hydrate today's mission on entry WITHOUT resetting
-          // the writing surface — the stored entry belongs to this exact mission.
-          onThemeReady={(t) => { setDailyTheme(t); entitlements.refetch(); }}
-          // A brand-new mission: adopt it AND reset the writing/review surface so
-          // nothing from the previous mission leaks in.
-          onMissionGenerated={handleMissionGenerated}
-          onStartWriting={scrollToWritingField}
-          writingEntitlements={writingEntitlements}
-        />
+                {writingDisabledByPlan && (
+                  <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.featureUnavailable}</p>
+                )}
+                {!writingDisabledByPlan && reviewsBlocked && !v1Locked && (
+                  <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.writingReviewsExhausted}</p>
+                )}
+                {!writingDisabledByPlan && !reviewsBlocked && writingEntitlements && !v1Locked && (
+                  <p className="text-xs text-slate-500 text-right -mb-1">
+                    {writingEntitlements.reviews.unlimited
+                      ? ENTITLEMENT_MESSAGES.unlimitedLabel
+                      : `${writingEntitlements.reviews.remaining} revis${writingEntitlements.reviews.remaining === 1 ? 'ão restante' : 'ões restantes'} hoje`}
+                  </p>
+                )}
 
-        {dailyTheme && (
-          // Keyed by mission identity so the pre-writing exercises (which hold
-          // their own answered/checked state) fully remount for a new mission and
-          // never carry an answer over from the previous one.
-          <MissionGrammarGuide
-            key={dailyTheme.id ?? dailyTheme.title}
-            theme={dailyTheme}
-            onSkipToWriting={scrollToWritingField}
-          />
-        )}
+                {v1Locked ? (
+                  <button
+                    onClick={() => handleNavigate('feedback')}
+                    className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+                  >
+                    {t.stepFeedback}
+                  </button>
+                ) : (
+                  <div className="flex gap-3">
+                    <button
+                      onClick={handleSaveDraft}
+                      disabled={saveState === 'saving'}
+                      className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                        saveState === 'saved' ? 'bg-green-700 text-white' :
+                        saveState === 'error' ? 'bg-red-800 text-white' :
+                        saveState === 'saving' ? 'bg-slate-700 text-slate-400' :
+                        'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+                    >
+                      {saveState === 'saving' ? t.saving : saveState === 'saved' ? t.savedShort : saveState === 'error' ? t.saveError : t.saveDraft}
+                    </button>
+                    <button
+                      onClick={handleReview}
+                      disabled={!originalText.trim() || isReviewing || !canSubmit}
+                      className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {isReviewing ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" strokeWidth={2} />
+                          {t.analyzing}
+                        </span>
+                      ) : t.reviewWithAi}
+                    </button>
+                  </div>
+                )}
 
-        <div>
-          <div className="flex justify-between mb-2">
-            <label className="text-xs text-slate-400">Título</label>
-            <span className="text-xs text-slate-500">
-              {`${titleCharCount.toLocaleString('pt-BR')} caracteres`}
-            </span>
-          </div>
-          <input
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Ex: My Morning Routine"
-            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
-          />
-        </div>
+                {reviewState === 'loading' && (
+                  <div className="bg-slate-800 rounded-xl p-8 text-center space-y-3">
+                    <BrainCircuit className="w-10 h-10 text-blue-400/60 shrink-0 mx-auto" strokeWidth={1.5} aria-hidden="true" />
+                    <p className="text-slate-200 font-medium">Seu professor está analisando seu texto...</p>
+                    <p className="text-slate-500 text-sm">Isso pode levar alguns segundos</p>
+                  </div>
+                )}
 
-        {/* Portuguese draft — local only, never sent anywhere */}
-        <CollapsibleBlock title="Ideia em português" badge="opcional" defaultOpen={false}>
-          <div className="space-y-2 pt-1">
-            <p className="text-xs text-slate-500">
-              Esse rascunho é só para você. A IA vai avaliar apenas o texto em inglês.
-            </p>
-            <textarea
-              value={ptDraft}
-              onChange={(e) => setPtDraft(e.target.value)}
-              placeholder="Escreva aqui sua ideia em português. Esse texto não será corrigido nem salvo."
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg p-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-slate-500 min-h-[120px] resize-none"
-            />
-            {ptDraft && (
-              <button
-                type="button"
-                onClick={() => setPtDraft('')}
-                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                Limpar rascunho
-              </button>
+                {reviewState === 'error' && (
+                  <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-2">
+                    <p className="text-red-300 text-sm font-medium">Erro ao revisar</p>
+                    {reviewError && <p className="text-red-400 text-xs break-all">{reviewError}</p>}
+                    <button
+                      onClick={() => { setReviewState('idle'); setReviewError(null); }}
+                      className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                    >
+                      Tentar novamente
+                    </button>
+                  </div>
+                )}
+              </>
             )}
-          </div>
-        </CollapsibleBlock>
 
-        <div>
-          <div className="flex justify-between mb-2">
-            <label className="text-xs text-slate-400">Seu texto</label>
-            <span className={`text-xs ${overLimitBy > 0 ? 'text-red-400' : nearLimit ? 'text-amber-400' : 'text-slate-500'}`}>
-              {maxChars !== null
-                ? `${charCount.toLocaleString('pt-BR')} / ${maxChars.toLocaleString('pt-BR')} caracteres`
-                : `${words.toLocaleString('pt-BR')} palavras · ${charCount.toLocaleString('pt-BR')} caracteres`}
-            </span>
-          </div>
-          <textarea
-            ref={textareaRef}
-            value={originalText}
-            onChange={(e) => setOriginalText(e.target.value)}
-            placeholder="Escreva seu texto em inglês aqui..."
-            aria-invalid={overLimitBy > 0}
-            className={`w-full bg-slate-800 border rounded-xl p-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none min-h-[200px] resize-none ${overLimitBy > 0 ? 'border-red-500 focus:border-red-500' : 'border-slate-700 focus:border-blue-500'}`}
-          />
-          {overLimitBy > 0 && (
-            <p className="text-xs text-red-400 mt-1.5">{ENTITLEMENT_MESSAGES.characterOverLimitAfterPlanChange(overLimitBy)}</p>
-          )}
-        </div>
-
-        <div>
-          <label className="text-xs text-slate-400 mb-2 block">Dificuldade</label>
-          <div className="flex gap-2">
-            {DIFF_OPTS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setDifficulty(difficulty === opt.value ? null : opt.value)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-opacity ${opt.cls} ${
-                  difficulty === opt.value ? 'opacity-100 ring-2 ring-white/30' : 'opacity-40'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {writingDisabledByPlan && (
-          <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.featureUnavailable}</p>
-        )}
-        {!writingDisabledByPlan && reviewsBlocked && (
-          <p className="text-xs text-amber-400">{ENTITLEMENT_MESSAGES.writingReviewsExhausted}</p>
-        )}
-        {!writingDisabledByPlan && !reviewsBlocked && writingEntitlements && (
-          <p className="text-xs text-slate-500 text-right -mb-1">
-            {writingEntitlements.reviews.unlimited
-              ? ENTITLEMENT_MESSAGES.unlimitedLabel
-              : `${writingEntitlements.reviews.remaining} revis${writingEntitlements.reviews.remaining === 1 ? 'ão restante' : 'ões restantes'} hoje`}
-          </p>
-        )}
-
-        <div className="flex gap-3">
-          <button
-            onClick={handleSaveDraft}
-            disabled={saveState === 'saving'}
-            className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors ${saveBtnCls}`}
-          >
-            {saveBtnLabel}
-          </button>
-          <button
-            onClick={handleReview}
-            disabled={!originalText.trim() || isReviewing || !canSubmit}
-            className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {isReviewing ? (
-              <span className="flex items-center justify-center gap-2">
-                <Loader2 className="w-4 h-4 shrink-0 animate-spin" strokeWidth={2} />
-                Analisando...
-              </span>
-            ) : 'Revisar com IA'}
-          </button>
-        </div>
-
-        {historyState === 'saved' && (
-          <p className="text-xs text-green-500 text-center py-1">✓ Revisão salva no histórico.</p>
-        )}
-
-        {reviewState === 'loading' && (
-          <div className="bg-slate-800 rounded-xl p-8 text-center space-y-3">
-            <BrainCircuit className="w-10 h-10 text-blue-400/60 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-            <p className="text-slate-200 font-medium">Seu professor está analisando seu texto...</p>
-            <p className="text-slate-500 text-sm">Isso pode levar alguns segundos</p>
-          </div>
-        )}
-
-        {reviewState === 'error' && (
-          <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 space-y-2">
-            <p className="text-red-300 text-sm font-medium">Erro ao revisar</p>
-            {reviewError && (
-              <p className="text-red-400 text-xs break-all">{reviewError}</p>
-            )}
-            <button
-              onClick={() => { setReviewState('idle'); setReviewError(null); }}
-              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              Tentar novamente
-            </button>
-          </div>
-        )}
-
-        {reviewState === 'done' && aiReview && (
-          <>
-            <CollapsibleBlock title="Relatório do Professor" defaultOpen={true}>
-              <TeacherReport
+            {/* ── Step: Feedback ── */}
+            {step === 'feedback' && aiReview && (
+              <FeedbackStep
                 review={aiReview}
                 grammarObjective={dailyTheme?.objective ?? ''}
-                onReviewAgain={handleReview}
-                reviewing={isReviewing}
+                onConclude={handleConclude}
+                onImprove={handleImprove}
+                concluding={concluding}
+                t={t}
               />
-            </CollapsibleBlock>
-            <CollapsibleBlock
-              title="Versão 2"
-              defaultOpen={!!(existingV2Text || existingV2Comparison)}
-            >
-              <RewriteSection
-                key={reviewId ?? 'no-review'}
+            )}
+
+            {/* ── Step: Melhorar (improve) ── */}
+            {step === 'improve' && aiReview && (
+              <ImproveStep
                 originalText={originalText}
                 aiReview={aiReview}
                 reviewId={reviewId ?? undefined}
                 initialV2Text={existingV2Text ?? undefined}
                 initialV2Comparison={existingV2Comparison ?? undefined}
                 initialV2FinalText={existingV2FinalText ?? undefined}
+                analyzed={!!existingV2Comparison}
                 onSaveV2={handleSaveV2}
                 onV2FinalText={handleV2FinalText}
+                onAnalyzed={() => advanceFurthest('feedback')}
+                onBackToFeedback={() => handleNavigate('feedback')}
+                onConclude={handleConclude}
+                t={t}
               />
-            </CollapsibleBlock>
-            <CollapsibleBlock title="Treino de pronúncia" defaultOpen={false}>
-              {existingV2FinalText ? (
-                <PronunciationRecorder
-                  key={`pronunciation-${reviewId ?? 'no-review'}-final`}
-                  referenceText={existingV2FinalText}
-                  reviewId={reviewId}
-                />
-              ) : existingV2Text ? (
-                <div className="py-3 space-y-1">
-                  <p className="text-sm text-slate-400">Aguardando versão final corrigida.</p>
-                  <p className="text-xs text-slate-500">Gere a versão final na seção Versão 2 para treinar pronúncia com o texto corrigido.</p>
-                </div>
-              ) : (
-                <PronunciationRecorder
-                  key={`pronunciation-${reviewId ?? 'no-review'}-v1`}
-                  referenceText={aiReview.correctedText}
-                  reviewId={reviewId}
-                />
-              )}
-            </CollapsibleBlock>
+            )}
 
-            {/* Next writing practice — shown only when the plan still allows
-                another writing today (server-authoritative: reviews.canStart is
-                computed from consumption vs the plan limit, refreshed after each
-                review). When the daily quota is exhausted, no action is offered
-                (the "exhausted" note in the compose area above informs the user),
-                and reserve_writing_review would reject a forged request anyway. */}
-            {canStartNewWriting && (
-              <div className="pt-1 space-y-1.5">
-                <button
-                  onClick={handleNewMission}
-                  className="w-full py-3 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-                >
-                  Nova missão
-                </button>
-                {remainingWritingsLabel && (
-                  <p className="text-xs text-slate-500 text-center">{remainingWritingsLabel}</p>
-                )}
-              </div>
+            {/* ── Step: Concluído ── */}
+            {step === 'done' && aiReview && (
+              <DoneStep
+                review={aiReview}
+                finalText={existingV2FinalText || aiReview.correctedText}
+                v2Comparison={existingV2Comparison}
+                reviewId={reviewId}
+                pronunciation={pronunciationEntitlements}
+                canStartNewWriting={canStartNewWriting}
+                remainingWritings={remainingWritings}
+                onNewMission={handleNewMission}
+                t={t}
+              />
             )}
           </>
         )}
-
-          </>
-        )}
-
-      </div>
-    </div>
-  );
-}
-
-// ── Teacher report ────────────────────────────────────────────────────────────
-
-function TeacherReport({
-  review,
-  grammarObjective,
-  onReviewAgain,
-  reviewing,
-}: {
-  review: AIFeedback;
-  grammarObjective: string;
-  onReviewAgain: () => void;
-  reviewing: boolean;
-}) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2 py-2">
-        <div className="h-px flex-1 bg-slate-700" />
-        <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">Relatório do Professor</span>
-        <div className="h-px flex-1 bg-slate-700" />
       </div>
 
-      <ScoresCard review={review} />
-      {review.summary && <SummaryCard text={review.summary} />}
-      <CorrectedTextCard text={review.correctedText} />
-      {review.mainMistakes.length > 0 && <MainMistakesCard items={review.mainMistakes} />}
-      {review.newVocabulary.length > 0 && <VocabularyCard items={review.newVocabulary} />}
-      {review.objectiveFeedback && (
-        <ObjectiveFeedbackCard text={review.objectiveFeedback} objective={grammarObjective} />
+      {sheetOpen && dailyTheme && (
+        <MissionSheet theme={dailyTheme} t={t} onClose={() => setSheetOpen(false)} />
       )}
-      {review.nextPractice && <NextPracticeCard text={review.nextPractice} />}
 
-      <button
-        onClick={onReviewAgain}
-        disabled={reviewing}
-        className="w-full py-2.5 rounded-xl text-xs text-slate-500 hover:text-slate-300 transition-colors"
-      >
-        Revisar novamente
-      </button>
+      {exitConfirm && (
+        <ExitConfirmDialog
+          t={t}
+          onLeave={() => { setExitConfirm(false); onBack(); }}
+          onStay={() => setExitConfirm(false)}
+        />
+      )}
     </div>
   );
 }
 
-// ── Scores card ───────────────────────────────────────────────────────────────
+// ── Exit confirmation ─────────────────────────────────────────────────────────
 
-function ScoresCard({ review }: { review: AIFeedback }) {
-  const scoreColor =
-    review.score >= 75 ? 'text-green-400' :
-    review.score >= 50 ? 'text-amber-400' : 'text-red-400';
-
+function ExitConfirmDialog({
+  t, onLeave, onStay,
+}: { t: ReturnType<typeof writingUiStrings>; onLeave: () => void; onStay: () => void }) {
+  const stayRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    stayRef.current?.focus();
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onStay(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onStay]);
   return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Nota Geral</p>
-          <span className={`text-6xl font-bold tabular-nums ${scoreColor}`}>{review.score}</span>
-          <span className="text-slate-500 text-lg">/100</span>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onStay(); }}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
+      <div role="dialog" aria-modal="true" aria-label={t.exitConfirmTitle}
+        className="relative w-full max-w-sm bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-4 shadow-2xl">
+        <div className="space-y-1.5">
+          <p className="text-base font-bold text-slate-100">{t.exitConfirmTitle}</p>
+          <p className="text-sm text-slate-400 leading-relaxed">{t.exitConfirmBody}</p>
         </div>
-        <div className="text-right space-y-2">
-          <p className="text-xs text-slate-400 uppercase tracking-wider">Writing Level</p>
-          <span className="block px-3 py-1.5 rounded-lg bg-blue-900 text-blue-300 text-lg font-bold">
-            {review.level}
-          </span>
+        <div className="flex flex-col gap-2">
+          <button ref={stayRef} onClick={onStay}
+            className="w-full py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors">
+            {t.exitConfirmStay}
+          </button>
+          <button onClick={onLeave}
+            className="w-full py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors">
+            {t.exitConfirmLeave}
+          </button>
         </div>
       </div>
-
-      <div className="space-y-2.5 pt-2 border-t border-slate-700">
-        <ScoreBar label="Gramática" value={review.grammar} />
-        <ScoreBar label="Vocabulário" value={review.vocabulary} />
-        <ScoreBar label="Naturalidade" value={review.naturalness} />
-        <ScoreBar label="Fluência" value={review.fluency} />
-      </div>
-    </div>
-  );
-}
-
-function ScoreBar({ label, value }: { label: string; value: number }) {
-  const color =
-    value >= 75 ? 'bg-green-500' :
-    value >= 50 ? 'bg-amber-500' : 'bg-red-500';
-  return (
-    <div className="flex items-center gap-3">
-      <span className="text-xs text-slate-400 w-24 shrink-0">{label}</span>
-      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full ${color} rounded-full`} style={{ width: `${value}%` }} />
-      </div>
-      <span className="text-xs text-slate-300 w-7 text-right tabular-nums">{value}</span>
-    </div>
-  );
-}
-
-// ── Summary ───────────────────────────────────────────────────────────────────
-
-function SummaryCard({ text }: { text: string }) {
-  return (
-    <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-5 space-y-2">
-      <p className="text-xs text-blue-400 font-medium uppercase tracking-wider">Resumo do Professor</p>
-      <p className="text-slate-200 text-sm leading-relaxed">{text}</p>
-    </div>
-  );
-}
-
-// ── Corrected text ────────────────────────────────────────────────────────────
-
-function CorrectedTextCard({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  function copy() {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <div className="flex justify-between items-center">
-        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Texto Corrigido</p>
-        <button onClick={copy} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
-          {copied ? '✓ Copiado' : 'Copiar'}
-        </button>
-      </div>
-      <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">{text}</p>
-    </div>
-  );
-}
-
-// ── Main mistakes ─────────────────────────────────────────────────────────────
-
-function MainMistakesCard({ items }: { items: MainMistake[] }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-4">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Principais Erros</p>
-      {items.map((item, i) => (
-        <div key={i} className="space-y-1.5 border-b border-slate-700 last:border-0 pb-4 last:pb-0">
-          <div className="flex gap-2 text-xs">
-            <span className="text-slate-500 shrink-0 w-24">Você escreveu:</span>
-            <span className="text-red-400 italic">"{item.original}"</span>
-          </div>
-          <div className="flex gap-2 text-xs">
-            <span className="text-slate-500 shrink-0 w-24">Correção:</span>
-            <span className="text-green-400 italic">"{item.correct}"</span>
-          </div>
-          <div className="flex gap-2 text-xs">
-            <span className="text-slate-500 shrink-0 w-24">Explicação:</span>
-            <span className="text-slate-300 leading-relaxed">{item.explanation}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Vocabulary ────────────────────────────────────────────────────────────────
-
-function VocabularyCard({ items }: { items: VocabularyItem[] }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 space-y-3">
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Vocabulário Novo</p>
-      <div className="space-y-3">
-        {items.map((item, i) => (
-          <div key={i} className="border-b border-slate-700 last:border-0 pb-3 last:pb-0">
-            <div className="flex items-baseline gap-2 mb-0.5">
-              <span className="text-blue-400 font-semibold text-sm">{item.word}</span>
-              <span className="text-slate-500 text-xs">{item.meaningPtBr}</span>
-            </div>
-            <p className="text-slate-400 text-xs italic">"{item.example}"</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Objective feedback ────────────────────────────────────────────────────────
-
-function ObjectiveFeedbackCard({ text, objective }: { text: string; objective: string }) {
-  const achieved = /cumpr|atingi|usou|utilizou|sim|yes/i.test(text);
-  return (
-    <div className={`rounded-xl p-4 space-y-2 ${
-      achieved
-        ? 'bg-green-900/20 border border-green-800/30'
-        : 'bg-amber-900/20 border border-amber-800/30'
-    }`}>
-      <div className="flex items-center gap-2">
-        {achieved
-          ? <CheckCircle2 className="w-4 h-4 shrink-0 text-green-400" strokeWidth={2} aria-hidden="true" />
-          : <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" strokeWidth={2} aria-hidden="true" />
-        }
-        <p className={`text-xs font-medium uppercase tracking-wider ${achieved ? 'text-green-400' : 'text-amber-400'}`}>
-          Feedback do Objetivo
-        </p>
-      </div>
-      {objective && <p className="text-xs text-slate-500 italic">{objective}</p>}
-      <p className="text-sm text-slate-200 leading-relaxed">{text}</p>
-    </div>
-  );
-}
-
-// ── Next practice ─────────────────────────────────────────────────────────────
-
-function NextPracticeCard({ text }: { text: string }) {
-  return (
-    <div className="bg-purple-900/20 border border-purple-800/30 rounded-xl p-5 space-y-2">
-      <div className="flex items-center gap-2">
-        <Target className="w-4 h-4 shrink-0 text-purple-400" strokeWidth={2} aria-hidden="true" />
-        <p className="text-xs text-purple-400 font-medium uppercase tracking-wider">Próxima Prática</p>
-      </div>
-      <p className="text-slate-300 text-sm leading-relaxed">{text}</p>
     </div>
   );
 }
@@ -937,25 +828,5 @@ function InactiveDayCard({ schedule, onActivate }: { schedule: DaySchedule | nul
         Praticar hoje mesmo
       </button>
     </div>
-  );
-}
-
-function StatusBadgePill({ status }: { status: Status }) {
-  const map: Record<Status, string> = {
-    'nao-iniciado': 'bg-slate-700 text-slate-400',
-    'escrito': 'bg-blue-700 text-blue-200',
-    'corrigido': 'bg-amber-700 text-amber-200',
-    'revisado': 'bg-green-700 text-green-200',
-  };
-  const labels: Record<Status, string> = {
-    'nao-iniciado': 'Não iniciado',
-    'escrito': 'Escrito',
-    'corrigido': 'Corrigido',
-    'revisado': 'Revisado',
-  };
-  return (
-    <span className={`px-2 py-1 rounded-md text-xs font-medium ${map[status]}`}>
-      {labels[status]}
-    </span>
   );
 }
