@@ -239,7 +239,8 @@ export default function App() {
   // the safe-area inset itself.
   const usesOwnHeader =
     view === 'conversation' || view === 'listening' ||
-    view === 'pronunciation-training' || view === 'error-review';
+    view === 'pronunciation-training' || view === 'error-review' ||
+    view === 'practice-reminder';
   const headerOffset = usesOwnHeader ? undefined : 'calc(3.5rem + env(safe-area-inset-top))';
 
   return (
