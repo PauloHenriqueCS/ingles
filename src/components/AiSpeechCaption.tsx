@@ -6,19 +6,41 @@ interface AiSpeechCaptionProps {
   visible: boolean;
 }
 
+// Approx height (px) reserved at the bottom for the fixed "Encerrar conversa"
+// bar + the iOS safe-area, so the current caption line is never scrolled behind it.
+const BOTTOM_RESERVE_PX = 120;
+
+/** Nearest actually-scrollable ancestor, or null when the document scrolls. */
+function getScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const oy = getComputedStyle(node).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && node.scrollHeight > node.clientHeight + 1) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const display = getDisplayCaption(text);
 
-  // Follow the caption as it grows: keep the newest line in view by scrolling a
-  // bottom anchor into view on every update. `block: 'nearest'` only scrolls when
-  // the anchor is actually out of view (so it doesn't jitter when the caption
-  // already fits), and its scroll-margin-bottom keeps the current line clear of
-  // the fixed "Encerrar conversa" bar. This makes the page auto-scroll down to
-  // track the speech, and also re-centers on each new reply.
+  // Follow the caption as it grows: if its bottom edge has dropped below the
+  // "target line" (viewport bottom minus the fixed bar), scroll DOWN by exactly
+  // that overflow so the current line stays visible just above the bar. We
+  // compute and scroll manually (rather than scrollIntoView, which no-ops when
+  // the anchor is geometrically on-screen but hidden behind the fixed bar), and
+  // only ever scroll down — never yanking the view up.
   useEffect(() => {
-    if (display) {
-      anchorRef.current?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+    if (!display) return;
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    const targetBottom = window.innerHeight - BOTTOM_RESERVE_PX;
+    const delta = Math.round(anchor.getBoundingClientRect().bottom - targetBottom);
+    if (delta > 4) {
+      const scroller = getScrollParent(anchor);
+      if (scroller) scroller.scrollBy({ top: delta, behavior: 'auto' });
+      else window.scrollBy({ top: delta, behavior: 'auto' });
     }
   }, [display]);
 
@@ -26,7 +48,7 @@ export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps)
 
   // The caption area reserves a min-height during a call so the layout doesn't
   // collapse/jump between replies. The styled box grows to fit its text (no
-  // internal scroll — the page scrolls).
+  // internal scroll — the page scrolls, and we auto-follow above).
   return (
     <div
       role="status"
@@ -48,12 +70,7 @@ export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps)
           {display}
         </p>
       )}
-      {/* Bottom scroll anchor — its margin keeps the latest line above the fixed CTA. */}
-      <div
-        ref={anchorRef}
-        aria-hidden="true"
-        style={{ scrollMarginBottom: 'calc(6rem + env(safe-area-inset-bottom))' }}
-      />
+      <div ref={anchorRef} aria-hidden="true" />
     </div>
   );
 }
