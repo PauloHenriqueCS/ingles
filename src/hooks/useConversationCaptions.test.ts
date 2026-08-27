@@ -54,15 +54,14 @@ describe('getDisplayCaption', () => {
     expect(result).toContain('How are you?');
   });
 
-  it('shows recent sentences plus in-progress text (sliding window drops old sentences)', () => {
-    // lookback=3 → needs >3 complete sentences to start dropping early ones
+  it('shows the FULL response text (the box scrolls; nothing is dropped)', () => {
     const text = 'First. Second. Third. Fourth. In progress';
     const result = getDisplayCaption(text);
-    // The most recent content must be visible
+    // Everything is available — the caption box auto-scrolls to keep the newest
+    // line visible, so we never hide earlier text of a long reply.
+    expect(result).toContain('First.');
     expect(result).toContain('Fourth.');
     expect(result).toContain('In progress');
-    // The oldest sentence is dropped when there are more than 3 complete sentences
-    expect(result).not.toContain('First.');
   });
 
   it('handles exclamation points as boundaries', () => {
@@ -87,16 +86,14 @@ describe('getDisplayCaption', () => {
     expect(getDisplayCaption('Hello')).toBe('Hello');
   });
 
-  it('handles text with only complete sentences (no in-progress) — shows up to lookback=3', () => {
-    // 2 sentences → fewer than lookback(3) → shows both
+  it('returns every complete sentence (no dropping; the box handles overflow)', () => {
     const two = 'First sentence. Second sentence.';
     expect(getDisplayCaption(two)).toBe('First sentence. Second sentence.');
 
-    // 4 sentences → older one is dropped
     const four = 'A. B. C. D.';
     const result = getDisplayCaption(four);
+    expect(result).toContain('A.');
     expect(result).toContain('D.');
-    expect(result).not.toContain('A.');
   });
 
   it('caps long text to a short window that ENDS at the current words (older text trimmed)', () => {
