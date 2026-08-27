@@ -111,8 +111,16 @@ describe('fixed bottom CTA', () => {
     expect(cta).toContain('focusStrings.conversationStartCta');
   });
 
-  it('the scroll content reserves space so nothing hides behind the CTA', () => {
-    expect(viewSrc).toMatch(/paddingBottom: canStart \? 'calc\(6\.5rem \+ env\(safe-area-inset-bottom\)\)'/);
+  it('the scroll content reserves space so nothing hides behind the CTA (start or end bar)', () => {
+    expect(viewSrc).toMatch(/paddingBottom: \(canStart \|\| isActive\) \? 'calc\(6\.5rem \+ env\(safe-area-inset-bottom\)\)'/);
+  });
+
+  it('the in-call "Encerrar conversa" is a fixed bottom bar (mirrors the start CTA)', () => {
+    expect(viewSrc).toContain('data-testid="conversation-end-cta"');
+    const endBar = viewSrc.slice(viewSrc.indexOf('Fixed bottom CTA (in-call)'), viewSrc.indexOf('conversation-end-cta') + 200);
+    expect(endBar).toMatch(/fixed inset-x-0 bottom-0/);
+    expect(endBar).toContain('env(safe-area-inset-bottom)');
+    expect(endBar).toContain('session.end');
   });
 });
 
