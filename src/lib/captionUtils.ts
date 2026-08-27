@@ -1,40 +1,26 @@
 /**
- * Returns a compact sliding window of the transcript for display as a caption.
- * Shows the last few sentences PLUS any in-progress text, and — crucially —
- * bounds the total length so the caption stays ~2 lines and ALWAYS ENDS at the
- * latest (currently-spoken) words. Older text is trimmed from the LEFT, so the
- * last word shown tracks what the tutor is saying right now instead of the
- * caption growing into a tall block where the current position is ambiguous
- * (which read as "out of sync" on long replies).
+ * The caption shows the FULL text of the current response (the portion revealed
+ * so far). It is NOT truncated to a tiny window — the caption box is a fixed,
+ * scrollable area (see AiSpeechCaption) that auto-scrolls to the bottom, so the
+ * currently-spoken words stay visible at the bottom while earlier lines remain
+ * scrollable above. This resolves both failure modes we hit before: a tiny
+ * window that hides most of a long reply, and a tall block where the current
+ * position is ambiguous.
  *
- * @param maxChars soft cap on the visible caption length (kept ~2 lines). Long
- *   windows are trimmed from the left at a word boundary and prefixed with "…".
+ * A very high safety cap only guards against pathologically long monologues; in
+ * that rare case the oldest text is dropped from the left at a word boundary.
  */
-export function getDisplayCaption(fullText: string, maxChars = 130): string {
+export function getDisplayCaption(fullText: string, maxChars = 1200): string {
   if (!fullText) return '';
 
-  const re = /[.!?]+\s*/g;
-  const boundaries: number[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(fullText)) !== null) {
-    boundaries.push(m.index + m[0].length);
+  const text = fullText.replace(/\s+$/g, '');
+  if (text.length <= maxChars) return text.trim();
+
+  // Pathologically long: keep the tail, cut older text at a word boundary.
+  let tail = text.slice(text.length - maxChars);
+  const firstSpace = tail.indexOf(' ');
+  if (firstSpace !== -1 && firstSpace < tail.length - 1) {
+    tail = tail.slice(firstSpace + 1);
   }
-
-  // Start from up to three sentences back so there's meaningful context…
-  const lookback = 3;
-  const startIdx = boundaries.length >= lookback ? boundaries[boundaries.length - lookback] : 0;
-  let windowed = fullText.slice(startIdx).trim();
-
-  // …but never longer than maxChars: keep the TAIL (the current words) and drop
-  // older text from the left at a word boundary, marking the cut with an ellipsis.
-  if (windowed.length > maxChars) {
-    let tail = windowed.slice(windowed.length - maxChars);
-    const firstSpace = tail.indexOf(' ');
-    if (firstSpace !== -1 && firstSpace < tail.length - 1) {
-      tail = tail.slice(firstSpace + 1);
-    }
-    windowed = `… ${tail.trimStart()}`;
-  }
-
-  return windowed;
+  return `… ${tail.trim()}`;
 }
