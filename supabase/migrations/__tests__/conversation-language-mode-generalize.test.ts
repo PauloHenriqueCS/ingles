@@ -118,6 +118,34 @@ describe('20260826160000 — PROACTIVE bilingual template (data-only prompt upgr
   });
 });
 
+describe('20260827120000 — DETERMINISTIC bilingual language rule (no random switching)', () => {
+  const sql = read('20260827120000_conversation_bilingual_directive_consistency.sql');
+  const body = (() => {
+    const m = sql.match(/\$tpl\$([\s\S]*?)\$tpl\$/);
+    return m ? m[1] : '';
+  })();
+
+  it('re-seeds the same template idempotently, still parameterized', () => {
+    expect(sql).toContain("'conversation.bilingual_support', 'en', 'pt-BR', 1, 'published'");
+    expect(sql).toContain('ON CONFLICT');
+    validateTemplateRequires(body, ['target_label', 'support_label', 'level']);
+    expect(extractPlaceholders(body).sort()).toEqual(['level', 'support_label', 'target_label']);
+    expect(body).not.toMatch(/\bpt_en\b|\bes_en\b|\bpt_es\b/);
+  });
+
+  it('makes the tutor CONDUCT in the support language and use the target only for practice items', () => {
+    expect(body).toMatch(/NUNCA ALTERNE AO ACASO/i);
+    expect(body).toMatch(/TODA a sua fala de condução[\s\S]*em \{\{support_label\}\}/);
+    expect(body).toMatch(/Use \{\{target_label\}\} SOMENTE/);
+    expect(body).toMatch(/Nunca conduza a conversa em \{\{target_label\}\} com um aluno A1\/A2/i);
+  });
+
+  it('scales by level (A1/A2 strict → C1/C2 majority target)', () => {
+    expect(body).toMatch(/A1\/A2:/);
+    expect(body).toMatch(/C1\/C2:/);
+  });
+});
+
 describe('20260826200000 — base templates use a single {{conversation_language_directive}}', () => {
   const sql = read('20260826200000_conversation_templates_language_directive.sql');
 
