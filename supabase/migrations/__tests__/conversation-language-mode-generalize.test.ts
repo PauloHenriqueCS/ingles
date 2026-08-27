@@ -159,6 +159,37 @@ describe('20260827130000 — guided tutor must ADVANCE (anti-repetition)', () =>
   });
 });
 
+describe('20260827140000 — bilingual: feedback in support lang, translate once, no echo', () => {
+  const sql = read('20260827140000_conversation_bilingual_less_translation_no_echo.sql');
+  const body = (() => {
+    const m = sql.match(/\$tpl\$([\s\S]*?)\$tpl\$/);
+    return m ? m[1] : '';
+  })();
+
+  it('keeps the template parameterized (no hardcoded pair) with the same placeholders', () => {
+    expect(sql).toContain("'conversation.bilingual_support', 'en', 'pt-BR', 1, 'published'");
+    expect(sql).toContain('ON CONFLICT');
+    validateTemplateRequires(body, ['target_label', 'support_label', 'level']);
+    expect(body).not.toMatch(/\bpt_en\b|\bes_en\b|\bpt_es\b/);
+  });
+
+  it('forces feedback/corrections into the support language (no English "Nice try")', () => {
+    expect(body).toMatch(/ELOGIOS, FEEDBACK/);
+    expect(body).toMatch(/NUNCA dê feedback em \{\{target_label\}\}/i);
+  });
+
+  it('limits translation (once, never obvious, never repeat)', () => {
+    expect(body).toMatch(/no máximo UMA vez/i);
+    expect(body).toMatch(/NÃO traduza palavras\/expressões óbvias/i);
+    expect(body).toMatch(/NUNCA repita a tradução/i);
+  });
+
+  it('forbids echoing/re-translating the learner', () => {
+    expect(body).toMatch(/NÃO ECOE O ALUNO/i);
+    expect(body).toMatch(/NÃO repita a fala dele nem a traduza de volta/i);
+  });
+});
+
 describe('20260826200000 — base templates use a single {{conversation_language_directive}}', () => {
   const sql = read('20260826200000_conversation_templates_language_directive.sql');
 
