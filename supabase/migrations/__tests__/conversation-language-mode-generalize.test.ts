@@ -146,6 +146,19 @@ describe('20260827120000 — DETERMINISTIC bilingual language rule (no random sw
   });
 });
 
+describe('20260827130000 — guided tutor must ADVANCE (anti-repetition)', () => {
+  const sql = read('20260827130000_conversation_guided_progression.sql');
+
+  it('adds a progression / anti-repetition rule to conversation.tutor', () => {
+    expect(sql).toMatch(/template_key = 'conversation\.tutor'/);
+    expect(sql).toContain('MOVING FORWARD');
+    expect(sql).toMatch(/NEVER repeat the same sentence/i);
+    expect(sql).toMatch(/Do not get stuck drilling a single phrase/i);
+    // Applied via replace() on the exact existing sentence (idempotent).
+    expect(sql).toContain('Provoke situations that require the target capability.');
+  });
+});
+
 describe('20260826200000 — base templates use a single {{conversation_language_directive}}', () => {
   const sql = read('20260826200000_conversation_templates_language_directive.sql');
 
