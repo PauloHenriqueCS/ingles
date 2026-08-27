@@ -62,9 +62,19 @@ export function isPracticeReminderSupported(): boolean {
 
 // Lazy/dynamic import so the native bridge module is never evaluated in the web
 // bundle's eager graph — isPracticeReminderSupported() guards every call site.
+//
+// CRITICAL: return the plugin WRAPPED in a plain object, never the bare
+// LocalNotifications proxy. A Capacitor plugin is a Proxy whose every property
+// access (including `.then`) yields a callable, so returning it from an `async`
+// function makes the runtime treat it as a thenable and invoke `proxy.then()` —
+// which Capacitor rejects/logs as "LocalNotifications.then() is not implemented
+// on android" and, worse, the return-value adoption promise then never settles,
+// so `await loadPlugin()` HANGS forever (the "Salvando…" that never finishes).
+// onesignalClient.loadOneSignal() returns `{ OneSignal }` for exactly this
+// reason; mirror it here.
 async function loadPlugin() {
   const mod = await import('@capacitor/local-notifications');
-  return mod.LocalNotifications;
+  return { plugin: mod.LocalNotifications };
 }
 
 let channelReady = false;
@@ -101,7 +111,7 @@ function mapPermission(display: string | undefined): NotificationPermission {
 export async function getPracticeReminderPermission(): Promise<NotificationPermission | 'unsupported'> {
   if (!isPracticeReminderSupported()) return 'unsupported';
   try {
-    const plugin = await loadPlugin();
+    const { plugin } = await loadPlugin();
     const res = await plugin.checkPermissions();
     return mapPermission(res.display);
   } catch {
@@ -113,7 +123,7 @@ export async function getPracticeReminderPermission(): Promise<NotificationPermi
 export async function requestPracticeReminderPermission(): Promise<NotificationPermission | 'unsupported'> {
   if (!isPracticeReminderSupported()) return 'unsupported';
   try {
-    const plugin = await loadPlugin();
+    const { plugin } = await loadPlugin();
     const res = await plugin.requestPermissions();
     return mapPermission(res.display);
   } catch {
@@ -134,7 +144,7 @@ export async function requestPracticeReminderPermission(): Promise<NotificationP
 async function ensureChannel(copy: PracticeReminderCopy): Promise<boolean> {
   if (!isAndroidApp) return false;
   try {
-    const plugin = await loadPlugin();
+    const { plugin } = await loadPlugin();
     await plugin.createChannel({
       id: CHANNEL_ID,
       name: copy.channelName,
@@ -155,7 +165,7 @@ async function ensureTapListener(): Promise<void> {
   if (tapListenerRegistered || !isPracticeReminderSupported()) return;
   tapListenerRegistered = true;
   try {
-    const plugin = await loadPlugin();
+    const { plugin } = await loadPlugin();
     await plugin.addListener('localNotificationActionPerformed', (event: unknown) => {
       const id = extractTapId(event);
       if (id != null && tapHandler) tapHandler({ id });
@@ -177,7 +187,7 @@ export async function cancelPracticeReminders(): Promise<void> {
   if (!isPracticeReminderSupported()) return;
   opChain = opChain.then(async () => {
     try {
-      const plugin = await loadPlugin();
+      const { plugin } = await loadPlugin();
       // Cancel the full reserved id range regardless of which are currently set
       // — cancelling a non-pending id is a safe no-op — so any prior config is
       // fully cleared. Belt-and-suspenders: also sweep pending in our range in
@@ -220,7 +230,7 @@ export async function schedulePracticeReminders(
   let count = 0;
   opChain = opChain.then(async () => {
     try {
-      const plugin = await loadPlugin();
+      const { plugin } = await loadPlugin();
       // Clear our whole reserved range first so days that were de-selected can
       // never linger (the cancel is scoped to our ids only).
       await plugin.cancel({
