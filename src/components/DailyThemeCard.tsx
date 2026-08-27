@@ -35,6 +35,11 @@ interface Props {
   /** Label for the primary "accept mission / start writing" action. Defaults to
    *  "Aceitar missão"; the guided flow passes "Começar escrita". */
   startLabel?: string;
+  /** When true, the mount restore is skipped: the card renders "Receber missão"
+   *  directly instead of re-fetching today's active mission. The guided flow
+   *  passes this during a fresh "Nova missão" practice so remounting the card
+   *  (it lives only on the Missão step) never brings the previous mission back. */
+  suppressRestore?: boolean;
 }
 
 const FORMAT_LABELS: Record<string, string> = {
@@ -69,14 +74,15 @@ function formatLabel(format: string | undefined, activityType: string | undefine
   return FORMAT_LABELS[key] ?? key.replace(/_/g, ' ');
 }
 
-export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated, onStartWriting, writingEntitlements, startLabel }: Props) {
+export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated, onStartWriting, writingEntitlements, startLabel, suppressRestore = false }: Props) {
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
   const [grammarModal, setGrammarModal] = useState<string | null>(null);
   // True while we ask the server whether today's mission already exists, so the
   // "no mission / generations exhausted" UI never flashes before the restore.
-  const [restoring, setRestoring] = useState(theme === null);
+  // A suppressed restore (fresh "Nova missão" practice) never enters this state.
+  const [restoring, setRestoring] = useState(theme === null && !suppressRestore);
   const isLoading = genState === 'loading';
 
   // Restore today's already-assigned mission on entry. The mission is persisted
@@ -86,6 +92,10 @@ export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated
   // read-only call makes NO AI request and never consumes a generation. Runs
   // once on mount; if a mission is already loaded (e.g. just generated) it skips.
   useEffect(() => {
+    // A fresh "Nova missão" practice must NOT restore the previous mission when
+    // this card remounts (it only lives on the Missão step) — show "Receber
+    // missão" straight away.
+    if (suppressRestore) { setRestoring(false); return; }
     if (theme !== null) { setRestoring(false); return; }
     let cancelled = false;
     (async () => {

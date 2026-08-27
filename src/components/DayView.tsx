@@ -22,6 +22,7 @@ import { checkLearningDayOverride, addLearningDayOverride } from '../lib/learnin
 import { countWords } from '../utils/wordCount';
 import { countCharacters } from '../domain/text/text-normalization';
 import { updateReviewV2, updateV2FinalText, markReviewConcluded } from '../lib/reviews';
+import { discardCurrentMission } from '../lib/missionDiscard';
 import { fetchReviewByDate } from '../lib/reviewsHistory';
 import { buildMissionSnapshot } from '../lib/missionSnapshot';
 import { updateLearningMemory } from '../lib/learningMemory';
@@ -285,12 +286,25 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   }
 
   // "Nova missão": start a NEW, independent writing practice for the same day.
-  // Resets the on-screen practice to blank and refreshes the server-authoritative
-  // quota; never generates a mission or consumes anything by itself.
+  // A durable, clean reset (the previous mission was concluded):
+  //  1. wipe the on-screen practice → Missão step (local),
+  //  2. supersede the previous mission server-side so a reload doesn't restore
+  //     it (best-effort; no AI call, no generation consumed),
+  //  3. blank the day's stored entry so a reload lands on Missão, not the old
+  //     Concluído — the previous attempt stays in History (english_reviews) and
+  //     its streak/curriculum credit are already banked (idempotent).
+  // Never generates a mission or consumes a generation by itself.
   function handleNewMission() {
     freshPracticeRef.current = true;
+    hydratedRef.current = date; // this session owns the step; don't re-hydrate
+    themeRestoreStartedRef.current = true; // and don't auto-restore the old theme
     resetWritingState();
     setDailyTheme(null); // re-open "Receber missão" for a brand-new mission
+    void discardCurrentMission();
+    void onSave({
+      date, title: '', originalText: '', correctedText: '', observations: '',
+      mainErrors: '', difficulty: null, status: 'nao-iniciado', aiReview: null, reviewedAt: null,
+    }).catch(() => {});
     entitlements.refetch();
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
@@ -514,6 +528,7 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
                   onStartWriting={handleStartWriting}
                   writingEntitlements={writingEntitlements}
                   startLabel={t.startWriting}
+                  suppressRestore={freshPracticeRef.current}
                 />
                 {dailyTheme && (
                   <MissionGrammarGuide

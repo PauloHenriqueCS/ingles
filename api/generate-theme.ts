@@ -590,6 +590,25 @@ export default async function handler(req: any, res: any) {
     return res.json({ theme, themeId: rowVal.id, mode: 'retrieve' });
   }
 
+  // ── Discard: supersede today's active mission (used by "Nova missão" reset) ──
+  // Marks the user's still-active mission(s) for the current UTC day as
+  // 'regenerated' so a subsequent `retrieve` returns nothing and the flow starts
+  // from a clean slate. Makes NO AI call and inserts nothing. It does NOT refund
+  // or consume a generation: the daily counter counts generated_themes rows
+  // CREATED today regardless of status (plan-entitlements-service.ts), so a
+  // superseded row still counts — no quota bypass. Idempotent.
+  if (req.body?.mode === 'discard') {
+    const { startIso, endIso } = utcDayRange(new Date(getProductionDeps().clock()));
+    await supabase
+      .from('generated_themes')
+      .update({ status: 'regenerated' })
+      .eq('user_id', userId)
+      .eq('status', 'generated')
+      .gte('created_at', startIso)
+      .lt('created_at', endIso);
+    return res.json({ ok: true, mode: 'discard' });
+  }
+
   const { mode: _clientMode, reviewGroup, learningContext, previousThemeId, excludedTheme } = req.body ?? {};
   // SECURITY: legacy review-mission generation is discontinued and can no longer
   // be initiated by ANY client request. Normalize the client-supplied mode to

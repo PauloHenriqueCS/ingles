@@ -69,6 +69,26 @@ describe('DayView — per-mission state isolation (reset)', () => {
     expect(body).not.toMatch(/\bfetch\(/);
   });
 
+  it('handleNewMission is a DURABLE reset: supersedes the old mission and blanks the day entry (so a reload lands on Missão, not the old Concluído)', () => {
+    const body = fnBody(view, 'function handleNewMission');
+    // supersede the previous mission server-side so retrieve returns nothing
+    expect(body).toMatch(/discardCurrentMission\(\)/);
+    // blank the stored entry (status nao-iniciado, no review) so a reload
+    // re-derives the Missão step instead of restoring the concluded state
+    expect(body).toMatch(/onSave\(\{/);
+    expect(body).toMatch(/status: 'nao-iniciado'/);
+    expect(body).toMatch(/aiReview: null/);
+    // this session owns the step; guard against re-hydration/auto-restore
+    expect(body).toMatch(/hydratedRef\.current = date/);
+    expect(body).toMatch(/themeRestoreStartedRef\.current = true/);
+  });
+
+  it('DailyThemeCard is told to suppress restore during a fresh practice (so remount never brings the old mission back)', () => {
+    expect(view).toMatch(/suppressRestore=\{freshPracticeRef\.current\}/);
+    // and the card actually honors it: skips the mount retrieve
+    expect(card).toMatch(/if \(suppressRestore\) \{ setRestoring\(false\); return; \}/);
+  });
+
   it('handleMissionGenerated adopts the NEW mission AND resets the surface (identity fix)', () => {
     const body = fnBody(view, 'function handleMissionGenerated');
     expect(body).toMatch(/freshPracticeRef\.current = true/);
