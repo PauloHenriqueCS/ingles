@@ -43,6 +43,10 @@ function rowToReview(row: Record<string, unknown>): EnglishReviewSaved {
     version2Comparison: row.version_2_comparison != null ? row.version_2_comparison as RewriteComparisonResult : null,
     version2ImprovementScore: row.version_2_improvement_score != null ? Number(row.version_2_improvement_score) : null,
     version2FinalText: row.version_2_final_text != null ? String(row.version_2_final_text) : null,
+    // Additive column (migration 20260827160000). Absent on older rows / before
+    // the column exists → undefined → mapped to null. select('*') picks it up
+    // transparently, so no query change is needed.
+    concludedAt: row.concluded_at != null ? String(row.concluded_at) : null,
   };
 }
 

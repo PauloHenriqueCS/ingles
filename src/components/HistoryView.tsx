@@ -9,6 +9,7 @@ import {
 } from '../types';
 import { fetchEnglishReviews } from '../lib/reviewsHistory';
 import { deriveWritingEntryStatus } from '../domain/writing/entry-status';
+import { visibleVocabulary } from '../domain/writing/mission-vocabulary';
 import { foldSmartQuotes } from '../domain/text/text-normalization';
 
 /**
@@ -616,10 +617,10 @@ function MissionContent({ mission }: { mission: MissionSnapshot }) {
         </MissionSection>
       )}
 
-      {mission.missionUsefulVocabulary.length > 0 && (
+      {visibleVocabulary(mission.missionUsefulVocabulary).length > 0 && (
         <MissionSection title="Vocabulário útil">
           <div className="space-y-1.5">
-            {mission.missionUsefulVocabulary.map((v, i) => (
+            {visibleVocabulary(mission.missionUsefulVocabulary).map((v, i) => (
               <div key={i}>
                 <div className="flex items-baseline gap-2">
                   <span className="text-blue-400 font-semibold text-xs">{v.word}</span>
@@ -692,6 +693,9 @@ function V2ComparisonCard({ comparison }: { comparison: RewriteComparisonResult 
       <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado da Versão 2</p>
       <div className="flex items-center gap-4">
         <div>
+          {/* The number is the V2's composite quality SCORE (0–100), not a delta
+             vs V1 — labeled honestly so it never reads as "improvement". */}
+          <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Nota da versão 2</p>
           <span className={`text-4xl font-bold tabular-nums ${scoreColor}`}>{comparison.improvementScore}</span>
           <span className="text-slate-500 text-lg">/100</span>
         </div>

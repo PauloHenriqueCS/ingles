@@ -77,7 +77,10 @@ describe('reservation migration is service-role-only and one-per-review', () => 
 
 describe('RewriteSection reflects the one-analysis rule', () => {
   it('locks the compare button and the textarea once analyzed', () => {
-    expect(rewriteSectionSrc).toMatch(/disabled=\{isComparing \|\| finalCorrectState === 'loading' \|\| hasCompared\}/);
+    // The analyze button is REMOVED once a comparison exists (a stronger lock
+    // than a disabled button); while shown, it disables during in-flight work.
+    expect(rewriteSectionSrc).toMatch(/\{!hasCompared && \(/);
+    expect(rewriteSectionSrc).toMatch(/disabled=\{isComparing \|\| finalCorrectState === 'loading'\}/);
     expect(rewriteSectionSrc).toContain('readOnly={hasCompared}');
     // guards the handler itself, not only the button
     const compareIdx = rewriteSectionSrc.indexOf('async function compare()');

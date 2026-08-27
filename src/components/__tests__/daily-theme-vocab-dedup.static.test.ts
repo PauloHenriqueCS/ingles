@@ -12,9 +12,11 @@ import { join } from 'node:path';
 const card = readFileSync(join(__dirname, '..', 'DailyThemeCard.tsx'), 'utf8');
 
 describe('DailyThemeCard — single vocabulary section (no duplication)', () => {
-  it('keeps the "Vocabulário útil para esta missão" section (suggestedVocabulary)', () => {
+  it('keeps the "Vocabulário útil para esta missão" section (suggestedVocabulary), filtered to non-empty items', () => {
     expect(card).toMatch(/Vocabulário útil para esta missão/);
-    expect(card).toMatch(/theme\.suggestedVocabulary\.map/);
+    // The list is filtered through visibleVocabulary so a blank/empty AI list
+    // never renders the heading over nothing (empty-vocabulary bug fix).
+    expect(card).toMatch(/visibleVocabulary\(theme\.suggestedVocabulary\)\.map/);
   });
 
   it('no longer renders the redundant "Palavras para usar" section', () => {

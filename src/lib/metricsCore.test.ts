@@ -30,6 +30,7 @@ function makeReview(
     version2Comparison: null,
     version2ImprovementScore: null,
     version2FinalText: null,
+    concludedAt: null,
     ...overrides,
   };
 }

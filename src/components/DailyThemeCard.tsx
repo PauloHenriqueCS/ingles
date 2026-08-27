@@ -7,6 +7,7 @@ import { fetchLearningMemory } from '../lib/learningMemory';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
 import { buildGenerateThemeRequestBody } from '../lib/dailyThemeRequest';
+import { visibleVocabulary } from '../domain/writing/mission-vocabulary';
 import type { WritingEntitlements } from '../domain/entitlements/entitlement-types';
 import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
@@ -31,6 +32,9 @@ interface Props {
   onStartWriting: () => void;
   /** null while the plan is still resolving — never treat as "available" during that window. */
   writingEntitlements: WritingEntitlements | null;
+  /** Label for the primary "accept mission / start writing" action. Defaults to
+   *  "Aceitar missão"; the guided flow passes "Começar escrita". */
+  startLabel?: string;
 }
 
 const FORMAT_LABELS: Record<string, string> = {
@@ -65,7 +69,7 @@ function formatLabel(format: string | undefined, activityType: string | undefine
   return FORMAT_LABELS[key] ?? key.replace(/_/g, ' ');
 }
 
-export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated, onStartWriting, writingEntitlements }: Props) {
+export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated, onStartWriting, writingEntitlements, startLabel }: Props) {
   const [genState, setGenState] = useState<GenState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentThemeId, setCurrentThemeId] = useState<string | null>(null);
@@ -323,11 +327,12 @@ export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated
             </Section>
           )}
 
-          {/* Suggested vocabulary */}
-          {theme.suggestedVocabulary.length > 0 && (
+          {/* Suggested vocabulary — filtered to items with real content so the
+             heading never renders over an empty/blank AI-generated list. */}
+          {visibleVocabulary(theme.suggestedVocabulary).length > 0 && (
             <Section title="Vocabulário útil para esta missão">
               <div className="space-y-2">
-                {theme.suggestedVocabulary.map((v, i) => (
+                {visibleVocabulary(theme.suggestedVocabulary).map((v, i) => (
                   <div key={i}>
                     <div className="flex items-baseline gap-2">
                       <span className="text-blue-400 font-semibold text-sm">{v.word}</span>
@@ -402,7 +407,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated
                 onClick={onStartWriting}
                 className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
               >
-                Aceitar missão
+                {startLabel ?? 'Aceitar missão'}
               </button>
             </div>
             {remainingLabel && !disabledByPlan && !generationsBlocked && (
