@@ -607,21 +607,29 @@ export function useRealtimeSession(playbackRate: number = 1.0): UseRealtimeSessi
 
         if (ev.type === 'response.output_audio.delta') {
           setIsSpeaking(true);
-          // First audio chunk of this response → align the caption reveal with
-          // the actual start of speech (scaled by playbackRate so it tracks the
-          // audio at every pace).
-          if (!revealStartedRef.current) {
-            revealStartedRef.current = true;
-            startRevealTimer();
-          }
         }
 
-        // Accumulate transcript deltas into ref only — reveal timer controls display
+        // Accumulate transcript deltas. The reveal is started HERE (on the first
+        // transcript, when there is actually text to show) — not on
+        // response.created (precedes audio → caption ran ahead) — and the FIRST
+        // WORD is shown immediately so the caption appears promptly instead of
+        // ramping up one char at a time. The rest is paced by the timer.
         const isTranscriptDelta =
           ev.type === 'response.audio_transcript.delta' ||
           ev.type === 'response.output_audio_transcript.delta';
         if (isTranscriptDelta && typeof ev.delta === 'string') {
+          const wasEmpty = transcriptAccumRef.current.length === 0;
           transcriptAccumRef.current += ev.delta;
+          if (!revealStartedRef.current) {
+            revealStartedRef.current = true;
+            startRevealTimer();
+          }
+          if (wasEmpty && displayCountRef.current === 0) {
+            const full = transcriptAccumRef.current;
+            const firstBreak = full.search(/\s/);
+            displayCountRef.current = firstBreak === -1 ? Math.min(full.length, 14) : firstBreak;
+            setTranscriptText(full.slice(0, displayCountRef.current));
+          }
         }
 
         if (ev.type === 'response.done') {

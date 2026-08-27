@@ -400,20 +400,23 @@ describe('caption reveal timer — playback rate scaling', () => {
     expect(displayCount).toBe(0);
   });
 
-  it('starts the reveal on the FIRST audio chunk, not on response.created (no lead offset)', async () => {
+  it('starts the reveal on the first TRANSCRIPT delta (not response.created / not audio) and shows the first word immediately', async () => {
     const src = await import('../hooks/useRealtimeSession?raw');
     const code = (src as unknown as { default: string }).default;
     const createdIdx = code.indexOf("ev.type === 'response.created'");
     const audioIdx = code.indexOf("ev.type === 'response.output_audio.delta'");
+    const transcriptIdx = code.indexOf('const isTranscriptDelta =');
     expect(createdIdx).toBeGreaterThan(-1);
-    expect(audioIdx).toBeGreaterThan(-1);
-    // The response.created block must NOT start the reveal (it precedes audio).
+    // Neither response.created nor the audio-delta block start the reveal.
     const createdBlock = code.slice(createdIdx, audioIdx);
     expect(createdBlock).not.toContain('startRevealTimer');
-    // The audio-delta block starts it, guarded so it fires once per response.
-    const audioBlock = code.slice(audioIdx, audioIdx + 400);
-    expect(audioBlock).toContain('revealStartedRef.current = true');
-    expect(audioBlock).toContain('startRevealTimer()');
+    const audioBlock = code.slice(audioIdx, transcriptIdx);
+    expect(audioBlock).not.toContain('startRevealTimer');
+    // The transcript-delta block starts it (guarded once) and shows the first word.
+    const transcriptBlock = code.slice(transcriptIdx, transcriptIdx + 700);
+    expect(transcriptBlock).toContain('revealStartedRef.current = true');
+    expect(transcriptBlock).toContain('startRevealTimer()');
+    expect(transcriptBlock).toMatch(/firstBreak/);
   });
 
   it('reveals one char per tick with no catch-up burst (never runs ahead of the voice)', async () => {
