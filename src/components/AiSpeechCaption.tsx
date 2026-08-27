@@ -7,31 +7,28 @@ interface AiSpeechCaptionProps {
 }
 
 export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const hadTextRef = useRef(false);
+  const anchorRef = useRef<HTMLDivElement>(null);
   const display = getDisplayCaption(text);
 
-  // When a NEW reply starts (empty → has text), bring the caption into view so
-  // the user never has to scroll the page down again each time. Only on that
-  // transition — never on every streamed char — so it doesn't fight the user's
-  // own scrolling while reading a long reply.
+  // Follow the caption as it grows: keep the newest line in view by scrolling a
+  // bottom anchor into view on every update. `block: 'nearest'` only scrolls when
+  // the anchor is actually out of view (so it doesn't jitter when the caption
+  // already fits), and its scroll-margin-bottom keeps the current line clear of
+  // the fixed "Encerrar conversa" bar. This makes the page auto-scroll down to
+  // track the speech, and also re-centers on each new reply.
   useEffect(() => {
-    const hasText = display.length > 0;
-    if (hasText && !hadTextRef.current) {
-      containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (display) {
+      anchorRef.current?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
     }
-    hadTextRef.current = hasText;
   }, [display]);
 
   if (!visible) return null;
 
-  // The caption AREA is always present during a call (min-height reserved) so the
-  // layout doesn't collapse and jump between replies. The styled box only shows
-  // when there is text; the box grows to fit it (no internal scroll — the page
-  // scrolls if needed).
+  // The caption area reserves a min-height during a call so the layout doesn't
+  // collapse/jump between replies. The styled box grows to fit its text (no
+  // internal scroll — the page scrolls).
   return (
     <div
-      ref={containerRef}
       role="status"
       aria-live="polite"
       aria-atomic="false"
@@ -51,6 +48,12 @@ export default function AiSpeechCaption({ text, visible }: AiSpeechCaptionProps)
           {display}
         </p>
       )}
+      {/* Bottom scroll anchor — its margin keeps the latest line above the fixed CTA. */}
+      <div
+        ref={anchorRef}
+        aria-hidden="true"
+        style={{ scrollMarginBottom: 'calc(6rem + env(safe-area-inset-bottom))' }}
+      />
     </div>
   );
 }
