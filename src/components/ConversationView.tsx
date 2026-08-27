@@ -753,9 +753,10 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
 
       <div
         className="flex-1 flex flex-col px-4 pt-6 max-w-lg mx-auto w-full"
-        // Extra bottom padding in the pre-conversation state so the scrollable
-        // content is never hidden behind the fixed "Iniciar conversa" CTA.
-        style={{ paddingBottom: canStart ? 'calc(6.5rem + env(safe-area-inset-bottom))' : '2rem' }}
+        // Extra bottom padding whenever a fixed bottom CTA is shown (the
+        // "Iniciar conversa" pre-session bar, or the "Encerrar conversa" in-call
+        // bar) so scrollable content is never hidden behind it.
+        style={{ paddingBottom: (canStart || isActive) ? 'calc(6.5rem + env(safe-area-inset-bottom))' : '2rem' }}
       >
 
         {/* Page header */}
@@ -874,13 +875,8 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
                 </div>
 
                 <AiSpeechCaption text={session.transcriptText} visible={captionsEnabled} />
-
-                <button
-                  onClick={session.end}
-                  className="px-8 py-2.5 rounded-xl bg-red-700 hover:bg-red-600 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-800 min-h-[44px]"
-                >
-                  Encerrar conversa
-                </button>
+                {/* "Encerrar conversa" is a fixed bottom bar (below), mirroring
+                    the "Iniciar conversa" CTA — not part of this scrolling card. */}
               </div>
             )}
 
@@ -963,6 +959,25 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
             >
               <Mic className="w-5 h-5 shrink-0" strokeWidth={2} aria-hidden="true" />
               {focusStrings.conversationStartCta}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Fixed bottom CTA (in-call) — "Encerrar conversa", mirroring the
+           start bar: fixed above the iOS safe area, out of the scroll flow. ── */}
+      {isActive && (
+        <div
+          className="fixed inset-x-0 bottom-0 z-30 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-4 pt-3"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="max-w-lg mx-auto">
+            <button
+              onClick={session.end}
+              data-testid="conversation-end-cta"
+              className="w-full py-3.5 rounded-2xl bg-red-700 hover:bg-red-600 text-white text-base font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[52px] flex items-center justify-center gap-2"
+            >
+              Encerrar conversa
             </button>
           </div>
         </div>
