@@ -339,19 +339,23 @@ function PracticeWordRow({
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 min-h-[52px]">
-      <span
-        className="flex-1 min-w-0 text-sm font-medium text-slate-100 truncate"
-        title={word.displayWord}
-      >
-        {word.displayWord}
-      </span>
+      {/* Word + band stacked so the word keeps the full left column and is never
+          truncated by a long badge ("Pratique novamente") on narrow screens. */}
+      <div className="flex-1 min-w-0 flex flex-col items-start gap-1">
+        <span
+          className="max-w-full text-sm font-medium text-slate-100 truncate"
+          title={word.displayWord}
+        >
+          {word.displayWord}
+        </span>
 
-      <span
-        className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-full border whitespace-nowrap transition-all ${band.colorClass} ${band.bgClass} ${band.borderClass} ${justGood ? 'ring-1 ring-offset-1 ring-offset-slate-800 ring-green-500' : ''}`}
-        aria-label={`Classificação: ${band.label}`}
-      >
-        {band.label}
-      </span>
+        <span
+          className={`max-w-full text-[10px] font-bold px-1.5 py-0.5 rounded-full border whitespace-nowrap transition-all ${band.colorClass} ${band.bgClass} ${band.borderClass} ${justGood ? 'ring-1 ring-offset-1 ring-offset-slate-800 ring-green-500' : ''}`}
+          aria-label={`Classificação: ${band.label}`}
+        >
+          {band.label}
+        </span>
+      </div>
 
       <button
         onClick={handlePlayWord}
