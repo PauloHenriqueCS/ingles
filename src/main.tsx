@@ -4,6 +4,7 @@ import { StatusBar, Style } from '@capacitor/status-bar'
 import { isNativeApp, isPluginAvailable, runtimeAttribute } from './lib/runtimeEnvironment'
 import { installChunkReloadRecovery } from './lib/chunkReloadRecovery'
 import { installNativeAuthDeepLinkHandler } from './lib/nativeAuthDeepLink'
+import { CelebrationProvider } from './celebration'
 import './index.css'
 import App from './App.tsx'
 
@@ -22,6 +23,8 @@ if (isNativeApp && isPluginAvailable('StatusBar')) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <CelebrationProvider>
+      <App />
+    </CelebrationProvider>
   </StrictMode>,
 )

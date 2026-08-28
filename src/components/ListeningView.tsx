@@ -8,6 +8,7 @@ import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
 import ScreenHeader from './ScreenHeader';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCelebration } from '../celebration';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
 import {
   getEpisodeSession,
@@ -162,6 +163,7 @@ interface Props {
 
 export default function ListeningView({ onBack, episodeId: propEpisodeId, onComplete, onNavigateToSubscription }: Props) {
   const entitlementsState = usePlanEntitlements();
+  const celebration = useCelebration();
   const listening = entitlementsState.data?.listening ?? null;
   const listeningLoading = entitlementsState.data === null;
   const listeningDisabledByPlan = listening ? !listening.enabled : false;
@@ -621,9 +623,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         // Part 2 correct — persist completion, then show done.
         setPhase('submitting');
         try {
-          await completeStoryListening(storyData?.sharedStoryId ?? null);
+          const completion = await completeStoryListening(storyData?.sharedStoryId ?? null);
           setCompletionSaveError(false);
           setCompletionSaved(true);
+          // Celebrate only a genuine transition (the server de-dupes re-sends).
+          if (!completion.alreadyCompleted) celebration.notifyActivityCompleted('listening');
           onComplete?.();
         } catch {
           setCompletionSaveError(true);
@@ -1655,9 +1659,10 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
         if (isLastPart) {
           setPhase('submitting');
           try {
-            await completeStoryListening(storyData?.sharedStoryId ?? null);
+            const completion = await completeStoryListening(storyData?.sharedStoryId ?? null);
             setCompletionSaveError(false);
             setCompletionSaved(true);
+            if (!completion.alreadyCompleted) celebration.notifyActivityCompleted('listening');
             onComplete?.();
           } catch {
             setCompletionSaveError(true);
