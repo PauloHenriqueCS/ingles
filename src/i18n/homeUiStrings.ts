@@ -53,6 +53,7 @@ export interface HomeUiStrings {
   remainingCount: (n: number) => string;        // "2 restantes"
   allCaughtUp: string;                          // "Tudo em dia"
   loadingShort: string;                         // "…"
+  loadingPractices: string;                     // "Carregando suas práticas…"
 }
 
 const PT_BR: HomeUiStrings = {
@@ -93,6 +94,7 @@ const PT_BR: HomeUiStrings = {
   remainingCount: (n) => `${n} ${n === 1 ? 'restante' : 'restantes'}`,
   allCaughtUp: 'Tudo em dia',
   loadingShort: '…',
+  loadingPractices: 'Carregando suas práticas…',
 };
 
 const EN: HomeUiStrings = {
@@ -133,6 +135,7 @@ const EN: HomeUiStrings = {
   remainingCount: (n) => `${n} left`,
   allCaughtUp: 'All caught up',
   loadingShort: '…',
+  loadingPractices: 'Loading your practices…',
 };
 
 const STRINGS: Record<string, HomeUiStrings> = { 'pt-BR': PT_BR, en: EN };
