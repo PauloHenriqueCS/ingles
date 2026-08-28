@@ -2,8 +2,10 @@ import { getAuthHeader } from './apiAuth';
 import { apiUrl } from './apiUrl';
 
 // Mirrors the backend contract (api/_placement/placement-runtime.ts). The client
-// NEVER receives the answer key nor any correct/incorrect feedback — only the
-// visible options and the next screen the server decides.
+// never receives the answer key BEFORE answering — only the visible options and
+// the next screen the server decides. AFTER a submission, the /answer response
+// carries `answerFeedback` (correct/incorrect + the right option) for the
+// question just answered, so it cannot be used to cheat.
 
 export type PlacementStatus =
   | 'not_started'
@@ -45,6 +47,15 @@ export interface PlacementResultView {
   cta: string;
 }
 
+export interface PlacementAnswerFeedback {
+  questionKey: string;
+  selectedOptionKey: string;
+  selectedOptionLabel: string;
+  correctOptionKey: string;
+  correctOptionLabel: string;
+  isCorrect: boolean;
+}
+
 export interface PlacementState {
   placementStatus: PlacementStatus;
   learningLanguage: string;
@@ -56,6 +67,8 @@ export interface PlacementState {
   question?: PlacementQuestionView;
   c2?: PlacementC2View;
   result?: PlacementResultView;
+  /** Only on the /answer response — feedback for the question just answered. */
+  answerFeedback?: PlacementAnswerFeedback;
 }
 
 export class PlacementApiError extends Error {
