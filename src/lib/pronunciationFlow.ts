@@ -1,5 +1,5 @@
 import { convertToWavPcm, AudioConversionError } from './audioConverter';
-import { createRecognitionSession, PronunciationServiceError } from './pronunciationService';
+import { fileToBase64 } from './base64Audio';
 import { getAuthHeader } from './apiAuth';
 import { apiUrl } from './apiUrl';
 import type { PronunciationFailCode, PronunciationNormalizedResult } from '../types';
@@ -139,66 +139,50 @@ export async function runAnalysisFlow(
   refs.assessmentIdRef.current = startBody.assessmentId;
   if (refs.gatewaySessionIdRef) refs.gatewaySessionIdRef.current = startBody.gatewaySessionId ?? null;
 
-  // Step 3: Run Azure Pronunciation Assessment (continuous)
+  // Step 3: Upload the WAV — Azure runs SERVER-side (continuous pronunciation
+  // assessment). The browser no longer opens a WebSocket to Azure: that leg
+  // could stall with zero SDK events and only ever surfaced as "A análise
+  // demorou demais". /assess runs the provider AND finalizes the assessment
+  // (same complete_pronunciation_assessment RPC), so there is no separate
+  // /complete round-trip. The reference text is read from the reserved row
+  // server-side — never sent by the client.
   setPhase({ phase: 'analyzing' });
   let result: PronunciationNormalizedResult;
   try {
-    const session = createRecognitionSession({
-      token:           startBody.token,
-      region:          startBody.region,
-      referenceText:   startBody.referenceText, // always from /start, never from caller
-      language:        startBody.language,
-      wavFile,
-      audioDurationMs: input.audioDurationMs,
-    });
-    refs.cancelRecognitionRef.current = session.cancel;
-    result = await session.run();
-    refs.cancelRecognitionRef.current = null;
-  } catch (err) {
-    refs.cancelRecognitionRef.current = null;
-    const code: PronunciationFailCode =
-      err instanceof PronunciationServiceError ? (err.code as PronunciationFailCode) : 'AZURE_CANCELED';
-    const message =
-      code === 'AZURE_NO_MATCH'
-        ? 'Nenhuma fala foi detectada no áudio. Grave novamente e tente outra vez.'
-        : code === 'AZURE_TIMEOUT'
-        ? 'A análise demorou demais. Tente novamente.'
-        : 'Ocorreu um erro durante a análise. Tente novamente.';
-    setPhase({ phase: 'failed', errorMessage: message });
-    await reportFail(refs, code);
-    refs.flowLockRef.current = false;
-    return;
-  }
-
-  if (!refs.mountedRef.current) {
-    // Component unmounted while Azure was running — /fail sent by cleanup effect
-    return;
-  }
-
-  // Step 4: Save the result
-  setPhase({ phase: 'saving_result' });
-  try {
+    const audioBase64 = await fileToBase64(wavFile);
     const headers = await getAuthHeader();
-    const resp = await fetch(apiUrl('/api/pronunciation/complete'), {
+    const resp = await fetch(apiUrl('/api/pronunciation/assess'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({
         assessmentId: startBody.assessmentId,
         attemptId:    input.attemptId,
-        result,
+        audioBase64,
         ...(startBody.gatewaySessionId ? { gatewaySessionId: startBody.gatewaySessionId } : {}),
       }),
     });
+    const json = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const json = await resp.json().catch(() => ({}));
-      console.error('[flow] /complete failed:', json);
-      setPhase({ phase: 'failed', errorMessage: 'Não foi possível salvar o resultado. Tente novamente.' });
+      // The server already released the reserved slot for provider failures, so
+      // the attempt is NOT consumed and the user can retry.
+      const message = (json?.message as string | undefined) ?? 'Ocorreu um erro durante a análise. Tente novamente.';
+      setPhase({ phase: 'failed', errorMessage: message });
       refs.flowLockRef.current = false;
       return;
     }
+    result = json.result as PronunciationNormalizedResult;
   } catch {
-    setPhase({ phase: 'failed', errorMessage: 'Erro de rede ao salvar o resultado. Tente novamente.' });
+    // Network failure while uploading/awaiting: the reservation is still open,
+    // so report a retryable failure to release the slot.
+    setPhase({ phase: 'failed', errorMessage: 'Erro de rede durante a análise. Tente novamente.' });
+    await reportFail(refs, 'AZURE_NETWORK_ERROR');
     refs.flowLockRef.current = false;
+    return;
+  }
+
+  if (!refs.mountedRef.current) {
+    // Component unmounted while the server was assessing. The assessment already
+    // completed server-side, so the cleanup effect's /fail is a no-op.
     return;
   }
 
