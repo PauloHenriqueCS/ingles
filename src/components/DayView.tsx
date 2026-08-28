@@ -4,6 +4,8 @@ import { BrainCircuit, Moon, BookOpen, CalendarDays, Target as TargetIcon, Loade
 import ScreenHeader from './ScreenHeader';
 import { DayEntry, DaySchedule, Difficulty, Status, AIFeedback, EnglishDailyTheme, RewriteComparisonResult } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCelebration } from '../celebration';
+import { getTodaySP } from '../lib/timezone';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
 import { writingUiStrings } from '../i18n/writingUiStrings';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
@@ -59,6 +61,7 @@ type ReviewState = 'idle' | 'loading' | 'done' | 'error';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export default function DayView({ date, entry, onSave, onBack, onNavigateToSubscription, activeWeekdays = [1, 2, 3, 4, 5], onActivateDay }: Props) {
+  const celebration = useCelebration();
   const dow = new Date(date + 'T12:00:00').getDay();
   const isScheduledDay = activeWeekdays.includes(dow);
 
@@ -348,6 +351,10 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
     setStep('done');
     advanceFurthest('done');
     setConcluding(false);
+    // The writing is already server-confirmed ('corrigido') by the time the user
+    // reaches "Concluir"; this is the natural finish moment. Only for TODAY's
+    // entry — concluding a past day must not fire today's routine celebration.
+    if (reviewId && date === getTodaySP()) celebration.notifyActivityCompleted('writing');
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 

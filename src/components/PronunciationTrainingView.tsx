@@ -8,6 +8,7 @@ import {
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import ScreenHeader from './ScreenHeader';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCelebration } from '../celebration';
 import { getAuthHeader } from '../lib/apiAuth';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
 import {
@@ -384,6 +385,7 @@ type MainPhase = 'generating' | 'ready' | 'results' | 'gen-error' | 'blocked';
 
 export default function PronunciationTrainingView({ onBack, onNavigateToSubscription }: Props) {
   const entitlementsState = usePlanEntitlements();
+  const celebration = useCelebration();
   const pronunciation = entitlementsState.data?.pronunciation ?? null;
   const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
     ? pronunciation.maxRecordingSeconds * 1000
@@ -435,6 +437,10 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
   // Refs threaded into runTrainingAnalysisFlow — the same double-click /
   // concurrent-submission guard used by the writing flow's PronunciationRecorder.
   const flowLockRef           = useRef(false);
+  // One celebration per analysis that reaches 'completed' (reset when a new
+  // analysis starts). The backend blocks re-completing a session, so a retry
+  // never re-fires; a genuinely new session can celebrate again.
+  const celebratedRef         = useRef(false);
   const attemptIdRef          = useRef<string | null>(null);
   const sessionIdRef          = useRef<string | null>(null);
   const cancelRecognitionRef  = useRef<(() => void) | null>(null);
@@ -659,6 +665,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
     if (sessionStatus === 'completed') return; // frontend guard only — backend re-checks and blocks regardless
     if (recorder.phase !== 'done' || !recorder.audioBlob) return;
     flowLockRef.current = true;
+    celebratedRef.current = false;
 
     const attemptId = crypto.randomUUID();
     sharedAudioRef.current?.pause();
@@ -673,6 +680,13 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
         if (!mountedRef.current) return;
         setAnalysis(state);
         if (state.phase === 'completed' && state.result) {
+          // Fresh analysis just completed & persisted (server-authoritative).
+          // Guard so it fires once per analysis; the resume/recovery path
+          // deliberately never celebrates (it only re-opens an existing result).
+          if (!celebratedRef.current) {
+            celebratedRef.current = true;
+            celebration.notifyActivityCompleted('pronunciation');
+          }
           setSessionStatus('completed');
           if (typeof state.dailyCompleted === 'number') setDailyCompleted(state.dailyCompleted);
           const { aligned } = buildWordAlignment(generatedText ?? '', state.result.rawSegments);
