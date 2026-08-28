@@ -329,3 +329,59 @@ export async function recordClientLog(input: ClientLogInput, userId: string | nu
     /* best-effort */
   }
 }
+
+// ── Server-side self-timing (no trace threading) ──────────────────────────────
+
+export interface ServerTimingInput {
+  /** Logical unit measured, e.g. 'service:plan-entitlements'. */
+  endpoint: string;
+  /** Sub-step, e.g. 'db:entitlements'. */
+  stage: string;
+  userId?: string | null;
+  durationMs?: number;
+  /** Portion of durationMs spent in the database (usually == durationMs here). */
+  dbMs?: number;
+  status?: number;
+  errorCode?: string | null;
+  provider?: 'supabase' | 'azure' | 'openai' | null;
+  bytes?: number;
+  detail?: Record<string, unknown>;
+  correlationId?: string;
+}
+
+/**
+ * Fire-and-forget server self-timing for HOT SHARED functions (entitlements,
+ * subscription status, …) that many routes call. Instead of threading a trace
+ * through every route, the shared function reports its own DB time here — so
+ * "which server work waits on the database" is answered wherever it runs.
+ *
+ * Emits at 'debug' (production is set to 'debug' during a diagnosis), is gated
+ * by the dashboard level, and never throws. Callers should `void` it — do not
+ * await, so no latency is added to the hot path.
+ */
+export async function recordServerTiming(input: ServerTimingInput): Promise<void> {
+  try {
+    const { level } = await resolveDebugConfig(Date.now());
+    if (level === 'off') return;
+    if (LEVEL_RANK[level] < LEVEL_RANK.debug) return;
+    const client = getSharedServiceClient();
+    await client.from('debug_request_logs').insert({
+      environment: resolveConfigEnvironment(),
+      surface: 'server',
+      correlation_id: input.correlationId ?? null,
+      endpoint: input.endpoint,
+      stage: input.stage,
+      level: 'debug',
+      status_code: input.status ?? null,
+      error_code: input.errorCode ?? null,
+      duration_ms: typeof input.durationMs === 'number' ? Math.round(input.durationMs) : null,
+      db_ms: typeof input.dbMs === 'number' ? Math.round(input.dbMs) : null,
+      provider: input.provider ?? null,
+      bytes: typeof input.bytes === 'number' ? input.bytes : null,
+      user_id: input.userId ?? null,
+      detail: input.detail ?? null,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
