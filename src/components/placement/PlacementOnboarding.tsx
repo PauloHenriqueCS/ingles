@@ -211,7 +211,7 @@ export default function PlacementOnboarding({ onFinished, onExit }: Props) {
               <span className="text-emerald-300 font-medium">{fb.correctOptionLabel}</span>
             </p>
           )}
-          <div className="mt-auto pt-6">
+          <div className="mt-6 pb-4">
             <button
               onClick={() => setAnswerFeedback(null)}
               className="w-full py-3.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-2"
