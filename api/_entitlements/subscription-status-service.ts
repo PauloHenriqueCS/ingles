@@ -69,6 +69,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
+import { recordServerTiming } from '../_debug-log';
 import { hasActiveSubscriptionBillingIssue } from '../_account/billing-block-repository';
 
 export type SubscriptionStatus = 'trialing' | 'active' | 'expired' | 'canceled' | 'billing_issue';
@@ -162,6 +163,28 @@ function daysRemaining(endsAtIso: string, now: Date): number {
 }
 
 export async function resolveSubscriptionStatus(
+  userId: string,
+  deps?: { supabase?: SupabaseClient; now?: Date },
+): Promise<SubscriptionStatusSnapshot> {
+  // Self-timing wrapper (DB-dominated, hit on the Home/assinatura load). See the
+  // twin in getCurrentUserPlanEntitlements. Fire-and-forget, no-op when logging off.
+  const t0 = Date.now();
+  try {
+    return await resolveSubscriptionStatusImpl(userId, deps);
+  } finally {
+    const dt = Date.now() - t0;
+    void recordServerTiming({
+      endpoint: 'service:subscription-status',
+      stage: 'db:resolve_subscription',
+      userId,
+      durationMs: dt,
+      dbMs: dt,
+      provider: 'supabase',
+    });
+  }
+}
+
+async function resolveSubscriptionStatusImpl(
   userId: string,
   deps?: { supabase?: SupabaseClient; now?: Date },
 ): Promise<SubscriptionStatusSnapshot> {
