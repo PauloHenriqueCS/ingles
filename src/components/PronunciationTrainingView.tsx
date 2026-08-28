@@ -25,6 +25,7 @@ import {
   type TrainingCategory,
 } from '../lib/trainingWordCategory';
 import type { PronunciationNormalizedResult } from '../types';
+import PronunciationScoreSummary from './PronunciationScoreSummary';
 import { fetchAudioSettings, DEFAULT_AUDIO_SETTINGS, type AudioSettings } from '../lib/audioSettings';
 import { decideFullTextAudioSource, base64AudioToObjectUrl } from '../lib/pronunciationAudioSource';
 import { apiUrl } from '../lib/apiUrl';
@@ -414,6 +415,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
   const [ttsPhase, setTtsPhase]             = useState<'idle' | 'loading' | 'playing' | 'error'>('idle');
   const [analysis, setAnalysis]             = useState<TrainingAnalysisState>({ phase: 'idle' });
   const [wordResults, setWordResults]       = useState<PronunciationWordDetail[] | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<PronunciationNormalizedResult | null>(null);
   const [wordCategories, setWordCategories] = useState<Map<string, TrainingCategory>>(new Map());
   const [activeRecordingWordId, setActiveRecordingWordId] = useState<string | null>(null);
   const [audioVoice, setAudioVoice]         = useState<string>(DEFAULT_AUDIO_SETTINGS.voice);
@@ -502,6 +504,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
     setBlockedMessage(null);
     setBlockedIsNoAccess(false);
     setWordResults(null);
+    setAnalysisResult(null);
     setWordCategories(new Map());
     setActiveRecordingWordId(null);
     setAnalysis({ phase: 'idle' });
@@ -677,6 +680,7 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
           if (typeof state.dailyCompleted === 'number') setDailyCompleted(state.dailyCompleted);
           const { aligned } = buildWordAlignment(generatedText ?? '', state.result.rawSegments);
           setWordResults(aligned);
+          setAnalysisResult(state.result);
           setWordCategories(new Map());
           setActiveRecordingWordId(null);
           setMainPhase('results');
@@ -825,6 +829,14 @@ export default function PronunciationTrainingView({ onBack, onNavigateToSubscrip
           </div>
           {generateNewDisabled && (
             <p className="text-xs text-slate-500 mb-4">{ENTITLEMENT_MESSAGES.pronunciationTrainingTextAlreadyGeneratedToday}</p>
+          )}
+
+          {/* Score summary — same "Resultado da análise" + Precisão/Fluência/
+              Completude/Prosódia card the writing-flow pronunciation shows. */}
+          {mainPhase === 'results' && analysisResult && (
+            <div className="mb-4">
+              <PronunciationScoreSummary result={analysisResult} />
+            </div>
           )}
 
           {/* Generated text (plain or annotated) */}
