@@ -17,20 +17,14 @@ import { runAnalysisFlow, type AnalysisState } from './pronunciationFlow';
 // directly inside vi.mock factories. vi.hoisted() runs before the factories and
 // makes values available to them.
 
-const { MockAudioConversionError, MockPronunciationServiceError } = vi.hoisted(() => {
+const { MockAudioConversionError } = vi.hoisted(() => {
   class MockAudioConversionError extends Error {
     constructor(public code: string, message: string) {
       super(message);
       this.name = 'AudioConversionError';
     }
   }
-  class MockPronunciationServiceError extends Error {
-    constructor(public code: string, message: string) {
-      super(message);
-      this.name = 'PronunciationServiceError';
-    }
-  }
-  return { MockAudioConversionError, MockPronunciationServiceError };
+  return { MockAudioConversionError };
 });
 
 vi.mock('./apiAuth', () => ({
@@ -42,20 +36,19 @@ vi.mock('./audioConverter', () => ({
   convertToWavPcm: vi.fn(),
 }));
 
-vi.mock('./pronunciationService', () => ({
-  PronunciationServiceError: MockPronunciationServiceError,
-  createRecognitionSession: vi.fn(),
+vi.mock('./base64Audio', () => ({
+  fileToBase64: vi.fn().mockResolvedValue('QkFTRTY0'),
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 import { getAuthHeader } from './apiAuth';
 import { convertToWavPcm } from './audioConverter';
-import { createRecognitionSession } from './pronunciationService';
+import { fileToBase64 } from './base64Audio';
 
 const mockGetAuthHeader     = vi.mocked(getAuthHeader);
 const mockConvertToWavPcm   = vi.mocked(convertToWavPcm);
-const mockCreateSession     = vi.mocked(createRecognitionSession);
+const mockFileToBase64      = vi.mocked(fileToBase64);
 
 const REVIEW_ID = '11111111-1111-1111-1111-111111111111';
 const WAV_FILE  = new File(['wav'], 'audio.wav', { type: 'audio/wav' });
@@ -94,22 +87,16 @@ function makeFlowRefs() {
   };
 }
 
-function makeFetch(responses: Array<{ ok: boolean; body: unknown }>) {
+function makeFetch(responses: Array<{ ok: boolean; body: unknown } | Error>) {
   let call = 0;
   return vi.fn().mockImplementation(function() {
     const r = responses[call++] ?? { ok: true, body: {} };
+    if (r instanceof Error) return Promise.reject(r);
     return Promise.resolve({
       ok:   r.ok,
       json: () => Promise.resolve(r.body),
     });
   });
-}
-
-function makeSession(result: unknown = MOCK_RESULT, cancel = vi.fn()) {
-  return {
-    run:    vi.fn().mockResolvedValue(result),
-    cancel,
-  };
 }
 
 // ── Group A: fetchPronunciationStatus (scenarios 1-15) ────────────────────────
@@ -327,14 +314,14 @@ describe('runAnalysisFlow', () => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', undefined);
     mockGetAuthHeader.mockResolvedValue({ Authorization: 'Bearer test-token' });
+    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
+    mockFileToBase64.mockResolvedValue('QkFTRTY0');
   });
 
   it('16. calls convertToWavPcm with audioBlob as first step', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const refs = makeFlowRefs();
@@ -348,11 +335,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('17. sets phase preparing_audio at start', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const phases: string[] = [];
@@ -411,11 +396,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('21. sets phase reserving after audio conversion', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const phases: string[] = [];
@@ -431,11 +414,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('22. calls /start with attemptId and textVersionId', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     const mockFetch = makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]);
     vi.stubGlobal('fetch', mockFetch);
 
@@ -454,11 +435,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('23. sets phase analyzing after /start succeeds', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const phases: string[] = [];
@@ -472,32 +451,34 @@ describe('runAnalysisFlow', () => {
     expect(phases).toContain('analyzing');
   });
 
-  it('24. creates recognition session with referenceText from /start response (not caller input)', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
-    vi.stubGlobal('fetch', makeFetch([
-      { ok: true, body: makeStartResponse({ referenceText: 'server reference text' }) },
-      { ok: true, body: {} },
-    ]));
+  it('24. uploads the WAV to /assess with audioBase64, assessmentId and attemptId from /start', async () => {
+    const mockFetch = makeFetch([
+      { ok: true, body: makeStartResponse({ assessmentId: 'assess-24' }) },
+      { ok: true, body: { result: MOCK_RESULT } },
+    ]);
+    vi.stubGlobal('fetch', mockFetch);
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
-      { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
+      { reviewId: REVIEW_ID, attemptId: 'attempt-24', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
       vi.fn(),
     );
 
-    const [sessionOpts] = mockCreateSession.mock.calls[0];
-    expect(sessionOpts.referenceText).toBe('server reference text');
+    const assessCall = mockFetch.mock.calls.find(args => (args[0] as string).includes('/assess'));
+    expect(assessCall).toBeDefined();
+    const body = JSON.parse(assessCall![1].body);
+    expect(body.audioBase64).toBe('QkFTRTY0');
+    expect(body.assessmentId).toBe('assess-24');
+    expect(body.attemptId).toBe('attempt-24');
   });
 
-  it('25. creates recognition session with token from /start response', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
-    vi.stubGlobal('fetch', makeFetch([
-      { ok: true, body: makeStartResponse({ token: 'super-secret-azure-token' }) },
-      { ok: true, body: {} },
-    ]));
+  it('25. never sends the reference text to /assess (server grades against the reserved row)', async () => {
+    const mockFetch = makeFetch([
+      { ok: true, body: makeStartResponse({ referenceText: 'server reference text' }) },
+      { ok: true, body: { result: MOCK_RESULT } },
+    ]);
+    vi.stubGlobal('fetch', mockFetch);
 
     const refs = makeFlowRefs();
     await runAnalysisFlow(
@@ -506,16 +487,16 @@ describe('runAnalysisFlow', () => {
       vi.fn(),
     );
 
-    const [sessionOpts] = mockCreateSession.mock.calls[0];
-    expect(sessionOpts.token).toBe('super-secret-azure-token');
+    const assessCall = mockFetch.mock.calls.find(args => (args[0] as string).includes('/assess'));
+    const body = JSON.parse(assessCall![1].body);
+    expect(body).not.toHaveProperty('referenceText');
+    expect(body).not.toHaveProperty('token');
   });
 
   it('26. token from /start is not stored in refs', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse({ token: 'super-secret-azure-token' }) },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const refs = makeFlowRefs();
@@ -525,17 +506,15 @@ describe('runAnalysisFlow', () => {
       vi.fn(),
     );
 
-    // Token must not leak into refs (only assessmentId is stored)
+    // Token must not leak into refs (only assessmentId is ever stored)
     const refValues = Object.values(refs).map(r => r.current);
     expect(refValues.some(v => v === 'super-secret-azure-token')).toBe(false);
   });
 
-  it('27. sets phase saving_result after Azure returns result', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
+  it('27. never sets the removed saving_result phase (no separate save step)', async () => {
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const phases: string[] = [];
@@ -546,15 +525,15 @@ describe('runAnalysisFlow', () => {
       (s) => phases.push(s.phase),
     );
 
-    expect(phases).toContain('saving_result');
+    expect(phases).not.toContain('saving_result');
+    // analyzing is the last step before completed — /assess both runs and finalizes.
+    expect(phases.indexOf('completed')).toBe(phases.indexOf('analyzing') + 1);
   });
 
-  it('28. calls /complete with result and assessmentId', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession(MOCK_RESULT));
+  it('28. does NOT call /complete (/assess finalizes server-side)', async () => {
     const mockFetch = makeFetch([
       { ok: true, body: makeStartResponse({ assessmentId: 'assess-99' }) },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]);
     vi.stubGlobal('fetch', mockFetch);
 
@@ -566,18 +545,15 @@ describe('runAnalysisFlow', () => {
     );
 
     const completeCalls = mockFetch.mock.calls.filter(args => (args[0] as string).includes('/complete'));
-    expect(completeCalls).toHaveLength(1);
-    const body = JSON.parse(completeCalls[0][1].body);
-    expect(body.assessmentId).toBe('assess-99');
-    expect(body.result).toEqual(MOCK_RESULT);
+    expect(completeCalls).toHaveLength(0);
+    // Exactly two round-trips: /start then /assess.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('29. sets phase completed with result on success', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession(MOCK_RESULT));
+  it('29. sets phase completed with the server result on success', async () => {
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const states: AnalysisState[] = [];
@@ -593,40 +569,34 @@ describe('runAnalysisFlow', () => {
     expect(completed!.result).toEqual(MOCK_RESULT);
   });
 
-  it('30. calls /fail with AZURE_NO_MATCH when Azure returns no match', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue({
-      run:    vi.fn().mockRejectedValue(new MockPronunciationServiceError('AZURE_NO_MATCH', 'No match')),
-      cancel: vi.fn(),
-    });
+  it('30. on a non-ok /assess sets phase failed with the server message and does NOT call /fail', async () => {
     const mockFetch = makeFetch([
       { ok: true, body: makeStartResponse({ assessmentId: 'assess-50' }) },
-      { ok: true, body: {} }, // /fail
+      { ok: false, body: { code: 'AZURE_NO_MATCH', message: 'Não detectamos fala clara na gravação.' } },
     ]);
     vi.stubGlobal('fetch', mockFetch);
 
+    const states: AnalysisState[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
       { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
-      vi.fn(),
+      (s) => states.push(s),
     );
 
+    const failed = states.find(s => s.phase === 'failed');
+    expect(failed?.errorMessage).toBe('Não detectamos fala clara na gravação.');
+    // The server already released the reserved slot for provider errors — no /fail.
     const failCalls = mockFetch.mock.calls.filter(args => (args[0] as string).includes('/fail'));
-    expect(failCalls).toHaveLength(1);
-    const body = JSON.parse(failCalls[0][1].body);
-    expect(body.code).toBe('AZURE_NO_MATCH');
+    expect(failCalls).toHaveLength(0);
+    // Only /start and /assess were called.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('31. sets phase failed with no-match message on AZURE_NO_MATCH', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue({
-      run:    vi.fn().mockRejectedValue(new MockPronunciationServiceError('AZURE_NO_MATCH', 'No match')),
-      cancel: vi.fn(),
-    });
+  it('31. falls back to a generic message when a non-ok /assess omits one', async () => {
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: false, body: {} },
     ]));
 
     const states: AnalysisState[] = [];
@@ -638,40 +608,39 @@ describe('runAnalysisFlow', () => {
     );
 
     const failed = states.find(s => s.phase === 'failed');
-    expect(failed?.errorMessage).toMatch(/fala.*detectada|nenhuma/i);
+    expect(failed?.errorMessage).toMatch(/erro durante a análise/i);
   });
 
-  it('32. calls /fail with AZURE_CANCELED on generic Azure error', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue({
-      run:    vi.fn().mockRejectedValue(new Error('Unknown Azure error')),
-      cancel: vi.fn(),
-    });
+  it('32. on a network throw during /assess sets phase failed and calls /fail with AZURE_NETWORK_ERROR', async () => {
     const mockFetch = makeFetch([
       { ok: true, body: makeStartResponse({ assessmentId: 'assess-77' }) },
-      { ok: true, body: {} },
+      new Error('network down'),           // /assess upload throws
+      { ok: true, body: {} },              // the /fail call
     ]);
     vi.stubGlobal('fetch', mockFetch);
 
+    const states: AnalysisState[] = [];
     const refs = makeFlowRefs();
     await runAnalysisFlow(
       { reviewId: REVIEW_ID, attemptId: 'a1', audioBlob: BLOB, audioDurationMs: 0 },
       refs,
-      vi.fn(),
+      (s) => states.push(s),
     );
 
-    const failCalls = mockFetch.mock.calls.filter(args => (args[0] as string).includes('/fail'));
-    expect(failCalls).toHaveLength(1);
-    const body = JSON.parse(failCalls[0][1].body);
-    expect(body.code).toBe('AZURE_CANCELED');
+    const failed = states.find(s => s.phase === 'failed');
+    expect(failed?.errorMessage).toMatch(/rede/i);
+
+    const failCall = mockFetch.mock.calls.find(args => (args[0] as string).includes('/fail'));
+    expect(failCall).toBeDefined();
+    const body = JSON.parse(failCall![1].body);
+    expect(body.code).toBe('AZURE_NETWORK_ERROR');
+    expect(body.assessmentId).toBe('assess-77');
   });
 
   it('33. does not call onPhaseChange when mountedRef.current is false', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const onPhaseChange = vi.fn();
@@ -688,11 +657,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('34. sets flowLockRef.current = false on success', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const refs = makeFlowRefs();
@@ -722,15 +689,10 @@ describe('runAnalysisFlow', () => {
     expect(refs.flowLockRef.current).toBe(false);
   });
 
-  it('36. sets flowLockRef.current = false on Azure error', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue({
-      run:    vi.fn().mockRejectedValue(new MockPronunciationServiceError('AZURE_CANCELED', 'cancelled')),
-      cancel: vi.fn(),
-    });
+  it('36. sets flowLockRef.current = false on a non-ok /assess', async () => {
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse({ assessmentId: 'assess-xx' }) },
-      { ok: true, body: {} },
+      { ok: false, body: { code: 'AZURE_CANCELED', message: 'Ocorreu um erro durante a análise.' } },
     ]));
 
     const refs = makeFlowRefs();
@@ -744,11 +706,9 @@ describe('runAnalysisFlow', () => {
   });
 
   it('37. clears assessmentIdRef and attemptIdRef on success', async () => {
-    mockConvertToWavPcm.mockResolvedValue(WAV_FILE);
-    mockCreateSession.mockReturnValue(makeSession());
     vi.stubGlobal('fetch', makeFetch([
       { ok: true, body: makeStartResponse() },
-      { ok: true, body: {} },
+      { ok: true, body: { result: MOCK_RESULT } },
     ]));
 
     const refs = makeFlowRefs();
