@@ -1288,11 +1288,140 @@ async function handlePromotionEvaluate(req: any, res: any): Promise<void> {
 
 // ─── dispatcher ───────────────────────────────────────────────────────────────
 
+// ─── POST /api/pronunciation-training/word-assess ─────────────────────────────
+//
+// Server-side per-word assessment for the individual-word drill (BOTH surfaces:
+// the standalone WordRow and the writing-flow PracticeWordRow). Replaces the
+// browser→Azure WebSocket leg (fetchWordPracticeToken + createRecognitionSession)
+// that could stall with zero SDK events and only surfaced as "Análise demorou".
+// Registers the attempt server-side (same 3/word cap, BEFORE any provider work),
+// then runs Azure over the uploaded WAV with the WORD as reference text. Refunds
+// the attempt on a provider failure so a failed analysis is never consumed.
+
+const MAX_BODY_BYTES_WORD_ASSESS = 4 * 1024 * 1024; // one short word ≈ ≤5s audio
+
+async function handleWordAssess(req: any, res: any) {
+  if (!methodGuard(req, res, ['POST'])) return;
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  const access = await requirePronunciationEnabled(auth.userId);
+  if (isAccessDenial(access)) return jsonError(res, access.status, access.code, access.message);
+  if (!await applyRateLimit(res, auth.userId, 'pronunciation-training-token')) return;
+
+  const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
+  if (contentLength > MAX_BODY_BYTES_WORD_ASSESS) {
+    return jsonError(res, 413, 'PAYLOAD_TOO_LARGE', 'A gravação é grande demais para ser analisada.');
+  }
+
+  const { word, ownerType, ownerId, audioBase64 } = (req.body ?? {}) as {
+    word?: unknown; ownerType?: unknown; ownerId?: unknown; audioBase64?: unknown;
+  };
+  if (typeof word !== 'string' || word.trim() === '' || word.length > MAX_WORD_PRACTICE_WORD_LENGTH) {
+    return jsonError(res, 400, 'INVALID_WORD', 'Palavra inválida para o treino individual.');
+  }
+  if (!isWordPracticeOwnerType(ownerType)) {
+    return jsonError(res, 400, 'INVALID_OWNER_TYPE', 'Contexto de treino inválido.');
+  }
+  if (typeof ownerId !== 'string' || !isValidUuid(ownerId)) {
+    return jsonError(res, 400, 'INVALID_OWNER_ID', 'Identificador de contexto inválido.');
+  }
+  if (typeof audioBase64 !== 'string' || audioBase64.length === 0) {
+    return jsonError(res, 400, 'INVALID_AUDIO', 'Áudio ausente.');
+  }
+
+  // Recognition locale BEFORE registering the attempt (a missing Speech config
+  // must never burn one of the 3 attempts) — same order as /token.
+  let recognitionLocale: string;
+  try {
+    recognitionLocale = (await resolveUserSpeechConfig(getCurriculumServiceClient(), auth.userId)).speechLocale;
+  } catch (err) {
+    if (err instanceof SpeechConfigError) {
+      safeLog('pronunciation-training/word-assess', 'speech_config_missing', 503);
+      return jsonError(res, 503, 'PRONUNCIATION_UNAVAILABLE', 'Serviço de pronúncia temporariamente indisponível. Tente novamente.');
+    }
+    throw err;
+  }
+
+  const { data: attemptData, error: attemptError } = await auth.supabase.rpc('register_word_practice_attempt', {
+    p_owner_type: ownerType, p_owner_id: ownerId, p_word: word, p_max_attempts: WORD_PRACTICE_MAX_ATTEMPTS,
+  });
+  if (attemptError) {
+    safeLog('pronunciation-training/word-assess', 'word_attempt_rpc_error', 500);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao registrar a tentativa.');
+  }
+  const attempt = (attemptData ?? {}) as { error?: string; attemptsUsed?: number };
+  if (attempt.error) {
+    const status = WORD_ATTEMPT_ERROR_STATUS[attempt.error] ?? 500;
+    if (attempt.error === 'WORD_ATTEMPT_LIMIT_REACHED') {
+      return res.status(status).json({
+        code: 'WORD_ATTEMPT_LIMIT_REACHED',
+        message: `Você já usou as ${WORD_PRACTICE_MAX_ATTEMPTS} tentativas desta palavra.`,
+        attemptsUsed: attempt.attemptsUsed ?? WORD_PRACTICE_MAX_ATTEMPTS,
+        maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
+      });
+    }
+    if (attempt.error === 'OWNER_NOT_FOUND') {
+      return jsonError(res, status, 'OWNER_NOT_FOUND', 'Contexto de treino não encontrado.');
+    }
+    return jsonError(res, status, attempt.error, 'Não foi possível registrar a tentativa.');
+  }
+  const attemptsUsed = typeof attempt.attemptsUsed === 'number' ? attempt.attemptsUsed : 1;
+
+  let wav: Buffer;
+  try {
+    wav = Buffer.from(audioBase64, 'base64');
+  } catch {
+    await refundWordPracticeAttempt(auth.userId, ownerType, ownerId, word);
+    return jsonError(res, 400, 'INVALID_AUDIO', 'Áudio inválido.');
+  }
+
+  try {
+    const assessed = await assessPronunciation({
+      wav, referenceText: word, language: recognitionLocale, logLabel: `word:${ownerId}`,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).json({
+      result: assessed.result,
+      attemptsUsed,
+      maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
+    });
+  } catch (err) {
+    const code: PronunciationFailCode = err instanceof PronunciationServiceError ? err.code : 'AZURE_CANCELED';
+    // Provider failure → refund so the attempt is NOT consumed (parity with the
+    // old token path, where a failure before any client evaluation was refunded).
+    await refundWordPracticeAttempt(auth.userId, ownerType, ownerId, word);
+    const providerSignal = mapPronunciationFailCodeToProviderSignal(code);
+    if (providerSignal) {
+      try {
+        await recordAndAlertBrowserProviderFailure({
+          featureKey: 'pronunciation.assess_text', providerRaw: 'azure',
+          httpStatus: providerSignal.httpStatus, errorCode: providerSignal.errorCode,
+          service: 'speech_sdk', userId: auth.userId,
+        });
+      } catch { /* isolated */ }
+    }
+    safeLog('pronunciation-training/word-assess', `failed_${code.toLowerCase()}`, 502);
+    const message =
+      code === 'AZURE_NO_MATCH' ? 'Nenhuma fala detectada.'
+      : code === 'AUDIO_EMPTY' || code === 'AUDIO_DECODE_FAILED' ? 'Áudio inválido.'
+      : code === 'AZURE_TIMEOUT' ? 'Análise demorou.'
+      : 'Erro. Tente novamente.';
+    const status = code === 'AUDIO_EMPTY' || code === 'AUDIO_DECODE_FAILED' ? 400 : 502;
+    return res.status(status).json({
+      code, message,
+      attemptsUsed: Math.max(0, attemptsUsed - 1),
+      maxAttempts: WORD_PRACTICE_MAX_ATTEMPTS,
+    });
+  }
+}
+
 export default async function handler(req: any, res: any) {
   const slug = resolveSlug(req, '/api/pronunciation-training');
   switch (slug) {
     case 'generate-text':     return handleGenerateText(req, res);
     case 'token':             return handleToken(req, res);
+    case 'word-assess':       return handleWordAssess(req, res);
     case 'start':             return handleTrainingStart(req, res);
     case 'complete':          return handleTrainingComplete(req, res);
     case 'assess':            return handleTrainingAssess(req, res);
