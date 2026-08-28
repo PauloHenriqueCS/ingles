@@ -7,10 +7,8 @@ import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
-import { createRecognitionSession, PronunciationServiceError } from '../lib/pronunciationService';
 import { DEFAULT_AUDIO_SETTINGS, fetchAudioSettings } from '../lib/audioSettings';
-import type { PronunciationNormalizedResult } from '../types';
-import { fetchWordPracticeToken, WordAttemptLimitError } from '../lib/wordPracticeToken';
+import { assessWord, WordAssessError, WordAttemptLimitError } from '../lib/wordPracticeToken';
 import {
   WORD_PRACTICE_MAX_ATTEMPTS,
   WORD_PRACTICE_MAX_DURATION_MS,
@@ -275,7 +273,7 @@ function PracticeWordRow({
     recorder.startRecording();
   }
 
-  async function runAnalysis(audioBlob: Blob, audioDurationMs: number) {
+  async function runAnalysis(audioBlob: Blob, _audioDurationMs: number) {
     if (!mountedRef.current) return;
     if (!reviewId) {
       setErrorMsg('Contexto indisponível.');
@@ -288,16 +286,13 @@ function PracticeWordRow({
     onRecordingChange(null);
 
     try {
-      const tokenResult = await fetchWordPracticeToken(cleanWord, 'writing', reviewId);
-      setAttemptsUsed(tokenResult.attemptsUsed);
-      const { token, region, language } = tokenResult;
-
+      // Azure runs SERVER-side now: upload the WAV, the server registers the
+      // attempt (3/word cap) and returns the same normalized result. No browser
+      // WebSocket that could stall with zero SDK events ("Análise demorou").
       const wavFile = await convertToWavPcm(audioBlob);
-      const session = createRecognitionSession({ token, region, language, referenceText: cleanWord, wavFile, audioDurationMs });
-      cancelRef.current = session.cancel;
-      const result: PronunciationNormalizedResult = await session.run();
-      cancelRef.current = null;
+      const { result, attemptsUsed } = await assessWord(cleanWord, 'writing', reviewId, wavFile);
       if (!mountedRef.current) return;
+      setAttemptsUsed(attemptsUsed);
 
       const { aligned: newAligned } = buildWordAlignment(cleanWord, result.rawSegments);
       const newBand = newAligned.length > 0 ? getWordBand(newAligned[0]) : getWordBand(word);
@@ -312,7 +307,6 @@ function PracticeWordRow({
         if (mountedRef.current) { setAnalysisState('idle'); submittedRef.current = false; }
       }, 1500);
     } catch (err) {
-      cancelRef.current = null;
       submittedRef.current = false;
       if (!mountedRef.current) return;
 
@@ -325,9 +319,10 @@ function PracticeWordRow({
       }
 
       let msg = 'Erro. Tente novamente.';
-      if (err instanceof PronunciationServiceError) {
-        if (err.code === 'AZURE_NO_MATCH') msg = 'Nenhuma fala detectada.';
-        else if (err.code === 'AZURE_TIMEOUT') msg = 'Análise demorou.';
+      if (err instanceof WordAssessError) {
+        // The server already localized the message and refunded the attempt.
+        msg = err.message;
+        setAttemptsUsed(err.attemptsUsed);
       } else if (err instanceof AudioConversionError) {
         msg = 'Áudio inválido.';
       }
