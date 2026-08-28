@@ -17,6 +17,7 @@ import { handleRevenueCatWebhookRoute } from './_billing/revenuecat-webhook-rout
 import { handleSubscriptionSyncRoute } from './_billing/subscription-sync-route-handler';
 import { handleCurriculumRoute } from './_curriculum/route-handler';
 import { handlePlacementRoute } from './_placement/route-handler';
+import { handleDebugLogRoute } from './_debug/log-route-handler';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
@@ -151,6 +152,13 @@ export default async function handler(req: any, res: any) {
   // answer key stays server-side (service_role), never sent to the client.
   if (typeof req.query?.__lemonRoute === 'string' && req.query.__lemonRoute.startsWith('placement-')) {
     return handlePlacementRoute(req, res, req.query.__lemonRoute.slice('placement-'.length));
+  }
+  // Rewritten here from POST /api/debug/log (see vercel.json) — same
+  // function-budget reuse as the branches above. On-demand client timing
+  // ingestion; every write is gated by the dashboard log level (a no-op when
+  // logging is off), otherwise unrelated to grammar explanations.
+  if (req.query?.__lemonRoute === 'debug-log') {
+    return handleDebugLogRoute(req, res);
   }
 
   if (!methodGuard(req, res, ['POST'])) return;
