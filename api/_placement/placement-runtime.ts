@@ -74,6 +74,20 @@ export interface PlacementResultView {
   cta: string;
 }
 
+/**
+ * Feedback about the objective answer the user JUST submitted. Revealed only
+ * AFTER submission (the private key never reaches the client before that), so it
+ * cannot be used to cheat. Rendered as a one-shot screen before the next question.
+ */
+export interface PlacementAnswerFeedback {
+  questionKey: string;
+  selectedOptionKey: string;
+  selectedOptionLabel: string;
+  correctOptionKey: string;
+  correctOptionLabel: string;
+  isCorrect: boolean;
+}
+
 export interface PlacementState {
   placementStatus: PlacementStatus;
   learningLanguage: string;
@@ -85,6 +99,8 @@ export interface PlacementState {
   question?: PlacementQuestionView;
   c2?: PlacementC2View;
   result?: PlacementResultView;
+  /** Present only on the response to /answer — feedback for the just-answered question. */
+  answerFeedback?: PlacementAnswerFeedback;
 }
 
 // ── C2 evaluator (OpenAI call injected by the route handler) ─────────────────
@@ -682,7 +698,21 @@ export async function submitAnswer(
     throw new PlacementConfigError(`failed to record answer: ${insertError.message}`);
   }
 
-  return await advanceInProgress(ctx, attempt);
+  // Reveal correctness + the right option for THIS question (post-submission, so
+  // the private key still never leaks before the user commits an answer). The
+  // next screen is computed as usual and the feedback rides along with it.
+  const options = ctx.test.optionsByQuestionId.get(q.id) ?? [];
+  const labelOf = (key: string) => options.find((o) => o.key === key)?.label ?? key;
+  const next = await advanceInProgress(ctx, attempt);
+  next.answerFeedback = {
+    questionKey,
+    selectedOptionKey: optionKey,
+    selectedOptionLabel: labelOf(optionKey),
+    correctOptionKey: correctKey,
+    correctOptionLabel: labelOf(correctKey),
+    isCorrect,
+  };
+  return next;
 }
 
 export async function submitC2Response(
