@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
+import { useCelebration } from '../celebration';
 import { CheckCircle2, AlertTriangle, Loader2, Sparkles, RefreshCw } from 'lucide-react';
 import ScreenHeader from './ScreenHeader';
 import {
@@ -16,6 +17,7 @@ interface Props {
 type Phase = 'loading' | 'error' | 'empty' | 'active' | 'done';
 
 export default function ErrorReviewView({ onBack }: Props) {
+  const celebration = useCelebration();
   const [phase, setPhase] = useState<Phase>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [items, setItems] = useState<ErrorReviewItem[]>([]);
@@ -93,6 +95,9 @@ export default function ErrorReviewView({ onBack }: Props) {
     const next = index + 1;
     if (next >= total) {
       setPhase('done');
+      // Session finished (every item's answer was server-persisted per-item).
+      // Review is optional — this only ever shows the individual celebration.
+      if (total > 0) celebration.notifyActivityCompleted('review');
       return;
     }
     setIndex(next);

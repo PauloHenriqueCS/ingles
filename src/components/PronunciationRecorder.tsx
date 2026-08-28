@@ -5,6 +5,7 @@ import { isAndroidApp } from '../lib/runtimeEnvironment';
 import { openAndroidAppSettings } from '../lib/lemonNative';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCelebration } from '../celebration';
 import PronunciationResult from './PronunciationResult';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
@@ -31,6 +32,7 @@ function formatTime(ms: number): string {
 
 export default function PronunciationRecorder({ referenceText, reviewId }: Props) {
   const entitlements = usePlanEntitlements();
+  const celebration = useCelebration();
   const pronunciation = entitlements.data?.pronunciation ?? null;
   const maxRecordingMs = pronunciation && !pronunciation.maxRecordingUnlimited
     ? pronunciation.maxRecordingSeconds * 1000
@@ -145,7 +147,14 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
         audioDurationMs: recorder.durationMs,
       },
       { mountedRef, attemptIdRef, assessmentIdRef, cancelRecognitionRef, flowLockRef, gatewaySessionIdRef },
-      (state) => { if (mountedRef.current) setAnalysis(state); },
+      (state) => {
+        if (!mountedRef.current) return;
+        setAnalysis(state);
+        // Fresh diary analysis just completed & persisted. This callback only
+        // runs during an active flow, so restoring an existing assessment on
+        // mount (the statusData effect) never reaches here.
+        if (state.phase === 'completed') celebration.notifyActivityCompleted('pronunciation');
+      },
     );
   }, [reviewId, recorder.audioBlob, recorder.durationMs, pronunciationDisabledByPlan, evaluationsBlocked]);
 

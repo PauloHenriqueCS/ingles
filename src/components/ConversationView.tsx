@@ -9,6 +9,7 @@ import { openAndroidAppSettings } from '../lib/lemonNative';
 import { useTutorPreferences } from '../hooks/useTutorPreferences';
 import { useConversationCaptions } from '../hooks/useConversationCaptions';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
+import { useCelebration } from '../celebration';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
 import ScreenHeader from './ScreenHeader';
 import TutorPersonalizationSheet from './TutorPersonalizationSheet';
@@ -557,6 +558,7 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
   const session      = useRealtimeSession(playbackRate);
   const { captionsEnabled, toggleCaptions } = useConversationCaptions();
   const entitlements = usePlanEntitlements();
+  const celebration  = useCelebration();
   const today   = getTodaySP();
 
   const conversation = entitlements.data?.conversation ?? null;
@@ -630,7 +632,12 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
           // duration>0, guaranteed by the elapsedMs>0 gate above) was written
           // server-side only when there was an authorization to close. AppsFlyer
           // funnel — fire-and-forget & fail-safe.
-          if (session.recordingAuthorizationId) void trackActivityCompleted('conversation');
+          if (session.recordingAuthorizationId) {
+            void trackActivityCompleted('conversation');
+            // Conversation is always optional — this only ever shows the
+            // individual celebration, never day-complete.
+            celebration.notifyActivityCompleted('conversation');
+          }
           onComplete?.();
           entitlements.refetch(); // reconcile the monthly balance with the server, never optimistic-only
           return getDayTotalSeconds(today);
