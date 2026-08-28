@@ -169,18 +169,47 @@ function unwrapLimit(resolution: NumericLimitResolution, ctx: LogContext, capabi
   return { limit: resolution.limit, unlimited: resolution.unlimited, configError: false };
 }
 
+// ── Short-lived in-process cache ──────────────────────────────────────────────
+// This resolver is DB-dominated (admin_resolve_effective_plan_v1 + per-activity
+// counters) and is called by NEARLY EVERY /api route — so a single screen load
+// fires it many times for the same user within a second or two, each hitting the
+// database. On the small (CPU-burstable) Postgres instance that pile-up is what
+// tipped latency to 8-13s ("spinner em várias telas"). A tiny per-lambda TTL
+// cache collapses that burst to one DB read without meaningful staleness: the
+// snapshot is display/gating hint only — the AUTHORITATIVE checks are the server
+// RPCs (reserve_pronunciation_assessment, register_word_practice_attempt, the
+// conversation authorizers), which are never cached. Bypassed whenever a caller
+// injects deps (tests / special callers).
+const ENT_CACHE_TTL_MS = 5_000;
+const ENT_CACHE_MAX_ENTRIES = 2_000;
+interface CachedEntitlements { snapshot: PlanEntitlementsSnapshot; expiresAt: number; }
+const _entitlementsCache = new Map<string, CachedEntitlements>();
+
+/** Drops a user's cached snapshot so the next read is fresh (e.g. right after a
+ *  plan change). Safe to call anytime; no-op if absent. */
+export function invalidatePlanEntitlementsCache(userId?: string): void {
+  if (userId) _entitlementsCache.delete(userId);
+  else _entitlementsCache.clear();
+}
+
 export async function getCurrentUserPlanEntitlements(
   userId: string,
   deps?: { supabase?: SupabaseClient; now?: Date },
 ): Promise<PlanEntitlementsSnapshot> {
-  // Self-timing wrapper: this resolver is DB-dominated (admin_resolve_effective_plan_v1
-  // + per-activity counters) and is called by nearly every /api route, so timing
-  // it here answers "is the API waiting on the database?" across screens without
-  // threading a trace through each route. Fire-and-forget, no-op unless the
-  // dashboard log level is on (see api/_debug-log.ts).
+  // Only the default path (no injected deps) is cacheable.
+  const cacheable = deps === undefined;
+  if (cacheable) {
+    const hit = _entitlementsCache.get(userId);
+    if (hit && hit.expiresAt > Date.now()) return hit.snapshot;
+  }
+
+  // Self-timing (fire-and-forget, no-op unless the dashboard log level is on)
+  // now runs ONLY on a cache miss — so debug_request_logs also shows how much
+  // the cache cut the DB load.
   const t0 = Date.now();
+  let snapshot: PlanEntitlementsSnapshot;
   try {
-    return await getCurrentUserPlanEntitlementsImpl(userId, deps);
+    snapshot = await getCurrentUserPlanEntitlementsImpl(userId, deps);
   } finally {
     const dt = Date.now() - t0;
     void recordServerTiming({
@@ -192,6 +221,13 @@ export async function getCurrentUserPlanEntitlements(
       provider: 'supabase',
     });
   }
+
+  if (cacheable) {
+    // Cheap unbounded-growth guard for a long-lived warm lambda.
+    if (_entitlementsCache.size >= ENT_CACHE_MAX_ENTRIES) _entitlementsCache.clear();
+    _entitlementsCache.set(userId, { snapshot, expiresAt: Date.now() + ENT_CACHE_TTL_MS });
+  }
+  return snapshot;
 }
 
 async function getCurrentUserPlanEntitlementsImpl(
