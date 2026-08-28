@@ -43,6 +43,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient } from '../_ai-gateway/usage-repository';
+import { recordServerTiming } from '../_debug-log';
 import { AUTHORIZATION_HEARTBEAT_STALE_SECONDS } from '../_realtime-constants';
 import { computeFeatureState } from '../../src/domain/entitlements/compute-feature-state';
 import type {
@@ -169,6 +170,31 @@ function unwrapLimit(resolution: NumericLimitResolution, ctx: LogContext, capabi
 }
 
 export async function getCurrentUserPlanEntitlements(
+  userId: string,
+  deps?: { supabase?: SupabaseClient; now?: Date },
+): Promise<PlanEntitlementsSnapshot> {
+  // Self-timing wrapper: this resolver is DB-dominated (admin_resolve_effective_plan_v1
+  // + per-activity counters) and is called by nearly every /api route, so timing
+  // it here answers "is the API waiting on the database?" across screens without
+  // threading a trace through each route. Fire-and-forget, no-op unless the
+  // dashboard log level is on (see api/_debug-log.ts).
+  const t0 = Date.now();
+  try {
+    return await getCurrentUserPlanEntitlementsImpl(userId, deps);
+  } finally {
+    const dt = Date.now() - t0;
+    void recordServerTiming({
+      endpoint: 'service:plan-entitlements',
+      stage: 'db:resolve_entitlements',
+      userId,
+      durationMs: dt,
+      dbMs: dt,
+      provider: 'supabase',
+    });
+  }
+}
+
+async function getCurrentUserPlanEntitlementsImpl(
   userId: string,
   deps?: { supabase?: SupabaseClient; now?: Date },
 ): Promise<PlanEntitlementsSnapshot> {
