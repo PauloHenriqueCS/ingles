@@ -10,7 +10,6 @@ import ScreenHeader from './ScreenHeader';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { getAuthHeader } from '../lib/apiAuth';
 import { convertToWavPcm, AudioConversionError } from '../lib/audioConverter';
-import { createRecognitionSession, PronunciationServiceError } from '../lib/pronunciationService';
 import {
   runTrainingAnalysisFlow,
   TRAINING_PHASE_MESSAGES,
@@ -32,7 +31,7 @@ import { apiUrl } from '../lib/apiUrl';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
 import ActivityAccessBlocked from './ActivityAccessBlocked';
-import { fetchWordPracticeToken, WordAttemptLimitError } from '../lib/wordPracticeToken';
+import { assessWord, WordAssessError, WordAttemptLimitError } from '../lib/wordPracticeToken';
 import {
   WORD_PRACTICE_MAX_ATTEMPTS,
   WORD_PRACTICE_MAX_DURATION_MS,
@@ -207,7 +206,7 @@ function WordRow({
 
   // ── Analysis ──────────────────────────────────────────────────────────────
 
-  async function runAnalysis(audioBlob: Blob, audioDurationMs: number) {
+  async function runAnalysis(audioBlob: Blob, _audioDurationMs: number) {
     if (!mountedRef.current) return;
     if (!sessionId) {
       setErrorMsg('Contexto indisponível.');
@@ -222,15 +221,13 @@ function WordRow({
     onRecordingChange(null);
 
     try {
-      const tokenResult = await fetchWordPracticeToken(cleanWord, 'training', sessionId);
-      setAttemptsUsed(tokenResult.attemptsUsed);
-      const { token, region, language } = tokenResult;
+      // Azure runs SERVER-side now: upload the WAV; the server registers the
+      // attempt (3/word cap) and returns the same normalized result. No browser
+      // WebSocket that could stall with zero SDK events ("Análise demorou").
       const wavFile = await convertToWavPcm(audioBlob);
-      const session = createRecognitionSession({ token, region, language, referenceText: cleanWord, wavFile, audioDurationMs });
-      cancelRef.current = session.cancel;
-      const result: PronunciationNormalizedResult = await session.run();
-      cancelRef.current = null;
+      const { result, attemptsUsed } = await assessWord(cleanWord, 'training', sessionId, wavFile);
       if (!mountedRef.current) return;
+      setAttemptsUsed(attemptsUsed);
 
       const { aligned } = buildWordAlignment(cleanWord, result.rawSegments);
       const newCat: TrainingCategory = aligned.length > 0 ? getWordTrainingCategory(aligned[0]) : 'pratique';
@@ -246,7 +243,6 @@ function WordRow({
         if (mountedRef.current) { setAnalysisState('idle'); submittedRef.current = false; }
       }, 1500);
     } catch (err) {
-      cancelRef.current = null;
       submittedRef.current = false;
       if (!mountedRef.current) return;
 
@@ -259,15 +255,10 @@ function WordRow({
       }
 
       let msg = 'Erro. Gravar novamente.';
-      if (err instanceof PronunciationServiceError) {
-        switch (err.code) {
-          case 'AZURE_NO_MATCH':       msg = 'Fala não detectada.'; break;
-          case 'AZURE_TIMEOUT':        msg = 'Análise demorou.'; break;
-          case 'AZURE_NETWORK_ERROR':  msg = 'Serviço indisponível.'; break;
-          case 'AZURE_CANCELED':       msg = 'Análise interrompida.'; break;
-          case 'CLIENT_INTERRUPTED':   msg = 'Cancelado.'; break;
-          case 'RESULT_INVALID':       msg = 'Resultado inválido.'; break;
-        }
+      if (err instanceof WordAssessError) {
+        // Server already localized the message and refunded the attempt.
+        msg = err.message;
+        setAttemptsUsed(err.attemptsUsed);
       } else if (err instanceof AudioConversionError) {
         msg = 'Áudio incompatível.';
       }
