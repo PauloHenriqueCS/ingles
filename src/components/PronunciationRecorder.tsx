@@ -6,7 +6,6 @@ import { openAndroidAppSettings } from '../lib/lemonNative';
 import { usePronunciationStatus } from '../hooks/usePronunciationStatus';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { useCelebration } from '../celebration';
-import ConfirmPronunciationModal from './ConfirmPronunciationModal';
 import PronunciationResult from './PronunciationResult';
 import { getAuthHeader } from '../lib/apiAuth';
 import { apiUrl } from '../lib/apiUrl';
@@ -126,14 +125,10 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
 
   // ── Button handlers ────────────────────────────────────────────────────────
 
-  const handleSubmitClick = useCallback(() => {
-    setAnalysis((prev) => ({ ...prev, phase: 'confirming' }));
-  }, []);
-
-  const handleCancelModal = useCallback(() => {
-    setAnalysis({ phase: 'idle' });
-  }, []);
-
+  // The recording is sent straight to analysis — no confirmation modal. The
+  // backend re-checks entitlements and reserves the slot before any provider
+  // call, and a recoverable failure never consumes the evaluation, so the
+  // extra "Confirmar e analisar" step added friction without protecting anything.
   const handleConfirm = useCallback(() => {
     if (flowLockRef.current) return;
     // Frontend guard for UX only — the backend re-checks entitlements
@@ -419,7 +414,7 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
                   </div>
 
                   <button
-                    onClick={handleSubmitClick}
+                    onClick={handleConfirm}
                     disabled={!canSubmit}
                     aria-disabled={!canSubmit}
                     className={`w-full py-2.5 rounded-xl text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 min-h-[44px] ${
@@ -460,13 +455,6 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
         </>
       )}
 
-      {/* Confirmation modal */}
-      {analysis.phase === 'confirming' && (
-        <ConfirmPronunciationModal
-          onConfirm={handleConfirm}
-          onCancel={handleCancelModal}
-        />
-      )}
     </div>
   );
 }
