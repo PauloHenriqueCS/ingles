@@ -280,3 +280,52 @@ export async function startTrace(params: StartTraceParams): Promise<DebugTrace> 
 function cheapId(clock: () => number): string {
   return `srv_${clock().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
+
+// ── Client-reported timings ───────────────────────────────────────────────────
+
+export interface ClientLogInput {
+  endpoint: string;
+  stage: string;
+  correlationId?: string;
+  durationMs?: number;
+  status?: number;
+  errorCode?: string | null;
+  bytes?: number;
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * Persists a single client-reported timing row (surface='client'). The device
+ * is the only place that can see a request STALL (the "spinner forever" symptom
+ * the server never learns about), so the client posts slow/stalled/errored
+ * fetches here. Gated by the same level switch and fail-closed: when logging is
+ * off, nothing is written. Never throws.
+ */
+export async function recordClientLog(input: ClientLogInput, userId: string | null): Promise<void> {
+  try {
+    const { level } = await resolveDebugConfig(Date.now());
+    if (level === 'off') return;
+    // Client rows are the raison d'être of this feature (spinner diagnosis), so
+    // they emit at 'info' — visible whenever logging is on at all.
+    if (LEVEL_RANK[level] < LEVEL_RANK.info) return;
+    const client = getSharedServiceClient();
+    await client.from('debug_request_logs').insert({
+      environment: resolveConfigEnvironment(),
+      surface: 'client',
+      correlation_id: input.correlationId ?? null,
+      endpoint: input.endpoint,
+      stage: input.stage,
+      level: 'info',
+      status_code: input.status ?? null,
+      error_code: input.errorCode ?? null,
+      duration_ms: typeof input.durationMs === 'number' ? Math.round(input.durationMs) : null,
+      db_ms: null,
+      provider: null,
+      bytes: typeof input.bytes === 'number' ? input.bytes : null,
+      user_id: userId,
+      detail: input.detail ?? null,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
