@@ -1,4 +1,4 @@
-import { PenSquare, MessagesSquare, Headphones, AudioLines, Repeat2 } from 'lucide-react';
+import { PenSquare, MessagesSquare, Headphones, AudioLines, Repeat2, Loader2 } from 'lucide-react';
 import type { View } from '../types';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
@@ -58,6 +58,12 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
   // Loading and "not yet resolved" both render the neutral loading state — never
   // a flash of a card looking available before the plan is known.
   const resolved = isLoading ? null : entitlements;
+  // First-load ONLY: show a loader in place of the practice cards until the
+  // plan/permissions are known, so they never flash grey/"disabled" first.
+  // `isLoading` is true only on the very first fetch (see usePlanEntitlements'
+  // hasLoadedRef) — a background refetch keeps the last snapshot, so this never
+  // blanks the Home after the first paint.
+  const entitlementsLoading = isLoading && !entitlements;
   const s = homeUiStrings(focus.data?.interfaceLanguage);
 
   const icon = (key: CurricularActivityKey, size: string) => {
@@ -149,6 +155,15 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
         <CurrentFocus data={focus.data} loading={focus.loading} error={focus.error} />
       </div>
 
+      {entitlementsLoading ? (
+        /* First load: one loader until the plan/permissions are known, so the
+           practice cards never flash grey/"disabled" before they resolve. */
+        <div className="flex flex-col items-center justify-center gap-3 py-20" role="status" aria-live="polite">
+          <Loader2 className="w-7 h-7 text-slate-400 animate-spin" aria-hidden="true" />
+          <p className="text-sm text-slate-400">{s.loadingPractices}</p>
+        </div>
+      ) : (
+        <>
       {/* Próxima recomendação — the prominent hero */}
       <section className="mb-6">
         <h2 className="text-base font-bold text-slate-100 mb-3">{s.nextRecommendation}</h2>
@@ -198,6 +213,8 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
           />
         </div>
       </section>
+        </>
+      )}
 
     </div>
   );
