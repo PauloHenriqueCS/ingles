@@ -1,8 +1,10 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { CelebrationContext, type CelebrationContextValue } from './CelebrationContext';
 import { CelebrationOverlay } from './CelebrationOverlay';
 import { resolveActivityCelebration } from './resolveCelebration';
 import { createCelebrationDedup } from './celebrationDedup';
+import { installCelebrationAudioUnlock } from './celebrationSound';
 import { getTodaySP } from '../lib/timezone';
 import type { Celebration, CelebrationActivityType } from './celebration-types';
 
@@ -83,8 +85,15 @@ export function CelebrationProvider({ children }: { children: ReactNode }) {
     [enqueue],
   );
 
-  const handleDone = useCallback(() => {
+  // Dequeue the current celebration → active becomes null (or the next item),
+  // and AnimatePresence plays the exit variant before unmounting.
+  const handleExpire = useCallback(() => {
     setQueue((q) => q.slice(1));
+  }, []);
+
+  // Prime the audio elements on the first user gesture (autoplay policy), once.
+  useEffect(() => {
+    installCelebrationAudioUnlock();
   }, []);
 
   const value = useMemo<CelebrationContextValue>(
@@ -97,13 +106,16 @@ export function CelebrationProvider({ children }: { children: ReactNode }) {
   return (
     <CelebrationContext.Provider value={value}>
       {children}
-      {active && (
-        <CelebrationOverlay
-          key={active.id}
-          celebration={active.celebration}
-          onDone={handleDone}
-        />
-      )}
+      {/* mode="wait" → the exit animation finishes before any next celebration enters. */}
+      <AnimatePresence mode="wait">
+        {active && (
+          <CelebrationOverlay
+            key={active.id}
+            celebration={active.celebration}
+            onExpire={handleExpire}
+          />
+        )}
+      </AnimatePresence>
     </CelebrationContext.Provider>
   );
 }
