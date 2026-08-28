@@ -267,6 +267,34 @@ describe('placement runtime — adaptive flow + monotonic apply', () => {
     expect(s.question?.checkpointKey).toBe('B2');
   });
 
+  it('answer feedback: a correct answer reveals isCorrect + the right option', async () => {
+    let s = await startPlacement(client, USER);
+    const id = s.attemptId!;
+    expect(s.answerFeedback).toBeUndefined(); // never present before answering
+    s = await submitAnswer(client, USER, id, 'B1.1', 'A');
+    expect(s.answerFeedback).toBeDefined();
+    expect(s.answerFeedback?.questionKey).toBe('B1.1');
+    expect(s.answerFeedback?.isCorrect).toBe(true);
+    expect(s.answerFeedback?.selectedOptionKey).toBe('A');
+    expect(s.answerFeedback?.correctOptionKey).toBe('A');
+    expect(s.answerFeedback?.correctOptionLabel).toBe('a');
+  });
+
+  it('answer feedback: a wrong answer reveals the correct option label', async () => {
+    let s = await startPlacement(client, USER);
+    const id = s.attemptId!;
+    s = await submitAnswer(client, USER, id, 'B1.1', 'B');
+    expect(s.answerFeedback?.isCorrect).toBe(false);
+    expect(s.answerFeedback?.selectedOptionKey).toBe('B');
+    expect(s.answerFeedback?.correctOptionKey).toBe('A');
+    expect(s.answerFeedback?.correctOptionLabel).toBe('a');
+    // The served next question still never leaks a correctness flag.
+    expect(s.question?.options.every((o) => !('isCorrect' in o))).toBe(true);
+    // Re-reading state (not via /answer) carries no feedback.
+    const fresh = await getPlacementState(client, USER);
+    expect(fresh.answerFeedback).toBeUndefined();
+  });
+
   it('skip records a skipped attempt and leaves the user not-completed', async () => {
     const s = await skipPlacement(client, USER);
     expect(s.placementStatus).toBe('skipped');
