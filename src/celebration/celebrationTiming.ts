@@ -22,19 +22,27 @@ export interface CelebrationTiming {
   subDelay: number;
   /** seconds — streak line appears (day-complete only). */
   streakDelay?: number;
+  /**
+   * Playback speed for the Lottie hero, so the animation's meaningful reveal
+   * fits inside the on-screen hold. The chosen "payment success" clip is ~4s at
+   * 1× — sped up it completes its check within the ~1.5s activity window; the
+   * Trophy clip is ~2.37s and plays at 1× within the ~2.3s day window.
+   */
+  lottieSpeed: number;
 }
 
 export const CELEBRATION_TIMING: {
   'activity-complete': CelebrationTiming;
   'day-complete': CelebrationTiming;
 } = {
-  // 0 enter · 150 spring · ~350 impact(sound+haptic) · 550 title · 800 sub · 1400 exit · ~1700 gone
+  // 0 enter · 150 spring · ~250 impact(sound+haptic, leads the check) · 600 title · 850 sub · 1500 exit · ~1760 gone
   'activity-complete': {
-    holdMs: 1400,
-    impactMs: 350,
+    holdMs: 1500,
+    impactMs: 250,
     contentDelayMs: 150,
-    titleDelay: 0.55,
-    subDelay: 0.8,
+    titleDelay: 0.6,
+    subDelay: 0.85,
+    lottieSpeed: 1.0,
   },
   // 0 enter · 200 grow · ~450 impact(sound+haptic) · 600 title · 900 sub · 1300 streak · 2300 exit · ~2700 gone
   'day-complete': {
@@ -44,5 +52,6 @@ export const CELEBRATION_TIMING: {
     titleDelay: 0.6,
     subDelay: 0.9,
     streakDelay: 1.3,
+    lottieSpeed: 1.0,
   },
 };

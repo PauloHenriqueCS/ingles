@@ -19,9 +19,10 @@ describe('celebration choreography timings', () => {
 
   it('activity sequence is ordered: impact → title → sub → exit', () => {
     const a = CELEBRATION_TIMING['activity-complete'];
-    expect(a.impactMs).toBeGreaterThanOrEqual(300);
-    expect(a.impactMs).toBeLessThanOrEqual(400); // impact/sound/haptic beat
-    expect(a.titleDelay * 1000).toBeGreaterThan(a.impactMs);
+    // Sound leads the check slightly (starts early, before the title) — the beat
+    // sits between the content spring-in and the title reveal.
+    expect(a.impactMs).toBeGreaterThan(0);
+    expect(a.impactMs).toBeLessThan(a.titleDelay * 1000);
     expect(a.subDelay).toBeGreaterThan(a.titleDelay);
     expect(a.subDelay * 1000).toBeLessThan(a.holdMs);
   });
