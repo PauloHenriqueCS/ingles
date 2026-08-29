@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from './_auth';
 import { methodGuard, sizeGuard, PAYLOAD_LIMITS, TIMEOUTS, jsonError, safeLog, sanitizeProviderError } from './_helpers';
+import { recordBehavioralPushActivityConversion } from './_push/attribution';
 import { applyRateLimit } from './_rateLimit';
 import { executeAiGatewayCall, getProductionDeps, estimateTextTokens, DEFAULT_MAX_OUTPUT_TOKENS_ESTIMATE } from './_ai-gateway/index';
 import type { GatewayUsageMetric } from './_ai-gateway/index';
@@ -694,6 +695,11 @@ export default async function handler(req: any, res: any) {
     // ledger itself. Logged for investigation; does not affect the response.
     safeLog('review-text', 'complete_reservation_failed', 500);
   }
+
+  // Behavioral push attribution (association, not causality). Any completed
+  // writing review is a valid practice (same as the streak/active-day rule).
+  // Best-effort, idempotent, isolated — never affects this response.
+  void recordBehavioralPushActivityConversion(userId, 'writing');
 
   // ── Record curricular practice (normal mode only) ─────────────────────────
   // A successful NORMAL correction counts as the "writing" modality practised

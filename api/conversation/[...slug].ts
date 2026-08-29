@@ -20,6 +20,7 @@ import {
 import { CURRICULUM_BOOTSTRAP_DEFAULT } from '../../src/config/curriculum-defaults';
 import type { AIPreferences } from '../../src/types';
 import { methodGuard, sizeGuard, jsonError, PAYLOAD_LIMITS, TIMEOUTS, safeLog, resolveSlug } from '../_helpers';
+import { recordBehavioralPushActivityConversion } from '../_push/attribution';
 import { applyRateLimit } from '../_rateLimit';
 import {
   executeAiGatewayCall,
@@ -1375,6 +1376,11 @@ async function handleSessionComplete(req: any, res: any) {
       .maybeSingle();
 
     if (!updated) return res.status(200).json({ status: 'ignored' });
+
+    // Behavioral push attribution (association, not causality). A cooperatively
+    // completed session with real duration counts as a conversation practice.
+    // Best-effort, idempotent, isolated — never affects this response.
+    if (durationSeconds > 0) void recordBehavioralPushActivityConversion(userId, 'conversation');
 
     // Reconcile the upfront conversation.realtime_usage budget reservation
     // against the session's REAL recorded cost — commits it into
