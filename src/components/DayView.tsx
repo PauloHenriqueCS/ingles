@@ -81,6 +81,20 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   const hasContent = !!(entry?.originalText?.trim());
   const showInactiveMessage = !isPracticeDay && hasOverride !== null && !hasContent;
 
+  // Auto-open: a non-practice day no longer parks the user on the "Dia de
+  // revisão" / "Dia inativo" interstitial — we activate it right away and drop
+  // them straight into the activity. Fires once per date; the manual card only
+  // reappears as a fallback if activation errors.
+  const [activateError, setActivateError] = useState(false);
+  const autoActivatedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (showInactiveMessage && autoActivatedForRef.current !== date) {
+      autoActivatedForRef.current = date;
+      void handleActivateDay();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInactiveMessage, date]);
+
   const focus = useCurriculumFocus();
   const t = writingUiStrings(focus.data?.interfaceLanguage);
 
@@ -256,12 +270,16 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
   }
 
   async function handleActivateDay() {
+    setActivateError(false);
     try {
       await addLearningDayOverride(date);
       setHasOverride(true);
       await onActivateDay?.(date);
     } catch {
-      // silent — user can still write regardless
+      // Surface a fallback card with a retry — the auto-open effect below drops
+      // the user straight into the activity on the happy path, so the manual
+      // card only ever appears if activation actually failed.
+      setActivateError(true);
     }
   }
 
@@ -518,7 +536,18 @@ export default function DayView({ date, entry, onSave, onBack, onNavigateToSubsc
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-4 pb-10">
         {showInactiveMessage ? (
-          <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
+          activateError ? (
+            <InactiveDayCard schedule={schedule} onActivate={handleActivateDay} />
+          ) : (
+            <div
+              className="bg-slate-800 rounded-xl p-6 flex flex-col items-center justify-center gap-3 py-10"
+              role="status"
+              aria-live="polite"
+            >
+              <Loader2 className="w-6 h-6 text-slate-400 animate-spin" aria-hidden="true" />
+              <p className="text-sm text-slate-400">Abrindo atividade…</p>
+            </div>
+          )
         ) : (
           <>
             {!writingLoading && writingDisabledByPlan && (
