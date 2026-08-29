@@ -108,6 +108,12 @@ export default function HamburgerMenu({ current, onNavigate, onClose, onLogout, 
             <AppIcon icon={LogOut} />
             <span>Sair da conta</span>
           </button>
+          {/* Build stamp — lets a tester confirm the WebView loaded the latest
+              bundle (a new deploy changes this). If it looks stale, the process
+              is running cached JS: force-stop / clear cache to refresh. */}
+          <p className="mt-2 text-[10px] text-slate-600 select-text">
+            build {__BUILD_ID__.slice(5, 16).replace('T', ' ')} UTC
+          </p>
         </div>
       </nav>
     </>
