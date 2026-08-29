@@ -45,6 +45,7 @@ import { auditListeningInventory } from '../../../src/services/listening/invento
 import { getListeningInventoryStatus } from '../../../src/services/listening/inventory/get-listening-inventory-status';
 import { auditListeningStorageConsistency } from '../../../src/services/listening/publication/audit-listening-storage';
 import { repairListeningPipeline } from '../../../src/services/listening/pipeline/repair-listening-pipeline';
+import { handleBehavioralPushSweep } from '../../_push/behavioralPushSweep';
 
 const BATCH_SIZE = 3;
 const VALID_LEVELS = new Set(['A1', 'A2', 'B1', 'B2', 'C1', 'C2']);
@@ -595,6 +596,12 @@ export default async function handler(req: any, res: any): Promise<void> {
     case 'supply':             return handleSupply(req, res);
     case 'conversation-sweep': return handleConversationSweep(req, res);
     case 'alerts-recovery-sweep': return handleAlertsRecoverySweep(req, res);
+    // Behavioral push (streak_risk / abandonment) sweep — unrelated to
+    // listening; folded here for the same 12-function-cap reason as the two
+    // sweeps above. Scheduled via pg_cron + pg_net (public
+    // .behavioral_push_cron_sweep, migration 20260829120100). All eligibility,
+    // claim/idempotency, revalidation and OneSignal sending live in api/_push/*.
+    case 'behavioral-push-sweep': return handleBehavioralPushSweep(req, res);
     default:
       return res.status(404).json({ error: 'Route not found', slug });
   }

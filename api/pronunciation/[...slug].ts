@@ -6,6 +6,7 @@ import { assessPronunciation } from '../_azure-pronunciation';
 import { PronunciationServiceError } from '../../src/domain/pronunciation/pronunciation-scoring';
 import type { PronunciationNormalizedResult, PronunciationFailCode } from '../../src/types';
 import { methodGuard, safeLog, resolveSlug } from '../_helpers';
+import { recordBehavioralPushActivityConversion } from '../_push/attribution';
 import {
   executeAiGatewayCall,
   getProductionDeps,
@@ -663,6 +664,10 @@ async function handleComplete(req: any, res: any) {
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao salvar o resultado.' });
   }
 
+  // Behavioral push attribution (association, not causality). Best-effort,
+  // idempotent, isolated — never affects this response.
+  void recordBehavioralPushActivityConversion(auth.userId, 'pronunciation');
+
   // Additive Gateway telemetry — never affects the response above. Only runs
   // when the client (still authenticated) reports a gatewaySessionId, which
   // is now issued by every /start call regardless of gatewayMode (see header
@@ -903,6 +908,10 @@ async function handleAssess(req: any, res: any) {
     safeLog('pronunciation/assess', 'complete_rpc_unexpected', 500);
     return res.status(500).json({ code: 'INTERNAL_ERROR', message: 'Erro interno ao salvar o resultado.' });
   }
+
+  // Behavioral push attribution (association, not causality). Best-effort,
+  // idempotent, isolated — never affects this response.
+  void recordBehavioralPushActivityConversion(userId, 'pronunciation');
 
   // Additive Gateway telemetry — mirrors /complete, never affects the response.
   if (typeof gatewaySessionId === 'string' && isValidUuid(gatewaySessionId)) {

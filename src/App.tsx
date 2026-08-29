@@ -6,6 +6,7 @@ import { useEntries } from './hooks/useEntries';
 import { useAuth } from './hooks/useAuth';
 import { useRevenueCatIdentitySync } from './hooks/useRevenueCatIdentitySync';
 import { useOneSignalIdentitySync } from './hooks/useOneSignalIdentitySync';
+import { useBehavioralPushOpenSync } from './hooks/useBehavioralPushOpenSync';
 import { usePracticeReminderSync } from './hooks/usePracticeReminderSync';
 import {
   setPracticeReminderTapHandler,
@@ -77,6 +78,10 @@ export default function App() {
   useRevenueCatIdentitySync(user?.id);
   useOneSignalIdentitySync(user?.id);
   useAppsFlyerIdentitySync(user?.id);
+  // Behavioral push (streak_risk / abandonment): a tap routes to Home (the push
+  // is general — "faça uma atividade", not a specific one) and reports the open
+  // (cold-start safe). Separate from the local practice reminder's tap handler.
+  useBehavioralPushOpenSync(user?.id, () => setView('home'));
   // Keeps the device's local practice-reminder schedules in lockstep with the
   // session (login restores, logout cancels) and re-heals them on resume.
   usePracticeReminderSync(user?.id);
