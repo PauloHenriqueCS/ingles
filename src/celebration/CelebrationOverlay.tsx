@@ -45,7 +45,16 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
           playDayCompleteSound();
           triggerDayCompleteHaptic();
         } else {
-          playActivityCompleteSound();
+          // DIAGNOSTIC (conversation freeze): after two failed fixes on the
+          // audio-timing/release theory, isolate the ONE remaining variable —
+          // is the freeze the SOUND or the Lottie render? Here we skip ONLY the
+          // sound for the conversation activity (animation + haptic still play).
+          // If the freeze stops → it's the sound (AudioManager mode conflict) and
+          // we restore it via a safe path next. If it still freezes → it's the
+          // render, and conversation switches to the lightweight static variant.
+          const isConversation =
+            celebration.type === 'activity-complete' && celebration.activityType === 'conversation';
+          if (!isConversation) playActivityCompleteSound();
           triggerActivityHaptic();
         }
       }, t.impactMs);
