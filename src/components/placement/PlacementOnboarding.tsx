@@ -136,7 +136,11 @@ export default function PlacementOnboarding({ onFinished, onExit }: Props) {
 
   const Shell = ({ children, showSkip }: { children: React.ReactNode; showSkip: boolean }) => (
     <div
-      className="min-h-screen bg-slate-900 text-slate-100 flex flex-col"
+      // h-[100dvh] (not min-h-screen) bounds the height to the visible viewport so
+      // the content area below scrolls INTERNALLY — that's what lets the sticky
+      // "Continuar" footer actually pin to the bottom instead of drifting off the
+      // fold with the document scroll.
+      className="h-[100dvh] bg-slate-900 text-slate-100 flex flex-col overflow-hidden"
       style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
       <div className="flex items-center justify-between px-4 h-14 shrink-0">
