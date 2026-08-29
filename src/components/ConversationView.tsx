@@ -623,6 +623,18 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       // backend's best-effort insert failed at session start) there is
       // nothing to complete — the call simply won't be credited this time,
       // same fail-open direction as before this fix existed.
+      // Celebrate the genuine end-of-conversation transition IMMEDIATELY —
+      // decoupled from the server-complete call below. That call has variable
+      // latency and can stall (no client timeout), which was making the overlay
+      // appear late, not at all (on failure the old .then never ran), or feel
+      // frozen while it waited. Conversation is ALWAYS optional (never
+      // day-complete), so the celebration needs nothing from the server; the
+      // `elapsedMs > 0` + authorization gate already proves a real session
+      // happened. This is why only this screen was affected.
+      if (session.recordingAuthorizationId) {
+        celebration.notifyActivityCompleted('conversation');
+      }
+
       const complete = session.recordingAuthorizationId
         ? completeConversationSession(session.recordingAuthorizationId)
         : Promise.resolve();
@@ -631,13 +643,8 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
           // Genuine conversation completion: a conversation_sessions row (with
           // duration>0, guaranteed by the elapsedMs>0 gate above) was written
           // server-side only when there was an authorization to close. AppsFlyer
-          // funnel — fire-and-forget & fail-safe.
-          if (session.recordingAuthorizationId) {
-            void trackActivityCompleted('conversation');
-            // Conversation is always optional — this only ever shows the
-            // individual celebration, never day-complete.
-            celebration.notifyActivityCompleted('conversation');
-          }
+          // funnel stays server-confirmed — fire-and-forget & fail-safe.
+          if (session.recordingAuthorizationId) void trackActivityCompleted('conversation');
           onComplete?.();
           entitlements.refetch(); // reconcile the monthly balance with the server, never optimistic-only
           return getDayTotalSeconds(today);
