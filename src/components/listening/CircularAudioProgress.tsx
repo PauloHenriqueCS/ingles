@@ -28,7 +28,7 @@ export default function CircularAudioProgress({ progress }: Props) {
   return (
     <svg
       viewBox="0 0 100 100"
-      className="absolute inset-0 h-full w-full overflow-visible"
+      className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
       aria-hidden="true"
       focusable="false"
     >

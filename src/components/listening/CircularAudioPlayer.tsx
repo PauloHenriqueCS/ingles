@@ -75,7 +75,7 @@ export default function CircularAudioPlayer({
       <div className="relative" style={{ width: CIRCLE_SIZE, aspectRatio: '1 / 1' }}>
         {/* CAMADA A — base circle */}
         <div
-          className="absolute inset-0 rounded-full"
+          className="pointer-events-none absolute inset-0 rounded-full"
           style={{
             background: 'radial-gradient(circle at 50% 38%, #141b30 0%, #0b1020 68%, #090d1a 100%)',
             border: '1px solid rgba(99,102,241,0.16)',
@@ -86,7 +86,7 @@ export default function CircularAudioPlayer({
 
         {/* CAMADA C — particle mesh, clipped inside the ring */}
         {!isMarking && (
-          <div className="absolute overflow-hidden rounded-full" style={{ inset: '8%' }}>
+          <div className="pointer-events-none absolute overflow-hidden rounded-full" style={{ inset: '8%' }}>
             <AudioParticleWave playing={playing} reducedMotion={reducedMotion} />
           </div>
         )}
@@ -95,7 +95,7 @@ export default function CircularAudioPlayer({
         <CircularAudioProgress progress={progress} />
 
         {/* Current-time pill (visual echo of existing state, mirrors the reference) */}
-        <div className="absolute left-1/2 -translate-x-1/2" style={{ top: '12.5%' }}>
+        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2" style={{ top: '12.5%' }}>
           <span className="rounded-full border border-slate-700/60 bg-slate-950/60 px-3 py-1 text-xs font-semibold tabular-nums text-slate-200">
             {currentLabel}
           </span>
@@ -124,12 +124,15 @@ export default function CircularAudioPlayer({
               </span>
             </button>
 
-            {/* Centre — play / pause */}
-            <div className="absolute inset-0 flex items-center justify-center">
+            {/* Centre — play / pause. The wrapper spans the whole circle only to
+                centre the button; it must NOT swallow clicks aimed at the side
+                controls, so it is pointer-transparent and only the button re-enables
+                pointer events. */}
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <button
                 onClick={showPlay ? onPlay : onPause}
                 aria-label={showPlay ? 'Reproduzir' : 'Pausar'}
-                className="relative flex h-[68px] w-[68px] items-center justify-center rounded-full text-white transition-transform active:scale-95"
+                className="pointer-events-auto relative flex h-[68px] w-[68px] items-center justify-center rounded-full text-white transition-transform active:scale-95"
                 style={{
                   background:
                     'radial-gradient(circle at 50% 32%, rgba(79,70,229,0.55), rgba(15,23,42,0.92))',
