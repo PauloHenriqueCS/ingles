@@ -4,9 +4,15 @@ import { StatusBar, Style } from '@capacitor/status-bar'
 import { isNativeApp, isPluginAvailable, runtimeAttribute } from './lib/runtimeEnvironment'
 import { installChunkReloadRecovery } from './lib/chunkReloadRecovery'
 import { installNativeAuthDeepLinkHandler } from './lib/nativeAuthDeepLink'
+import { installResourceProbe } from './lib/diag/resourceProbe'
+import ResourceProbeBadge from './components/ResourceProbeBadge'
 import { CelebrationProvider } from './celebration'
 import './index.css'
 import App from './App.tsx'
+
+// TEMPORARY (homolog only): instrument capped-resource creation BEFORE any app
+// code runs, so the Conversation-freeze probe catches every AudioContext/PC/mic.
+installResourceProbe()
 
 installChunkReloadRecovery()
 // Completes the Android Apple OAuth flow when the system browser returns via the
@@ -26,5 +32,6 @@ createRoot(document.getElementById('root')!).render(
     <CelebrationProvider>
       <App />
     </CelebrationProvider>
+    <ResourceProbeBadge />
   </StrictMode>,
 )
