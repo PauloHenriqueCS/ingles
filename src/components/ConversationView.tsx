@@ -631,16 +631,26 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       // day-complete), so the celebration needs nothing from the server; the
       // `elapsedMs > 0` + authorization gate already proves a real session
       // happened. This is why only this screen was affected.
-      // Fire the celebration a beat AFTER end-of-session, NOT at the exact moment
-      // of "Encerrar". Firing it immediately made the celebration sound (an
-      // HTMLAudioElement.play()) collide with the realtime AI audio being released
-      // on the native Android audio layer during teardown — which FROZE the app on
-      // this screen and sometimes muted the chime (confirmed by an A/B test where
-      // disabling the celebration here stopped the freeze). A short delay lets the
-      // device release the audio hardware first, then the celebration plays cleanly.
-      // Still decoupled from the slow server-complete call, so it always appears.
+      // The freeze at "Encerrar" was the celebration SOUND (an HTMLAudioElement)
+      // colliding with the realtime AI audio session still being released on the
+      // native Android audio layer (confirmed by A/B). A plain delay was NOT
+      // enough because the `#realtime-audio` element keeps holding the WebRTC
+      // remote stream — the communication-mode audio session never fully releases,
+      // so any media playback then freezes regardless of timing. So we EXPLICITLY
+      // release it: pause + drop its srcObject, which lets the native audio session
+      // tear down and switch back to media mode. THEN, a beat later (for the mode
+      // switch to settle), fire the whole celebration (animation + sound + haptic,
+      // in sync). Still decoupled from the slow server-complete call.
+      try {
+        const rtAudio = document.getElementById('realtime-audio') as HTMLAudioElement | null;
+        if (rtAudio) {
+          rtAudio.pause();
+          rtAudio.srcObject = null;
+        }
+      } catch { /* ignore — best effort */ }
+
       if (session.recordingAuthorizationId) {
-        window.setTimeout(() => celebration.notifyActivityCompleted('conversation'), 900);
+        window.setTimeout(() => celebration.notifyActivityCompleted('conversation'), 1000);
       }
 
       const complete = session.recordingAuthorizationId
