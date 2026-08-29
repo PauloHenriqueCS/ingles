@@ -16,6 +16,9 @@ export interface ProbeSnapshot {
   micTotal: number; // getUserMedia calls
   intLive: number; // setInterval timers currently live
   heapMb: number; // JS heap used, MB (0 if unavailable)
+  svgLive: number; // <svg> nodes in the document (Lottie renders SVG)
+  domNodes: number; // total element nodes (÷100, to keep the badge short)
+  overlaysLive: number; // live celebration overlays ([role=alertdialog])
 }
 
 const state: ProbeSnapshot = {
@@ -25,6 +28,9 @@ const state: ProbeSnapshot = {
   micTotal: 0,
   intLive: 0,
   heapMb: 0,
+  svgLive: 0,
+  domNodes: 0,
+  overlaysLive: 0,
 };
 
 type Listener = (s: ProbeSnapshot) => void;
@@ -175,16 +181,24 @@ export function installResourceProbe(): void {
       };
     }
 
-    // Heap sampling (Chromium only).
+    // Heap + DOM sampling (1 Hz). DOM/SVG/overlay counts reveal a render-side
+    // leak (e.g. Lottie SVG not destroyed) that PC/mic/interval counters miss.
     const sampleHeap = () => {
+      let changed = false;
       const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory;
       if (mem && typeof mem.usedJSHeapSize === 'number') {
         const mb = Math.round(mem.usedJSHeapSize / (1024 * 1024));
-        if (mb !== state.heapMb) {
-          state.heapMb = mb;
-          notify();
-        }
+        if (mb !== state.heapMb) { state.heapMb = mb; changed = true; }
       }
+      try {
+        const svg = document.getElementsByTagName('svg').length;
+        if (svg !== state.svgLive) { state.svgLive = svg; changed = true; }
+        const dom = Math.round(document.getElementsByTagName('*').length / 100);
+        if (dom !== state.domNodes) { state.domNodes = dom; changed = true; }
+        const ov = document.querySelectorAll('[role="alertdialog"]').length;
+        if (ov !== state.overlaysLive) { state.overlaysLive = ov; changed = true; }
+      } catch { /* ignore */ }
+      if (changed) notify();
     };
     sampleHeap();
     origSet(sampleHeap, 1000);

@@ -67,9 +67,22 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Speed the Lottie so its meaningful reveal fits inside the on-screen hold.
+  // Speed the Lottie so its meaningful reveal fits inside the on-screen hold,
+  // and — critically — DESTROY it on unmount. lottie-web keeps an internal
+  // animation instance (rAF loop + an <svg> tree) per mount; if it is not torn
+  // down, each celebration leaves one behind. Over several conversations they
+  // accumulate and the render gets progressively slower until the app freezes
+  // (the exact reported symptom). We stop + destroy explicitly so nothing lingers.
   useEffect(() => {
     lottieRef.current?.setSpeed(t.lottieSpeed);
+    return () => {
+      try {
+        lottieRef.current?.stop();
+        lottieRef.current?.destroy();
+      } catch {
+        /* ignore — teardown must never throw */
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

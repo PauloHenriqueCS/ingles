@@ -27,7 +27,8 @@ export default function ResourceProbeBadge() {
   if (isProd || !s) return null;
 
   // A single live session is normal for each; more than one = accumulation.
-  const leak = s.micTracksLive > 1 || s.pcLive > 1;
+  // An overlay left mounted after a celebration ended is a render-side leak.
+  const leak = s.micTracksLive > 1 || s.pcLive > 1 || s.overlaysLive > 0;
 
   return (
     <button
@@ -51,7 +52,7 @@ export default function ResourceProbeBadge() {
         maxWidth: '96vw',
       }}
     >
-      PC {s.pcLive} · MICt {s.micTracksLive}/{s.micTotal} · INT {s.intLive} · {s.heapMb}MB
+      PC {s.pcLive} · MIC {s.micTracksLive}/{s.micTotal} · SVG {s.svgLive} · OV {s.overlaysLive} · DOM {s.domNodes} · {s.heapMb}MB
     </button>
   );
 }
