@@ -15,6 +15,18 @@ import GrammarHelpModal from './GrammarHelpModal';
 
 type GenState = 'idle' | 'loading' | 'error';
 
+// Progressive loading messages while a mission is generated — same "sense of
+// progress" the Listening/História screen gives (GENERATION_PROGRESS there).
+// Advances forward and holds on the last step (never loops back), so it reads
+// as progress rather than a spinner stuck on one fixed line.
+const MISSION_PROGRESS = [
+  'Carregando missão...',
+  'Montando a explicação...',
+  'Criando os exercícios...',
+  'Quase pronto...',
+];
+const MISSION_PROGRESS_INTERVAL_MS = 2500;
+
 interface Props {
   theme: EnglishDailyTheme | null;
   /**
@@ -84,6 +96,18 @@ export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated
   // A suppressed restore (fresh "Nova missão" practice) never enters this state.
   const [restoring, setRestoring] = useState(theme === null && !suppressRestore);
   const isLoading = genState === 'loading';
+
+  // Cycle the progressive mission-loading messages while generating.
+  const [missionProgressIdx, setMissionProgressIdx] = useState(0);
+  useEffect(() => {
+    if (!isLoading) { setMissionProgressIdx(0); return; }
+    setMissionProgressIdx(0);
+    const id = setInterval(
+      () => setMissionProgressIdx((i) => Math.min(i + 1, MISSION_PROGRESS.length - 1)),
+      MISSION_PROGRESS_INTERVAL_MS,
+    );
+    return () => clearInterval(id);
+  }, [isLoading]);
 
   // Restore today's already-assigned mission on entry. The mission is persisted
   // server-side (generated_themes); the client used to keep it only in memory,
@@ -224,7 +248,7 @@ export default function DailyThemeCard({ theme, onThemeReady, onMissionGenerated
       {(isLoading || (restoring && !theme)) && (
         <div className="px-4 pb-6 flex flex-col items-center gap-3 py-4">
           <div className="w-7 h-7 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs text-slate-400">{isLoading ? 'Criando sua missão...' : 'Carregando sua missão...'}</p>
+          <p className="text-xs text-slate-400">{isLoading ? MISSION_PROGRESS[missionProgressIdx] : 'Carregando sua missão...'}</p>
         </div>
       )}
 
