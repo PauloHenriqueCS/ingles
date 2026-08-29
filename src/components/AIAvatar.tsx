@@ -94,6 +94,16 @@ export default function AIAvatar({ state, size = 120 }: Props) {
         // Bind the persistent audio element to the shared context ONCE. If the
         // element was recreated (left + re-entered the screen), bind the new one.
         if (!sharedSource || sharedSourceEl !== audioEl) {
+          // CRITICAL: fully detach the previous source node from ctx.destination
+          // BEFORE overwriting its reference. Otherwise, on every screen
+          // leave/re-enter, the old MediaElementAudioSourceNode stays wired into
+          // the live audio graph — unreachable (reference lost) and un-GC-able
+          // (reachable from the context) — so nodes accumulate until the WebView's
+          // audio render pipeline saturates (~4-6) and the app freezes. Only a
+          // full app restart cleared it. This detach makes the old node GC-able.
+          if (sharedSource) {
+            try { sharedSource.disconnect(); } catch { /* ignore */ }
+          }
           try {
             sharedSource = ctx.createMediaElementSource(audioEl);
             sharedSource.connect(ctx.destination);
