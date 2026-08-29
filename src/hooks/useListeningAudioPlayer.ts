@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
+import { applyPlaybackRate } from './audioPlaybackRate';
 
 export type AudioPlayerState = {
   currentTimeMs: number;
@@ -11,6 +12,9 @@ export type AudioPlayerState = {
 export function useListeningAudioPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const onEndedCallbackRef = useRef<(() => void) | null>(null);
+  // The currently-selected playback rate, mirrored outside React state so it can
+  // be re-applied to any freshly-created / re-sourced element (see setRate).
+  const rateRef = useRef<number>(1);
 
   const [state, setState] = useState<AudioPlayerState>({
     currentTimeMs: 0,
@@ -29,6 +33,9 @@ export function useListeningAudioPlayer() {
 
     const audio = new Audio(url);
     audioRef.current = audio;
+    // A brand-new element starts at 1.0×; re-apply the user's selected rate so a
+    // fresh load (e.g. next episode block) never silently reverts to 1.0×.
+    applyPlaybackRate(audio, rateRef.current);
 
     setState({
       currentTimeMs: 0,
@@ -40,6 +47,12 @@ export function useListeningAudioPlayer() {
 
     audio.addEventListener('canplay', () => {
       setState(s => ({ ...s, isLoading: false }));
+    });
+    // The media-load algorithm resets playbackRate to defaultPlaybackRate when a
+    // resource is (re)selected. Re-assert the selected rate once metadata is in,
+    // so it holds regardless of when the async reset lands.
+    audio.addEventListener('loadedmetadata', () => {
+      applyPlaybackRate(audio, rateRef.current);
     });
     audio.addEventListener('durationchange', () => {
       if (audio.duration && isFinite(audio.duration)) {
@@ -92,8 +105,9 @@ export function useListeningAudioPlayer() {
   }, []);
 
   const setRate = useCallback((rate: number) => {
+    rateRef.current = rate;
     if (audioRef.current) {
-      audioRef.current.playbackRate = rate;
+      applyPlaybackRate(audioRef.current, rate);
     }
   }, []);
 
@@ -104,6 +118,8 @@ export function useListeningAudioPlayer() {
     const pos = audio.currentTime;
     const wasPlaying = !audio.paused && !audio.ended;
     audio.src = newUrl;
+    // Re-selecting the resource resets playbackRate → re-apply the selected rate.
+    applyPlaybackRate(audio, rateRef.current);
     audio.currentTime = pos;
     if (wasPlaying) audio.play().catch(() => {});
   }, []);
