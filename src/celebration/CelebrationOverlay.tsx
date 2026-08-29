@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import Lottie, { type LottieRefCurrentProps } from 'lottie-react';
 import { Check, Trophy, Flame } from 'lucide-react';
@@ -32,6 +32,20 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
   const isDay = celebration.type === 'day-complete';
   const t = isDay ? CELEBRATION_TIMING['day-complete'] : CELEBRATION_TIMING['activity-complete'];
 
+  // ROOT CAUSE of the conversation freeze: lottie-web MUTATES the animationData
+  // object it is handed (it writes computed keyframes/layers back onto it). We
+  // were passing the SAME imported JSON module on every celebration, so that
+  // mutation COMPOUNDED across mounts — the object ballooned and each render
+  // produced exponentially more SVG nodes (measured 80 → 512 → 6128 → … in a
+  // repro), locking the whole tab after a few celebrations. Hand lottie a FRESH
+  // deep clone each mount so it only ever mutates a throwaway copy; the imported
+  // module stays pristine. JSON round-trip is safe here (Lottie data is plain JSON)
+  // and universal across WebViews.
+  const animationData = useMemo(
+    () => JSON.parse(JSON.stringify(isDay ? dayLottie : activityLottie)),
+    [isDay],
+  );
+
   // Fire sound + haptics + observability once, at the animation's impact moment,
   // then schedule the exit. Timers are always (re)armed on setup and cleared on
   // cleanup, so React StrictMode's setup→cleanup→setup can't leave it stuck.
@@ -45,16 +59,7 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
           playDayCompleteSound();
           triggerDayCompleteHaptic();
         } else {
-          // DIAGNOSTIC (conversation freeze): after two failed fixes on the
-          // audio-timing/release theory, isolate the ONE remaining variable —
-          // is the freeze the SOUND or the Lottie render? Here we skip ONLY the
-          // sound for the conversation activity (animation + haptic still play).
-          // If the freeze stops → it's the sound (AudioManager mode conflict) and
-          // we restore it via a safe path next. If it still freezes → it's the
-          // render, and conversation switches to the lightweight static variant.
-          const isConversation =
-            celebration.type === 'activity-complete' && celebration.activityType === 'conversation';
-          if (!isConversation) playActivityCompleteSound();
+          playActivityCompleteSound();
           triggerActivityHaptic();
         }
       }, t.impactMs);
@@ -154,7 +159,7 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
           ) : (
             <Lottie
               lottieRef={lottieRef}
-              animationData={isDay ? dayLottie : activityLottie}
+              animationData={animationData}
               loop={false}
               autoplay
               style={{ width: heroSize, height: heroSize }}

@@ -630,27 +630,13 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       // frozen while it waited. Conversation is ALWAYS optional (never
       // day-complete), so the celebration needs nothing from the server; the
       // `elapsedMs > 0` + authorization gate already proves a real session
-      // happened. This is why only this screen was affected.
-      // The freeze at "Encerrar" was the celebration SOUND (an HTMLAudioElement)
-      // colliding with the realtime AI audio session still being released on the
-      // native Android audio layer (confirmed by A/B). A plain delay was NOT
-      // enough because the `#realtime-audio` element keeps holding the WebRTC
-      // remote stream — the communication-mode audio session never fully releases,
-      // so any media playback then freezes regardless of timing. So we EXPLICITLY
-      // release it: pause + drop its srcObject, which lets the native audio session
-      // tear down and switch back to media mode. THEN, a beat later (for the mode
-      // switch to settle), fire the whole celebration (animation + sound + haptic,
-      // in sync). Still decoupled from the slow server-complete call.
-      try {
-        const rtAudio = document.getElementById('realtime-audio') as HTMLAudioElement | null;
-        if (rtAudio) {
-          rtAudio.pause();
-          rtAudio.srcObject = null;
-        }
-      } catch { /* ignore — best effort */ }
-
+      // happened.
+      // (The earlier "freeze at Encerrar" turned out NOT to be audio timing at
+      // all — it was lottie-web mutating a shared animationData object, fixed in
+      // CelebrationOverlay by cloning the data per mount. So no delay/audio-release
+      // dance is needed here; fire immediately.)
       if (session.recordingAuthorizationId) {
-        window.setTimeout(() => celebration.notifyActivityCompleted('conversation'), 1000);
+        celebration.notifyActivityCompleted('conversation');
       }
 
       const complete = session.recordingAuthorizationId
