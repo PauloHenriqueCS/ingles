@@ -47,11 +47,18 @@ describe('Listening — celebrates only a genuine (not already-completed) transi
   });
 });
 
-describe('Conversation — optional, celebrated only on a server-persisted session', () => {
-  it('notifies inside the recordingAuthorizationId block, after completeConversationSession resolves', () => {
+describe('Conversation — optional, celebrated immediately on end-of-session (decoupled from the server call)', () => {
+  it('is guarded by recordingAuthorizationId', () => {
     expect(conversation).toMatch(
-      /if \(session\.recordingAuthorizationId\) \{[\s\S]{0,220}?celebration\.notifyActivityCompleted\('conversation'\)/,
+      /if \(session\.recordingAuthorizationId\) \{[\s\S]{0,120}?celebration\.notifyActivityCompleted\('conversation'\)/,
     );
+  });
+  it('fires BEFORE completeConversationSession (not inside its .then) so it never waits on the server', () => {
+    const celebrateAt = conversation.indexOf("celebration.notifyActivityCompleted('conversation')");
+    const completeAt = conversation.indexOf('completeConversationSession(session.recordingAuthorizationId)');
+    expect(celebrateAt).toBeGreaterThan(-1);
+    expect(completeAt).toBeGreaterThan(-1);
+    expect(celebrateAt).toBeLessThan(completeAt);
   });
 });
 
