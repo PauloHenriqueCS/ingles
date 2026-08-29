@@ -211,7 +211,9 @@ export default function PlacementOnboarding({ onFinished, onExit }: Props) {
               <span className="text-emerald-300 font-medium">{fb.correctOptionLabel}</span>
             </p>
           )}
-          <div className="mt-6 pb-4">
+          {/* Sticky footer so "Continuar" is ALWAYS visible, even when the
+              options list is long enough to push it below the fold. */}
+          <div className="sticky bottom-0 -mx-5 mt-6 px-5 pt-3 pb-3 bg-slate-900 border-t border-slate-800">
             <button
               onClick={() => setAnswerFeedback(null)}
               className="w-full py-3.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-2"
