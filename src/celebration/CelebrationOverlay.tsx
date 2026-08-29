@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
-import Lottie from 'lottie-react';
-import { Check, Flame } from 'lucide-react';
+import Lottie, { type LottieRefCurrentProps } from 'lottie-react';
+import { Check, Trophy, Flame } from 'lucide-react';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
 import { celebrationUiStrings } from '../i18n/celebrationUiStrings';
 import { playActivityCompleteSound, playDayCompleteSound } from './celebrationSound';
@@ -27,6 +27,7 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
   const s = celebrationUiStrings(focus.data?.interfaceLanguage);
   const reduced = useReducedMotion() ?? false;
   const firedRef = useRef(false);
+  const lottieRef = useRef<LottieRefCurrentProps>(null);
 
   const isDay = celebration.type === 'day-complete';
   const t = isDay ? CELEBRATION_TIMING['day-complete'] : CELEBRATION_TIMING['activity-complete'];
@@ -54,6 +55,12 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
       clearTimeout(impactTimer);
       clearTimeout(holdTimer);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Speed the Lottie so its meaningful reveal fits inside the on-screen hold.
+  useEffect(() => {
+    lottieRef.current?.setSpeed(t.lottieSpeed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -117,13 +124,14 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
               }}
             >
               {isDay ? (
-                <Flame style={{ width: 46, height: 46, color: '#fff' }} strokeWidth={2.25} />
+                <Trophy style={{ width: 46, height: 46, color: '#fff' }} strokeWidth={2.25} />
               ) : (
                 <Check style={{ width: 46, height: 46, color: '#fff' }} strokeWidth={3} />
               )}
             </div>
           ) : (
             <Lottie
+              lottieRef={lottieRef}
               animationData={isDay ? dayLottie : activityLottie}
               loop={false}
               autoplay
