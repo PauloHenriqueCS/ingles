@@ -631,14 +631,16 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       // day-complete), so the celebration needs nothing from the server; the
       // `elapsedMs > 0` + authorization gate already proves a real session
       // happened. This is why only this screen was affected.
-      // DIAG (temporary A/B test): the Conversation celebration is DISABLED here
-      // to check if firing it (Lottie + sound via <audio>.play()) at "Encerrar",
-      // during the WebRTC/audio teardown, is what freezes the app on this screen.
-      // If the freeze stops with this off, the celebration is the cause and we fix
-      // the audio/timing conflict. Re-enable after the test.
+      // Fire the celebration a beat AFTER end-of-session, NOT at the exact moment
+      // of "Encerrar". Firing it immediately made the celebration sound (an
+      // HTMLAudioElement.play()) collide with the realtime AI audio being released
+      // on the native Android audio layer during teardown — which FROZE the app on
+      // this screen and sometimes muted the chime (confirmed by an A/B test where
+      // disabling the celebration here stopped the freeze). A short delay lets the
+      // device release the audio hardware first, then the celebration plays cleanly.
+      // Still decoupled from the slow server-complete call, so it always appears.
       if (session.recordingAuthorizationId) {
-        void celebration; // keep the hook referenced; celebration intentionally not fired
-        // celebration.notifyActivityCompleted('conversation');
+        window.setTimeout(() => celebration.notifyActivityCompleted('conversation'), 900);
       }
 
       const complete = session.recordingAuthorizationId
