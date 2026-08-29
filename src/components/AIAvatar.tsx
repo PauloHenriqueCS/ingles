@@ -29,13 +29,24 @@ interface Props {
   size?: number;
 }
 
+// SHARED, app-lifetime Web Audio graph. These were per-instance refs, but the
+// avatar is remounted on every conversation session status change, so each
+// start→end cycle created a NEW AudioContext that was never closed — after a few
+// cycles the WebView hit its AudioContext cap and the app froze (progressively
+// worse each cycle). The `#realtime-audio` element is a persistent singleton and
+// can be bound to `createMediaElementSource` only ONCE, so the whole graph must
+// be created once and reused. One long-lived context (never closed) fixes the
+// leak AND avoids the once-only-binding error, and keeps the AI voice routed
+// through `ctx.destination` for the app's lifetime.
+let sharedCtx: AudioContext | null = null;
+let sharedAnalyser: AnalyserNode | null = null;
+let sharedData: Uint8Array<ArrayBuffer> | null = null;
+let sharedSource: MediaElementAudioSourceNode | null = null;
+let sharedSourceEl: HTMLMediaElement | null = null;
+
 export default function AIAvatar({ state, size = 120 }: Props) {
   const [amplitude, setAmplitude] = useState(0);
   const rafRef     = useRef<number>(0);
-  const ctxRef     = useRef<AudioContext | null>(null);
-  const sourceRef  = useRef<MediaElementAudioSourceNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const dataRef    = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const [hidden, setHidden] = useState(false);
 
   // Pause animations when tab is not visible
@@ -59,32 +70,47 @@ export default function AIAvatar({ state, size = 120 }: Props) {
       const audioEl = document.getElementById('realtime-audio') as HTMLAudioElement | null;
       if (!audioEl) return;
       try {
-        if (!ctxRef.current || ctxRef.current.state === 'closed') {
-          ctxRef.current = new AudioContext();
+        // One shared context for the app's lifetime (see note above) — created
+        // once, reused on every mount, never accumulated. Only recreated if it
+        // was somehow closed (e.g. by the OS), which also invalidates the graph.
+        if (!sharedCtx || sharedCtx.state === 'closed') {
+          sharedCtx = new AudioContext();
+          sharedAnalyser = null;
+          sharedData = null;
+          sharedSource = null;
+          sharedSourceEl = null;
         }
-        const ctx = ctxRef.current;
+        const ctx = sharedCtx;
         if (ctx.state === 'suspended') await ctx.resume();
 
-        if (!analyserRef.current) {
+        if (!sharedAnalyser) {
           const an = ctx.createAnalyser();
           an.fftSize = 256;
           an.smoothingTimeConstant = 0.75;
-          analyserRef.current = an;
-          dataRef.current = new Uint8Array(an.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+          sharedAnalyser = an;
+          sharedData = new Uint8Array(an.frequencyBinCount) as Uint8Array<ArrayBuffer>;
         }
 
-        if (!sourceRef.current) {
-          sourceRef.current = ctx.createMediaElementSource(audioEl);
-          sourceRef.current.connect(ctx.destination);
+        // Bind the persistent audio element to the shared context ONCE. If the
+        // element was recreated (left + re-entered the screen), bind the new one.
+        if (!sharedSource || sharedSourceEl !== audioEl) {
+          try {
+            sharedSource = ctx.createMediaElementSource(audioEl);
+            sharedSource.connect(ctx.destination);
+            sharedSourceEl = audioEl;
+          } catch {
+            // Already bound once for this element's lifetime — keep the existing
+            // source (its ctx.destination route keeps the AI voice audible).
+          }
         }
-        sourceRef.current.connect(analyserRef.current);
+        if (sharedSource && sharedAnalyser) sharedSource.connect(sharedAnalyser);
 
         const tick = () => {
-          if (cancelled) return;
-          analyserRef.current!.getByteFrequencyData(dataRef.current!);
+          if (cancelled || !sharedAnalyser || !sharedData) return;
+          sharedAnalyser.getByteFrequencyData(sharedData);
           let sum = 0;
-          for (const v of dataRef.current!) sum += (v / 255) ** 2;
-          setAmplitude(Math.sqrt(sum / dataRef.current!.length));
+          for (const v of sharedData) sum += (v / 255) ** 2;
+          setAmplitude(Math.sqrt(sum / sharedData.length));
           rafRef.current = requestAnimationFrame(tick);
         };
         rafRef.current = requestAnimationFrame(tick);
@@ -98,7 +124,10 @@ export default function AIAvatar({ state, size = 120 }: Props) {
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafRef.current);
-      try { sourceRef.current?.disconnect(analyserRef.current!); } catch { /* ignore */ }
+      // Detach the analyser tap only — NEVER close the shared context or drop the
+      // source→destination route, or the AI voice would go silent for the rest of
+      // the app session.
+      try { sharedSource?.disconnect(sharedAnalyser!); } catch { /* ignore */ }
       setAmplitude(0);
     };
   }, [state, hidden]);
