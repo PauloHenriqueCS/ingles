@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Headphones, Play, Pause, RotateCcw,
+  Headphones,
   Check, X, AlertCircle, Trophy, RefreshCw, Lock,
-  ScrollText, Rewind, Clock, Loader2, CheckCircle2,
+  ScrollText, Clock, Loader2, CheckCircle2,
 } from 'lucide-react';
 import { useListeningAudioPlayer } from '../hooks/useListeningAudioPlayer';
+import CircularAudioPlayer from './listening/CircularAudioPlayer';
 import ScreenHeader from './ScreenHeader';
 import { useListeningSubtitles } from '../hooks/useListeningSubtitles';
 import { usePlanEntitlements } from '../hooks/usePlanEntitlements';
@@ -79,36 +80,6 @@ function getSpeakerColor(speaker: string | null | undefined): string {
   if (speaker.toLowerCase().includes('narrat')) return '#94a3b8';
   const hash = speaker.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
   return SPEAKER_PALETTE[hash % SPEAKER_PALETTE.length];
-}
-
-// ── Waveform ──────────────────────────────────────────────────────────────────
-
-function Waveform({ playing }: { playing: boolean }) {
-  const heights = [35, 60, 80, 55, 70, 45, 85, 50, 65, 40, 75, 55, 30, 70, 85, 50, 65, 45, 80, 55, 70, 40, 60, 75, 50, 35, 65, 55];
-  return (
-    <>
-      <style>{`@keyframes bar-wave{0%,100%{transform:scaleY(1)}50%{transform:scaleY(0.2)}}`}</style>
-      <div className="flex items-end justify-center gap-0.5 h-14 px-2">
-        {heights.map((h, i) => (
-          <div
-            key={i}
-            style={{
-              width: '5px',
-              height: `${h}%`,
-              background: 'rgb(168,85,247)',
-              borderRadius: '3px',
-              transformOrigin: 'bottom',
-              animation: playing
-                ? `bar-wave ${0.55 + (i % 5) * 0.13}s ease-in-out ${i * 0.035}s infinite`
-                : 'none',
-              opacity: playing ? 0.7 + (i % 3) * 0.1 : 0.15,
-              transition: 'opacity 0.4s',
-            }}
-          />
-        ))}
-      </div>
-    </>
-  );
 }
 
 // ── AutoAdvance countdown ─────────────────────────────────────────────────────
@@ -579,6 +550,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     const audio = audioRef.current;
     if (audio) {
       audio.src = url1;
+      // Swapping src re-runs the media-load algorithm, which resets playbackRate
+      // to 1.0×. Re-apply the selected speed to the SAME element so Parte 2 plays
+      // at the rate the selector still shows (setRate also pins defaultPlaybackRate
+      // so the async reset lands on the selected rate too).
+      player.setRate(speedRef.current);
       player.restart(); // resets currentTime + state without creating new Audio
     }
     player.setOnEnded(() => setPhase('question'));
@@ -788,6 +764,11 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
   // ── Derived ─────────────────────────────────────────────────────────────────
   const { currentTimeMs, durationMs } = player.state;
   const pct = durationMs > 0 ? Math.min((currentTimeMs / durationMs) * 100, 100) : 0;
+  // Deterministic seed for the mini-waveform — stable per block/part so the bars
+  // never reshuffle on re-render, and change when the audio actually changes.
+  const waveformSeed = storyData
+    ? `story-${storyData.sharedStoryId ?? 's'}-${currentPartIdx}`
+    : `ep-${episodeId ?? 'e'}-${blockIdx}`;
 
   // ── Full transcript text (all blocks, en cues) ───────────────────────────────
   const transcriptLines = useMemo(() => {
@@ -1287,96 +1268,31 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
           </div>
         )}
 
-        {/* Waveform + progress + subtitles */}
-        <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4">
-          <Waveform playing={playing} />
+        {/* Circular "audio + AI" player. Purely presentational — all actions
+            below map 1:1 to the existing player behaviour (unchanged). */}
+        <CircularAudioPlayer
+          playing={playing}
+          isReady={isReady}
+          isMarking={isMarking}
+          progress={pct / 100}
+          currentLabel={fmtMs(currentTimeMs)}
+          durationLabel={durationMs > 0 ? fmtMs(durationMs) : '--:--'}
+          speed={speed}
+          speeds={SPEEDS}
+          waveformSeed={waveformSeed}
+          onPlay={handlePlay}
+          onPause={() => { player.pause(); setPhase('paused'); }}
+          onSeekBack={() => player.seekBack(10)}
+          onReplay={() => { player.restart(); setPhase('ready_to_play'); }}
+          onSelectSpeed={(s) => setSpeed(s as Speed)}
+        />
 
-          <div className="mt-3">
-            <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-1.5">
-              <div
-                className="h-full bg-purple-500 rounded-full transition-all duration-100"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-xs text-slate-600">
-              <span>{fmtMs(currentTimeMs)}</span>
-              <span>{durationMs > 0 ? fmtMs(durationMs) : '--:--'}</span>
-            </div>
-          </div>
-
-          {renderSubtitleArea()}
-        </div>
-
-        {/* Controls */}
-        {isMarking ? (
-          <div className="flex items-center justify-center py-2 gap-2 text-slate-500">
-            <div className="w-4 h-4 border-2 border-slate-600 border-t-purple-500 rounded-full animate-spin" />
-            <span className="text-xs">Processando...</span>
-          </div>
-        ) : (
-          <div className="flex items-center justify-center gap-6">
-            {/* Back 10s */}
-            <button
-              onClick={() => player.seekBack(10)}
-              className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
-              title="Voltar 10 segundos"
-            >
-              <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors relative">
-                <Rewind className="w-4 h-4" />
-                <span className="absolute bottom-0.5 right-0 text-[9px] font-bold text-slate-400 leading-none">10</span>
-              </div>
-              <span className="text-xs text-slate-600">-10s</span>
-            </button>
-
-            {/* Play / Pause */}
-            {isReady || !playing ? (
-              <button
-                onClick={handlePlay}
-                className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
-                aria-label="Reproduzir"
-              >
-                <Play className="w-7 h-7 translate-x-0.5" />
-              </button>
-            ) : (
-              <button
-                onClick={() => { player.pause(); setPhase('paused'); }}
-                className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
-                aria-label="Pausar"
-              >
-                <Pause className="w-7 h-7" />
-              </button>
-            )}
-
-            {/* Replay block */}
-            <button
-              onClick={() => { player.restart(); setPhase('ready_to_play'); }}
-              className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
-              title="Reouvir bloco"
-            >
-              <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors">
-                <RotateCcw className="w-4 h-4" />
-              </div>
-              <span className="text-xs text-slate-600">Reouvir</span>
-            </button>
+        {/* Subtitles (episode flow) — preserved, below the player */}
+        {subtitleMode !== 'none' && (
+          <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl px-4 pb-4">
+            {renderSubtitleArea()}
           </div>
         )}
-
-        {/* Speed */}
-        <div className="flex items-center justify-center gap-2">
-          {SPEEDS.map(s => (
-            <button
-              key={s}
-              onClick={() => setSpeed(s)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-w-[44px] ${
-                speed === s
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
-              }`}
-            >
-              {s === 1.00 ? '1×' : `${s}×`}
-            </button>
-          ))}
-        </div>
 
         {/* Story transcript (shown after first wrong answer) */}
         {storyData && showPartTranscript && (
@@ -1816,7 +1732,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     if (!audio) return;
     audio.src = url0;
     audio.currentTime = 0;
-    audio.playbackRate = speedRef.current;
+    player.setRate(speedRef.current); // pins default+rate so the src-swap reset keeps it
     audio.play().catch(() => {});
   }
 
@@ -1829,7 +1745,7 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
     if (!audio) return;
     audio.src = url1;
     audio.currentTime = 0;
-    audio.playbackRate = speedRef.current;
+    player.setRate(speedRef.current); // pins default+rate so the src-swap reset keeps it
     audio.play().catch(() => {});
   }
 
@@ -1849,89 +1765,33 @@ export default function ListeningView({ onBack, episodeId: propEpisodeId, onComp
           <span className="text-xs text-purple-400 font-medium">Revisão com legenda</span>
         </div>
 
-        <div className="bg-slate-800 border border-slate-700 rounded-2xl py-5 px-4 space-y-3">
-          <Waveform playing={playing} />
+        <CircularAudioPlayer
+          playing={playing}
+          isReady={!playing}
+          isMarking={false}
+          progress={pct / 100}
+          currentLabel={fmtMs(currentTimeMs)}
+          durationLabel={durationMs > 0 ? fmtMs(durationMs) : '--:--'}
+          speed={speed}
+          speeds={SPEEDS}
+          waveformSeed={`story-${storyData.sharedStoryId ?? 's'}-replay-${replayPartIdx}`}
+          onPlay={() => player.play()}
+          onPause={() => player.pause()}
+          onSeekBack={() => player.seekBack(10)}
+          onReplay={startReplay}
+          onSelectSpeed={(s) => setSpeed(s as Speed)}
+          replayAriaLabel="Reiniciar"
+          replayTitle="Reiniciar desde a Parte 1"
+        />
 
-          <div>
-            <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-1.5">
-              <div
-                className="h-full bg-purple-500 rounded-full transition-all duration-100"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-xs text-slate-600">
-              <span>{fmtMs(currentTimeMs)}</span>
-              <span>{durationMs > 0 ? fmtMs(durationMs) : '--:--'}</span>
-            </div>
-          </div>
-
-          <div className="border-t border-slate-700 pt-3">
-            <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">
-              Texto — Parte {replayPartIdx + 1}
-            </p>
-            <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-line">
-              {part.text}
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-center gap-6">
-          <button
-            onClick={() => player.seekBack(10)}
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
-            title="Voltar 10 segundos"
-          >
-            <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors relative">
-              <Rewind className="w-4 h-4" />
-              <span className="absolute bottom-0.5 right-0 text-[9px] font-bold text-slate-400 leading-none">10</span>
-            </div>
-            <span className="text-xs text-slate-600">-10s</span>
-          </button>
-
-          {playing ? (
-            <button
-              onClick={() => player.pause()}
-              className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
-              aria-label="Pausar"
-            >
-              <Pause className="w-7 h-7" />
-            </button>
-          ) : (
-            <button
-              onClick={() => player.play()}
-              className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white flex items-center justify-center transition-colors shadow-lg shadow-purple-900/40"
-              aria-label="Reproduzir"
-            >
-              <Play className="w-7 h-7 translate-x-0.5" />
-            </button>
-          )}
-
-          <button
-            onClick={startReplay}
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
-            title="Reiniciar desde a Parte 1"
-          >
-            <div className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors">
-              <RotateCcw className="w-4 h-4" />
-            </div>
-            <span className="text-xs text-slate-600">Reiniciar</span>
-          </button>
-        </div>
-
-        <div className="flex items-center justify-center gap-2">
-          {SPEEDS.map(s => (
-            <button
-              key={s}
-              onClick={() => setSpeed(s)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-w-[44px] ${
-                speed === s
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
-              }`}
-            >
-              {s === 1.00 ? '1×' : `${s}×`}
-            </button>
-          ))}
+        {/* Transcript for the part under review — preserved */}
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4">
+          <p className="text-xs text-slate-500 font-medium mb-2 uppercase tracking-wide">
+            Texto — Parte {replayPartIdx + 1}
+          </p>
+          <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-line">
+            {part.text}
+          </p>
         </div>
 
         <button
