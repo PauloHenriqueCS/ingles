@@ -58,10 +58,10 @@ CREATE TABLE IF NOT EXISTS public.behavioral_push_events (
   failure_code  text,
   created_at    timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now(),
-  -- Documentação/analytics: chave de idempotência legível. A unicidade real é a
-  -- constraint UNIQUE(user_id, local_date) abaixo (usada pelo ON CONFLICT do
-  -- claim atômico). Vira NULL se user_id for anonimizado por LGPD.
-  idempotency_key text GENERATED ALWAYS AS (user_id::text || ':' || local_date::text) STORED,
+  -- Idempotência: a constraint UNIQUE(user_id, local_date) abaixo É a chave
+  -- (usada pelo ON CONFLICT do claim atômico). No máximo UM push comportamental
+  -- por usuário por dia. (Não usamos uma coluna gerada user_id||local_date: o
+  -- cast date→text não é IMMUTABLE, o que o Postgres rejeita em GENERATED.)
 
   CONSTRAINT bpe_push_type_valid CHECK (push_type IN ('streak_risk', 'abandonment')),
   CONSTRAINT bpe_status_valid CHECK (status IN ('claimed', 'sent', 'failed', 'skipped', 'dry_run')),
@@ -150,7 +150,7 @@ WITH bounds AS (
 base AS (
   SELECT uls.user_id,
          COALESCE(
-           NULLIF(ARRAY(SELECT jsonb_array_elements_text(uls.active_weekdays)::int), '{}'),
+           NULLIF(ARRAY(SELECT jsonb_array_elements_text(uls.active_weekdays)::int), '{}'::int[]),
            ARRAY[1,2,3,4,5]
          ) AS active_weekdays,
          (au.created_at AT TIME ZONE 'America/Sao_Paulo')::date AS account_created_date
