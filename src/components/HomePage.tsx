@@ -151,7 +151,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
       </div>
 
       {/* Foco atual — read-only context, not a button */}
-      <div className="mb-6">
+      <div className="mb-6" data-tour="current-focus">
         <CurrentFocus data={focus.data} loading={focus.loading} error={focus.error} />
       </div>
 
@@ -165,7 +165,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
       ) : (
         <>
       {/* Próxima recomendação — the prominent hero */}
-      <section className="mb-6">
+      <section className="mb-6" data-tour="recommended-practice">
         <h2 className="text-base font-bold text-slate-100 mb-3">{s.nextRecommendation}</h2>
         <RecommendedPractice
           accent={ACCENT[heroKey]}
@@ -181,7 +181,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
       </section>
 
       {/* Outras práticas — compact rows */}
-      <section>
+      <section data-tour="practice-list">
         <h2 className="text-base font-bold text-slate-100 mb-3">{s.otherPractices}</h2>
         <div className="space-y-2.5">
           {secondaryKeys.map((key) => {
@@ -202,15 +202,17 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
 
           {/* Revisão de erros — independent, complementary activity: never plan-
               gated, never part of curricular progression. Always visible. */}
-          <PracticeRow
-            accent="emerald"
-            icon={<Repeat2 className="w-5 h-5 text-white shrink-0" strokeWidth={2} aria-hidden="true" />}
-            title={s.errorReviewTitle}
-            description={errorReviewDesc}
-            state={errorReview.loading ? 'loading' : 'available'}
-            badge={errorReviewBadge}
-            onClick={() => onNavigate('error-review')}
-          />
+          <div data-tour="error-review">
+            <PracticeRow
+              accent="emerald"
+              icon={<Repeat2 className="w-5 h-5 text-white shrink-0" strokeWidth={2} aria-hidden="true" />}
+              title={s.errorReviewTitle}
+              description={errorReviewDesc}
+              state={errorReview.loading ? 'loading' : 'available'}
+              badge={errorReviewBadge}
+              onClick={() => onNavigate('error-review')}
+            />
+          </div>
         </div>
       </section>
         </>

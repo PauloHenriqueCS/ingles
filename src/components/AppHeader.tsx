@@ -20,6 +20,7 @@ export default function AppHeader({ onMenuOpen, onLogoClick }: Props) {
           onClick={onMenuOpen}
           className="w-10 h-10 flex flex-col justify-center items-center gap-[5px] rounded-lg hover:bg-slate-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 shrink-0"
           aria-label="Abrir menu"
+          data-tour="main-menu"
         >
           <span className="block w-5 h-0.5 bg-slate-300 rounded-full" />
           <span className="block w-5 h-0.5 bg-slate-300 rounded-full" />
