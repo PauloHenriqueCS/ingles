@@ -8,7 +8,7 @@
  *
  * This avoids the need for real credentials in mocked UI tests.
  */
-import { Page } from '@playwright/test';
+import { Page, Route } from '@playwright/test';
 
 export const TEST_USER_A = {
   id:    'eeeeeeee-aaaa-0000-0000-000000000001',
@@ -77,6 +77,25 @@ export function getProjectRef(): string {
 
 /** The Supabase project URL (needed to build route patterns). */
 export const SUPABASE_URL = process.env.VITE_SUPABASE_URL ?? '';
+
+/** URL fragment for the first-run tutorial status table. */
+export const TUTORIAL_STATUS_PATH = 'user_tutorial_progress';
+
+/**
+ * E2E users represent EXISTING (grandfathered) accounts whose first-run Home
+ * tutorial is already completed — so its full-screen blocking overlay never
+ * appears over unrelated flows (dashboard, calendar, menu). Call at the top of a
+ * `/rest/v1/*` catch-all; returns true if it fulfilled the tutorial-status query.
+ */
+export function maybeFulfillTutorialStatus(route: Route): boolean {
+  if (!route.request().url().includes(TUTORIAL_STATUS_PATH)) return false;
+  route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '[{"status":"completed"}]',
+  });
+  return true;
+}
 
 /**
  * Injects a fake Supabase session into localStorage for the given user
@@ -264,6 +283,7 @@ export async function mockReviewData(
     });
     // Catch-all for other REST calls — let specific mocks handle english_reviews and writing_entries
     await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+      if (maybeFulfillTutorialStatus(route)) return;
       const url = route.request().url();
       if (url.includes('english_reviews') || url.includes('writing_entries')) {
         route.continue(); // pass to the specific handler registered earlier
