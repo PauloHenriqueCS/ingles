@@ -7,6 +7,7 @@ import GoogleSignInButton from './GoogleSignInButton';
 import { isGoogleSignInAvailable } from '../lib/googleAuth';
 import AppleSignInButton from './AppleSignInButton';
 import { isAppleSignInAvailable } from '../lib/appleAuth';
+import PasswordInput from './PasswordInput';
 
 type Mode = 'login' | 'signup' | 'forgot';
 // The screen leads with the method chooser; the traditional email/password
@@ -302,12 +303,10 @@ export default function LoginPage() {
 
         <div>
           <label className="text-xs text-slate-400 block mb-1.5">Senha</label>
-          <input
-            type="password"
+          <PasswordInput
             value={password}
             onChange={(e) => { setPassword(e.target.value); if (state === 'error') setState('idle'); }}
             placeholder="••••••••"
-            className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
             required
             minLength={6}
           />
