@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { isPasswordRecoveryActive, subscribeToPasswordRecovery } from '../lib/passwordRecovery';
 import { endSessionAfterPasswordReset } from '../lib/accountSessionCleanup';
+import PasswordInput from './PasswordInput';
 
 type Status = 'checking' | 'ready' | 'invalid';
 
@@ -145,12 +146,10 @@ export default function ResetPasswordPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="text-xs text-slate-400 block mb-1.5">Nova senha</label>
-            <input
-              type="password"
+            <PasswordInput
               value={password}
               onChange={(e) => { setPassword(e.target.value); setFormError(''); }}
               placeholder="••••••••"
-              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
               autoFocus
               required
               minLength={8}
@@ -160,12 +159,10 @@ export default function ResetPasswordPage() {
 
           <div>
             <label className="text-xs text-slate-400 block mb-1.5">Confirmar nova senha</label>
-            <input
-              type="password"
+            <PasswordInput
               value={confirmPassword}
               onChange={(e) => { setConfirmPassword(e.target.value); setFormError(''); }}
               placeholder="••••••••"
-              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-500"
               required
               minLength={8}
             />
