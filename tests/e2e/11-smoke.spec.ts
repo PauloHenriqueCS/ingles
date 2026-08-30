@@ -17,7 +17,7 @@
  * 10. Offline-resilient: app still renders if REST returns 503
  */
 import { test, expect } from '@playwright/test';
-import { setupFakeAuth, TEST_USER_A, TEST_USER_B, SUPABASE_URL } from './helpers/auth';
+import { setupFakeAuth, TEST_USER_A, TEST_USER_B, SUPABASE_URL, maybeFulfillTutorialStatus } from './helpers/auth';
 import { setupNewUser, setupA1User } from './helpers/fixtures';
 
 // ── 1. App loads without crash ────────────────────────────────────────────────
@@ -118,6 +118,7 @@ test('smoke: calendário é acessível via menu', async ({ page }) => {
   await setupFakeAuth(page);
   if (SUPABASE_URL) {
     await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+      if (maybeFulfillTutorialStatus(route)) return;
       route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
   }
@@ -206,6 +207,7 @@ test('smoke: isolamento RLS — User B não vê dados de User A', async ({ page 
   if (SUPABASE_URL) {
     // User B's API calls return empty
     await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+      if (maybeFulfillTutorialStatus(route)) return;
       route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
   }
