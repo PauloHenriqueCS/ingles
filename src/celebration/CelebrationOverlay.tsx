@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import Lottie, { type LottieRefCurrentProps } from 'lottie-react';
 import { Check, Trophy, Flame } from 'lucide-react';
@@ -32,6 +32,20 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
   const isDay = celebration.type === 'day-complete';
   const t = isDay ? CELEBRATION_TIMING['day-complete'] : CELEBRATION_TIMING['activity-complete'];
 
+  // ROOT CAUSE of the conversation freeze: lottie-web MUTATES the animationData
+  // object it is handed (it writes computed keyframes/layers back onto it). We
+  // were passing the SAME imported JSON module on every celebration, so that
+  // mutation COMPOUNDED across mounts — the object ballooned and each render
+  // produced exponentially more SVG nodes (measured 80 → 512 → 6128 → … in a
+  // repro), locking the whole tab after a few celebrations. Hand lottie a FRESH
+  // deep clone each mount so it only ever mutates a throwaway copy; the imported
+  // module stays pristine. JSON round-trip is safe here (Lottie data is plain JSON)
+  // and universal across WebViews.
+  const animationData = useMemo(
+    () => JSON.parse(JSON.stringify(isDay ? dayLottie : activityLottie)),
+    [isDay],
+  );
+
   // Fire sound + haptics + observability once, at the animation's impact moment,
   // then schedule the exit. Timers are always (re)armed on setup and cleared on
   // cleanup, so React StrictMode's setup→cleanup→setup can't leave it stuck.
@@ -58,9 +72,22 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Speed the Lottie so its meaningful reveal fits inside the on-screen hold.
+  // Speed the Lottie so its meaningful reveal fits inside the on-screen hold,
+  // and — critically — DESTROY it on unmount. lottie-web keeps an internal
+  // animation instance (rAF loop + an <svg> tree) per mount; if it is not torn
+  // down, each celebration leaves one behind. Over several conversations they
+  // accumulate and the render gets progressively slower until the app freezes
+  // (the exact reported symptom). We stop + destroy explicitly so nothing lingers.
   useEffect(() => {
     lottieRef.current?.setSpeed(t.lottieSpeed);
+    return () => {
+      try {
+        lottieRef.current?.stop();
+        lottieRef.current?.destroy();
+      } catch {
+        /* ignore — teardown must never throw */
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -132,7 +159,7 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
           ) : (
             <Lottie
               lottieRef={lottieRef}
-              animationData={isDay ? dayLottie : activityLottie}
+              animationData={animationData}
               loop={false}
               autoplay
               style={{ width: heroSize, height: heroSize }}

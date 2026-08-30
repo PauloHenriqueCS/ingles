@@ -630,7 +630,11 @@ export default function ConversationView({ onBack, onComplete, onNavigateToSubsc
       // frozen while it waited. Conversation is ALWAYS optional (never
       // day-complete), so the celebration needs nothing from the server; the
       // `elapsedMs > 0` + authorization gate already proves a real session
-      // happened. This is why only this screen was affected.
+      // happened.
+      // (The earlier "freeze at Encerrar" turned out NOT to be audio timing at
+      // all — it was lottie-web mutating a shared animationData object, fixed in
+      // CelebrationOverlay by cloning the data per mount. So no delay/audio-release
+      // dance is needed here; fire immediately.)
       if (session.recordingAuthorizationId) {
         celebration.notifyActivityCompleted('conversation');
       }
