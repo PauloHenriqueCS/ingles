@@ -13,7 +13,7 @@
  * Uses mocked auth and Supabase REST — no real backend needed.
  */
 import { test, expect } from '@playwright/test';
-import { setupFakeAuth, SUPABASE_URL } from './helpers/auth';
+import { setupFakeAuth, SUPABASE_URL, maybeFulfillTutorialStatus } from './helpers/auth';
 import {
   setupNewUser,
   setupA1User,
@@ -98,6 +98,7 @@ test.describe('Tela inicial (HomePage) — conteúdo e estrutura', () => {
         route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
       });
       await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+        if (maybeFulfillTutorialStatus(route)) return;
         route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
       });
     } else {

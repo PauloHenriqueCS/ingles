@@ -11,6 +11,7 @@ import {
   TEST_USER_B,
   FAKE_AI_REVIEW,
   SUPABASE_URL,
+  maybeFulfillTutorialStatus,
 } from './auth';
 
 // ── User profiles ─────────────────────────────────────────────────────────────
@@ -171,6 +172,7 @@ export async function mockDashboardData(
 
   // catch-all for other REST calls
   await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+    if (maybeFulfillTutorialStatus(route)) return;
     const url = route.request().url();
     if (
       url.includes('learner_skill_profiles') ||
@@ -246,6 +248,7 @@ export async function mockCalendarData(
 
   // catch-all
   await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
+    if (maybeFulfillTutorialStatus(route)) return;
     route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
   });
 }
