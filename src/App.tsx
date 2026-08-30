@@ -42,6 +42,8 @@ import SettingsView from './components/SettingsView';
 import CurriculumPlanView from './components/CurriculumPlanView';
 import PlacementOnboarding from './components/placement/PlacementOnboarding';
 import { usePlacementStatus } from './hooks/usePlacementStatus';
+import { useTutorialStatus } from './hooks/useTutorialStatus';
+import HomeTutorial from './components/tutorial/HomeTutorial';
 import SubscriptionView from './components/SubscriptionView';
 import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
@@ -95,7 +97,69 @@ export default function App() {
   }, []);
   const { entries, loading, syncError, getEntry, saveEntry } = useEntries(user?.id);
   const { status: placementStatus, loading: placementLoading, refresh: refreshPlacement } = usePlacementStatus(user?.id);
+  // Server-persisted first-run tutorial status. 'pending' (incl. a brand-new
+  // account with no row) → the Home walkthrough should auto-run once; existing
+  // users backfilled to 'completed' by the rollout migration never see it.
+  const {
+    status: tutorialStatus,
+    loading: tutorialLoading,
+    complete: completeTutorial,
+    skip: skipTutorial,
+  } = useTutorialStatus(user?.id);
+  // `tutorialActive` = the walkthrough overlay is on screen; `tutorialReplay` =
+  // this run was launched from Configurações → "Ver tutorial novamente", so
+  // finishing/skipping it must NOT overwrite the persisted status.
+  const [tutorialActive, setTutorialActive] = useState(false);
+  const [tutorialReplay, setTutorialReplay] = useState(false);
+  const tutorialAutoShownRef = useRef(false);
+  const tutorialBackRef = useRef<(() => void) | null>(null);
 
+  // The real Home experience is on screen once the app has cleared every
+  // blocking gate below — authenticated, past the auth/entries spinners and the
+  // placement-onboarding gate. This gates the first-run tutorial trigger (§7).
+  // NOTE: develop does not carry the push-permission-prompt feature (it lives
+  // only on main), so unlike the main-based branch there is no push gating to
+  // wire here — the tutorial simply reuses the placement-released signal.
+  const placementReleased =
+    !(placementLoading && placementStatus === null) && placementStatus !== 'not_started';
+  const atHomeExperience = !!user && !authLoading && !loading && placementReleased;
+
+  // Auto-run the walkthrough exactly once per session, only on the real Home,
+  // never over the menu/another modal, and only for a 'pending' user (§7).
+  useEffect(() => {
+    if (
+      atHomeExperience &&
+      view === 'home' &&
+      !menuOpen &&
+      !tutorialLoading &&
+      tutorialStatus === 'pending' &&
+      !tutorialActive &&
+      !tutorialAutoShownRef.current
+    ) {
+      tutorialAutoShownRef.current = true;
+      setTutorialReplay(false);
+      setTutorialActive(true);
+    }
+  }, [atHomeExperience, view, menuOpen, tutorialLoading, tutorialStatus, tutorialActive]);
+
+  function handleTutorialComplete() {
+    setTutorialActive(false);
+    if (!tutorialReplay) void completeTutorial();
+    setTutorialReplay(false);
+  }
+  function handleTutorialSkip() {
+    setTutorialActive(false);
+    if (!tutorialReplay) void skipTutorial();
+    setTutorialReplay(false);
+  }
+  // Configurações → "Ver tutorial novamente": replays on the Home WITHOUT
+  // changing the persisted status (a completed user stays completed).
+  function startTutorialReplay() {
+    setMenuOpen(false);
+    setView('home');
+    setTutorialReplay(true);
+    setTutorialActive(true);
+  }
   useEffect(() => {
     if (!user) return;
     fetchLearningSettings().then(setLearningSettings).catch(() => {});
@@ -145,14 +209,21 @@ export default function App() {
   // site could push real history entries), then the app's own view stack,
   // then exit only from the root. Capacitor's default (no listener at all)
   // would just close the app from any screen.
-  const backButtonStateRef = useRef({ menuOpen, view, prevView });
-  backButtonStateRef.current = { menuOpen, view, prevView };
+  const backButtonStateRef = useRef({ menuOpen, view, prevView, tutorialActive });
+  backButtonStateRef.current = { menuOpen, view, prevView, tutorialActive };
 
   useEffect(() => {
     if (!isNativeApp || !isPluginAvailable('App')) return;
 
     const listenerPromise = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
-      const { menuOpen: isMenuOpen, view: currentView, prevView: previousView } = backButtonStateRef.current;
+      const { menuOpen: isMenuOpen, view: currentView, prevView: previousView, tutorialActive: isTutorialActive } = backButtonStateRef.current;
+      // The walkthrough owns the back button while it is on screen: previous step,
+      // or skip on the first step — never falls through to menu/app navigation
+      // (so the user is never left stuck behind the overlay, §6).
+      if (isTutorialActive) {
+        tutorialBackRef.current?.();
+        return;
+      }
       if (isMenuOpen) {
         setMenuOpen(false);
       } else if (canGoBack) {
@@ -372,7 +443,11 @@ export default function App() {
           <ErrorReviewView onBack={() => setView('home')} />
         )}
         {view === 'settings' && (
-          <SettingsView onBack={() => setView('home')} onAccountDeleted={handleAccountDeleted} />
+          <SettingsView
+            onBack={() => setView('home')}
+            onAccountDeleted={handleAccountDeleted}
+            onReplayTutorial={startTutorialReplay}
+          />
         )}
         {view === 'curriculum-plan' && (
           <CurriculumPlanView onBack={() => setView('home')} />
@@ -390,6 +465,20 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* First-run interactive Home walkthrough. Mounts only while active (auto on
+          first run, or replayed from Configurações) and always over the real Home
+          — it spotlights Home/header elements by their data-tour anchors. */}
+      {tutorialActive && (
+        <HomeTutorial
+          open={tutorialActive}
+          onComplete={handleTutorialComplete}
+          onSkip={handleTutorialSkip}
+          registerBackHandler={(fn) => {
+            tutorialBackRef.current = fn;
+          }}
+        />
+      )}
     </div>
   );
 }

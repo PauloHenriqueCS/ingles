@@ -1,13 +1,15 @@
 import { useState } from 'react';
-import { ArrowLeft, Settings as SettingsIcon, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Settings as SettingsIcon, AlertTriangle, GraduationCap } from 'lucide-react';
 import DeleteAccountModal from './DeleteAccountModal';
 
 interface Props {
   onBack: () => void;
   onAccountDeleted: () => void;
+  /** Replays the first-run Home walkthrough without changing its persisted status. */
+  onReplayTutorial?: () => void;
 }
 
-export default function SettingsView({ onBack, onAccountDeleted }: Props) {
+export default function SettingsView({ onBack, onAccountDeleted, onReplayTutorial }: Props) {
   const [modalOpen, setModalOpen] = useState(false);
 
   return (
@@ -24,6 +26,28 @@ export default function SettingsView({ onBack, onAccountDeleted }: Props) {
       </header>
 
       <div className="flex-1 overflow-auto p-4 max-w-lg mx-auto w-full space-y-5 pb-10">
+        {onReplayTutorial && (
+          <section className="bg-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <GraduationCap className="w-4 h-4 text-slate-400 shrink-0" />
+              <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Tutorial</p>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-sm text-slate-300 leading-relaxed">
+                Reveja o passo a passo da Home quando quiser.
+              </p>
+              <button
+                type="button"
+                onClick={onReplayTutorial}
+                className="shrink-0 px-4 py-2.5 rounded-xl text-sm font-semibold bg-slate-700 hover:bg-slate-600 text-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400"
+                data-testid="settings-replay-tutorial"
+              >
+                Ver tutorial novamente
+              </button>
+            </div>
+          </section>
+        )}
+
         <section className="bg-slate-800 rounded-xl p-5 space-y-4">
           <div className="flex items-center gap-2">
             <SettingsIcon className="w-4 h-4 text-slate-400 shrink-0" />
