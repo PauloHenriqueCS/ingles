@@ -309,7 +309,9 @@ describe('runRecoverySweep', () => {
     let call = 0;
     const rpc = vi.fn(async () => ({ data: rpcResults[call++], error: null }));
     const supabase = {
-      from: () => ({ select: () => ({ eq: () => Promise.resolve({ data: openRows, error: null }) }) }),
+      // runRecoverySweep now filters provider IS NOT NULL (isolates provider
+      // incidents from observability/degradation ones): .select().eq().not().
+      from: () => ({ select: () => ({ eq: () => ({ not: () => Promise.resolve({ data: openRows, error: null }) }) }) }),
       rpc,
     };
     const deps: AlertDeps = {
@@ -350,7 +352,7 @@ describe('runRecoverySweep', () => {
   });
 
   it('returns zeros and sends nothing when the query fails', async () => {
-    const supabase = { from: () => ({ select: () => ({ eq: () => Promise.resolve({ data: null, error: { message: 'x' } }) }) }), rpc: vi.fn() };
+    const supabase = { from: () => ({ select: () => ({ eq: () => ({ not: () => Promise.resolve({ data: null, error: { message: 'x' } }) }) }) }), rpc: vi.fn() };
     const emails: any[] = [];
     const deps: AlertDeps = { supabase: supabase as any, sendEmail: async () => { emails.push(1); }, logger: () => {}, now: () => new Date() };
     const result = await runRecoverySweep(deps);

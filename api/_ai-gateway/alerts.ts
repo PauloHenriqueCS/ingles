@@ -409,10 +409,15 @@ export async function runRecoverySweep(
   let recovered = 0;
   let orphanClosed = 0;
   try {
+    // Only PROVIDER incidents (provider IS NOT NULL). Observability/degradation
+    // incidents (latency_p95 / http_5xx) leave provider NULL and are recovered
+    // by run_observability_alert_sweep — never touched here, so the two sweeps
+    // can never resolve or orphan-close each other's alerts.
     const { data: openAlerts, error } = await deps.supabase
       .from('ai_alerts')
       .select('id')
-      .eq('status', 'open');
+      .eq('status', 'open')
+      .not('provider', 'is', null);
 
     if (error) {
       deps.logger('alerts.sweep.query_failed', { message: error.message });
@@ -445,6 +450,129 @@ export async function runRecoverySweep(
     deps.logger('alerts.sweep.failed', { message: err instanceof Error ? err.message : String(err) });
   }
   return { open: openCount, recovered, orphanClosed };
+}
+
+// ── Observability degradation alerts (DB / API latency + HTTP 5xx) ────────────
+// A SECOND alert class, disjoint from provider failures. Detection is NOT on the
+// hot request path (there is none — the signal is aggregate p95 over a window):
+// the pg_cron job observability_alerts_cron_sweep → this route → the atomic RPC
+// run_observability_alert_sweep, which opens AND recovers incidents from
+// public.debug_request_logs. These incidents leave ai_alerts.provider NULL, so
+// runRecoverySweep (filtered to provider IS NOT NULL) never touches them.
+// Thresholds/windows live in ai_alert_rules — tune them with NO deploy.
+
+interface DegradationOpened {
+  alert_id: string;
+  dedup_key: string;
+  alert_type: string;
+  scope: string;
+  severity: string | null;
+  title: string;
+  detail: Record<string, unknown> | null;
+  opened_at: string;
+}
+
+interface DegradationRecovered {
+  alert_id: string;
+  dedup_key: string;
+  alert_type: string;
+  scope: string;
+  severity: string | null;
+  title: string;
+  occurrence_count: number | null;
+  opened_at: string | null;
+  first_occurrence: string | null;
+  last_occurrence: string | null;
+  resolved_at: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+export function buildDegradationOpenEmail(
+  env: AlertEnvironment,
+  o: DegradationOpened,
+): { subject: string; text: string } {
+  const d = (o.detail ?? {}) as Record<string, unknown>;
+  const subject = `[ORODIM ALERT][${env.label}] ${o.title}`;
+  const lines: Array<string | null> = [
+    `Type: ${o.alert_type}`,
+    `Scope: ${o.scope}`,
+    `Environment: ${env.label.toLowerCase()}`,
+    `Severity: ${o.severity ?? 'n/a'}`,
+    `Metric: ${d.metric ?? 'n/a'}`,
+    `Value: ${d.value ?? 'n/a'}`,
+    `Threshold: ${d.threshold ?? 'n/a'}`,
+    `Sample count: ${d.sample_count ?? 'n/a'}`,
+    `Window (s): ${d.window_seconds ?? 'n/a'}`,
+    `Opened at: ${o.opened_at}`,
+    '',
+    'Automated Orodim degradation alert. Detected from debug_request_logs by the periodic observability sweep. Thresholds are configurable in ai_alert_rules.',
+  ];
+  return { subject, text: lines.filter((l): l is string => l !== null).join('\n') };
+}
+
+export function buildDegradationRecoveredEmail(
+  env: AlertEnvironment,
+  r: DegradationRecovered,
+): { subject: string; text: string } {
+  const subject = `[ORODIM RECOVERED][${env.label}] ${r.title}`;
+  const lines: Array<string | null> = [
+    `Type: ${r.alert_type}`,
+    `Scope: ${r.scope}`,
+    `Environment: ${env.label.toLowerCase()}`,
+    `Severity: ${r.severity ?? 'n/a'}`,
+    `Total occurrences: ${r.occurrence_count ?? 'n/a'}`,
+    r.opened_at ? `Opened at: ${r.opened_at}` : null,
+    r.first_occurrence ? `First occurrence: ${r.first_occurrence}` : null,
+    r.last_occurrence ? `Last occurrence: ${r.last_occurrence}` : null,
+    `Recovered at: ${r.resolved_at ?? 'n/a'}`,
+    '',
+    'The degraded metric is back within its threshold. This incident has been auto-resolved.',
+  ];
+  return { subject, text: lines.filter((l): l is string => l !== null).join('\n') };
+}
+
+/**
+ * Runs one observability sweep for the current environment: the RPC opens /
+ * increments / recovers degradation incidents atomically and returns the ones
+ * that need an OPEN or RECOVERED e-mail; we dispatch each through the same
+ * production-gated e-mail path as the provider pipeline. Fully isolated: never
+ * throws; a failure here affects nothing else.
+ */
+export async function runObservabilitySweep(
+  deps: AlertDeps,
+): Promise<{ opened: number; recovered: number }> {
+  let opened = 0;
+  let recovered = 0;
+  try {
+    const env = resolveAlertEnvironment();
+    const { data, error } = await deps.supabase.rpc('run_observability_alert_sweep', {
+      p_environment: env.dbValue,
+    });
+    if (error) {
+      deps.logger('alerts.observability.rpc_failed', { message: error.message });
+      return { opened: 0, recovered: 0 };
+    }
+    const result = (data ?? {}) as {
+      opened?: DegradationOpened[];
+      recovered?: DegradationRecovered[];
+    };
+
+    for (const o of result.opened ?? []) {
+      opened++;
+      const { subject, text } = buildDegradationOpenEmail(env, o);
+      await dispatchEmail(deps, subject, text); // gated to production; never throws
+    }
+    for (const r of result.recovered ?? []) {
+      recovered++;
+      const { subject, text } = buildDegradationRecoveredEmail(env, r);
+      await dispatchEmail(deps, subject, text);
+    }
+
+    deps.logger('alerts.observability.done', { opened, recovered });
+  } catch (err) {
+    deps.logger('alerts.observability.failed', { message: err instanceof Error ? err.message : String(err) });
+  }
+  return { opened, recovered };
 }
 
 // ── Fire-and-forget entry point for the gateway failure sink ──────────────────

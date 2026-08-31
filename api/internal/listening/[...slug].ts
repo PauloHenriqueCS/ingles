@@ -20,7 +20,7 @@ import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
 import { handleProductConfigStatusRoute } from '../_product-config-status-route-handler';
 import {
   getSharedServiceClient, getProductionDeps, reconcileSessionReservation,
-  releaseExpiredPendingReservations, runRecoverySweep, getProductionAlertDeps,
+  releaseExpiredPendingReservations, runRecoverySweep, runObservabilitySweep, getProductionAlertDeps,
 } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
 import {
@@ -566,6 +566,30 @@ async function handleAlertsRecoverySweep(req: any, res: any): Promise<void> {
   }
 }
 
+// ── GET /api/internal/listening/observability-sweep ──────────────────────────
+// Degradation detector for DB / API latency + HTTP 5xx, read from
+// debug_request_logs. Unrelated to listening — folded into this dispatcher for
+// the same 12-function-cap reason as the sweeps above. Scheduled via pg_cron +
+// pg_net every 5 min (public.observability_alerts_cron_sweep, documented in
+// supabase/migrations/20260831130000_observability_degradation_alerts.sql).
+// Unlike provider failures (detected immediately at the gateway failure sink),
+// degradation is an AGGREGATE signal (p95 over a window), so there is no hot
+// path to detect it on — this periodic sweep is the primary detector. It both
+// opens and recovers incidents atomically in run_observability_alert_sweep and
+// e-mails via the same production-gated Resend path. Failures here never affect
+// anything else.
+async function handleObservabilitySweep(req: any, res: any): Promise<void> {
+  if (!methodGuard(req, res, ['GET'])) return;
+  try {
+    const result = await runObservabilitySweep(getProductionAlertDeps());
+    safeLog('internal/listening/observability-sweep', 'sweep_done', 200, result);
+    return res.status(200).json({ success: true, ...result });
+  } catch (err) {
+    safeLog('internal/listening/observability-sweep', 'sweep_error', 500, { error: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ success: false, error: 'Observability sweep failed.' });
+  }
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -595,6 +619,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     case 'supply':             return handleSupply(req, res);
     case 'conversation-sweep': return handleConversationSweep(req, res);
     case 'alerts-recovery-sweep': return handleAlertsRecoverySweep(req, res);
+    case 'observability-sweep': return handleObservabilitySweep(req, res);
     default:
       return res.status(404).json({ error: 'Route not found', slug });
   }
