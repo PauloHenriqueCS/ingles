@@ -12,6 +12,7 @@ import {
   Bell,
   Flame,
   ArrowLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { isNativeApp, isPluginAvailable } from '../../lib/runtimeEnvironment';
 import { useReducedMotion } from '../listening/useReducedMotion';
@@ -259,7 +260,7 @@ export default function HomeTutorial({ open, onComplete, onSkip, registerBackHan
                     <span
                       key={s.id}
                       className={`h-1.5 rounded-full transition-all ${
-                        i === index ? 'w-5 bg-amber-400' : 'w-1.5 bg-slate-600'
+                        i === index ? 'w-5 bg-violet-500' : 'w-1.5 bg-slate-600'
                       }`}
                     />
                   ))}
@@ -271,23 +272,17 @@ export default function HomeTutorial({ open, onComplete, onSkip, registerBackHan
 
               <StepContent stepId={step.id} t={t} titleId={titleId} bodyId={bodyId} />
 
-              {/* Controls — Skip is ALWAYS present (§4). */}
-              <div className="mt-5 flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={onSkip}
-                  className="text-xs font-medium text-slate-400 hover:text-slate-200 underline underline-offset-2 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400 rounded px-1 py-1"
-                  data-tour-action="skip"
-                >
-                  {t.skip}
-                </button>
-
-                <div className="flex items-center gap-2">
+              {/* Controls — primary CTA row (Voltar + gradient CTA) with the
+                  always-visible "Pular tutorial" as a discreet link below (§4).
+                  The CTA is flex-1 so its label (incl. "Começar a praticar")
+                  never wraps to two lines, even on the narrowest phones. */}
+              <div className="mt-5 space-y-3">
+                <div className="flex items-center gap-2.5">
                   {!isFirst && (
                     <button
                       type="button"
                       onClick={goBack}
-                      className="inline-flex items-center gap-1 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-200 bg-slate-700 hover:bg-slate-600 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-400"
+                      className="flex-none inline-flex items-center gap-1 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-300 bg-slate-800/60 border border-slate-600/80 hover:bg-slate-700/70 hover:text-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-400"
                       data-tour-action="back"
                     >
                       <ArrowLeft className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -297,10 +292,22 @@ export default function HomeTutorial({ open, onComplete, onSkip, registerBackHan
                   <button
                     type="button"
                     onClick={advance}
-                    className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-900 bg-amber-400 hover:bg-amber-300 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-200"
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-blue-600 via-violet-600 to-fuchsia-600 hover:from-blue-500 hover:via-violet-500 hover:to-fuchsia-500 ring-1 ring-inset ring-white/10 shadow-[0_8px_24px_-8px_rgba(139,92,246,0.7)] transition-all focus:outline-none focus:ring-2 focus:ring-violet-300"
                     data-tour-action={isLast ? 'complete' : 'next'}
                   >
                     {isFirst ? t.step1.cta : isLast ? t.step7.cta : t.next}
+                    <ChevronRight className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  </button>
+                </div>
+
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={onSkip}
+                    className="text-xs font-medium text-slate-400 hover:text-slate-200 underline underline-offset-2 decoration-slate-600 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-500 rounded px-2 py-1"
+                    data-tour-action="skip"
+                  >
+                    {t.skip}
                   </button>
                 </div>
               </div>
@@ -391,7 +398,7 @@ function StepContent({
         <>
           <Title id={titleId}>{t.step6.title}</Title>
           <Body id={bodyId}>{t.step6.body}</Body>
-          <ul className="mt-3 space-y-1.5">
+          <ul className="mt-3 space-y-2">
             <MenuItem icon={<GraduationCap className="w-4 h-4" />} label={t.step6.plan.label} desc={t.step6.plan.desc} />
             <MenuItem icon={<CalendarDays className="w-4 h-4" />} label={t.step6.calendar.label} desc={t.step6.calendar.desc} />
             <MenuItem icon={<HistoryIcon className="w-4 h-4" />} label={t.step6.history.label} desc={t.step6.history.desc} />
