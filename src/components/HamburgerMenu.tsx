@@ -1,5 +1,5 @@
 import {
-  House, CalendarDays,
+  House, CalendarDays, CalendarCheck,
   History, TrendingUp, BookOpen, Volume2, Settings, CreditCard, LogOut, X, GraduationCap, Award, Bell,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -15,6 +15,7 @@ interface MenuItem {
 const MENU_ITEMS: MenuItem[] = [
   { view: 'home',           label: 'Página inicial',          icon: House },
   { view: 'curriculum-plan', label: 'Plano de ensino',         icon: GraduationCap },
+  { view: 'study-routine',  label: 'Rotina de estudos',       icon: CalendarCheck },
   { view: 'month',          label: 'Calendário',              icon: CalendarDays },
   { view: 'history',        label: 'Histórico',                icon: History },
   { view: 'evolution',      label: 'Evolução',                 icon: TrendingUp },
