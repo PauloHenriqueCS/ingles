@@ -81,6 +81,9 @@ export const SUPABASE_URL = process.env.VITE_SUPABASE_URL ?? '';
 /** URL fragment for the first-run tutorial status table. */
 export const TUTORIAL_STATUS_PATH = 'user_tutorial_progress';
 
+/** URL fragment for the mandatory study-routine config status table. */
+export const STUDY_ROUTINE_STATUS_PATH = 'user_study_routine_config';
+
 /**
  * E2E users represent EXISTING (grandfathered) accounts whose first-run Home
  * tutorial is already completed — so its full-screen blocking overlay never
@@ -93,6 +96,24 @@ export function maybeFulfillTutorialStatus(route: Route): boolean {
     status: 200,
     contentType: 'application/json',
     body: '[{"status":"completed"}]',
+  });
+  return true;
+}
+
+/**
+ * E2E users are also grandfathered past the MANDATORY study-routine setup (the
+ * full-screen z-[80] gate that runs after the tutorial): reply 'configured' so
+ * it never blocks unrelated flows. Pair it with maybeFulfillTutorialStatus at the
+ * top of the same `/rest/v1/*` catch-all — the gate only activates once the
+ * tutorial reads as settled, so both must look done. Returns true if it fulfilled
+ * the study-routine-status query.
+ */
+export function maybeFulfillStudyRoutineStatus(route: Route): boolean {
+  if (!route.request().url().includes(STUDY_ROUTINE_STATUS_PATH)) return false;
+  route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '[{"status":"configured"}]',
   });
   return true;
 }
@@ -284,6 +305,7 @@ export async function mockReviewData(
     // Catch-all for other REST calls — let specific mocks handle english_reviews and writing_entries
     await page.route(`${SUPABASE_URL}/rest/v1/*`, (route) => {
       if (maybeFulfillTutorialStatus(route)) return;
+      if (maybeFulfillStudyRoutineStatus(route)) return;
       const url = route.request().url();
       if (url.includes('english_reviews') || url.includes('writing_entries')) {
         route.continue(); // pass to the specific handler registered earlier
