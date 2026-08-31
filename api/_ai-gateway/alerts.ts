@@ -697,6 +697,14 @@ export async function runInfraSweep(
           title: `Long-running transaction — ${s.longest_tx_seconds}s`,
           detail: { metric: 'longest_tx_seconds', value: s.longest_tx_seconds },
         });
+        // Logical database size vs the plan cap — the meaningful "storage
+        // filling up" signal (matches the Dashboard's Database size), unlike the
+        // instance root filesystem which is a near-constant ~80% baseline.
+        metrics.push({
+          scope: 'db_size', value: numOrNull(s.db_size_mb),
+          title: `Database size — ${s.db_size_mb} MB`,
+          detail: { metric: 'db_size_mb', value: s.db_size_mb },
+        });
       }
     } catch (e) {
       deps.logger('alerts.infra.db_stats_failed', { message: e instanceof Error ? e.message : String(e) });
@@ -706,7 +714,10 @@ export async function runInfraSweep(
     const res = await fetchSupabaseResourceMetrics(deps, env);
     if (res.cpu !== null) metrics.push({ scope: 'cpu', value: res.cpu, title: `CPU high — ${res.cpu}%`, detail: { metric: 'cpu_util_pct', value: res.cpu } });
     if (res.memory !== null) metrics.push({ scope: 'memory', value: res.memory, title: `Memory high — ${res.memory}%`, detail: { metric: 'memory_pct', value: res.memory } });
-    if (res.disk !== null) metrics.push({ scope: 'disk', value: res.disk, title: `Disk high — ${res.disk}%`, detail: { metric: 'disk_pct', value: res.disk } });
+    // 'disk' is the INSTANCE ROOT filesystem (OS + Postgres + WAL/logs), a
+    // near-constant ~80% baseline — a safety net for a genuine fill only (its
+    // rule threshold is 95%), NOT the user's data (see the db_size signal above).
+    if (res.disk !== null) metrics.push({ scope: 'disk', value: res.disk, title: `Instance root disk high — ${res.disk}%`, detail: { metric: 'root_fs_pct', value: res.disk } });
 
     for (const m of metrics) {
       if (m.value === null) continue;
