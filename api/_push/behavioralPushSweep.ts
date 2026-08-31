@@ -97,6 +97,14 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
     const limit = BEHAVIORAL_PUSH.SWEEP_BATCH_SIZE;
     let offset = 0;
 
+    // Test allowlist may bypass the ACCOUNT-TYPE exclusions (admin/internal,
+    // deactivated, comm-suppressed) so an explicitly-allowlisted account can be
+    // tested end-to-end in homologation — NEVER in production (there the list is
+    // empty by design; this hard-gates it regardless). Behavioral rules
+    // (practiced-today, cooldown, idempotency, weekday, streak/abandon) are
+    // never bypassed. See migration 20260831120000.
+    const bypassUserIds = environment === 'production' ? [] : Array.from(gate.testUserIds);
+
     for (let batch = 0; batch < MAX_BATCHES; batch++) {
       const { data, error } = await supabase.rpc('behavioral_push_candidates', {
         p_local_date: spDate,
@@ -104,6 +112,7 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
         p_cooldown_hours: BEHAVIORAL_PUSH.COOLDOWN_HOURS,
         p_limit: limit,
         p_offset: offset,
+        p_bypass_user_ids: bypassUserIds,
       });
       if (error) {
         safeLog(LOG, 'candidates_error', 500, { error: error.message });
