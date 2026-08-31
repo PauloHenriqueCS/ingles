@@ -32,7 +32,7 @@ import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSharedServiceClient, SupabaseUsageRepository } from './usage-repository';
 import type { AiFeatureKey } from './feature-catalog';
-import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail, getAlertEnvironmentOverride } from '../_env';
+import { getResendApiKey, getAlertRecipientEmail, getAlertFromEmail, getAlertEnvironmentOverride, getSupabaseServiceCredentials } from '../_env';
 import { isProductionDeployment } from '../_billing/revenuecat-environment';
 
 export type ProviderErrorClass =
@@ -573,6 +573,175 @@ export async function runObservabilitySweep(
     deps.logger('alerts.observability.failed', { message: err instanceof Error ? err.message : String(err) });
   }
   return { opened, recovered };
+}
+
+// ── Infrastructure saturation sweep (DB connections/locks/long-tx + CPU/RAM/disk)
+// A THIRD alert class. Two sources: in-database stats (pg_stat_activity via
+// get_infra_db_stats — always reliable) and the Supabase Prometheus metrics
+// endpoint (CPU/RAM/disk — best-effort, authenticated with the service creds
+// already in Vercel). Every measured gauge is fed through raise_observability_
+// alert, reusing the exact dedup/cooldown/recover pipeline. Fully isolated: a
+// missing metric, a 401, or a parse failure only skips that scope — never throws.
+
+const METRICS_TIMEOUT_MS = 5_000;
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+/** Sums every Prometheus series whose name matches `metric` (optionally filtered
+ *  by a label substring / a mode="x"). Returns null when no series was found so
+ *  a metric the endpoint doesn't expose simply never alerts. */
+function sumPromSeries(
+  text: string,
+  metric: string,
+  opts?: { labelIncludes?: string; onlyMode?: string },
+): number | null {
+  let sum = 0;
+  let found = false;
+  for (const line of text.split('\n')) {
+    if (line.length === 0 || line.charCodeAt(0) === 35 /* '#' */) continue;
+    if (!line.startsWith(metric)) continue;
+    const after = line.charAt(metric.length);
+    if (after !== '{' && after !== ' ') continue; // avoid prefix collisions
+    if (opts?.labelIncludes && !line.includes(opts.labelIncludes)) continue;
+    if (opts?.onlyMode && !line.includes(`mode="${opts.onlyMode}"`)) continue;
+    const sp = line.lastIndexOf(' ');
+    if (sp < 0) continue;
+    const v = Number(line.slice(sp + 1));
+    if (Number.isFinite(v)) { sum += v; found = true; }
+  }
+  return found ? sum : null;
+}
+
+interface ResourceMetrics { cpu: number | null; memory: number | null; disk: number | null }
+
+/** Fetches + parses the Supabase metrics endpoint into CPU/RAM/disk percentages.
+ *  CPU needs two scrapes (node_cpu_seconds_total is a counter), so utilisation
+ *  is computed by record_cpu_sample_and_get_util across sweeps. Never throws. */
+async function fetchSupabaseResourceMetrics(deps: AlertDeps, env: AlertEnvironment): Promise<ResourceMetrics> {
+  const empty: ResourceMetrics = { cpu: null, memory: null, disk: null };
+  const { url, key } = getSupabaseServiceCredentials();
+  if (!url || !key) { deps.logger('alerts.infra.metrics_no_creds', {}); return empty; }
+
+  const metricsUrl = `${url.replace(/\/+$/, '')}/customer/v1/privileged/metrics`;
+  const auth = 'Basic ' + Buffer.from(`service_role:${key}`).toString('base64');
+
+  let text: string;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), METRICS_TIMEOUT_MS);
+  try {
+    const res = await fetch(metricsUrl, { headers: { Authorization: auth }, signal: controller.signal });
+    if (!res.ok) { deps.logger('alerts.infra.metrics_http', { status: res.status }); return empty; }
+    text = await res.text();
+  } catch (err) {
+    deps.logger('alerts.infra.metrics_fetch_failed', { message: err instanceof Error ? err.name : 'error' });
+    return empty;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const memTotal = sumPromSeries(text, 'node_memory_MemTotal_bytes');
+  const memAvail = sumPromSeries(text, 'node_memory_MemAvailable_bytes');
+  const memory = memTotal && memAvail && memTotal > 0 ? round1((1 - memAvail / memTotal) * 100) : null;
+
+  const diskSize = sumPromSeries(text, 'node_filesystem_size_bytes', { labelIncludes: 'mountpoint="/"' });
+  const diskAvail = sumPromSeries(text, 'node_filesystem_avail_bytes', { labelIncludes: 'mountpoint="/"' });
+  const disk = diskSize && diskAvail && diskSize > 0 ? round1((1 - diskAvail / diskSize) * 100) : null;
+
+  let cpu: number | null = null;
+  const cpuIdle = sumPromSeries(text, 'node_cpu_seconds_total', { onlyMode: 'idle' });
+  const cpuTotal = sumPromSeries(text, 'node_cpu_seconds_total');
+  if (cpuIdle !== null && cpuTotal !== null) {
+    const { data, error } = await deps.supabase.rpc('record_cpu_sample_and_get_util', {
+      p_environment: env.dbValue,
+      p_idle: cpuIdle,
+      p_total: cpuTotal,
+    });
+    if (error) deps.logger('alerts.infra.cpu_sample_failed', { message: error.message });
+    else cpu = data == null ? null : Number(data);
+  }
+
+  return { cpu, memory, disk };
+}
+
+export async function runInfraSweep(
+  deps: AlertDeps,
+): Promise<{ opened: number; recovered: number; measured: Array<{ scope: string; value: number }> }> {
+  let opened = 0;
+  let recovered = 0;
+  const measured: Array<{ scope: string; value: number }> = [];
+  try {
+    const env = resolveAlertEnvironment();
+    const metrics: Array<{ scope: string; value: number | null; title: string; detail: Record<string, unknown> }> = [];
+
+    // ── In-database stats (always available) ──────────────────────────────────
+    try {
+      const { data: stats, error } = await deps.supabase.rpc('get_infra_db_stats');
+      if (error) {
+        deps.logger('alerts.infra.db_stats_failed', { message: error.message });
+      } else {
+        const s = (stats ?? {}) as Record<string, number>;
+        metrics.push({
+          scope: 'db_connections', value: numOrNull(s.connections_pct),
+          title: `DB connections high — ${s.connections_pct}% of ${s.max_connections}`,
+          detail: { metric: 'connections_pct', value: s.connections_pct, max_connections: s.max_connections, active: s.active_connections, total: s.total_connections },
+        });
+        metrics.push({
+          scope: 'db_locks', value: numOrNull(s.waiting_on_lock),
+          title: `DB lock waiters — ${s.waiting_on_lock} session(s) blocked`,
+          detail: { metric: 'waiting_on_lock', value: s.waiting_on_lock },
+        });
+        metrics.push({
+          scope: 'db_long_tx', value: numOrNull(s.longest_tx_seconds),
+          title: `Long-running transaction — ${s.longest_tx_seconds}s`,
+          detail: { metric: 'longest_tx_seconds', value: s.longest_tx_seconds },
+        });
+      }
+    } catch (e) {
+      deps.logger('alerts.infra.db_stats_failed', { message: e instanceof Error ? e.message : String(e) });
+    }
+
+    // ── Metrics endpoint (best-effort) ────────────────────────────────────────
+    const res = await fetchSupabaseResourceMetrics(deps, env);
+    if (res.cpu !== null) metrics.push({ scope: 'cpu', value: res.cpu, title: `CPU high — ${res.cpu}%`, detail: { metric: 'cpu_util_pct', value: res.cpu } });
+    if (res.memory !== null) metrics.push({ scope: 'memory', value: res.memory, title: `Memory high — ${res.memory}%`, detail: { metric: 'memory_pct', value: res.memory } });
+    if (res.disk !== null) metrics.push({ scope: 'disk', value: res.disk, title: `Disk high — ${res.disk}%`, detail: { metric: 'disk_pct', value: res.disk } });
+
+    for (const m of metrics) {
+      if (m.value === null) continue;
+      measured.push({ scope: m.scope, value: m.value });
+      const { data, error } = await deps.supabase.rpc('raise_observability_alert', {
+        p_environment: env.dbValue,
+        p_alert_type: 'resource_saturation',
+        p_scope: m.scope,
+        p_value: m.value,
+        p_title: m.title,
+        p_detail: m.detail,
+      });
+      if (error) { deps.logger('alerts.infra.raise_failed', { scope: m.scope, message: error.message }); continue; }
+      const r = (data ?? {}) as { opened?: DegradationOpened | null; recovered?: DegradationRecovered | null };
+      if (r.opened) {
+        opened++;
+        const { subject, text } = buildDegradationOpenEmail(env, r.opened);
+        await dispatchEmail(deps, subject, text);
+      }
+      if (r.recovered) {
+        recovered++;
+        const { subject, text } = buildDegradationRecoveredEmail(env, r.recovered);
+        await dispatchEmail(deps, subject, text);
+      }
+    }
+
+    deps.logger('alerts.infra.done', { opened, recovered, measured });
+  } catch (err) {
+    deps.logger('alerts.infra.failed', { message: err instanceof Error ? err.message : String(err) });
+  }
+  return { opened, recovered, measured };
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
 // ── Fire-and-forget entry point for the gateway failure sink ──────────────────

@@ -20,7 +20,7 @@ import { methodGuard, safeLog, resolveSlug } from '../../_helpers';
 import { handleProductConfigStatusRoute } from '../_product-config-status-route-handler';
 import {
   getSharedServiceClient, getProductionDeps, reconcileSessionReservation,
-  releaseExpiredPendingReservations, runRecoverySweep, runObservabilitySweep, getProductionAlertDeps,
+  releaseExpiredPendingReservations, runRecoverySweep, runObservabilitySweep, runInfraSweep, getProductionAlertDeps,
 } from '../../_ai-gateway/index';
 import { hangupAndPersist } from '../../_realtime-hangup';
 import {
@@ -581,7 +581,12 @@ async function handleAlertsRecoverySweep(req: any, res: any): Promise<void> {
 async function handleObservabilitySweep(req: any, res: any): Promise<void> {
   if (!methodGuard(req, res, ['GET'])) return;
   try {
-    const result = await runObservabilitySweep(getProductionAlertDeps());
+    const deps = getProductionAlertDeps();
+    // Latency degradation (debug_request_logs) + infra saturation (DB stats +
+    // Supabase metrics endpoint). Both are isolated and never throw.
+    const latency = await runObservabilitySweep(deps);
+    const infra = await runInfraSweep(deps);
+    const result = { latency, infra };
     safeLog('internal/listening/observability-sweep', 'sweep_done', 200, result);
     return res.status(200).json({ success: true, ...result });
   } catch (err) {
