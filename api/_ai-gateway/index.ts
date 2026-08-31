@@ -186,6 +186,7 @@ export {
   dispatchProviderIncident,
   runRecoverySweep,
   runObservabilitySweep,
+  runInfraSweep,
   getProductionAlertDeps,
   resendSendEmail,
   buildOpenEmail,
