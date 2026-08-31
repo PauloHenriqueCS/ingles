@@ -146,9 +146,6 @@ describe('handleBehavioralPushSweep', () => {
     await handleBehavioralPushSweep(req(), res());
     expect(h.send).not.toHaveBeenCalled();
     expect(markCalls(h.client, 'dry_run')).toHaveLength(1);
-    // Non-production: the allowlist is passed as the account-exclusion bypass.
-    const cand = h.client.calls.find((c: any) => c.name === 'behavioral_push_candidates');
-    expect(cand.args.p_bypass_user_ids).toEqual(['someone-else']);
   });
 
   it('concurrent claim / request retry: claim returns null → no send, no mark', async () => {

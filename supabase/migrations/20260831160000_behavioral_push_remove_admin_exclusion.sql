@@ -1,43 +1,29 @@
 -- =============================================================================
--- MIGRATION: 20260831120000_behavioral_push_candidates_test_bypass
+-- MIGRATION: 20260831160000_behavioral_push_remove_admin_exclusion
 -- Projeto: Orodim
 --
 -- Aplicada automaticamente por .github/workflows/homologation.yml
 -- (supabase db push). NÃO aplicar manualmente no SQL Editor.
 --
--- OBJETIVO: permitir testar o behavioral push com uma conta que normalmente
--- seria EXCLUÍDA por tipo (admin/interno, desativada, ou com bloqueio de
--- comunicação) — mas SOMENTE via allowlist de teste e SOMENTE fora de produção.
--- Atende exatamente o brief original ("não envie para conta interna/admin, MAS
--- não prejudique a capacidade de testar explicitamente em homologação; se
--- necessário, criar allowlist de teste apenas para homolog").
+-- OBJETIVO: remover a exclusão de contas admin/internas do behavioral push, em
+-- TODOS os ambientes (decisão do owner). Contas admin passam a ser tratadas como
+-- qualquer outro usuário para o push comportamental. As demais exclusões de
+-- conta permanecem: desativação self-service (user_account_deactivations) e
+-- opt-out de comunicação push (user_communication_blocks; também revalidado
+-- fail-closed no envio via canSendCommunication).
 --
--- COMO: adiciona o parâmetro p_bypass_user_ids uuid[] a
--- behavioral_push_candidates. Para os UUIDs nesse array, as três exclusões de
--- CONTA (deactivation / admin / communication-block) são ignoradas. As regras
--- COMPORTAMENTAIS (dia configurado, praticou-hoje, cooldown, idempotência,
--- histórico, streak/abandono) continuam VALENDO — só o tipo-de-conta é
--- contornado. O sweep (api/_push/behavioralPushSweep.ts) só preenche esse array
--- com a allowlist BEHAVIORAL_PUSH_TEST_USER_IDS quando o ambiente NÃO é
--- produção; em produção passa '{}' → comportamento idêntico ao anterior (admin
--- continua excluído de retenção). Duplamente travado: não-produção E na allowlist.
---
--- ESCOPO: recria behavioral_push_candidates (DROP da assinatura antiga de 5
--- args + CREATE da nova de 6 args, pois adicionar parâmetro muda a assinatura).
--- Corpo IDÊNTICO ao de 20260829120000, exceto: (a) novo parâmetro; (b) as três
--- exclusões de conta agora são `(user_id = ANY(bypass) OR NOT EXISTS(...))`.
--- Nada mais muda. Aditivo.
+-- COMO: CREATE OR REPLACE de behavioral_push_candidates com a MESMA assinatura de
+-- 5 args de 20260829120000, corpo IDÊNTICO exceto pela remoção do bloco
+-- `NOT EXISTS (public.admin_users ...)`. Sem mudança de assinatura → os grants
+-- existentes (service_role) são preservados. Aditivo.
 -- =============================================================================
-
-DROP FUNCTION IF EXISTS public.behavioral_push_candidates(date, int, int, int, int);
 
 CREATE OR REPLACE FUNCTION public.behavioral_push_candidates(
   p_local_date date,
   p_lookback_days int DEFAULT 120,
   p_cooldown_hours int DEFAULT 72,
   p_limit int DEFAULT 200,
-  p_offset int DEFAULT 0,
-  p_bypass_user_ids uuid[] DEFAULT '{}'::uuid[]
+  p_offset int DEFAULT 0
 )
 RETURNS TABLE (
   user_id uuid,
@@ -162,45 +148,35 @@ LEFT JOIN last_act la ON la.user_id = a.user_id
 WHERE
   -- today is a configured practice weekday (0=Sun..6=Sat, matching active_weekdays)
   (EXTRACT(DOW FROM p_local_date)::int = ANY (a.active_weekdays))
-  -- anti-nag: not practiced today (generous) — NEVER bypassed
+  -- anti-nag: not practiced today (generous)
   AND tg.user_id IS NULL
   -- bound the universe: some history in window OR a recent signup (never-practiced abandonment)
   AND (COALESCE(array_length(a.active_dates, 1), 0) > 0
        OR a.account_created_date >= (SELECT since FROM bounds))
-  -- idempotency pre-filter: not already decided today — NEVER bypassed
+  -- idempotency pre-filter: not already decided today
   AND NOT EXISTS (
     SELECT 1 FROM public.behavioral_push_events e
     WHERE e.user_id = a.user_id AND e.local_date = p_local_date
   )
-  -- global cooldown: no successful send in the last p_cooldown_hours — NEVER bypassed
+  -- global cooldown: no successful send in the last p_cooldown_hours
   AND NOT EXISTS (
     SELECT 1 FROM public.behavioral_push_events e
     WHERE e.user_id = a.user_id AND e.status = 'sent'
       AND e.sent_at > now() - make_interval(hours => p_cooldown_hours)
   )
-  -- excluded: self-service deactivation still active (bypassable via test allowlist)
-  AND (a.user_id = ANY (p_bypass_user_ids) OR NOT EXISTS (
+  -- excluded: self-service deactivation still active
+  AND NOT EXISTS (
     SELECT 1 FROM public.user_account_deactivations d
     WHERE d.user_id = a.user_id AND d.status = 'deactivated' AND d.reactivated_at IS NULL
-  ))
-  -- excluded: admin/internal accounts (bypassable via test allowlist)
-  AND (a.user_id = ANY (p_bypass_user_ids) OR NOT EXISTS (
-    SELECT 1 FROM public.admin_users au2
-    WHERE au2.user_id = a.user_id AND au2.status = 'active'
-  ))
-  -- excluded: push communication suppressed (bypassable via test allowlist)
-  AND (a.user_id = ANY (p_bypass_user_ids) OR NOT EXISTS (
+  )
+  -- (admin/internal exclusion intentionally REMOVED — see migration header)
+  -- excluded: push communication suppressed (marketing or all)
+  AND NOT EXISTS (
     SELECT 1 FROM public.user_communication_blocks cb
     WHERE cb.user_id = a.user_id AND cb.channel = 'push' AND cb.is_active = true
       AND cb.scope IN ('marketing', 'all')
       AND (cb.expires_at IS NULL OR cb.expires_at > now())
-  ))
+  )
 ORDER BY a.user_id
 LIMIT p_limit OFFSET p_offset;
 $$;
-
--- Grants para a NOVA assinatura (a antiga foi dropada). service_role only.
-REVOKE ALL ON FUNCTION public.behavioral_push_candidates(date, int, int, int, int, uuid[]) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.behavioral_push_candidates(date, int, int, int, int, uuid[]) FROM anon;
-REVOKE ALL ON FUNCTION public.behavioral_push_candidates(date, int, int, int, int, uuid[]) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.behavioral_push_candidates(date, int, int, int, int, uuid[]) TO service_role;
