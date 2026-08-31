@@ -131,14 +131,18 @@ export default function App() {
   const placementReleased =
     !(placementLoading && placementStatus === null) && placementStatus !== 'not_started';
   const atHomeExperience = !!user && !authLoading && !loading && placementReleased;
-  // The native push prompt must WAIT for the tutorial (§10): a brand-new user
-  // sees auth → placement → tutorial, and only AFTER the tutorial is completed or
-  // skipped may the push flow continue. So suppress it while the tutorial is
-  // still pending or on screen. A tutorial-status backend error (status stays
+  // The native push prompt must WAIT for the tutorial (§10) AND for the mandatory
+  // study-routine setup: a brand-new user sees auth → placement → tutorial →
+  // study-routine config, and only AFTER all of those may the push flow continue
+  // (the OS prompt must never fire over the tutorial or the config wizard). So
+  // suppress it while the tutorial is still pending/on screen or while the
+  // study-routine config is still unconfigured. A backend error (status stays
   // null, not loading) is treated as "settled" so a transient failure never
   // permanently blocks the existing push flow.
   const tutorialShouldRun = tutorialStatus === 'pending';
-  const readyForPush = atHomeExperience && !tutorialActive && !tutorialLoading && !tutorialShouldRun;
+  const readyForPush =
+    atHomeExperience && !tutorialActive && !tutorialLoading && !tutorialShouldRun &&
+    studyRoutineStatus !== 'unconfigured';
   usePushPermissionPrompt(readyForPush);
 
   // The MANDATORY study-routine setup runs strictly AFTER the tutorial has
