@@ -1,6 +1,6 @@
 export type Status = 'nao-iniciado' | 'escrito' | 'corrigido' | 'revisado';
 export type Difficulty = 'facil' | 'medio' | 'dificil' | null;
-export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'error-review' | 'settings' | 'subscription' | 'minute-packages' | 'curriculum-plan' | 'placement' | 'practice-reminder';
+export type View = 'home' | 'dashboard' | 'month' | 'year' | 'filters' | 'day' | 'history' | 'evolution' | 'memory' | 'conversation' | 'listening' | 'audio-settings' | 'pronunciation-training' | 'error-review' | 'settings' | 'subscription' | 'minute-packages' | 'curriculum-plan' | 'placement' | 'practice-reminder' | 'study-routine';
 
 export interface AIPreferences {
   // Identity

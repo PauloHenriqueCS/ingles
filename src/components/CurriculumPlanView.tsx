@@ -8,7 +8,6 @@ import {
   type CurriculumTreeModule,
   type CurriculumNodeStatus,
 } from '../lib/curriculumApi';
-import CurriculumModalityPreferences from './CurriculumModalityPreferences';
 import CurriculumLevelDetail from './CurriculumLevelDetail';
 import CurriculumModuleDetail from './CurriculumModuleDetail';
 import { curriculumUiStrings } from '../i18n/curriculumUiStrings';
@@ -161,9 +160,9 @@ export default function CurriculumPlanView({ onBack }: Props) {
                 );
               })}
             </div>
-
-            {/* Modality preferences ("menu = regra") — kept accessible from the plan. */}
-            <CurriculumModalityPreferences />
+            {/* The practices menu ("Práticas do seu plano") moved out of here to
+                the mandatory first-access setup + the menu → "Rotina de estudos"
+                (single source of truth: user_curriculum_preferences). */}
           </>
         )}
       </div>
