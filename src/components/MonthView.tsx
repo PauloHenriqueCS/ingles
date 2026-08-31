@@ -1,8 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Settings, Check, ChevronRight } from 'lucide-react';
+import { Check, ChevronRight } from 'lucide-react';
 import { EntriesStore, DailyProgress } from '../types';
 import { getAllDatesInMonth, MONTH_NAMES_PT } from '../data/calendar2026';
-import { saveLearningSettings, LearningSettings } from '../lib/learningSettings';
 import { getMonthSessionTotals, getConversationGoalMinutes } from '../lib/conversationSessions';
 import { getPronunciationDatesForMonth, computeDailyProgress, type ActiveDailyFeatures } from '../lib/dailyProgress';
 import { getListeningDatesForMonth } from '../services/listening/calendar/get-listening-calendar-activities';
@@ -25,17 +24,14 @@ interface Props {
   conversationRefreshKey?: number;
   activeWeekdays?: number[];
   overrideDates?: string[];
-  onSettingsChange?: (settings: LearningSettings) => void;
 }
 
 const DOW_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-
 export default function MonthView({
   entries, currentMonth, currentYear, onChangeMonth, onOpenDay,
   onOpenWriting, onOpenPronunciation, onOpenConversation, onOpenListening,
-  listeningRefreshKey = 0, conversationRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [], onSettingsChange,
+  listeningRefreshKey = 0, conversationRefreshKey = 0, activeWeekdays = [1, 2, 3, 4, 5], overrideDates = [],
 }: Props) {
   const today = (() => {
     try {
@@ -48,9 +44,6 @@ export default function MonthView({
   const firstDow = new Date(dates[0] + 'T12:00:00').getDay();
   const blanks = Array(firstDow).fill(null);
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [selectedDays, setSelectedDays] = useState<number[]>(activeWeekdays);
-  const [saveState, setSaveState] = useState<SaveState>('idle');
   const [convTotals, setConvTotals] = useState<Record<string, number>>({});
   const [convGoalSec, setConvGoalSec] = useState<number>(15 * 60);
   const [pronunciationDates, setPronunciationDates] = useState<Set<string>>(new Set());
@@ -70,8 +63,6 @@ export default function MonthView({
         listeningEnabled: entitlements.data.listening.enabled,
       }
     : { writingEnabled: true, pronunciationEnabled: true, listeningEnabled: true };
-
-  useEffect(() => { setSelectedDays(activeWeekdays); }, [activeWeekdays.join(',')]);
 
   useEffect(() => {
     getMonthSessionTotals(currentYear, currentMonth).then(setConvTotals).catch(() => {});
@@ -118,30 +109,6 @@ export default function MonthView({
     listeningProgress[today],
     activeFeatures,
   ), [today, entries, convTotals, convGoalSec, pronunciationDates, listeningProgress, activeFeatures]);
-
-  function toggleDay(dow: number) {
-    setSelectedDays((prev) => {
-      if (prev.includes(dow)) {
-        if (prev.length <= 1) return prev;
-        return prev.filter((d) => d !== dow);
-      }
-      return [...prev, dow].sort((a, b) => a - b);
-    });
-  }
-
-  async function saveSettings() {
-    setSaveState('saving');
-    try {
-      const settings: LearningSettings = { activeWeekdays: selectedDays };
-      await saveLearningSettings(settings);
-      onSettingsChange?.(settings);
-      setSaveState('saved');
-      setTimeout(() => setSaveState('idle'), 2500);
-    } catch {
-      setSaveState('error');
-      setTimeout(() => setSaveState('idle'), 3000);
-    }
-  }
 
   function prev() {
     if (currentMonth === 1) onChangeMonth(12, currentYear - 1);
@@ -325,57 +292,9 @@ export default function MonthView({
             </div>
           );
         })()}
-
-        {/* Practice days config */}
-        <div className="mt-4">
-          <button
-            onClick={() => setSettingsOpen((o) => !o)}
-            className="w-full flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl text-xs text-slate-400 hover:text-slate-200 transition-colors"
-          >
-            <span className="flex items-center gap-1.5">
-              <Settings className="w-3.5 h-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
-              Dias de prática
-            </span>
-            <span>{settingsOpen ? '▲' : '▼'}</span>
-          </button>
-
-          {settingsOpen && (
-            <div className="mt-2 bg-slate-800 rounded-xl p-4 space-y-3">
-              <p className="text-xs text-slate-500">Dias da semana ativos. Mínimo 1 dia.</p>
-              <div className="flex gap-2 flex-wrap">
-                {DOW_LABELS.map((label, dow) => {
-                  const active = selectedDays.includes(dow);
-                  return (
-                    <button
-                      key={dow}
-                      onClick={() => toggleDay(dow)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                        active
-                          ? 'bg-blue-600 border-blue-500 text-white'
-                          : 'bg-slate-700 border-slate-600 text-slate-400 hover:border-slate-500'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                onClick={saveSettings}
-                disabled={saveState === 'saving' || selectedDays.length === 0}
-                className={`w-full py-2 rounded-lg text-xs font-medium transition-colors ${
-                  saveState === 'saved'
-                    ? 'bg-green-700 text-white'
-                    : saveState === 'error'
-                    ? 'bg-red-800 text-white'
-                    : 'bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white'
-                }`}
-              >
-                {saveState === 'saving' ? 'Salvando...' : saveState === 'saved' ? '✓ Salvo!' : saveState === 'error' ? 'Erro' : 'Salvar'}
-              </button>
-            </div>
-          )}
-        </div>
+        {/* The practice-days configuration moved out of the Calendar to the
+            mandatory first-access setup + menu → "Rotina de estudos". The
+            calendar still reads activeWeekdays (source of truth unchanged). */}
       </div>
 
       {modalDate && (
