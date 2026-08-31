@@ -21,6 +21,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { recordServerTiming } from '../_debug-log';
 
 // Long enough to cover a realistic OpenAI (+ Azure TTS) run with margin; short
 // enough that a genuinely crashed request doesn't block a slot for long before
@@ -250,6 +251,10 @@ export async function getOrCreateSharedContent<TContent>(
   const { client, userId, identity, generatorModel, generateContent, audio } = opts;
   const lockSeconds = opts.lockSeconds ?? SHARED_CONTENT_LOCK_SECONDS;
 
+  // Time ONLY the DB acquire RPC (never the AI generateContent below), so the
+  // db_latency degradation alert sees the shared-content DB path too. Fire-and-
+  // forget: no-op unless the dashboard log level is on; adds no request latency.
+  const t0 = Date.now();
   const { data, error } = await client.rpc('acquire_or_get_shared_content_item', {
     p_user_id: userId,
     p_modality: identity.modality,
@@ -263,6 +268,18 @@ export async function getOrCreateSharedContent<TContent>(
     p_prompt_version: identity.promptVersion,
     p_lock_duration_seconds: lockSeconds,
   });
+  {
+    const dt = Date.now() - t0;
+    void recordServerTiming({
+      endpoint: 'service:shared-content',
+      stage: 'db:acquire_or_get',
+      userId,
+      durationMs: dt,
+      dbMs: dt,
+      provider: 'supabase',
+      detail: { modality: identity.modality },
+    });
+  }
   if (error) throw new Error(`SHARED_CONTENT_ACQUIRE_RPC_FAILED: ${error.message}`);
   const row = (data as AcquireRow[] | null)?.[0];
   if (!row) throw new Error('SHARED_CONTENT_ACQUIRE_RETURNED_NO_ROW');
