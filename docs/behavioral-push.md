@@ -128,13 +128,11 @@ Domain constants: `api/_push/behavioralPushDomain.ts::BEHAVIORAL_PUSH`
 accepted the send (NOT physical delivery — never call it `delivered`). Only
 `sent` starts the cooldown; `dry_run`/`failed`/`skipped` do not.
 
-## Test allowlist bypasses ACCOUNT-TYPE exclusions (homolog only)
+## Admin/internal accounts are NOT excluded (product decision)
 
-`behavioral_push_candidates` takes `p_bypass_user_ids uuid[]`. For those UUIDs the
-account-type exclusions (admin/internal, deactivated, comm-suppressed) are
-ignored, so an allowlisted account (e.g. the owner) can be tested end-to-end.
-The sweep only fills this with `BEHAVIORAL_PUSH_TEST_USER_IDS` when
-`environment !== 'production'`; in production it passes `{}` (admins stay
-excluded from retention). Doubly gated: non-production **and** on the allowlist.
-Behavioral rules (practiced-today, cooldown, idempotency, weekday,
-streak/abandonment) are **never** bypassed. Migration `20260831120000`.
+The `admin_users` exclusion was **removed in all environments** (migration
+`20260831160000`, per owner decision) — admin/internal accounts are treated like
+any other user for behavioral push. The remaining account-type exclusions stay:
+active `user_account_deactivations` (deleted/deactivated) and push
+`user_communication_blocks` (marketing/all opt-out, checked again fail-closed at
+send time via `canSendCommunication`).
