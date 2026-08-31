@@ -127,3 +127,14 @@ Domain constants: `api/_push/behavioralPushDomain.ts::BEHAVIORAL_PUSH`
 `claimed` → `sent` | `failed` | `skipped` | `dry_run`. `sent` = OneSignal
 accepted the send (NOT physical delivery — never call it `delivered`). Only
 `sent` starts the cooldown; `dry_run`/`failed`/`skipped` do not.
+
+## Test allowlist bypasses ACCOUNT-TYPE exclusions (homolog only)
+
+`behavioral_push_candidates` takes `p_bypass_user_ids uuid[]`. For those UUIDs the
+account-type exclusions (admin/internal, deactivated, comm-suppressed) are
+ignored, so an allowlisted account (e.g. the owner) can be tested end-to-end.
+The sweep only fills this with `BEHAVIORAL_PUSH_TEST_USER_IDS` when
+`environment !== 'production'`; in production it passes `{}` (admins stay
+excluded from retention). Doubly gated: non-production **and** on the allowlist.
+Behavioral rules (practiced-today, cooldown, idempotency, weekday,
+streak/abandonment) are **never** bypassed. Migration `20260831120000`.
