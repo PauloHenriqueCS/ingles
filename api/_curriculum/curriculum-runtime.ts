@@ -14,6 +14,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { recordServerTiming } from '../_debug-log';
 import {
   SupabaseCurriculumRepository,
   CurriculumConfigError,
@@ -135,6 +136,27 @@ export async function resolveActiveLearningLanguage(client: SupabaseClient, user
  * authority every runtime read shares (blockers 1, 8).
  */
 export async function ensureUserCurriculum(client: SupabaseClient, userId: string): Promise<EnsuredCurriculum> {
+  // Fire-and-forget DB self-timing (no-op unless the dashboard log level is on),
+  // mirroring the entitlements services — so debug_request_logs / the db_latency
+  // degradation alert also see the curriculum bootstrap DB path (hit by
+  // conversation / mission / placement starts), not only the auth hot path.
+  const t0 = Date.now();
+  try {
+    return await ensureUserCurriculumImpl(client, userId);
+  } finally {
+    const dt = Date.now() - t0;
+    void recordServerTiming({
+      endpoint: 'service:curriculum',
+      stage: 'db:ensure_curriculum',
+      userId,
+      durationMs: dt,
+      dbMs: dt,
+      provider: 'supabase',
+    });
+  }
+}
+
+async function ensureUserCurriculumImpl(client: SupabaseClient, userId: string): Promise<EnsuredCurriculum> {
   const repo = new SupabaseCurriculumRepository(client);
 
   let activePath = await readActivePath(client, userId);
