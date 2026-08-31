@@ -85,9 +85,9 @@ describe('CurriculumPlanView.tsx — data-driven levels list', () => {
     expect(i18nSrc).toMatch(/curriculumCompletedTitle:\s*'Currículo concluído'/);
   });
 
-  it('keeps the modality preferences accessible from the plan', () => {
-    expect(planSrc).toMatch(/import CurriculumModalityPreferences from '\.\/CurriculumModalityPreferences'/);
-    expect(planSrc).toMatch(/<CurriculumModalityPreferences \/>/);
+  it('no longer hosts the modality preferences — moved to the "Rotina de estudos" setup/menu (§6)', () => {
+    expect(planSrc).not.toMatch(/import CurriculumModalityPreferences/);
+    expect(planSrc).not.toMatch(/<CurriculumModalityPreferences/);
   });
 
   it('never renders recortes/subtopics or recorte counts', () => {

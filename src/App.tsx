@@ -44,6 +44,9 @@ import PlacementOnboarding from './components/placement/PlacementOnboarding';
 import { usePlacementStatus } from './hooks/usePlacementStatus';
 import { useTutorialStatus } from './hooks/useTutorialStatus';
 import HomeTutorial from './components/tutorial/HomeTutorial';
+import { useStudyRoutineStatus } from './hooks/useStudyRoutineStatus';
+import StudyRoutineOnboarding from './components/studyRoutine/StudyRoutineOnboarding';
+import StudyRoutineView from './components/studyRoutine/StudyRoutineView';
 import SubscriptionView from './components/SubscriptionView';
 import MinutePackagesView from './components/MinutePackagesView';
 import AppHeader from './components/AppHeader';
@@ -113,6 +116,15 @@ export default function App() {
   const [tutorialReplay, setTutorialReplay] = useState(false);
   const tutorialAutoShownRef = useRef(false);
   const tutorialBackRef = useRef<(() => void) | null>(null);
+  // Server-persisted MANDATORY study-routine setup status. 'unconfigured' (incl.
+  // a brand-new account with no row) → the config gate must run once, right after
+  // the tutorial, before releasing the Home (§1). Existing users are grandfathered
+  // to 'configured' by the rollout migration, so they never see it.
+  const {
+    status: studyRoutineStatus,
+    markConfigured: markStudyRoutineConfigured,
+  } = useStudyRoutineStatus(user?.id);
+  const studyRoutineBackRef = useRef<(() => void) | null>(null);
 
   // The real Home experience is on screen once the app has cleared every
   // blocking gate below — authenticated, past the auth/entries spinners and the
@@ -123,6 +135,23 @@ export default function App() {
   const placementReleased =
     !(placementLoading && placementStatus === null) && placementStatus !== 'not_started';
   const atHomeExperience = !!user && !authLoading && !loading && placementReleased;
+
+  // The MANDATORY study-routine setup runs strictly AFTER the tutorial has
+  // settled (never while it is pending/active — the walkthrough must play on the
+  // real Home first) and BEFORE the Home is released. It only fires on an explicit
+  // 'unconfigured' status, so a transient read failure (null) never traps the user
+  // behind it — it simply re-appears next launch while still unconfigured (§3).
+  const tutorialSettled =
+    !tutorialLoading && tutorialStatus !== 'pending' && !tutorialActive;
+  const studyRoutineGateActive =
+    atHomeExperience && tutorialSettled && studyRoutineStatus === 'unconfigured';
+
+  async function handleStudyRoutineComplete() {
+    await markStudyRoutineConfigured();
+    // Reflect any change to the practice days in the app's in-memory state so the
+    // calendar/home/streak update immediately (same source of truth, no reload).
+    fetchLearningSettings().then(setLearningSettings).catch(() => {});
+  }
 
   // Auto-run the walkthrough exactly once per session, only on the real Home,
   // never over the menu/another modal, and only for a 'pending' user (§7).
@@ -209,14 +238,21 @@ export default function App() {
   // site could push real history entries), then the app's own view stack,
   // then exit only from the root. Capacitor's default (no listener at all)
   // would just close the app from any screen.
-  const backButtonStateRef = useRef({ menuOpen, view, prevView, tutorialActive });
-  backButtonStateRef.current = { menuOpen, view, prevView, tutorialActive };
+  const backButtonStateRef = useRef({ menuOpen, view, prevView, tutorialActive, studyRoutineGateActive });
+  backButtonStateRef.current = { menuOpen, view, prevView, tutorialActive, studyRoutineGateActive };
 
   useEffect(() => {
     if (!isNativeApp || !isPluginAvailable('App')) return;
 
     const listenerPromise = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
-      const { menuOpen: isMenuOpen, view: currentView, prevView: previousView, tutorialActive: isTutorialActive } = backButtonStateRef.current;
+      const { menuOpen: isMenuOpen, view: currentView, prevView: previousView, tutorialActive: isTutorialActive, studyRoutineGateActive: isRoutineGate } = backButtonStateRef.current;
+      // The MANDATORY study-routine setup owns the back button while it gates the
+      // Home: step 2 → step 1, and on step 1 it is a no-op — the user can never
+      // escape to the Home before completing it (§3).
+      if (isRoutineGate) {
+        studyRoutineBackRef.current?.();
+        return;
+      }
       // The walkthrough owns the back button while it is on screen: previous step,
       // or skip on the first step — never falls through to menu/app navigation
       // (so the user is never left stuck behind the overlay, §6).
@@ -294,6 +330,20 @@ export default function App() {
     );
   }
 
+  // MANDATORY study-routine setup GATE (§1/§3): runs once, immediately AFTER the
+  // Home tutorial settles and BEFORE the Home is released. Full-screen and
+  // non-dismissible; the completion flag is server-persisted so it survives
+  // reload/reinstall/logout and other devices. Existing users are grandfathered
+  // to 'configured' by the rollout migration and never see this.
+  if (studyRoutineGateActive) {
+    return (
+      <StudyRoutineOnboarding
+        onComplete={handleStudyRoutineComplete}
+        registerBackHandler={(fn) => { studyRoutineBackRef.current = fn; }}
+      />
+    );
+  }
+
   if (view === 'day') {
     return (
       <DayView
@@ -316,7 +366,7 @@ export default function App() {
   const usesOwnHeader =
     view === 'conversation' || view === 'listening' ||
     view === 'pronunciation-training' || view === 'error-review' ||
-    view === 'practice-reminder';
+    view === 'practice-reminder' || view === 'study-routine';
   const headerOffset = usesOwnHeader ? undefined : 'calc(3.5rem + env(safe-area-inset-top))';
 
   return (
@@ -381,7 +431,6 @@ export default function App() {
             conversationRefreshKey={conversationRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
-            onSettingsChange={setLearningSettings}
           />
         )}
         {view === 'year' && (
@@ -399,7 +448,6 @@ export default function App() {
             conversationRefreshKey={conversationRefreshKey}
             activeWeekdays={learningSettings.activeWeekdays}
             overrideDates={monthOverrides}
-            onSettingsChange={setLearningSettings}
           />
         )}
         {(view === 'filters' || view === 'history') && (
@@ -451,6 +499,12 @@ export default function App() {
         )}
         {view === 'curriculum-plan' && (
           <CurriculumPlanView onBack={() => setView('home')} />
+        )}
+        {view === 'study-routine' && (
+          <StudyRoutineView
+            onBack={() => setView('home')}
+            onSettingsChange={setLearningSettings}
+          />
         )}
         {view === 'subscription' && (
           <SubscriptionView

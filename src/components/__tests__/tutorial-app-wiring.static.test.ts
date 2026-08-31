@@ -33,7 +33,9 @@ describe('App.tsx — tutorial orchestration', () => {
 
   it('gives the walkthrough priority over the Android hardware back button (§6)', () => {
     expect(app).toMatch(/if \(isTutorialActive\) \{\s*tutorialBackRef\.current\?\.\(\);\s*return;/);
-    expect(app).toContain('tutorialActive });');
+    // The back-button state ref tracks tutorialActive (the study-routine gate
+    // adds a sibling field after it — see study-routine-wiring.static.test.ts).
+    expect(app).toMatch(/tutorialActive, studyRoutineGateActive \}\);/);
   });
 
   it('persists completed/skipped ONLY for a real run, never for a replay (§9)', () => {
