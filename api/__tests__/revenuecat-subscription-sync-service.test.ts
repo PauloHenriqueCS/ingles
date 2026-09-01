@@ -82,12 +82,20 @@ function baseEvent(overrides: Partial<RevenueCatLifecycleEvent>): RevenueCatLife
 const originalVercelEnv = process.env.VERCEL_ENV;
 const originalSandboxAllowlist = process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
 beforeEach(() => {
+  // Freeze ONLY Date to a moment inside the fixed test events' window (purchase
+  // 2026-08-01, expiry 2026-09-01) so active/expired is deterministic regardless
+  // of the real calendar date. syncSubscriptionFromEvent has no injectable clock
+  // (it reads Date.now() directly), so these tests were silently date-dependent
+  // and broke on 2026-09-01. 2026-08-05 matches the NOW the reconcile tests use.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-08-05T00:00:00Z'));
   mockFlagBillingIssue.mockClear();
   mockClearBillingIssue.mockClear();
   delete process.env.VERCEL_ENV;
   delete process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
 });
 afterEach(() => {
+  vi.useRealTimers();
   if (originalVercelEnv === undefined) delete process.env.VERCEL_ENV;
   else process.env.VERCEL_ENV = originalVercelEnv;
   if (originalSandboxAllowlist === undefined) delete process.env.REVENUECAT_SANDBOX_TEST_USER_IDS;
