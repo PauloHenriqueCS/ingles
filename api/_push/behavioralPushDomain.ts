@@ -23,10 +23,8 @@ import { computeWeekdayStreak } from '../../src/lib/metricsCore';
 export const BEHAVIORAL_PUSH = {
   /** Global cooldown between ANY two behavioral pushes for a user, in hours.
    *  Applies across both types (a streak_risk starts the cooldown for a later
-   *  abandonment too). Only a genuinely SENT push starts it.
-   *  ⚠️ TEMP (homolog streak_risk test 2026-09-01): lowered 72 → 1 to bypass the
-   *  cooldown from the abandonment test. REVERT to 72 after the test. */
-  COOLDOWN_HOURS: 1,
+   *  abandonment too). Only a genuinely SENT push starts it. */
+  COOLDOWN_HOURS: 72,
   /** Consecutive missed CONFIGURED practice days required before 'abandonment'
    *  becomes eligible. Domain constant so it is trivially tunable later. */
   MISSED_PRACTICE_DAYS_FOR_ABANDONMENT: 2,
