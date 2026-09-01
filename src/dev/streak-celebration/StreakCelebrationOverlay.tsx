@@ -17,6 +17,7 @@ import { accentFor } from './variants/shared';
 import { FlameVariant } from './variants/FlameVariant';
 import { TrophyVariant } from './variants/TrophyVariant';
 import { OrodimVariant } from './variants/OrodimVariant';
+import { ConfettiVariant } from './variants/ConfettiVariant';
 import type { StreakCelebrationConfig } from './streakCelebrationTypes';
 
 const IMPACT_MS = 260; // when sound + haptic fire (as the hero pops in)
@@ -78,11 +79,13 @@ export function StreakCelebrationOverlay({
   }, [onClose]);
 
   const Hero =
-    config.variant === 'trophy'
-      ? TrophyVariant
-      : config.variant === 'orodim'
-        ? OrodimVariant
-        : FlameVariant;
+    config.variant === 'confetti'
+      ? ConfettiVariant
+      : config.variant === 'trophy'
+        ? TrophyVariant
+        : config.variant === 'orodim'
+          ? OrodimVariant
+          : FlameVariant;
 
   const textItem = (delay: number) =>
     reduced

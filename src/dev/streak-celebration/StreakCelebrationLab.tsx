@@ -7,9 +7,10 @@
  */
 import { useEffect, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { Flame, Play, Sparkles, Trophy, Volume2 } from 'lucide-react';
+import { Flame, PartyPopper, Play, Sparkles, Trophy, Vibrate, Volume2 } from 'lucide-react';
 import { StreakCelebrationOverlay } from './StreakCelebrationOverlay';
 import { installStreakAudioUnlock, playStreakSound } from './streakCelebrationSound';
+import { triggerStreakHaptic } from './streakCelebrationHaptics';
 import { streakCopy } from './streakCelebrationCopy';
 import {
   MILESTONE_PRESETS,
@@ -29,12 +30,14 @@ const VARIANT_META: Record<
   StreakVisualVariant,
   { label: string; desc: string; icon: typeof Flame }
 > = {
+  confetti: { label: 'H · Confete (escolhida)', desc: 'Fitas caindo ao redor do número, comemorativo e elegante.', icon: PartyPopper },
   flame: { label: 'A · Chama / Energia', desc: 'Anel de sequência esmeralda + chama + faíscas.', icon: Flame },
   trophy: { label: 'B · Troféu / Recorde', desc: 'Troféu (Lottie reutilizado), ouro, premium.', icon: Trophy },
   orodim: { label: 'C · Orodim premium', desc: 'Aurora da marca, halos elegantes, crescimento.', icon: Sparkles },
 };
 
 const SOUND_META: Record<StreakSoundOption, { label: string; hint: string }> = {
+  seal: { label: 'Extra 3 — selo digital (escolhido)', hint: 'seal.mp3 (Mixkit id 2018, isolado)' },
   discreet: { label: 'Curta e discreta', hint: 'activity-complete.mp3 (existente)' },
   achievement: { label: 'Conquista mais forte', hint: 'day-complete.mp3 (existente)' },
   premium: { label: 'Premium / elegante', hint: 'premium-chime.mp3 (novo, isolado)' },
@@ -76,8 +79,8 @@ function Chip({
 
 export function StreakCelebrationLab() {
   const [type, setType] = useState<StreakCelebrationType>('milestone');
-  const [variant, setVariant] = useState<StreakVisualVariant>('flame');
-  const [sound, setSound] = useState<StreakSoundOption>('achievement');
+  const [variant, setVariant] = useState<StreakVisualVariant>('confetti');
+  const [sound, setSound] = useState<StreakSoundOption>('seal');
   const [days, setDays] = useState(7);
   const [previousBest, setPreviousBest] = useState(14);
   const [autoDismiss, setAutoDismiss] = useState(true);
@@ -244,6 +247,13 @@ export function StreakCelebrationLab() {
                 Simular reduced motion
               </label>
             </div>
+            <button
+              type="button"
+              onClick={() => triggerStreakHaptic(type)}
+              className="mt-3 flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm font-medium text-slate-200 hover:border-slate-600"
+            >
+              <Vibrate size={15} /> Testar vibração
+            </button>
           </Section>
 
           {/* Copy preview */}

@@ -18,16 +18,18 @@ export type StreakCelebrationType =
   /** Same moment hits a fixed milestone AND a new personal best. */
   | 'both';
 
-/** The three visually distinct proposals to compare. */
+/** The visually distinct proposals to compare (confetti = chosen direction). */
 export type StreakVisualVariant =
   /** A. Flame / energy — emerald streak ring + flame + sparks. */
   | 'flame'
   /** B. Trophy / record — reuses the existing Trophy Lottie, premium/gold. */
   | 'trophy'
   /** C. Orodim premium — brand aurora gradient, elegant halo, growth. */
-  | 'orodim';
+  | 'orodim'
+  /** H. Confetti — tasteful falling-ribbon burst around the day count (CHOSEN). */
+  | 'confetti';
 
-/** The three sound proposals. */
+/** The sound proposals (seal = chosen direction). */
 export type StreakSoundOption =
   /** Short & discreet (reuses activity-complete.mp3). */
   | 'discreet'
@@ -35,6 +37,8 @@ export type StreakSoundOption =
   | 'achievement'
   /** Premium / elegant (isolated dev asset premium-chime.mp3). */
   | 'premium'
+  /** Digital "seal" chime — Mixkit id 2018 (isolated dev asset seal.mp3, CHOSEN). */
+  | 'seal'
   /** No sound. */
   | 'none';
 
@@ -62,12 +66,14 @@ export const STREAK_TYPES: readonly StreakCelebrationType[] = [
 ] as const;
 
 export const STREAK_VARIANTS: readonly StreakVisualVariant[] = [
+  'confetti',
   'flame',
   'trophy',
   'orodim',
 ] as const;
 
 export const STREAK_SOUND_OPTIONS: readonly StreakSoundOption[] = [
+  'seal',
   'discreet',
   'achievement',
   'premium',

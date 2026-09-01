@@ -13,12 +13,13 @@ free for commercial use, **no attribution required**, https://mixkit.co/license/
 
 | Preview option | File | Source |
 |----------------|------|--------|
+| **Extra 3 — selo digital (CHOSEN)** | `seal.mp3` (this folder) | Mixkit SFX id 2018 |
 | Curta e discreta | *(reused)* `src/celebration/assets/sounds/activity-complete.mp3` | Mixkit SFX id 949 |
 | Conquista mais forte | *(reused)* `src/celebration/assets/sounds/day-complete.mp3` | Mixkit SFX id 1938 |
 | Premium / elegante | `premium-chime.mp3` (this folder) | Mixkit SFX id 2344 "Magic notification ring" |
 
 - Source category: https://mixkit.co/free-sound-effects/
-- To swap the premium option: drop a replacement `premium-chime.mp3` here.
+- To swap a sound: drop a replacement mp3 with the same filename here.
 
 No new audio **library** was added — playback reuses the existing
 `HTMLAudioElement` pattern from `src/celebration/celebrationSound.ts`.

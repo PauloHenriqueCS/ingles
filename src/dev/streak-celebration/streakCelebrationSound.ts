@@ -4,8 +4,8 @@
  * REUSES the existing HTMLAudio infrastructure — no new audio library.
  *   - "discreet"    → the shared `playActivityCompleteSound()` (activity-complete.mp3)
  *   - "achievement" → the shared `playDayCompleteSound()` (day-complete.mp3)
- *   - "premium"     → one extra isolated asset (premium-chime.mp3) played with the
- *                     exact same `new Audio(url)` pattern as celebrationSound.ts.
+ *   - "premium"/"seal" → extra isolated assets played with the exact same
+ *                     `new Audio(url)` pattern as celebrationSound.ts.
  *
  * All playback is best-effort and fully swallowed: sound must NEVER break the UI.
  */
@@ -15,26 +15,30 @@ import {
   installCelebrationAudioUnlock,
 } from '../../celebration/celebrationSound';
 import premiumUrl from './assets/premium-chime.mp3';
+import sealUrl from './assets/seal.mp3';
 import type { StreakSoundOption } from './streakCelebrationTypes';
 
-const PREMIUM_VOLUME = 0.7;
-let premiumEl: HTMLAudioElement | null = null;
+const EXTRA_VOLUME = 0.7;
+const EXTRA_URLS: Record<'premium' | 'seal', string> = { premium: premiumUrl, seal: sealUrl };
+const extraEls: Partial<Record<'premium' | 'seal', HTMLAudioElement>> = {};
 let unlockInstalled = false;
 let unlocked = false;
 
-function getPremium(): HTMLAudioElement | null {
+function getExtra(kind: 'premium' | 'seal'): HTMLAudioElement | null {
   if (typeof Audio === 'undefined') return null;
-  if (!premiumEl) {
+  let el = extraEls[kind];
+  if (!el) {
     try {
-      premiumEl = new Audio(premiumUrl);
-      premiumEl.preload = 'auto';
-      premiumEl.volume = PREMIUM_VOLUME;
-      premiumEl.load();
+      el = new Audio(EXTRA_URLS[kind]);
+      el.preload = 'auto';
+      el.volume = EXTRA_VOLUME;
+      el.load();
+      extraEls[kind] = el;
     } catch {
       return null;
     }
   }
-  return premiumEl;
+  return el ?? null;
 }
 
 /**
@@ -50,8 +54,9 @@ export function installStreakAudioUnlock(): void {
   const unlock = () => {
     if (unlocked) return;
     unlocked = true;
-    const el = getPremium();
-    if (el) {
+    (['premium', 'seal'] as const).forEach((kind) => {
+      const el = getExtra(kind);
+      if (!el) return;
       try {
         const prevVol = el.volume;
         el.muted = true;
@@ -70,7 +75,7 @@ export function installStreakAudioUnlock(): void {
       } catch {
         /* ignore */
       }
-    }
+    });
     remove();
   };
 
@@ -80,12 +85,12 @@ export function installStreakAudioUnlock(): void {
   events.forEach((e) => document.addEventListener(e, unlock, opts));
 }
 
-function playPremium(): void {
-  const el = getPremium();
+function playExtra(kind: 'premium' | 'seal'): void {
+  const el = getExtra(kind);
   if (!el) return;
   try {
     el.muted = false;
-    el.volume = PREMIUM_VOLUME;
+    el.volume = EXTRA_VOLUME;
     el.currentTime = 0;
     const p = el.play();
     if (p && typeof p.then === 'function') p.catch(() => {});
@@ -104,7 +109,10 @@ export function playStreakSound(option: StreakSoundOption): void {
       playDayCompleteSound();
       break;
     case 'premium':
-      playPremium();
+      playExtra('premium');
+      break;
+    case 'seal':
+      playExtra('seal');
       break;
     case 'none':
     default:
