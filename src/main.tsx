@@ -21,10 +21,26 @@ if (isNativeApp && isPluginAvailable('StatusBar')) {
   StatusBar.setStyle({ style: Style.Dark }).catch(() => {})
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <CelebrationProvider>
-      <App />
-    </CelebrationProvider>
-  </StrictMode>,
-)
+const root = createRoot(document.getElementById('root')!)
+
+// DEV-ONLY isolated preview lab for the future streak celebration. Mounted for a
+// single path, WITHOUT the real App or CelebrationProvider, so it can never touch
+// streaks, the DB, or any product flow. Lazy-imported so it stays out of the main
+// bundle. Mirrors the existing `/auth/callback` / `/reset-password` path checks.
+if (window.location.pathname === '/dev/streak-celebration') {
+  import('./dev/streak-celebration').then(({ StreakCelebrationLab }) => {
+    root.render(
+      <StrictMode>
+        <StreakCelebrationLab />
+      </StrictMode>,
+    )
+  })
+} else {
+  root.render(
+    <StrictMode>
+      <CelebrationProvider>
+        <App />
+      </CelebrationProvider>
+    </StrictMode>,
+  )
+}
