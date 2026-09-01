@@ -42,6 +42,8 @@ vi.mock('./behavioralPushDomain', async (importActual) => {
 });
 
 import { handleBehavioralPushSweep } from './behavioralPushSweep';
+// importActual spread in the vi.mock above keeps the real BEHAVIORAL_PUSH constants.
+import { BEHAVIORAL_PUSH } from './behavioralPushDomain';
 
 function makeClient(rpcHandlers: Record<string, (args: any) => any>) {
   const calls: Array<{ name: string; args: any }> = [];
@@ -115,7 +117,7 @@ describe('handleBehavioralPushSweep', () => {
     expect(markCalls(h.client, 'sent')[0].args.p_onesignal_notification_id).toBe('notif-1');
     // candidates queried with the 72h cooldown window.
     const cand = h.client.calls.find((c: any) => c.name === 'behavioral_push_candidates');
-    expect(cand.args.p_cooldown_hours).toBe(72);
+    expect(cand.args.p_cooldown_hours).toBe(BEHAVIORAL_PUSH.COOLDOWN_HOURS);
   });
 
   it('dry-run mode (flag off): claims + marks dry_run, never calls OneSignal', async () => {
