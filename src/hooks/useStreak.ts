@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { fetchCurrentStreak } from '../lib/activeDates';
+import { fetchStreaks } from '../lib/activeDates';
 
 interface StreakState {
   /** Consecutive practice days ending today (São Paulo). 0 = no streak yet. */
   streak: number | null;
+  /** All-time longest streak (personal best). 0 = none yet. */
+  best: number | null;
   loading: boolean;
   error: boolean;
 }
@@ -23,6 +25,7 @@ interface StreakState {
  */
 export function useStreak(activeWeekdays: number[]): StreakState {
   const [streak, setStreak] = useState<number | null>(null);
+  const [best, setBest] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -33,12 +36,15 @@ export function useStreak(activeWeekdays: number[]): StreakState {
     let active = true;
     setLoading(true);
     setError(false);
-    fetchCurrentStreak(activeWeekdays)
-      .then((n) => { if (active) { setStreak(n); setLoading(false); } })
+    // One DB round-trip returns both the current streak and the personal best.
+    fetchStreaks(activeWeekdays)
+      .then(({ current, max }) => {
+        if (active) { setStreak(current); setBest(max); setLoading(false); }
+      })
       .catch(() => { if (active) { setError(true); setLoading(false); } });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  return { streak, loading, error };
+  return { streak, best, loading, error };
 }

@@ -53,7 +53,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
   const { config } = usePublicConfig();
   const errorReview = useErrorReviewSummary();
   const focus = useCurriculumFocus();
-  const { streak, loading: streakLoading } = useStreak(activeWeekdays);
+  const { streak, best: bestStreak, loading: streakLoading } = useStreak(activeWeekdays);
 
   // Loading and "not yet resolved" both render the neutral loading state — never
   // a flash of a card looking available before the plan is known.
@@ -147,7 +147,7 @@ export default function HomePage({ onNavigate, onStartPractice, activeWeekdays }
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-50 leading-tight break-words">{s.title}</h1>
           <p className="text-slate-400 text-sm mt-2 leading-relaxed">{s.subtitle}</p>
         </div>
-        <StreakCard streak={streak} loading={streakLoading} s={s} />
+        <StreakCard streak={streak} best={bestStreak} loading={streakLoading} s={s} />
       </div>
 
       {/* Foco atual — read-only context, not a button */}

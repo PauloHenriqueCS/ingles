@@ -4,6 +4,8 @@ import type { HomeUiStrings } from '../../i18n/homeUiStrings';
 interface Props {
   /** Consecutive practice days ending today. null while loading. */
   streak: number | null;
+  /** All-time longest streak (personal best). null while loading. */
+  best?: number | null;
   loading: boolean;
   s: HomeUiStrings;
 }
@@ -15,9 +17,11 @@ interface Props {
  * open-ended, so we never imply a target/goal the user is filling toward
  * (avoids inventing gamification). Zero-state shows "0 dias" + a gentle nudge.
  */
-export default function StreakCard({ streak, loading, s }: Props) {
+export default function StreakCard({ streak, best, loading, s }: Props) {
   const n = streak ?? 0;
+  const b = best ?? 0;
   const hasStreak = !loading && n > 0;
+  const showBest = !loading && b > 0;
   const value = loading ? s.loadingShort : String(n);
 
   return (
@@ -49,6 +53,9 @@ export default function StreakCard({ streak, loading, s }: Props) {
       <p className={`text-[11px] mt-0.5 leading-tight ${hasStreak ? 'text-emerald-400' : 'text-slate-500'}`}>
         {hasStreak ? s.streakEncouragement : s.streakZeroHint}
       </p>
+      {showBest && (
+        <p className="text-[10px] text-slate-500 mt-1 leading-tight">{s.streakBest(b)}</p>
+      )}
     </div>
   );
 }
