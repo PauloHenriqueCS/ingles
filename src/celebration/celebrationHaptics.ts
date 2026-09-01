@@ -67,6 +67,31 @@ async function nativeNotificationSuccess(): Promise<boolean> {
   }
 }
 
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A longer, celebratory native sequence for the streak celebration — a build-up
+ * of impacts ending on a "success" notification. Reuses the same plugin/guards.
+ */
+async function nativeStreakSequence(strong: boolean): Promise<boolean> {
+  try {
+    if (!isNativeApp || !isPluginAvailable('Haptics')) return false;
+    const mod = await import('@capacitor/haptics');
+    await mod.Haptics.impact({ style: mod.ImpactStyle.Medium });
+    await wait(90);
+    await mod.Haptics.impact({ style: strong ? mod.ImpactStyle.Heavy : mod.ImpactStyle.Medium });
+    await wait(90);
+    if (strong) {
+      await mod.Haptics.impact({ style: mod.ImpactStyle.Heavy });
+      await wait(90);
+    }
+    await mod.Haptics.notification({ type: mod.NotificationType.Success });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Light tap for a single activity completion. */
 export function triggerActivityHaptic(): void {
   if (muted) return;
@@ -83,5 +108,21 @@ export function triggerDayCompleteHaptic(): void {
     const handledNatively = await nativeNotificationSuccess();
     // Web fallback: a short double-pulse, never a long buzz.
     if (!handledNatively) webVibrate([0, 35, 55, 45]);
+  })();
+}
+
+/**
+ * Longer, celebratory haptic for a streak milestone / personal record. Record /
+ * both get a stronger, longer pattern than a plain milestone. Same infra.
+ */
+export function triggerStreakHaptic(kind: 'milestone' | 'personal_record' | 'both'): void {
+  if (muted) return;
+  const strong = kind !== 'milestone';
+  const web = strong
+    ? [0, 55, 60, 55, 60, 55, 60, 55, 60, 190]
+    : [0, 45, 60, 45, 60, 45, 60, 150];
+  void (async () => {
+    const handledNatively = await nativeStreakSequence(strong);
+    if (!handledNatively) webVibrate(web);
   })();
 }

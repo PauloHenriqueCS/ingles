@@ -11,7 +11,8 @@
  * so the decision never races the read-after-write of its own persist.
  */
 import { fetchPlanEntitlements } from '../lib/planEntitlementsFetcher';
-import { fetchCurrentStreak } from '../lib/activeDates';
+import { fetchStreakEvent } from '../lib/activeDates';
+import type { StreakEvent } from '../lib/streakEvents';
 import { fetchLearningSettings } from '../lib/learningSettings';
 import { decideCelebrationLevel } from './decideCelebrationLevel';
 import {
@@ -30,7 +31,12 @@ import {
 export interface ResolveDeps {
   fetchFeatures: () => Promise<ObligatoryFeatures | null>;
   fetchCompletion: (plan: CompletionQueryPlan) => Promise<ObligatoryCompletion>;
-  fetchStreak: () => Promise<number | null>;
+  /**
+   * Resolve today's streak event (current streak + whether it's a milestone /
+   * personal record). Called only when the day just completed. Uses the user's
+   * chosen practice weekdays so the streak respects their routine.
+   */
+  fetchStreakEvent: () => Promise<StreakEvent | null>;
 }
 
 const defaultDeps: ResolveDeps = {
@@ -43,9 +49,9 @@ const defaultDeps: ResolveDeps = {
     };
   },
   fetchCompletion: (plan) => fetchObligatoryCompletion(plan),
-  fetchStreak: async () => {
+  fetchStreakEvent: async () => {
     const settings = await fetchLearningSettings();
-    return fetchCurrentStreak(settings.activeWeekdays);
+    return fetchStreakEvent(settings.activeWeekdays);
   },
 };
 
@@ -92,15 +98,28 @@ export async function resolveActivityCelebration(
   const decision = decideCelebrationLevel({ features, completion, justFinished: activity });
 
   if (decision.level === 'day-complete') {
-    let streakDays: number | null = null;
+    let event: StreakEvent | null = null;
     try {
-      streakDays = await deps.fetchStreak();
+      event = await deps.fetchStreakEvent();
     } catch {
-      streakDays = null;
+      event = null;
     }
+
+    // A milestone / personal record REPLACES the plain day-complete on that day.
+    if (event && event.kind) {
+      return {
+        type: 'streak',
+        kind: event.kind,
+        streakDays: event.current,
+        previousBest: event.previousBest,
+        completedCount: decision.completedCount,
+        totalCount: decision.totalCount,
+      };
+    }
+
     return {
       type: 'day-complete',
-      streakDays,
+      streakDays: event ? event.current : null,
       completedCount: decision.completedCount,
       totalCount: decision.totalCount,
     };

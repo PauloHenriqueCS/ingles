@@ -81,9 +81,11 @@ export function computeWeekdayStreak(
   const activeSet = new Set(activeDates);
   let streak = 0;
 
-  // Walk backward from today. Guard at 400 to avoid infinite loops on bad input.
+  // Walk backward from today. Guard bounds the loop against bad input while
+  // staying well above any real streak (≈11 years of calendar days), so long
+  // streaks (e.g. the 365/730-day milestones) are never silently capped.
   const cursor = new Date(today + 'T12:00:00');
-  for (let guard = 0; guard < 400; guard++) {
+  for (let guard = 0; guard < 4000; guard++) {
     const dateStr = cursor.toISOString().slice(0, 10);
 
     if (dateStr > today) {

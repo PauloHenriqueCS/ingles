@@ -21,11 +21,12 @@
  */
 import activityUrl from './assets/sounds/activity-complete.mp3';
 import dayUrl from './assets/sounds/day-complete.mp3';
+import streakUrl from './assets/sounds/streak.mp3';
 
-type Kind = 'activity' | 'day';
+type Kind = 'activity' | 'day' | 'streak';
 
-const VOLUME: Record<Kind, number> = { activity: 0.7, day: 0.8 };
-const URLS: Record<Kind, string> = { activity: activityUrl, day: dayUrl };
+const VOLUME: Record<Kind, number> = { activity: 0.7, day: 0.8, streak: 0.8 };
+const URLS: Record<Kind, string> = { activity: activityUrl, day: dayUrl, streak: streakUrl };
 
 let muted = false;
 let unlockInstalled = false;
@@ -67,7 +68,7 @@ export function installCelebrationAudioUnlock(): void {
   const unlock = () => {
     if (unlocked) return;
     unlocked = true;
-    (['activity', 'day'] as Kind[]).forEach((kind) => {
+    (['activity', 'day', 'streak'] as Kind[]).forEach((kind) => {
       const el = get(kind);
       if (!el) return;
       try {
@@ -122,4 +123,8 @@ export function playActivityCompleteSound(): void {
 }
 export function playDayCompleteSound(): void {
   play('day');
+}
+/** Chosen streak-celebration chime (Mixkit "seal", CC-friendly Free License). */
+export function playStreakCelebrationSound(): void {
+  play('streak');
 }
