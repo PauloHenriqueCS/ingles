@@ -111,6 +111,67 @@ export function getAlertFromEmail(): string {
   return readEnv('ALERT_FROM_EMAIL') || 'alerts@orodim.com.br';
 }
 
+// ── Behavioral push (server-only OneSignal sending — never VITE_/NEXT_PUBLIC_) ─
+// Used exclusively by api/_push/* to send behaviour-triggered push (streak_risk
+// / abandonment) via the OneSignal REST API from the backend. The client SDK
+// integration (src/lib/push/onesignalClient.ts) is unrelated and never sees any
+// of these. Every getter returns '' / false when unset; the send path FAILS
+// CLOSED (no fallback to the public client App ID, never sends without an
+// explicit REST key + explicit enable flag).
+
+/** OneSignal App ID the SERVER targets. Explicit and required for sending —
+ *  there is intentionally NO fallback to the public client App ID constant in
+ *  onesignalClient.ts. Empty string when unset → the sweep records rows but
+ *  never calls OneSignal. */
+export function getOneSignalServerAppId(): string {
+  return readEnv('ONESIGNAL_APP_ID');
+}
+
+/** OneSignal REST API key — the secret that AUTHORIZES sending. SERVER-ONLY,
+ *  never a VITE_ var, never logged, never returned by any endpoint. Empty
+ *  string when unset → the send path fails closed and no push is dispatched. */
+export function getOneSignalRestApiKey(): string {
+  return readEnv('ONESIGNAL_REST_API_KEY');
+}
+
+/** Master switch for REAL behavioral-push sends. Only the exact string 'true'
+ *  enables sending; anything else (unset/false/typo) leaves the sweep in
+ *  dry-run — it evaluates eligibility and records rows but calls no provider. */
+export function isBehavioralPushEnabled(): boolean {
+  return readEnv('BEHAVIORAL_PUSH_ENABLED').toLowerCase() === 'true';
+}
+
+/** Force dry-run even when BEHAVIORAL_PUSH_ENABLED=true. Lets homologation
+ *  validate eligibility/copy/cooldown/idempotency with zero real sends. */
+export function isBehavioralPushDryRun(): boolean {
+  return readEnv('BEHAVIORAL_PUSH_DRY_RUN').toLowerCase() === 'true';
+}
+
+/** Comma-separated Supabase UUIDs allowed to receive a REAL behavioral push.
+ *  When NON-EMPTY (the homologation test setup), every other eligible user is
+ *  recorded as dry_run instead of sent — so a homolog sweep can never blast the
+ *  whole environment. Empty set (production) means no allowlist restriction.
+ *  Case-insensitive. */
+export function getBehavioralPushTestUserIds(): Set<string> {
+  return new Set(
+    readEnv('BEHAVIORAL_PUSH_TEST_USER_IDS')
+      .split(',')
+      .map((id) => id.trim().toLowerCase())
+      .filter((id) => id.length > 0),
+  );
+}
+
+/** Authoritative environment label stored on every behavioral_push_events row
+ *  and used for observability. REQUIRED on homologation (set
+ *  BEHAVIORAL_PUSH_ENVIRONMENT=homologation) because that project also runs
+ *  with VERCEL_ENV='production' (see getAlertEnvironmentOverride). When empty,
+ *  falls back to the VERCEL_ENV mapping. */
+export function getBehavioralPushEnvironment(): string {
+  const override = readEnv('BEHAVIORAL_PUSH_ENVIRONMENT').toLowerCase();
+  if (override) return override;
+  return readEnv('VERCEL_ENV').toLowerCase() === 'production' ? 'production' : 'homologation';
+}
+
 /**
  * Authoritative environment label for alerts, lowercased. REQUIRED on the
  * homologation Vercel project (set ALERT_ENVIRONMENT=homolog), because that

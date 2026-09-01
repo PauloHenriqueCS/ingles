@@ -1,6 +1,7 @@
 import { requireAuth } from '../_auth';
 import { applyRateLimit } from '../_rateLimit';
 import { methodGuard, sizeGuard, jsonError, safeLog, resolveSlug } from '../_helpers';
+import { recordBehavioralPushActivityConversion } from '../_push/attribution';
 import { readEnv } from '../_env';
 import { canUserAccessListeningEpisode } from '../../src/services/listening/publication/authorize-listening-access';
 import { buildPublicListeningEpisode } from '../../src/services/listening/publication/build-public-listening-episode';
@@ -525,6 +526,11 @@ async function handleStoryComplete(req: any, res: any) {
     if (rpcError) throw rpcError;
     const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
     const alreadyCompleted = Boolean((row as { already_completed?: boolean } | null)?.already_completed);
+
+    // Behavioral push attribution (association, not causality). Only on a
+    // genuinely NEW completion (not a same-day retry). Best-effort, idempotent,
+    // isolated — never affects this response.
+    if (!alreadyCompleted) void recordBehavioralPushActivityConversion(userId, 'listening');
 
     // (2) Curricular reconciliation — attempted for the EXACT story the user
     //     finished, keyed to that story's OWN consumed state (per-recorte), NEVER

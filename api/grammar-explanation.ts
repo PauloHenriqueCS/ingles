@@ -18,6 +18,7 @@ import { handleSubscriptionSyncRoute } from './_billing/subscription-sync-route-
 import { handleCurriculumRoute } from './_curriculum/route-handler';
 import { handlePlacementRoute } from './_placement/route-handler';
 import { handleDebugLogRoute } from './_debug/log-route-handler';
+import { handleBehavioralPushOpenRoute } from './_push/behavioralPushOpenRouteHandler';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
@@ -159,6 +160,13 @@ export default async function handler(req: any, res: any) {
   // logging is off), otherwise unrelated to grammar explanations.
   if (req.query?.__lemonRoute === 'debug-log') {
     return handleDebugLogRoute(req, res);
+  }
+  // Rewritten here from POST /api/behavioral-push/open (see vercel.json) — same
+  // function-budget reuse as the branches above. Records opened_at for a
+  // behavioral push; identity is the Supabase session (requireAuth), never a
+  // body user_id. Otherwise unrelated to grammar explanations.
+  if (req.query?.__lemonRoute === 'behavioral-push-open') {
+    return handleBehavioralPushOpenRoute(req, res);
   }
 
   if (!methodGuard(req, res, ['POST'])) return;

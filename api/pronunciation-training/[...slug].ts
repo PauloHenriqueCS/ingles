@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources';
 import { requireAuth } from '../_auth';
 import { methodGuard, jsonError, safeLog, sanitizeProviderError, resolveSlug } from '../_helpers';
+import { recordBehavioralPushActivityConversion } from '../_push/attribution';
 import { issueAzureSpeechToken, AzureSpeechError } from '../_azure-speech';
 import { assessPronunciation } from '../_azure-pronunciation';
 import { PronunciationServiceError } from '../../src/domain/pronunciation/pronunciation-scoring';
@@ -990,6 +991,10 @@ async function finalizeTrainingAssessment(
     safeLog('pronunciation-training/complete', 'rpc_unexpected', 500);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Erro interno ao salvar o resultado.');
   }
+
+  // Behavioral push attribution (association, not causality). Best-effort,
+  // idempotent, isolated — never affects this response.
+  void recordBehavioralPushActivityConversion(userId, 'pronunciation');
 
   // Data-driven curriculum: a successfully completed assessment is one valid
   // pronunciation practice — recorded against the recorte the session was
