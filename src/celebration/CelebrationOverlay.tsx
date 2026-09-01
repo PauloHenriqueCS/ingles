@@ -4,10 +4,19 @@ import Lottie, { type LottieRefCurrentProps } from 'lottie-react';
 import { Check, Trophy, Flame } from 'lucide-react';
 import { useCurriculumFocus } from '../hooks/useCurriculumFocus';
 import { celebrationUiStrings } from '../i18n/celebrationUiStrings';
-import { playActivityCompleteSound, playDayCompleteSound } from './celebrationSound';
-import { triggerActivityHaptic, triggerDayCompleteHaptic } from './celebrationHaptics';
+import {
+  playActivityCompleteSound,
+  playDayCompleteSound,
+  playStreakCelebrationSound,
+} from './celebrationSound';
+import {
+  triggerActivityHaptic,
+  triggerDayCompleteHaptic,
+  triggerStreakHaptic,
+} from './celebrationHaptics';
 import { trackCelebrationShown } from './celebrationAnalytics';
 import { CELEBRATION_TIMING } from './celebrationTiming';
+import { StreakCelebrationContent } from './StreakCelebrationContent';
 import activityLottie from './assets/lottie/activity-complete.json';
 import dayLottie from './assets/lottie/day-complete.json';
 import type { Celebration } from './celebration-types';
@@ -30,7 +39,12 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
   const lottieRef = useRef<LottieRefCurrentProps>(null);
 
   const isDay = celebration.type === 'day-complete';
-  const t = isDay ? CELEBRATION_TIMING['day-complete'] : CELEBRATION_TIMING['activity-complete'];
+  const isStreak = celebration.type === 'streak';
+  const t = isStreak
+    ? CELEBRATION_TIMING.streak
+    : isDay
+      ? CELEBRATION_TIMING['day-complete']
+      : CELEBRATION_TIMING['activity-complete'];
 
   // ROOT CAUSE of the conversation freeze: lottie-web MUTATES the animationData
   // object it is handed (it writes computed keyframes/layers back onto it). We
@@ -55,7 +69,12 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
       firedRef.current = true;
       trackCelebrationShown(celebration);
       impactTimer = setTimeout(() => {
-        if (isDay) {
+        if (isStreak) {
+          playStreakCelebrationSound();
+          triggerStreakHaptic(
+            (celebration as Extract<Celebration, { type: 'streak' }>).kind,
+          );
+        } else if (isDay) {
           playDayCompleteSound();
           triggerDayCompleteHaptic();
         } else {
@@ -103,9 +122,14 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
           transition: { duration: 0.38, delay, ease: [0.16, 1, 0.3, 1] as [number, number, number, number] },
         };
 
-  const ariaLabel = isDay
-    ? s.dayCompleteAria
-    : s.activityAria((celebration as Extract<Celebration, { type: 'activity-complete' }>).activityType);
+  const ariaLabel = isStreak
+    ? s.streakAria(
+        (celebration as Extract<Celebration, { type: 'streak' }>).kind,
+        (celebration as Extract<Celebration, { type: 'streak' }>).streakDays,
+      )
+    : isDay
+      ? s.dayCompleteAria
+      : s.activityAria((celebration as Extract<Celebration, { type: 'activity-complete' }>).activityType);
 
   return (
     <motion.div
@@ -132,6 +156,15 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
             : { type: 'spring', stiffness: 260, damping: 20, mass: 0.9, delay: t.contentDelayMs / 1000 }
         }
       >
+        {isStreak ? (
+          <StreakCelebrationContent
+            celebration={celebration as Extract<Celebration, { type: 'streak' }>}
+            reduced={reduced}
+            timing={t}
+            interfaceLanguage={focus.data?.interfaceLanguage}
+          />
+        ) : (
+        <>
         {/* Hero animation */}
         <div
           className="relative flex items-center justify-center"
@@ -221,6 +254,8 @@ export function CelebrationOverlay({ celebration, onExpire }: Props) {
                 </motion.p>
               )}
           </div>
+        )}
+        </>
         )}
       </motion.div>
     </motion.div>

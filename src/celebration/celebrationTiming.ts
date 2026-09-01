@@ -34,6 +34,7 @@ export interface CelebrationTiming {
 export const CELEBRATION_TIMING: {
   'activity-complete': CelebrationTiming;
   'day-complete': CelebrationTiming;
+  streak: CelebrationTiming;
 } = {
   // 0 enter · 150 spring · ~250 impact(sound+haptic, leads the check) · 600 title · 850 sub · 1500 exit · ~1760 gone
   'activity-complete': {
@@ -52,6 +53,17 @@ export const CELEBRATION_TIMING: {
     titleDelay: 0.6,
     subDelay: 0.9,
     streakDelay: 1.3,
+    lottieSpeed: 1.0,
+  },
+  // Confetti streak celebration: the sound/haptic land as the number pops in;
+  // held a touch longer so the confetti burst + copy read comfortably.
+  streak: {
+    holdMs: 2800,
+    impactMs: 260,
+    contentDelayMs: 120,
+    titleDelay: 0.6,
+    subDelay: 0.82,
+    streakDelay: 1.0,
     lottieSpeed: 1.0,
   },
 };

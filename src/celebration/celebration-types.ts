@@ -44,7 +44,10 @@ export function isObligatoryActivity(
   return a === 'writing' || a === 'pronunciation' || a === 'listening';
 }
 
-/** The two celebration payloads that drive the overlay. */
+/** Which streak celebration to show (see src/lib/streakEvents.ts). */
+export type StreakCelebrationKind = 'milestone' | 'personal_record' | 'both';
+
+/** The celebration payloads that drive the overlay. */
 export type Celebration =
   | {
       type: 'activity-complete';
@@ -58,6 +61,20 @@ export type Celebration =
       type: 'day-complete';
       /** Consecutive-days streak ending today, when reliably available. */
       streakDays?: number | null;
+      completedCount?: number;
+      totalCount?: number;
+    }
+  | {
+      /**
+       * A streak milestone and/or a new personal record. Shown INSTEAD of the
+       * plain day-complete on the day it happens (it also completes the day).
+       */
+      type: 'streak';
+      kind: StreakCelebrationKind;
+      /** Current consecutive-practice-day streak, including today. */
+      streakDays: number;
+      /** Previous personal best (used in record/both copy). */
+      previousBest: number;
       completedCount?: number;
       totalCount?: number;
     };

@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { toSpDate } from './timezone';
 import { computeWeekdayStreak, computeMaxWeekdayStreak } from './metricsCore';
+import { detectStreakEvent, type StreakEvent } from './streakEvents';
 
 // Fetches every calendar date where the user completed at least one activity:
 //   writing (english_reviews), pronunciation, conversation (goal met),
@@ -118,4 +119,13 @@ export async function fetchStreaks(
     current: computeWeekdayStreak(dates, undefined, activeWeekdays),
     max: computeMaxWeekdayStreak(dates, activeWeekdays),
   };
+}
+
+// Fetch the full active-date history and detect today's streak celebration event
+// (milestone / personal record / both / none), in a single DB round-trip.
+export async function fetchStreakEvent(
+  activeWeekdays: number[] = [1, 2, 3, 4, 5],
+): Promise<StreakEvent> {
+  const dates = await fetchAllActiveDates();
+  return detectStreakEvent(dates, activeWeekdays);
 }

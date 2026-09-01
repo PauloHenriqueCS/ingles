@@ -14,7 +14,13 @@ function makeDeps(over: Partial<ResolveDeps> = {}): ResolveDeps {
       pronunciation: false,
       listening: false,
     }),
-    fetchStreak: async () => 8,
+    fetchStreakEvent: async () => ({
+      current: 8,
+      previousBest: 0,
+      isMilestone: false,
+      isRecord: false,
+      kind: null,
+    }),
     ...over,
   };
 }
@@ -102,7 +108,7 @@ describe('resolveActivityCelebration', () => {
       'listening',
       makeDeps({
         fetchCompletion: async () => ({ writing: true, pronunciation: true, listening: false }),
-        fetchStreak: async () => {
+        fetchStreakEvent: async () => {
           throw new Error('no streak');
         },
       }),
@@ -111,9 +117,52 @@ describe('resolveActivityCelebration', () => {
     if (c.type === 'day-complete') expect(c.streakDays).toBeNull();
   });
 
-  it('always returns exactly one celebration object (never activity AND day)', async () => {
+  it('a milestone on the completing day → a streak celebration (not plain day-complete)', async () => {
+    const c = await resolveActivityCelebration(
+      'listening',
+      makeDeps({
+        fetchCompletion: async () => ({ writing: true, pronunciation: true, listening: false }),
+        fetchStreakEvent: async () => ({
+          current: 7,
+          previousBest: 0,
+          isMilestone: true,
+          isRecord: false,
+          kind: 'milestone',
+        }),
+      }),
+    );
+    expect(c.type).toBe('streak');
+    if (c.type === 'streak') {
+      expect(c.kind).toBe('milestone');
+      expect(c.streakDays).toBe(7);
+      expect(c.totalCount).toBe(3);
+    }
+  });
+
+  it('a personal record / both carries the previous best', async () => {
+    const c = await resolveActivityCelebration(
+      'listening',
+      makeDeps({
+        fetchCompletion: async () => ({ writing: true, pronunciation: true, listening: false }),
+        fetchStreakEvent: async () => ({
+          current: 30,
+          previousBest: 22,
+          isMilestone: true,
+          isRecord: true,
+          kind: 'both',
+        }),
+      }),
+    );
+    expect(c.type).toBe('streak');
+    if (c.type === 'streak') {
+      expect(c.kind).toBe('both');
+      expect(c.previousBest).toBe(22);
+    }
+  });
+
+  it('always returns exactly one celebration object', async () => {
     const c = await resolveActivityCelebration('writing', makeDeps());
     expect(typeof c.type).toBe('string');
-    expect(['activity-complete', 'day-complete']).toContain(c.type);
+    expect(['activity-complete', 'day-complete', 'streak']).toContain(c.type);
   });
 });
