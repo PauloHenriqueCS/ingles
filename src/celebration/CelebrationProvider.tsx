@@ -45,9 +45,11 @@ export function CelebrationProvider({ children }: { children: ReactNode }) {
   );
 
   const enqueue = useCallback((celebration: Celebration) => {
-    if (celebration.type === 'day-complete') {
-      // At most one day-complete per day. Mark BEFORE enqueueing so two
-      // near-simultaneous resolutions can't both slip through.
+    if (celebration.type === 'day-complete' || celebration.type === 'streak') {
+      // At most one DAY-LEVEL celebration per day — a streak celebration and a
+      // plain day-complete share the same gate (a milestone/record day replaces
+      // the day-complete), so they can never both fire. Mark BEFORE enqueueing so
+      // two near-simultaneous resolutions can't both slip through.
       if (dedupRef.current.dayCompleteAlreadyShown()) return;
       dedupRef.current.markDayCompleteShown();
     }

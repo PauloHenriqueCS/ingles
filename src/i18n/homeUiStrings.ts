@@ -19,6 +19,7 @@ export interface HomeUiStrings {
   streakUnit: (n: number) => string;   // "dia" / "dias"
   streakEncouragement: string;         // "Continue assim!" (streak > 0)
   streakZeroHint: string;              // "Comece hoje!" (streak == 0)
+  streakBest: (n: number) => string;   // "Melhor sequência: 14 dias" (best > 0)
   streakAria: (n: number) => string;   // accessible label
 
   // Sections
@@ -64,6 +65,7 @@ const PT_BR: HomeUiStrings = {
   streakUnit: (n) => (n === 1 ? 'dia' : 'dias'),
   streakEncouragement: 'Continue assim!',
   streakZeroHint: 'Comece hoje!',
+  streakBest: (n) => `Melhor sequência: ${n} ${n === 1 ? 'dia' : 'dias'}`,
   streakAria: (n) => `Sequência atual de ${n} ${n === 1 ? 'dia' : 'dias'} consecutivos de prática`,
 
   nextRecommendation: 'Próxima recomendação',
@@ -105,6 +107,7 @@ const EN: HomeUiStrings = {
   streakUnit: (n) => (n === 1 ? 'day' : 'days'),
   streakEncouragement: 'Keep it up!',
   streakZeroHint: 'Start today!',
+  streakBest: (n) => `Best streak: ${n} ${n === 1 ? 'day' : 'days'}`,
   streakAria: (n) => `Current streak of ${n} consecutive ${n === 1 ? 'day' : 'days'} of practice`,
 
   nextRecommendation: 'Next recommendation',
