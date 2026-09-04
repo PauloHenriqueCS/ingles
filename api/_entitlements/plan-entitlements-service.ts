@@ -322,12 +322,8 @@ async function getCurrentUserPlanEntitlementsImpl(
     planValuesResult,
     overridesResult,
     creditsResult,
-    themeCountResult,
-    reviewCountResult,
-    pronunciationCountResult,
-    listeningConsumedResult,
     conversationSecondsResult,
-    pronunciationTrainingCountResult,
+    dailyCountsResult,
   ] = await Promise.all([
     plan.plan_version_id
       ? supabase.from('plan_capability_values').select('capability_key, value').eq('plan_version_id', plan.plan_version_id).in('capability_key', ALL_CAPABILITY_KEYS)
@@ -347,34 +343,6 @@ async function getCurrentUserPlanEntitlementsImpl(
       .eq('user_id', userId)
       .gt('remaining_seconds', 0)
       .or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
-    supabase.from('generated_themes').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
-    // writing_review_reservations, not english_reviews.entry_date: entry_date
-    // is which diary day a review is ABOUT (can be any day the user
-    // navigates to), not when the review was actually consumed — the single
-    // source of truth for "reviews used today" is the same atomic
-    // reserve/complete ledger api/review-text.ts writes to, counted by
-    // created_at like every other daily counter here (themeCountResult,
-    // pronunciationCountResult). 'reserved' counts too — a reservation holds
-    // its slot the instant it is taken, before the AI call even starts.
-    supabase.from('writing_review_reservations').select('id', { count: 'exact', head: true }).eq('user_id', userId).in('status', ['reserved', 'completed']).gte('created_at', todayStartIso).lt('created_at', todayEndIso),
-    supabase.from('pronunciation_assessments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'completed').gte('completed_at', todayStartIso).lt('completed_at', todayEndIso),
-    // História = the live shared-story listening flow. Quota is consumed only
-    // when the user actually PRACTICES a story (completed=true), NEVER when it
-    // is merely prepared/opened. Preparing inserts a user_listening_shared_progress
-    // row with completed=false (PENDING) — that must not count. Practicing flips
-    // it to completed=true atomically (see consume_listening_pending_story). So
-    // we count only completed=true rows whose shared story belongs to TODAY (SP),
-    // via the FK to listening_shared_stories.practice_date (already an SP date).
-    //
-    // Historical safety: every pre-existing row is completed=false (the flag was
-    // never written before this change), so this correctly treats past "opens"
-    // as NOT consumed — no retroactive quota is charged to anyone.
-    supabase
-      .from('user_listening_shared_progress')
-      .select('id, listening_shared_stories!inner(practice_date)', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('completed', true)
-      .eq('listening_shared_stories.practice_date', todaySpDate),
     (() => {
       let q = supabase.from('conversation_session_authorizations').select('status, authorized_at, authorized_max_seconds, duration_seconds, last_seen_at').eq('user_id', userId);
       if (trialWindow) {
@@ -394,18 +362,40 @@ async function getCurrentUserPlanEntitlementsImpl(
       }
       return q.gte('session_date', monthStartDate).lt('session_date', monthEndDate);
     })(),
-    // Standalone "Treinar pronúncia" (Surface #2) — counted from its OWN table
-    // by the São Paulo practice_date, EXACTLY as the training endpoints' daily
-    // gate does (api/pronunciation-training: completed rows per practice_date).
-    // This is what the Home "Treinar pronúncia" card must reflect — never the
-    // diary's pronunciation_assessments count.
-    supabase
-      .from('pronunciation_training_sessions')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('status', 'completed')
-      .eq('practice_date', todaySpDate),
+    // The FIVE daily-usage counters (writing themes, writing reviews, diary
+    // pronunciation evals, História listening, standalone pronunciation
+    // training) collapsed into ONE round-trip via resolve_daily_activity_counts_v1
+    // (see 20260904120000_entitlements_daily_counts_rpc.sql). The day boundaries
+    // are computed here and passed in, so the RPC is a 1:1 translation of the
+    // previous five count(*) queries — the SP listening date still joins
+    // listening_shared_stories.practice_date; reviews still count reserved+
+    // completed by created_at; the diary/training surfaces stay distinct. This is
+    // the structural fix for the resolve_entitlements fan-out (9 concurrent
+    // queries per call) that starved CPU on the Micro instance under concurrent
+    // load and tripped the db_latency degradation alert.
+    supabase.rpc('resolve_daily_activity_counts_v1', {
+      p_user_id: userId,
+      p_utc_day_start: todayStartIso,
+      p_utc_day_end: todayEndIso,
+      p_sp_date: todaySpDate,
+    }),
   ]);
+
+  // One row of scalar counts (or null on RPC error → all default to 0, matching
+  // the previous per-query `count ?? 0` fallback). Never throws here: a daily
+  // counter is a display/gating hint; the authoritative caps are the reserve RPCs.
+  interface DailyCountsRow {
+    theme_count: number | null;
+    review_count: number | null;
+    pronunciation_eval_count: number | null;
+    listening_count: number | null;
+    pronunciation_training_count: number | null;
+  }
+  const dailyCountsRaw = dailyCountsResult.data as DailyCountsRow | DailyCountsRow[] | null;
+  const dailyCounts = (Array.isArray(dailyCountsRaw) ? dailyCountsRaw[0] : dailyCountsRaw) ?? null;
+  if (dailyCountsResult.error) {
+    console.warn(JSON.stringify({ event: 'entitlements.daily_counts_rpc_error', message: dailyCountsResult.error.message }));
+  }
 
   const planRows = (planValuesResult.data ?? []) as CapabilityValueRow[];
   const hasAnyPlanConfiguration = planRows.length > 0;
@@ -424,10 +414,10 @@ async function getCurrentUserPlanEntitlementsImpl(
     0,
   );
 
-  const themeGenerationsToday = themeCountResult.count ?? 0;
-  const reviewsToday = reviewCountResult.count ?? 0;
-  const pronunciationEvaluationsToday = pronunciationCountResult.count ?? 0;
-  const listeningStoriesToday = listeningConsumedResult.count ?? 0;
+  const themeGenerationsToday = dailyCounts?.theme_count ?? 0;
+  const reviewsToday = dailyCounts?.review_count ?? 0;
+  const pronunciationEvaluationsToday = dailyCounts?.pronunciation_eval_count ?? 0;
+  const listeningStoriesToday = dailyCounts?.listening_count ?? 0;
 
   // Never trusts a stored duration_seconds for a row still 'authorized' —
   // that state means session-complete hasn't (yet, or ever) closed it, so
@@ -512,7 +502,7 @@ async function getCurrentUserPlanEntitlementsImpl(
   const pronunciationConfigError = pronunciationEnabledR.configError || evaluationsR.configError || pronunciationMaxRecordingR.configError;
   const pronunciationEnabled = pronunciationConfigError ? false : pronunciationEnabledR.enabled;
 
-  const pronunciationTrainingToday = pronunciationTrainingCountResult.count ?? 0;
+  const pronunciationTrainingToday = dailyCounts?.pronunciation_training_count ?? 0;
   const pronunciation: PronunciationEntitlements = {
     enabled: pronunciationEnabled,
     evaluations: pronunciationConfigError ? configErrorLimit('day') : computeFeatureState({
