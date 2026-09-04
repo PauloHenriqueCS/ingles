@@ -26,8 +26,23 @@ interface MockOptions {
 }
 
 function makeMockSupabase({ planRow, tableResults = {} }: MockOptions) {
+  // The five daily-usage counters are now resolved by a single RPC
+  // (resolve_daily_activity_counts_v1), not five .from(...).select(count) calls.
+  // Derive that RPC's row from the SAME tableResults counts every test already
+  // sets, so existing cases keep asserting consumption exactly as before.
+  const dailyCounts = {
+    theme_count: tableResults['generated_themes']?.count ?? 0,
+    review_count: tableResults['writing_review_reservations']?.count ?? 0,
+    pronunciation_eval_count: tableResults['pronunciation_assessments']?.count ?? 0,
+    listening_count: tableResults['user_listening_shared_progress']?.count ?? 0,
+    pronunciation_training_count: tableResults['pronunciation_training_sessions']?.count ?? 0,
+  };
   return {
-    rpc: vi.fn().mockResolvedValue({ data: planRow ? [planRow] : [], error: null }),
+    rpc: vi.fn((name: string) =>
+      name === 'resolve_daily_activity_counts_v1'
+        ? Promise.resolve({ data: [dailyCounts], error: null })
+        : Promise.resolve({ data: planRow ? [planRow] : [], error: null }),
+    ),
     from: vi.fn((table: string) => makeChain(tableResults[table] ?? { data: [], error: null, count: 0 })),
   } as any;
 }
@@ -518,47 +533,37 @@ describe('getCurrentUserPlanEntitlements', () => {
 
   it('scopes História consumption to the user\'s São Paulo day, not the UTC day (regression for the 21:00–24:00 SP miscount)', async () => {
     // now = 02:00 UTC on 2026-07-18 → 23:00 on 2026-07-17 America/Sao_Paulo.
-    // The listening count MUST filter listening_shared_stories.practice_date
-    // by the SP date (2026-07-17), never the UTC date (2026-07-18), and must
-    // read from user_listening_shared_progress — capture the query to prove it.
-    const eqCalls: unknown[][] = [];
-    let queriedTable: string | null = null;
-    const progressChain: Record<string, unknown> = {
-      select: () => progressChain,
-      eq: (...args: unknown[]) => { eqCalls.push(args); return progressChain; },
-      gte: () => progressChain,
-      lt: () => progressChain,
-      in: () => progressChain,
-      not: () => progressChain,
-      or: () => progressChain,
-      order: () => progressChain,
-      gt: () => progressChain,
-      lte: () => progressChain,
-      maybeSingle: () => Promise.resolve({ data: null }),
-      then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: null, count: 1 }),
-    };
+    // The listening count MUST be scoped by the SP date (2026-07-17), never the
+    // UTC date (2026-07-18). That date is now passed to resolve_daily_activity_
+    // counts_v1 as p_sp_date (the RPC does the practice_date join) — capture the
+    // RPC args to prove the São Paulo day is what crosses the boundary.
+    const rpcCalls: Array<[string, Record<string, unknown>]> = [];
     const supabase = {
-      rpc: vi.fn().mockResolvedValue({ data: [RESOLVED_PLAN], error: null }),
-      from: vi.fn((table: string) => {
-        if (table === 'user_listening_shared_progress') { queriedTable = table; return progressChain; }
-        if (table === 'plan_capability_values') {
-          return makeChain({
-            data: [
-              { capability_key: 'listening.enabled', value: true },
-              { capability_key: 'listening.stories_per_day', value: 3 },
-              { capability_key: 'listening.stories_per_day.unlimited', value: false },
-            ],
-            error: null,
-          });
-        }
-        return makeChain({ data: [], error: null, count: 0 });
+      rpc: vi.fn((name: string, args: Record<string, unknown>) => {
+        rpcCalls.push([name, args]);
+        return name === 'resolve_daily_activity_counts_v1'
+          ? Promise.resolve({ data: [{ listening_count: 1 }], error: null })
+          : Promise.resolve({ data: [RESOLVED_PLAN], error: null });
       }),
+      from: vi.fn((table: string) =>
+        table === 'plan_capability_values'
+          ? makeChain({
+              data: [
+                { capability_key: 'listening.enabled', value: true },
+                { capability_key: 'listening.stories_per_day', value: 3 },
+                { capability_key: 'listening.stories_per_day.unlimited', value: false },
+              ],
+              error: null,
+            })
+          : makeChain({ data: [], error: null, count: 0 }),
+      ),
     } as any;
 
     const snapshot = await getCurrentUserPlanEntitlements('u1', { supabase, now: new Date('2026-07-18T02:00:00Z') });
 
-    expect(queriedTable).toBe('user_listening_shared_progress');
-    expect(eqCalls).toContainEqual(['listening_shared_stories.practice_date', '2026-07-17']);
+    const countsCall = rpcCalls.find(([name]) => name === 'resolve_daily_activity_counts_v1');
+    expect(countsCall).toBeDefined();
+    expect(countsCall?.[1].p_sp_date).toBe('2026-07-17');
     // Never falls back to the old episode-assignment source.
     expect(supabase.from).not.toHaveBeenCalledWith('user_listening_assignments');
     expect(snapshot.listening.stories.consumed).toBe(1);
