@@ -11,6 +11,7 @@ import { checkTextLength, checkFeatureConfigError } from './_entitlements/requir
 import { ENTITLEMENT_MESSAGES } from '../src/domain/entitlements/entitlement-messages';
 import { getProductConfig, isWithinConfiguredWindow, resolveConfigEnvironment } from '../src/server/product-config';
 import { isValidUuid } from '../src/lib/pronunciationAssessment';
+import { sanitizeDistractors } from '../src/domain/error-review/distractors';
 import { getCurriculumServiceClient } from './_curriculum/service-client';
 import { resolveActivityPrompt, recordCurricularPracticeFromIdentity, CurriculumConfigError } from './_curriculum/curriculum-runtime';
 
@@ -202,6 +203,28 @@ export function validateEvaluations(
 
 export function calculateOverallResult(evals: RequiredWordEvaluation[]): 'passed' | 'failed' {
   return evals.every((e) => e.status === 'correct') ? 'passed' : 'failed';
+}
+
+/**
+ * Normaliza os distratores que a IA anexou a cada erro de mainMistakes na MESMA
+ * resposta estruturada (sem nenhuma chamada de IA adicional). Cada erro passa a
+ * carregar exatamente 3 alternativas incorretas válidas (validadas em
+ * sanitizeDistractors: quantidade, não-duplicadas e diferentes da forma
+ * correta). Quando a IA não produz 3 válidas para um erro, apenas removemos o
+ * campo distractors DAQUELE erro — o erro continua na correção (feedback), mas
+ * não vira card de revisão no cliente. NUNCA fazemos uma 2ª chamada de IA para
+ * "consertar" distratores. Mutação idempotente do objeto feedback.
+ */
+export function sanitizeFeedbackDistractors(feedback: Record<string, unknown>): void {
+  if (!Array.isArray(feedback.mainMistakes)) return;
+  feedback.mainMistakes = (feedback.mainMistakes as unknown[]).map((raw) => {
+    const mistake = (raw ?? {}) as Record<string, unknown>;
+    const clean = sanitizeDistractors(String(mistake.correct ?? ''), mistake.distractors);
+    if (clean) return { ...mistake, distractors: clean };
+    // Sem 3 distratores válidos: remove o campo (não vira card de revisão).
+    const { distractors: _drop, ...rest } = mistake;
+    return rest;
+  });
 }
 
 // ── Metric extractor — reads from SDK response, never invents values ──────────
@@ -608,6 +631,12 @@ export default async function handler(req: any, res: any) {
     await releaseReservation();
     return jsonError(res, 500, 'INTERNAL_ERROR', 'Não foi possível processar a revisão. Tente novamente.');
   }
+
+  // Distratores da atividade "Revisar meus erros" — validados a partir da MESMA
+  // resposta da IA (sem chamada extra). Feito antes de qualquer persistência,
+  // para que main_mistakes (english_reviews / writing_entries) já guarde os 3
+  // distratores limpos e o cliente os persista no card de revisão.
+  sanitizeFeedbackDistractors(feedback);
 
   const reviewedAt = new Date().toISOString();
 
