@@ -1,9 +1,12 @@
 /**
- * Regression guard for the "Revisar meus erros" bug: the feedback used to render
- * the ORIGINAL error (result.originalValue) under the label "Sua resposta",
- * showing a phrase the student never submitted. These static source assertions
- * (node env, no DOM) lock in that "Sua resposta" is bound to the authoritative
- * submitted answer and that stale/out-of-order responses are dropped.
+ * Static source guards for "Revisar meus erros" (múltipla escolha, node env, no
+ * DOM). They lock in the multiple-choice contract:
+ *   - the submitted answer is the EXACT selected choice text (never the original
+ *     error, never a reconstructed value);
+ *   - correctness is shown by comparing a choice to the backend's correctedValue,
+ *     never by any client-side "isCorrect" flag arriving with the choices;
+ *   - stale / out-of-order responses are dropped;
+ *   - the old typing UI (textarea) is completely gone — no fallback.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -11,24 +14,36 @@ import { join } from 'node:path';
 
 const view = readFileSync(join(__dirname, '..', 'ErrorReviewView.tsx'), 'utf8');
 
-describe('ErrorReviewView — "Sua resposta" binds to the submitted answer', () => {
-  it('renders result.submittedAnswer under "Sua resposta", never result.originalValue', () => {
-    const idx = view.indexOf('Sua resposta');
-    expect(idx).toBeGreaterThan(-1);
-    const around = view.slice(idx, idx + 320);
-    expect(around).toMatch(/result\.submittedAnswer/);
-    expect(around).not.toMatch(/result\.originalValue/);
+describe('ErrorReviewView — multiple-choice answer binding', () => {
+  it('submits the EXACT selected choice text, snapshotted before awaiting the RPC', () => {
+    expect(view).toMatch(/const submittedAnswer = current\.choices\[selected\]/);
+    expect(view).toMatch(/const submittedItemId = current\.id/);
+    expect(view).toMatch(/submitErrorReviewItem\(submittedItemId, submittedAnswer\)/);
   });
 
-  it('snapshots the exact submitted answer + item id BEFORE awaiting the RPC', () => {
-    expect(view).toMatch(/const submittedAnswer = answer/);
-    expect(view).toMatch(/const submittedItemId = current\.id/);
-    // The RPC is called with that snapshot, not with live state read after await.
-    expect(view).toMatch(/submitErrorReviewItem\(submittedItemId, submittedAnswer\)/);
+  it('derives the correct choice from the backend correctedValue, not a client flag', () => {
+    // The green "CORRETA" highlight compares each choice to result.correctedValue.
+    expect(view).toMatch(/normalizeAnswer\(choice\) === correctNorm/);
+    expect(view).toMatch(/normalizeAnswer\(result!\.correctedValue\)/);
+    // The choices carry no correctness metadata — the item type is id/original/choices.
+    expect(view).not.toMatch(/correctIndex/);
+    expect(view).not.toMatch(/correctOption/);
   });
 
   it('drops stale / out-of-order responses via buildResultView + the live item ref', () => {
     expect(view).toMatch(/buildResultView\(/);
     expect(view).toMatch(/currentItemIdRef\.current/);
+  });
+
+  it('has NO textarea / typing fallback from the old model', () => {
+    expect(view).not.toMatch(/<textarea/i);
+    expect(view).not.toMatch(/Escreva a forma correta/);
+  });
+
+  it('blocks changing/answering while a submission is in flight (no double submit)', () => {
+    // handleSelect ignores taps while submitting or after a result is shown.
+    expect(view).toMatch(/if \(submitting \|\| result\) return;/);
+    // handleVerify guards on submitting AND an already-present result.
+    expect(view).toMatch(/selected === null \|\| submitting \|\| result/);
   });
 });

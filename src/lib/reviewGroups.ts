@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { getCurrentUserId } from './authSession';
 import { MainMistake } from '../types';
 import { getNextActivePracticeDate } from './activePracticeDate';
+import { sanitizeDistractors } from '../domain/error-review/distractors';
 
 interface CreateGroupParams {
   reviewId: string;
@@ -51,6 +52,19 @@ export async function createReviewGroupFromReview({
 }: CreateGroupParams): Promise<void> {
   if (mistakes.length === 0) return;
 
+  // MÚLTIPLA ESCOLHA: só vira card de revisão o erro que tem EXATAMENTE 3
+  // distratores válidos (validados aqui, além do servidor — defesa em
+  // profundidade sobre a mesma regra determinística; ver distractors.ts). O
+  // servidor (api/review-text.ts) já sanitizou os distratores na mesma resposta
+  // da IA. Erros sem 3 distratores válidos continuam no feedback da Escrita,
+  // mas não entram no scheduler. Calculado ANTES de criar o grupo para não
+  // deixar grupos órfãos vazios.
+  const reviewable = mistakes
+    .map((m) => ({ mistake: m, distractors: sanitizeDistractors(m.correct, m.distractors) }))
+    .filter((r): r is { mistake: MainMistake; distractors: string[] } => r.distractors !== null);
+
+  if (reviewable.length === 0) return;
+
   const uid = await getCurrentUserId();
   if (!uid) throw new Error('Não autenticado');
 
@@ -81,13 +95,16 @@ export async function createReviewGroupFromReview({
   // Novo erro → primeira revisão em +1 dia (scheduler POR ITEM).
   const itemNextReviewAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  const items = mistakes.map((m) => ({
+  const items = reviewable.map(({ mistake: m, distractors }) => ({
     review_group_id: group.id,
     user_id: uid,
     original_value: m.original,
     corrected_value: m.correct,
     explanation: m.explanation || null,
     original_sentence: extractOriginalSentence(originalText, m.original),
+    // Os 3 distratores da múltipla escolha, persistidos UMA vez na criação.
+    // Revisões futuras deste erro reutilizam estes valores — 0 chamadas de IA.
+    distractors,
     status: 'scheduled',
     review_level: 0,
     next_review_at: itemNextReviewAt,
