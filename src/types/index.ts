@@ -47,6 +47,14 @@ export interface MainMistake {
   original: string;
   correct: string;
   explanation: string;
+  /**
+   * Exatamente 3 alternativas incorretas para a atividade "Revisar meus erros"
+   * (múltipla escolha), geradas na MESMA chamada de IA que corrige a Escrita e
+   * já validadas no servidor (sanitizeFeedbackDistractors). Opcional aqui porque
+   * um erro sem 3 distratores válidos ainda é exibido no feedback, mas não vira
+   * card de revisão. Ver src/domain/error-review/distractors.ts.
+   */
+  distractors?: string[];
 }
 
 export interface VocabularyItem {

@@ -1,12 +1,22 @@
 import { supabase } from './supabase';
 import { getTodaySP } from './timezone';
 import { ERROR_REVIEW_DAILY_LIMIT } from '../domain/error-review/constants';
+import { ERROR_REVIEW_CHOICE_COUNT } from '../domain/error-review/distractors';
 
-/** Um card de revisão servido ao aluno — sem a correção (fica no servidor). */
+/**
+ * Um card de revisão (múltipla escolha) servido ao aluno.
+ *
+ * `choices` traz 4 alternativas — a forma correta + 3 distratores — JÁ
+ * EMBARALHADAS no servidor (get_error_review_session). O card NÃO revela qual é
+ * a correta: não há correctIndex/correctOption/flag. A autoridade sobre o acerto
+ * continua sendo exclusivamente do submit_error_review_item, que recebe o TEXTO
+ * da alternativa escolhida.
+ */
 export interface ErrorReviewItem {
   id: string;
   originalValue: string;
   originalSentence: string | null;
+  choices: string[];
 }
 
 export interface ErrorReviewSession {
@@ -51,11 +61,26 @@ export async function fetchErrorReviewSession(): Promise<ErrorReviewSession> {
     dueTotal: Number(d.dueTotal ?? 0),
     consumed: Number(d.consumed ?? 0),
     dailyLimit: Number(d.dailyLimit ?? ERROR_REVIEW_DAILY_LIMIT),
-    items: rawItems.map((it) => ({
-      id: String(it.id),
-      originalValue: String(it.originalValue ?? ''),
-      originalSentence: it.originalSentence != null ? String(it.originalSentence) : null,
-    })),
+    // Só entram itens com EXATAMENTE 4 alternativas (string) — não há fallback
+    // para o formato antigo (os dados antigos foram apagados pela migration).
+    // Um item malformado é descartado, nunca renderizado com menos opções.
+    items: rawItems.map(mapSessionItem).filter((it): it is ErrorReviewItem => it !== null),
+  };
+}
+
+/** Mapeia um item cru da RPC, validando as 4 alternativas de múltipla escolha. */
+function mapSessionItem(it: Record<string, unknown>): ErrorReviewItem | null {
+  const id = it.id != null ? String(it.id) : '';
+  if (!id) return null;
+  const choices = Array.isArray(it.choices)
+    ? it.choices.filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
+    : [];
+  if (choices.length !== ERROR_REVIEW_CHOICE_COUNT) return null;
+  return {
+    id,
+    originalValue: String(it.originalValue ?? ''),
+    originalSentence: it.originalSentence != null ? String(it.originalSentence) : null,
+    choices,
   };
 }
 
