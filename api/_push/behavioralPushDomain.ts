@@ -2,32 +2,30 @@
  * SERVER-ONLY, PURE domain logic for behavioral (behaviour-triggered) push.
  *
  * This module has NO Node, env, network or Supabase dependency — it is a pure
- * function layer so the eligibility rules can be exhaustively unit-tested. It
- * deliberately REUSES the exact streak math the Home screen uses
- * (computeWeekdayStreak from src/lib/metricsCore) instead of re-deriving it —
- * there must never be two streak algorithms (Home saying "8 dias" while the
- * push backend computes "7"). See docs/behavioral-push.md.
+ * function layer so the eligibility rules can be exhaustively unit-tested.
  *
- * Two push types only (v1):
- *   - 'streak_risk'  : the user has a live streak that today (a configured
- *                      practice day) would break if they don't practice.
- *   - 'abandonment'  : the user has missed >= N consecutive CONFIGURED practice
- *                      days without completing a valid activity.
- * Priority when both apply: streak_risk > abandonment. Never both.
+ * v2 (2026-09) — SIMPLE DAILY REMINDER. The product rule is now:
+ *
+ *   "Todo dia de prática, às 20h SP, se o usuário ainda não praticou, ele pode
+ *    receber 1 push. Todos recebem a MESMA frase naquele dia; no dia seguinte a
+ *    frase muda. Se já estudou, silêncio total."
+ *
+ * A eligibilidade NÃO depende mais de streak nem de abandono. O único tipo v2 é
+ * 'practice_reminder_behavioral'. Os tipos antigos 'streak_risk'/'abandonment'
+ * permanecem na UNION apenas por compatibilidade com o histórico (eventos já
+ * gravados + a copy legada em behavioralPushCopy) — nunca são mais PRODUZIDOS
+ * por decideBehavioralPush.
+ *
+ * streak continua sendo computado (reutilizando computeWeekdayStreak da Home,
+ * jamais um segundo algoritmo) apenas como SNAPSHOT para análise futura no
+ * Dashboard; não influencia a decisão nem a copy. See docs/behavioral-push.md.
  */
 
 import { computeWeekdayStreak } from '../../src/lib/metricsCore';
 
 /** Domain constants. Centralized here so a single edit changes behaviour
- *  everywhere (spec: "Centralize o número 2", "não espalhe 24/72 pelo código"). */
+ *  everywhere. */
 export const BEHAVIORAL_PUSH = {
-  /** Global cooldown between ANY two behavioral pushes for a user, in hours.
-   *  Applies across both types (a streak_risk starts the cooldown for a later
-   *  abandonment too). Only a genuinely SENT push starts it. */
-  COOLDOWN_HOURS: 72,
-  /** Consecutive missed CONFIGURED practice days required before 'abandonment'
-   *  becomes eligible. Domain constant so it is trivially tunable later. */
-  MISSED_PRACTICE_DAYS_FOR_ABANDONMENT: 2,
   /** Attribution window after a SENT push during which a completed activity is
    *  associated with it (association, NOT causality). Hours. */
   ATTRIBUTION_WINDOW_HOURS: 24,
@@ -35,32 +33,36 @@ export const BEHAVIORAL_PUSH = {
    *  claims a user when the São Paulo local hour is inside [START, END]. */
   EVAL_HOUR_SP_START: 20,
   EVAL_HOUR_SP_END: 20, // inclusive; the 20:00–20:59 window
-  /** How many days of activity history to load for streak + missed-day math.
-   *  120 comfortably covers any realistic streak and the abandonment lookback. */
-  STREAK_LOOKBACK_DAYS: 120,
+  /** Reactivation window: only nudge a user with activity in the last N days OR
+   *  a recent signup. Bounds the daily universe (avoids blasting fully-dormant
+   *  accounts) and is also the window over which the streak snapshot is
+   *  computed. Owner decision 2026-09-10: 30 days. */
+  REACTIVATION_LOOKBACK_DAYS: 30,
   /** Max users processed per sweep tick (bounded; the sweep paginates). */
   SWEEP_BATCH_SIZE: 200,
 } as const;
 
-export type BehavioralPushType = 'streak_risk' | 'abandonment';
+/** 'practice_reminder_behavioral' is the only type produced in v2; the other two
+ *  are kept for historical rows and the legacy copy builder. */
+export type BehavioralPushType = 'streak_risk' | 'abandonment' | 'practice_reminder_behavioral';
+
+/** The single push type produced by the daily-reminder strategy (v2). */
+export const DAILY_PRACTICE_PUSH_TYPE: BehavioralPushType = 'practice_reminder_behavioral';
 
 export interface BehavioralPushCandidateInput {
   userId: string;
   /** Configured practice weekdays, convention 0=Sun..6=Sat
    *  (user_learning_settings.active_weekdays — the same set the streak uses). */
   activeWeekdays: number[];
-  /** YYYY-MM-DD São Paulo dates with a completed valid activity, using the
-   *  SAME strict active-day rule as the Home streak (conversation counts only
-   *  when the daily-minutes goal was met). Feeds both the streak and the
-   *  missed-day count. */
+  /** YYYY-MM-DD São Paulo dates with a completed valid activity (strict active-day
+   *  rule, same as the Home streak). Feeds the streak SNAPSHOT only. */
   activeDates: string[];
-  /** Generous "did the user do anything today?" flag used ONLY for the
-   *  don't-nag gate — a single completed activity of any kind today (including
-   *  a below-goal conversation) sets this true. Kept distinct from the strict
-   *  active-day rule above on purpose (product decision). */
+  /** Generous "did the user do anything today?" flag used for the don't-nag
+   *  gate — a single completed activity of any kind today (including a
+   *  below-goal conversation) sets this true. */
   practicedToday: boolean;
-  /** YYYY-MM-DD São Paulo date the user's account was created. Reference start
-   *  for the abandonment count when the user has never practiced. */
+  /** YYYY-MM-DD São Paulo date the user's account was created. Kept for the
+   *  candidate shape; not used by the decision in v2. */
   accountCreatedDate: string;
   /** YYYY-MM-DD São Paulo date the sweep is evaluating ("today"). */
   localDate: string;
@@ -68,9 +70,9 @@ export interface BehavioralPushCandidateInput {
 
 export interface BehavioralPushDecision {
   pushType: BehavioralPushType | null;
-  /** Streak as of localDate (identical to what Home would show). */
+  /** Streak as of localDate (identical to what Home would show) — SNAPSHOT only. */
   streak: number;
-  /** Consecutive missed configured practice days (0 when not abandonment). */
+  /** Kept for the row snapshot; always 0 in v2 (no abandonment math). */
   missedStudyDays: number;
 }
 
@@ -90,11 +92,9 @@ function addDays(dateStr: string, days: number): string {
  * Count CONFIGURED practice weekdays in the interval
  * (afterDateExclusive, throughDateInclusive] that are NOT in activeDates.
  *
- * Because every configured day AFTER the user's last active date is by
- * definition missed, this equals the run of consecutive missed practice days.
- * `throughDateInclusive` is normally `today` — the spec counts today itself as
- * a missed day when today is a configured practice day and the user has not
- * practiced yet by 20:00 (the Wed-at-20h example in the brief).
+ * Pure utility retained for analytics/tests. No longer part of the eligibility
+ * decision in v2 (abandonment logic was removed), but kept because it is a
+ * correct, well-tested weekday-counting helper.
  */
 export function countMissedConfiguredDays(
   activeWeekdays: number[],
@@ -116,10 +116,13 @@ export function countMissedConfiguredDays(
 }
 
 /**
- * Decide which behavioral push (if any) applies. Pure — all the environmental
- * gates (cooldown, entitlement, exclusions, dry-run, timezone window) are
- * enforced by the sweep around this. This only encodes the streak_risk vs
- * abandonment product rules and their priority.
+ * Decide whether the daily practice-reminder push applies (v2). Pure — all the
+ * environmental gates (entitlement, exclusions, idempotency, dry-run, timezone
+ * window) are enforced by the sweep + SQL around this.
+ *
+ * Rule: eligible iff (a) the user has NOT practiced today AND (b) today is a
+ * configured practice weekday. No streak/abandonment gating. `streak` is still
+ * returned as a snapshot for analytics.
  */
 export function decideBehavioralPush(input: BehavioralPushCandidateInput): BehavioralPushDecision {
   const streak = computeWeekdayStreak(input.activeDates, input.localDate, input.activeWeekdays);
@@ -130,35 +133,11 @@ export function decideBehavioralPush(input: BehavioralPushCandidateInput): Behav
     return { pushType: null, streak, missedStudyDays: 0 };
   }
 
-  // Global rule: only ever send on a CONFIGURED practice day. This is enforced
-  // in SQL too (candidates pre-filter), but keeping it here makes the decision
-  // self-contained and correct for both types.
+  // Only ever send on a CONFIGURED practice day (also enforced in SQL).
   const todayIsConfigured = input.activeWeekdays.includes(weekdayOf(input.localDate));
   if (!todayIsConfigured) {
     return { pushType: null, streak, missedStudyDays: 0 };
   }
 
-  // ── streak_risk (priority 1) ────────────────────────────────────────────
-  // A live streak (>0) on a configured practice day that has not been
-  // completed yet would break the moment today passes as a missed weekday.
-  if (streak > 0) {
-    return { pushType: 'streak_risk', streak, missedStudyDays: 0 };
-  }
-
-  // ── abandonment (priority 2) ────────────────────────────────────────────
-  const lastActive = input.activeDates.length
-    ? input.activeDates.reduce((a, b) => (a > b ? a : b))
-    : null;
-  const reference = lastActive ?? input.accountCreatedDate;
-  const missed = countMissedConfiguredDays(
-    input.activeWeekdays,
-    input.activeDates,
-    reference,
-    input.localDate,
-  );
-  if (missed >= BEHAVIORAL_PUSH.MISSED_PRACTICE_DAYS_FOR_ABANDONMENT) {
-    return { pushType: 'abandonment', streak, missedStudyDays: missed };
-  }
-
-  return { pushType: null, streak, missedStudyDays: missed };
+  return { pushType: DAILY_PRACTICE_PUSH_TYPE, streak, missedStudyDays: 0 };
 }

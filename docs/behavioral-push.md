@@ -1,25 +1,52 @@
-# Behavioral Push (streak_risk / abandonment)
+# Behavioral Push (daily practice reminder)
 
-Backend-driven, behaviour-triggered push notifications. **Few pushes, but
-contextual.** This is a *separate* system from the local "Lembrete de prática"
-(`user_practice_reminder_preferences` + `@capacitor/local-notifications`), which
-fires 100% on-device and is untouched here.
+Backend-driven push notifications. This is a *separate* system from the local
+"Lembrete de prática" (`user_practice_reminder_preferences` +
+`@capacitor/local-notifications`), which fires 100% on-device and is untouched
+here.
 
-Two types only (v1):
+## v2 (2026-09) — simple daily reminder
 
-- **`streak_risk`** — the user has a live streak that today (a configured
-  practice day) would break if they don't practice.
-- **`abandonment`** — the user has missed ≥ 2 consecutive *configured* practice
-  days without completing a valid activity.
+> **Todo dia de prática, às 20h SP, se o usuário ainda não praticou, ele pode
+> receber 1 push. Todos recebem a mesma frase naquele dia; no dia seguinte a
+> frase muda. Se já estudou, silêncio total.**
 
-Priority when both apply: **streak_risk > abandonment**. Never both. At most
-**one** behavioral push per user per day, and a **global 72h cooldown** across
-both types (only a genuinely `sent` push starts it).
+One type only: **`practice_reminder_behavioral`**. Eligibility no longer depends
+on streak or abandonment. A user is eligible for the day's push when **all** of:
+
+- has a valid entitlement (≥ 1 accessible practice modality);
+- today is in `user_learning_settings.active_weekdays` (0=Sun..6=Sat);
+- has **not** practiced yet today (generous gate — see below);
+- has no `behavioral_push_events` row for this `(user_id, local_date)` yet;
+- is not deactivated and has not opted out of push communication;
+- had activity in the last **30 days** OR signed up in the last 30 days
+  (reactivation window — bounds the daily universe; owner decision 2026-09-10).
+
+**At most one push per user per `local_date`.** The idempotency guarantee is the
+`UNIQUE (user_id, local_date)` constraint + the `ON CONFLICT DO NOTHING` claim.
+There is **no** 72h cooldown — tomorrow the user is eligible again if it is a
+practice day and they still haven't practiced.
+
+### Copy: global daily rotation
+
+All eligible users on the **same** `local_date` receive the **same** copy;
+the next day rotates to the next copy; after the last it wraps to the first.
+Selection is deterministic and reproducible from `local_date` alone
+(`selectDailyPushCopy` — epoch-day index modulo the approved list length in
+`behavioralPushCopy.ts`), never random, never per-user. The exact
+`copy_variant` + `title_snapshot` + `body_snapshot` are persisted so the
+Dashboard can reproduce each day's message.
+
+### Legacy types (historical only)
+
+`streak_risk` and `abandonment` are **no longer produced**. Old rows keep their
+type and copy (the `push_type` CHECK and the legacy `buildBehavioralPushCopy`
+were retained on purpose). Nothing was deleted or rewritten.
 
 ## Golden rule
 
 > If the user has already completed **any** valid activity today, **no**
-> behavioral push is sent that day — even if other activities remain.
+> behavioral push is sent that day.
 
 Server-authoritative (never client state).
 
@@ -48,10 +75,11 @@ Two notions of "conversation counts" are intentionally distinct:
 pg_cron (behavioral_push_cron_sweep, 23:00/23:30 UTC ≈ 20:00 SP)
   → pg_net GET /api/internal/listening/behavioral-push-sweep  (Authorization: Bearer CRON_SECRET)
     → handleBehavioralPushSweep (api/_push/behavioralPushSweep.ts)
-        SP 20:00 window gate → behavioral_push_candidates (1 SQL/batch, no N+1)
-        per candidate: decide (pure) → entitlement → language+copy
-                     → ATOMIC claim (UNIQUE(user_id, local_date))
-                     → revalidate (fresh practiced-today + cooldown)
+        SP 20:00 window gate → pick the day's global copy (selectDailyPushCopy)
+        → behavioral_push_candidates (1 SQL/batch, no N+1)
+        per candidate: decide (pure) → entitlement → language snapshot
+                     → ATOMIC claim (UNIQUE(user_id, local_date), copy snapshot)
+                     → revalidate (fresh practiced-today only)
                      → real send OR dry_run → mark
     → OneSignal REST  (api/_push/oneSignalServer.ts): POST /notifications,
         include_aliases.external_id = Supabase UUID, target_channel=push. NEVER a broadcast.
@@ -100,7 +128,7 @@ Env (server-only — see `.env.example`): `ONESIGNAL_APP_ID`,
 `BEHAVIORAL_PUSH_TEST_USER_IDS`, `BEHAVIORAL_PUSH_ENVIRONMENT`.
 
 Domain constants: `api/_push/behavioralPushDomain.ts::BEHAVIORAL_PUSH`
-(cooldown 72h, missed-days 2, attribution 24h, eval hour 20 SP, batch size).
+(attribution 24h, eval hour 20 SP, reactivation lookback 30d, batch size).
 
 ## Activation (manual, per environment, once)
 
@@ -125,8 +153,9 @@ Domain constants: `api/_push/behavioralPushDomain.ts::BEHAVIORAL_PUSH`
 ## Status semantics
 
 `claimed` → `sent` | `failed` | `skipped` | `dry_run`. `sent` = OneSignal
-accepted the send (NOT physical delivery — never call it `delivered`). Only
-`sent` starts the cooldown; `dry_run`/`failed`/`skipped` do not.
+accepted the send (NOT physical delivery — never call it `delivered`). Any
+`claimed` row (whatever its final status) occupies the `(user_id, local_date)`
+slot, so it blocks a second push the same day; the next day is a fresh slot.
 
 ## Admin/internal accounts are NOT excluded (product decision)
 
