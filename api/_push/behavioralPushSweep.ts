@@ -27,7 +27,7 @@ import {
 import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { canSendCommunication } from '../_account/communication-suppression';
 import { BEHAVIORAL_PUSH, decideBehavioralPush } from './behavioralPushDomain';
-import { buildBehavioralPushCopy, resolvePushLanguage } from './behavioralPushCopy';
+import { selectDailyPushCopy, resolvePushLanguage, type PushCopy } from './behavioralPushCopy';
 import { sendBehavioralPush } from './oneSignalServer';
 import { shouldRealSend, resolveUserInterfaceLanguage, type SendGateConfig } from './behavioralPushConfig';
 
@@ -94,14 +94,20 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
       restApiKey: getOneSignalRestApiKey(),
     };
 
+    // Global daily copy — the SAME for every eligible user on this local_date;
+    // rotates to the next entry tomorrow (deterministic from the date alone).
+    const dailyCopy = selectDailyPushCopy(spDate);
+
     const limit = BEHAVIORAL_PUSH.SWEEP_BATCH_SIZE;
     let offset = 0;
 
     for (let batch = 0; batch < MAX_BATCHES; batch++) {
       const { data, error } = await supabase.rpc('behavioral_push_candidates', {
         p_local_date: spDate,
-        p_lookback_days: BEHAVIORAL_PUSH.STREAK_LOOKBACK_DAYS,
-        p_cooldown_hours: BEHAVIORAL_PUSH.COOLDOWN_HOURS,
+        // Reactivation window (30d). p_cooldown_hours intentionally omitted — the
+        // 72h cooldown was removed; idempotency by (user_id, local_date) guards
+        // against a second push the same day.
+        p_lookback_days: BEHAVIORAL_PUSH.REACTIVATION_LOOKBACK_DAYS,
         p_limit: limit,
         p_offset: offset,
       });
@@ -114,7 +120,7 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
       stats.candidates += rows.length;
 
       for (const row of rows) {
-        await processCandidate(supabase, row, spDate, environment, gate, stats);
+        await processCandidate(supabase, row, spDate, environment, gate, dailyCopy, stats);
       }
 
       if (rows.length < limit) break;
@@ -140,9 +146,11 @@ async function processCandidate(
   spDate: string,
   environment: string,
   gate: SendGateConfig,
+  copy: PushCopy,
   stats: SweepStats,
 ): Promise<void> {
-  // 1. Decide push type (pure — reuses computeWeekdayStreak).
+  // 1. Decide (pure). v2: eligible iff not-practiced-today AND today is a
+  //    configured practice weekday. streak is a snapshot only.
   const decision = decideBehavioralPush({
     userId: row.user_id,
     activeWeekdays: row.active_weekdays ?? [],
@@ -165,15 +173,13 @@ async function processCandidate(
   }
   if (!canPractice) return;
 
-  // 3. Language + deterministic copy (built before claim to persist the variant).
+  // 3. Interface language (recorded as a snapshot for analytics only — the copy
+  //    itself is the GLOBAL daily rotation, identical for every user today).
   const language = resolvePushLanguage(await resolveUserInterfaceLanguage(supabase, row.user_id));
-  const copy = buildBehavioralPushCopy({
-    pushType: decision.pushType,
-    language,
-    streak: decision.streak,
-  });
 
-  // 4. Atomic claim (ON CONFLICT (user_id, local_date) DO NOTHING).
+  // 4. Atomic claim (ON CONFLICT (user_id, local_date) DO NOTHING). Persists the
+  //    exact copy variant + title/body snapshot so the Dashboard can reproduce
+  //    the day's message without recomputing the rotation.
   let claimId: string | null = null;
   try {
     const { data, error } = await supabase.rpc('behavioral_push_claim', {
@@ -186,6 +192,8 @@ async function processCandidate(
       p_streak: decision.streak,
       p_missed_days: decision.missedStudyDays,
       p_last_activity_at: row.last_activity_at,
+      p_title_snapshot: copy.title,
+      p_body_snapshot: copy.body,
     });
     if (error) {
       safeLog(LOG, 'claim_error', 500, { error: error.message });
@@ -199,12 +207,12 @@ async function processCandidate(
   if (!claimId) return; // lost the race / already decided today
   stats.claimed++;
 
-  // 5. Immediate revalidation (race with a 20:00 completion + cooldown).
+  // 5. Immediate revalidation (race with a 20:00 completion). Fresh not-practiced
+  //    -today check only — the 72h cooldown was removed.
   try {
     const { data: stillEligible } = await supabase.rpc('behavioral_push_revalidate', {
       p_user_id: row.user_id,
       p_local_date: spDate,
-      p_cooldown_hours: BEHAVIORAL_PUSH.COOLDOWN_HOURS,
     });
     if (stillEligible !== true) {
       await mark(supabase, claimId, 'skipped', { failureCode: 'revalidation_failed' });
