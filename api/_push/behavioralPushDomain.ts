@@ -33,11 +33,11 @@ export const BEHAVIORAL_PUSH = {
    *  claims a user when the São Paulo local hour is inside [START, END]. */
   EVAL_HOUR_SP_START: 20,
   EVAL_HOUR_SP_END: 20, // inclusive; the 20:00–20:59 window
-  /** Reactivation window: only nudge a user with activity in the last N days OR
-   *  a recent signup. Bounds the daily universe (avoids blasting fully-dormant
-   *  accounts) and is also the window over which the streak snapshot is
-   *  computed. Owner decision 2026-09-10: 30 days. */
-  REACTIVATION_LOOKBACK_DAYS: 30,
+  /** Window (days) over which the SQL candidate query computes its SNAPSHOTS
+   *  (streak + last_activity). This is NOT an eligibility gate — dormancy never
+   *  excludes a user (owner decision 2026-09-11). A user inactive for 31/60/90
+   *  days is still eligible; the snapshot for them is simply empty. */
+  SNAPSHOT_LOOKBACK_DAYS: 30,
   /** Max users processed per sweep tick (bounded; the sweep paginates). */
   SWEEP_BATCH_SIZE: 200,
 } as const;

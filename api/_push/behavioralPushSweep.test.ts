@@ -134,14 +134,14 @@ describe('handleBehavioralPushSweep — v2 daily reminder', () => {
     expect(h.send.mock.calls[0][0]).toMatchObject({ title: claim.p_title_snapshot, body: claim.p_body_snapshot });
   });
 
-  it('candidates queried with the 30d reactivation window and NO cooldown param', async () => {
+  it('candidates queried with the snapshot lookback and NO cooldown param', async () => {
     h.client = makeClient({
       behavioral_push_candidates: () => ({ data: [], error: null }),
     });
     await handleBehavioralPushSweep(req(), res());
     const cand = callsOf(h.client, 'behavioral_push_candidates')[0].args;
-    expect(cand.p_lookback_days).toBe(BEHAVIORAL_PUSH.REACTIVATION_LOOKBACK_DAYS);
-    expect(cand.p_lookback_days).toBe(30);
+    // Lookback is snapshot-only (streak/last_activity), NOT an eligibility gate.
+    expect(cand.p_lookback_days).toBe(BEHAVIORAL_PUSH.SNAPSHOT_LOOKBACK_DAYS);
     // 72h cooldown removed → the sweep no longer sends a cooldown parameter.
     expect(cand.p_cooldown_hours).toBeUndefined();
   });

@@ -104,10 +104,11 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
     for (let batch = 0; batch < MAX_BATCHES; batch++) {
       const { data, error } = await supabase.rpc('behavioral_push_candidates', {
         p_local_date: spDate,
-        // Reactivation window (30d). p_cooldown_hours intentionally omitted — the
-        // 72h cooldown was removed; idempotency by (user_id, local_date) guards
-        // against a second push the same day.
-        p_lookback_days: BEHAVIORAL_PUSH.REACTIVATION_LOOKBACK_DAYS,
+        // Snapshot window only (streak/last_activity) — NOT an eligibility gate:
+        // dormancy never excludes a user. p_cooldown_hours intentionally omitted
+        // (the 72h cooldown was removed); idempotency by (user_id, local_date)
+        // guards against a second push the same day.
+        p_lookback_days: BEHAVIORAL_PUSH.SNAPSHOT_LOOKBACK_DAYS,
         p_limit: limit,
         p_offset: offset,
       });

@@ -90,3 +90,36 @@ describe('decideBehavioralPush — v2 daily practice reminder', () => {
     expect(d.pushType).toBe('practice_reminder_behavioral');
   });
 });
+
+describe('decideBehavioralPush — dormancy never excludes (no lookback gate)', () => {
+  // localDate 2026-09-14 is a Monday (in MON_FRI). The decision looks ONLY at
+  // practicedToday + configured-day; a user's last-activity age is irrelevant.
+
+  it('scenario 1: last activity 31 days ago → still eligible', () => {
+    const d = decideBehavioralPush(input({ localDate: '2026-09-14', activeDates: ['2026-08-14'] }));
+    expect(d.pushType).toBe('practice_reminder_behavioral');
+  });
+
+  it('scenario 2: last activity 90 days ago → still eligible', () => {
+    const d = decideBehavioralPush(input({ localDate: '2026-09-14', activeDates: ['2026-06-16'] }));
+    expect(d.pushType).toBe('practice_reminder_behavioral');
+  });
+
+  it('scenario 3: no history at all + valid access + configured day → normal rule (eligible)', () => {
+    const d = decideBehavioralPush(
+      input({ localDate: '2026-09-14', activeDates: [], accountCreatedDate: '2024-01-01' }),
+    );
+    expect(d.pushType).toBe('practice_reminder_behavioral');
+  });
+
+  it('scenario 4: practiced today → blocked even if it is a configured day', () => {
+    const d = decideBehavioralPush(input({ localDate: '2026-09-14', practicedToday: true, activeDates: ['2026-08-14'] }));
+    expect(d.pushType).toBeNull();
+  });
+
+  it('scenario 5: outside active_weekdays → blocked (dormant or not)', () => {
+    // 2026-09-13 is a Sunday (0), not in MON_FRI.
+    const d = decideBehavioralPush(input({ localDate: '2026-09-13', activeDates: ['2026-06-16'] }));
+    expect(d.pushType).toBeNull();
+  });
+});
