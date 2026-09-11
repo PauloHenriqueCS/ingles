@@ -117,11 +117,13 @@ hasMore, nextCursor, durationMs, environment, spDate }`.
 
 **Cron for a large base.** Because each tick drains the remainder idempotently,
 full coverage comes from scheduling **several ticks inside the 20:00 SP window**
-rather than one long run — e.g. `*/3 23 * * *` (every 3 min, 23:00–23:59 UTC ≈
-20:00–20:59 SP). No queue/worker needed. If a single tick ever exhausts its time
-budget, the next tick continues; the last ticks of the window simply find 0
-candidates and no-op. (`nextCursor` also allows an operator to resume a specific
-run manually via `?after=`.)
+rather than one long run. Production uses **`*/5 23 * * *`** (every 5 min,
+23:00–23:59 UTC ≈ 20:00–20:59 SP): the 5-minute spacing comfortably exceeds the
+240s time budget, so a run near its budget can never overlap the next tick. No
+queue/worker needed. If a single tick ever exhausts its time budget, the next
+tick continues; the last ticks of the window simply find 0 candidates and no-op.
+(`nextCursor` also allows an operator to resume a specific run manually via
+`?after=`.)
 
 ### Homolog / prod isolation
 
