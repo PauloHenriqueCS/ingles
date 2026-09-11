@@ -88,7 +88,7 @@ function devKey(): string | null {
 // call site, this just keeps the import out of the browser build entirely.
 async function loadAppsFlyer() {
   const mod = await import('appsflyer-capacitor-plugin');
-  return { AppsFlyer: mod.AppsFlyer };
+  return { AppsFlyer: mod.AppsFlyer, AFConstants: mod.AFConstants };
 }
 
 export function isAppsFlyerSupported(): boolean {
@@ -104,6 +104,65 @@ let identifiedUserId: string | null = null;
 // Serializes the identity calls so a fast sign-out-then-sign-in can't fire two
 // overlapping setCustomerUserId calls (same guard revenueCatClient.ts uses).
 let identityChain: Promise<void> = Promise.resolve();
+
+// ── Install attribution / conversion data ──────────────────────────────────
+// AppsFlyer delivers the install attribution (media_source, campaign, af_status,
+// ...) asynchronously via the conversion-data callback once per install. It can
+// arrive BEFORE the Supabase session resolves, so we buffer the last payload
+// here and expose a subscriber the decision layer (appsFlyerEvents) uses to
+// persist it against the authenticated UUID whenever either side becomes ready.
+// PII-free (attribution fields only). Never fabricated — if AppsFlyer sends
+// nothing, this stays null.
+let capturedConversionData: Record<string, unknown> | null = null;
+let conversionSubscriber: ((data: Record<string, unknown> | null) => void) | null = null;
+let conversionListenerRegistered = false;
+
+async function registerConversionListenerOnce(
+  AppsFlyer: Awaited<ReturnType<typeof loadAppsFlyer>>['AppsFlyer'],
+  AFConstants: Awaited<ReturnType<typeof loadAppsFlyer>>['AFConstants'],
+): Promise<void> {
+  if (conversionListenerRegistered) return;
+  conversionListenerRegistered = true;
+  try {
+    await AppsFlyer.addListener(AFConstants.CONVERSION_CALLBACK, (event) => {
+      // event.data is the attribution dict (organic installs may carry only
+      // { af_status: 'Organic', ... }); anything non-object is treated as absent.
+      const data = event && typeof event === 'object' ? (event as { data?: unknown }).data : null;
+      capturedConversionData = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+      try {
+        conversionSubscriber?.(capturedConversionData);
+      } catch {
+        // never throw from a native callback
+      }
+    });
+  } catch (err) {
+    conversionListenerRegistered = false; // allow a later re-registration attempt
+    console.warn('[appsFlyer] conversion listener registration failed', err instanceof Error ? err.message : err);
+  }
+}
+
+/** The last install-attribution payload AppsFlyer delivered (null until it does). */
+export function getCapturedConversionData(): Record<string, unknown> | null {
+  return capturedConversionData;
+}
+
+/**
+ * Register (or clear) the single subscriber notified when install attribution
+ * arrives. If a payload already arrived before the subscriber was set, it is
+ * delivered immediately so no attribution is missed to a registration race.
+ */
+export function setAppsFlyerConversionSubscriber(
+  cb: ((data: Record<string, unknown> | null) => void) | null,
+): void {
+  conversionSubscriber = cb;
+  if (cb && capturedConversionData) {
+    try {
+      cb(capturedConversionData);
+    } catch {
+      // ignore
+    }
+  }
+}
 
 /**
  * Initialize the AppsFlyer SDK once for this app session. Native-only,
@@ -129,16 +188,23 @@ export function initializeAppsFlyer(): Promise<boolean> {
         console.warn('[appsFlyer] VITE_APPSFLYER_DEV_KEY not set — attribution disabled this session');
         return false;
       }
-      const { AppsFlyer } = await loadAppsFlyer();
+      const { AppsFlyer, AFConstants } = await loadAppsFlyer();
       await AppsFlyer.initSDK({
         devKey: key,
         appID: resolveAppId(),
         isDebug: resolveDebug(),
+        // Deliver the install attribution (media_source/campaign/af_status/...)
+        // to the conversion-data callback so we can persist it against the
+        // Supabase UUID (see registerConversionListenerOnce / appsFlyerEvents).
+        registerConversionListener: true,
         // No manualStart → the SDK starts now, so install/open is registered
         // before login. No waitForATTUserAuthorization → we never block the
         // first session on an ATT prompt (ATT is not implemented; AppsFlyer
         // works without IDFA). See the module doc comment.
       });
+      // Subscribe to conversion data before marking initialized so an early
+      // callback is never missed. Best-effort — a failure never blocks init.
+      await registerConversionListenerOnce(AppsFlyer, AFConstants);
       initialized = true;
       return true;
     } catch (err) {
@@ -257,4 +323,7 @@ export function __resetAppsFlyerClientForTests(): void {
   initializing = null;
   identifiedUserId = null;
   identityChain = Promise.resolve();
+  capturedConversionData = null;
+  conversionSubscriber = null;
+  conversionListenerRegistered = false;
 }

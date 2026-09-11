@@ -1,6 +1,13 @@
 import { supabase } from '../supabase';
 import { isIOSApp, isAndroidApp } from '../runtimeEnvironment';
-import { isAppsFlyerSupported, logAppsFlyerEvent, setAppsFlyerCustomerUserId } from './appsFlyerClient';
+import {
+  isAppsFlyerSupported,
+  logAppsFlyerEvent,
+  setAppsFlyerCustomerUserId,
+  getCapturedConversionData,
+  setAppsFlyerConversionSubscriber,
+  getAppsFlyerUidSafe,
+} from './appsFlyerClient';
 
 /**
  * AppsFlyer Phase 2 — the marketing/acquisition funnel, orchestrated on top of
@@ -84,6 +91,77 @@ function storeName(): 'app_store' | 'play_store' | undefined {
   return undefined;
 }
 
+function platformName(): 'ios' | 'android' | 'web' {
+  if (isIOSApp) return 'ios';
+  if (isAndroidApp) return 'android';
+  return 'web';
+}
+
+// ── Acquisition attribution (item 2) ────────────────────────────────────────
+// Links the AppsFlyer install attribution (media_source/campaign/adset/ad/
+// af_status/...) to the authenticated Supabase UUID and persists it server-side
+// (record_acquisition_attribution). The attribution and the identity can become
+// ready in either order, so we (a) persist on identity resolution using whatever
+// conversion data has already arrived, and (b) subscribe so a later-arriving
+// payload is persisted too. Never fabricates values — absent fields stay null,
+// and organic installs (af_status='Organic') are recorded as organic.
+let attributionUserId: string | null = null;
+let attributionSubscriberWired = false;
+
+async function recordAcquisitionAttribution(): Promise<void> {
+  if (!isAppsFlyerSupported()) return;
+  if (!attributionUserId) return;
+  try {
+    const conversion = getCapturedConversionData();
+    const afId = await getAppsFlyerUidSafe();
+    // Nothing meaningful to persist yet — wait for the conversion callback.
+    if (!conversion && !afId) return;
+    await supabase.rpc('record_acquisition_attribution', {
+      p_af_id: afId,
+      p_platform: platformName(),
+      p_conversion: conversion ?? null,
+    });
+  } catch {
+    // never throw from analytics
+  }
+}
+
+function ensureAttributionSubscriber(): void {
+  if (attributionSubscriberWired) return;
+  attributionSubscriberWired = true;
+  setAppsFlyerConversionSubscriber(() => {
+    void recordAcquisitionAttribution();
+  });
+}
+
+// ── Internal paywall/checkout funnel telemetry (item 3) ─────────────────────
+// Recorded in our OWN DB for EVERY event (independent of the AppsFlyer ever-paid
+// gate), so the paywall_viewed → checkout_started → trial/subscription → purchase
+// funnel is measurable without AppsFlyer. All platforms (native + web). No
+// sensitive payment data — only the surface/plan/store/platform. Fail-safe.
+async function recordPaywallViewedInternal(source?: string): Promise<void> {
+  try {
+    await supabase.rpc('record_paywall_viewed', {
+      p_source: source ?? null,
+      p_platform: platformName(),
+    });
+  } catch {
+    // never throw from analytics
+  }
+}
+
+async function recordCheckoutStartedInternal(plan: 'essential' | 'plus'): Promise<void> {
+  try {
+    await supabase.rpc('record_checkout_started', {
+      p_plan: plan,
+      p_store: storeName() ?? null,
+      p_platform: platformName(),
+    });
+  } catch {
+    // never throw from analytics
+  }
+}
+
 /**
  * af_complete_registration — fired exactly once for a genuinely new account.
  * The server RPC decides (never on login/restore, never on a second device,
@@ -117,9 +195,12 @@ export async function trackRegistrationCompleted(): Promise<void> {
 export async function syncAppsFlyerIdentityAndRegistration(userId: string | null): Promise<void> {
   if (!isAppsFlyerSupported()) return;
   resetAppsFlyerMarketingCache();
+  attributionUserId = userId; // whom to attribute; sign-out (null) parks it, no-op
+  ensureAttributionSubscriber(); // catch attribution that arrives after this sync
   await setAppsFlyerCustomerUserId(userId); // never rejects; resolves after the CUID is set
   if (userId) {
     await trackRegistrationCompleted();
+    void recordAcquisitionAttribution(); // persist whatever attribution already arrived
   }
 }
 
@@ -171,6 +252,10 @@ export async function trackActivityCompleted(activityType: AppsFlyerActivityType
  * navigation away). `source` (optional) = which surface/limit routed here.
  */
 export async function trackPaywallViewed(source?: string): Promise<void> {
+  // Internal funnel telemetry first — recorded on every platform and even after
+  // the first payment (unlike the AppsFlyer send below), so the paywall funnel
+  // is fully measurable in our own DB.
+  void recordPaywallViewedInternal(source);
   if (!isAppsFlyerSupported()) return;
   try {
     if (!(await marketingAllowed())) return;
@@ -187,6 +272,8 @@ export async function trackPaywallViewed(source?: string): Promise<void> {
  * revenue flows via RevenueCat→AppsFlyer).
  */
 export async function trackCheckoutStarted(plan: 'essential' | 'plus'): Promise<void> {
+  // Internal funnel telemetry first — see trackPaywallViewed.
+  void recordCheckoutStartedInternal(plan);
   if (!isAppsFlyerSupported()) return;
   try {
     if (!(await marketingAllowed())) return;
