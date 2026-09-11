@@ -89,6 +89,40 @@ No new Vercel function: the sweep is a `case` in the existing consolidated
 dispatcher `api/internal/listening/[...slug].ts` (12/12 Hobby cap). The open
 endpoint folds onto `grammar-explanation.ts` via `?__lemonRoute=behavioral-push-open`.
 
+### Scaling: keyset pagination, time budget & draining
+
+The sweep covers the **entire** eligible population — there is no fixed
+1000-user cap. Mechanics:
+
+- **Keyset pagination.** `behavioral_push_candidates` pages by
+  `user_id > p_after_user_id ORDER BY user_id LIMIT p_limit` (stable cursor, no
+  `OFFSET`). Within one invocation the sweep advances `cursor` to the last
+  `user_id` of each page until a short page (drained) or the time budget.
+- **Time budget.** `SWEEP_TIME_BUDGET_MS` (240s) < Vercel `maxDuration` (300s).
+  The sweep checks the deadline before each page **and** before each candidate,
+  so worst-case overrun is one candidate. On timeout it stops cleanly and
+  returns `hasMore:true` + `nextCursor`.
+- **Draining across invocations.** State lives in the DB, not in the caller: the
+  candidates pre-filter excludes anyone with a row for `(user_id, local_date)`
+  today (any status). So a later invocation — whether it resumes with
+  `?after=<nextCursor>` or just starts fresh (`after` omitted) — processes only
+  the not-yet-decided remainder. `UNIQUE(user_id, local_date)` + the atomic
+  claim make re-processing a no-op; **nobody is pushed twice.**
+- **Same copy all day.** `selectDailyPushCopy(local_date)` is computed once per
+  invocation and is deterministic from the date, so every batch of every
+  invocation on the same `local_date` sends the identical copy.
+
+Response: `{ processed, batches, sent, failed, skipped, dryRun, claimed,
+hasMore, nextCursor, durationMs, environment, spDate }`.
+
+**Cron for a large base.** Because each tick drains the remainder idempotently,
+full coverage comes from scheduling **several ticks inside the 20:00 SP window**
+rather than one long run — e.g. `*/3 23 * * *` (every 3 min, 23:00–23:59 UTC ≈
+20:00–20:59 SP). No queue/worker needed. If a single tick ever exhausts its time
+budget, the next tick continues; the last ticks of the window simply find 0
+candidates and no-op. (`nextCursor` also allows an operator to resume a specific
+run manually via `?after=`.)
+
 ### Homolog / prod isolation
 
 There is a **single** OneSignal app across environments. Isolation comes from:

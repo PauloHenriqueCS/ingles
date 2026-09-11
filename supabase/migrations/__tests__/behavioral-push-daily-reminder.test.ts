@@ -69,3 +69,35 @@ describe('20260911120000 — drop the reactivation lookback gate (dormancy never
     expect(sql).not.toContain('p_cooldown_hours)');
   });
 });
+
+describe('20260911130000 — keyset pagination (scalability, no OFFSET, no fixed cap)', () => {
+  const sql = read('20260911130000_behavioral_push_candidates_keyset.sql');
+  const whereClause = sql.slice(sql.lastIndexOf('LEFT JOIN last_act'));
+
+  it('paginates by a stable keyset cursor on user_id, not OFFSET', () => {
+    expect(sql).toMatch(/p_after_user_id uuid DEFAULT NULL/);
+    expect(whereClause).toContain('a.user_id > p_after_user_id');
+    expect(sql).toContain('ORDER BY a.user_id');
+    expect(sql).toContain('LIMIT p_limit');
+    // No OFFSET pagination and no p_offset parameter (that was the old,
+    // non-scalable strategy). Note: the header COMMENT explains the removal, so
+    // we assert on the executable shapes, not the word in prose.
+    expect(sql).not.toMatch(/LIMIT\s+p_limit\s+OFFSET/i);
+    expect(sql).not.toMatch(/p_offset\s+int/);
+  });
+
+  it('drops the old int-offset signature and re-grants the new uuid one', () => {
+    expect(sql).toMatch(/DROP FUNCTION IF EXISTS public\.behavioral_push_candidates\(date, int, int, int, int\)/);
+    expect(sql).toMatch(/GRANT EXECUTE ON FUNCTION public\.behavioral_push_candidates\(date, int, int, uuid\) TO service_role/);
+  });
+
+  it('does NOT change eligibility: gates + idempotency preserved, still no bound/cooldown', () => {
+    expect(whereClause).toContain('EXTRACT(DOW FROM p_local_date)');
+    expect(whereClause).toContain('tg.user_id IS NULL');
+    expect(whereClause).toMatch(/NOT EXISTS \([\s\S]*behavioral_push_events e[\s\S]*local_date = p_local_date/);
+    expect(whereClause).toContain('user_account_deactivations');
+    expect(whereClause).toContain('user_communication_blocks');
+    expect(whereClause).not.toContain('account_created_date >='); // no reactivation bound
+    expect(sql).not.toContain('make_interval(hours => p_cooldown_hours)'); // no cooldown
+  });
+});
