@@ -38,8 +38,20 @@ export const BEHAVIORAL_PUSH = {
    *  excludes a user (owner decision 2026-09-11). A user inactive for 31/60/90
    *  days is still eligible; the snapshot for them is simply empty. */
   SNAPSHOT_LOOKBACK_DAYS: 30,
-  /** Max users processed per sweep tick (bounded; the sweep paginates). */
-  SWEEP_BATCH_SIZE: 200,
+  /** Rows fetched per keyset page. Small enough to keep the time-budget check
+   *  fine-grained and each candidates query cheap; the sweep pages until the
+   *  population is drained or the time budget runs out — there is NO fixed cap
+   *  on total users per invocation. */
+  SWEEP_BATCH_SIZE: 100,
+  /** Wall-clock budget (ms) for a single sweep invocation. Vercel maxDuration is
+   *  300s (see vercel.json); we stop cleanly well under it, reporting hasMore +
+   *  nextCursor so a later invocation resumes. pg_cron calls via pg_net
+   *  fire-and-forget, so the function owns the full 300s. */
+  SWEEP_TIME_BUDGET_MS: 240_000,
+  /** Absolute backstop on pages per invocation — a runaway guard only, set far
+   *  above any real population reachable inside the time budget (100 * 100k =
+   *  10M users). The real stop conditions are "drained" or "time budget". */
+  SWEEP_SAFETY_MAX_BATCHES: 100_000,
 } as const;
 
 /** 'practice_reminder_behavioral' is the only type produced in v2; the other two

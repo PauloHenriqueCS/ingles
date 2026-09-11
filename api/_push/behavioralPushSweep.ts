@@ -32,9 +32,9 @@ import { sendBehavioralPush } from './oneSignalServer';
 import { shouldRealSend, resolveUserInterfaceLanguage, type SendGateConfig } from './behavioralPushConfig';
 
 const LOG = 'internal/listening/behavioral-push-sweep';
-/** Max candidate batches processed per invocation — keeps the request short;
- *  pg_cron re-runs within the 20:00 window pick up any remainder. */
-const MAX_BATCHES = 5;
+
+/** Basic UUID shape guard for the optional resume cursor (?after=). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface CandidateRow {
   user_id: string;
@@ -96,42 +96,80 @@ export async function handleBehavioralPushSweep(req: any, res: any): Promise<voi
 
     // Global daily copy — the SAME for every eligible user on this local_date;
     // rotates to the next entry tomorrow (deterministic from the date alone).
+    // Computed ONCE so every batch of every invocation on this date is identical.
     const dailyCopy = selectDailyPushCopy(spDate);
 
     const limit = BEHAVIORAL_PUSH.SWEEP_BATCH_SIZE;
-    let offset = 0;
+    const deadline = startedAt + BEHAVIORAL_PUSH.SWEEP_TIME_BUDGET_MS;
 
-    for (let batch = 0; batch < MAX_BATCHES; batch++) {
+    // KEYSET pagination by user_id. Optional ?after=<uuid> resumes an earlier
+    // invocation that stopped on the time budget; omitted → start from the
+    // beginning (the candidates pre-filter already excludes anyone claimed today,
+    // so a fresh start naturally drains only the not-yet-decided remainder).
+    const afterParam = typeof req.query?.after === 'string' && UUID_RE.test(req.query.after)
+      ? req.query.after
+      : null;
+    let cursor: string | null = afterParam;
+    let hasMore = false;
+    let batches = 0;
+
+    for (let batch = 0; batch < BEHAVIORAL_PUSH.SWEEP_SAFETY_MAX_BATCHES; batch++) {
+      // Time budget: stop cleanly BEFORE fetching another batch if we're near the
+      // function's wall-clock limit. Whatever remains is picked up by a later
+      // invocation (resume via cursor, or a fresh start that skips claimed rows).
+      if (Date.now() >= deadline) { hasMore = true; break; }
+
       const { data, error } = await supabase.rpc('behavioral_push_candidates', {
         p_local_date: spDate,
         // Snapshot window only (streak/last_activity) — NOT an eligibility gate:
-        // dormancy never excludes a user. p_cooldown_hours intentionally omitted
-        // (the 72h cooldown was removed); idempotency by (user_id, local_date)
-        // guards against a second push the same day.
+        // dormancy never excludes a user.
         p_lookback_days: BEHAVIORAL_PUSH.SNAPSHOT_LOOKBACK_DAYS,
         p_limit: limit,
-        p_offset: offset,
+        p_after_user_id: cursor,
       });
       if (error) {
         safeLog(LOG, 'candidates_error', 500, { error: error.message });
+        // Unknown remainder — signal a resume so a later run continues.
+        hasMore = true;
         break;
       }
       const rows = (data ?? []) as CandidateRow[];
-      if (rows.length === 0) break;
+      if (rows.length === 0) break; // drained: no more eligible candidates
+      batches++;
       stats.candidates += rows.length;
+      cursor = rows[rows.length - 1].user_id; // advance keyset cursor
 
       for (const row of rows) {
+        // Per-candidate budget check keeps worst-case overrun to one candidate,
+        // not one whole batch, even if OneSignal is slow.
+        if (Date.now() >= deadline) { hasMore = true; break; }
         await processCandidate(supabase, row, spDate, environment, gate, dailyCopy, stats);
       }
+      if (hasMore) break;
 
+      // A short final page means the population is drained.
       if (rows.length < limit) break;
-      offset += limit;
     }
 
     const durationMs = Date.now() - startedAt;
     const dryRunMode = !gate.enabled || gate.dryRun;
-    safeLog(LOG, 'sweep_done', 200, { ...stats, durationMs, environment, dryRunMode });
-    return res.status(200).json({ success: true, ...stats, durationMs, environment, spDate });
+    const nextCursor = hasMore ? cursor : null;
+    safeLog(LOG, 'sweep_done', 200, { ...stats, batches, hasMore, durationMs, environment, dryRunMode });
+    return res.status(200).json({
+      success: true,
+      processed: stats.candidates,
+      batches,
+      claimed: stats.claimed,
+      sent: stats.sent,
+      failed: stats.failed,
+      skipped: stats.skipped,
+      dryRun: stats.dryRun,
+      hasMore,
+      nextCursor,
+      durationMs,
+      environment,
+      spDate,
+    });
   } catch (err) {
     safeLog(LOG, 'sweep_error', 500, {
       error: err instanceof Error ? err.message : String(err),
