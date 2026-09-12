@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- AppsFlyer SKAdNetwork / AdAttributionKit postback-copy endpoint. Sends a
+	     copy of iOS 15+ SKAN/AdAttributionKit postbacks to AppsFlyer so SKAN
+	     attribution shows up in the AppsFlyer dashboard. AttributionCopyEndpoint
+	     is the AdAttributionKit (iOS 17.4+) equivalent of the older
+	     NSAdvertisingAttributionReportEndpoint (see the NS* key below). -->
+	<key>AttributionCopyEndpoint</key>
+	<string>https://appsflyer-skadnetwork.com/</string>
 	<key>CAPACITOR_DEBUG</key>
 	<string>$(CAPACITOR_DEBUG)</string>
 	<key>CFBundleDevelopmentRegion</key>
@@ -52,6 +59,12 @@
 	     Xcode SPM resolution time). Orodim never calls the location API, so this
 	     prompt is not shown to users; the string exists only to satisfy Apple's
 	     purpose-string requirement for the symbol present in the binary. -->
+	<!-- AppsFlyer SKAdNetwork postback-copy endpoint (iOS 15+). Apple sends a
+	     copy of the SKAN postback to this URL in addition to the ad network, so
+	     AppsFlyer can report SKAN conversions. Paired with AttributionCopyEndpoint
+	     above for AdAttributionKit (iOS 17.4+). -->
+	<key>NSAdvertisingAttributionReportEndpoint</key>
+	<string>https://appsflyer-skadnetwork.com/</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>O Orodim pode usar sua localização aproximada para tornar as notificações e recomendações de estudo mais relevantes. O app funciona normalmente sem esse acesso.</string>
 	<key>NSMicrophoneUsageDescription</key>
