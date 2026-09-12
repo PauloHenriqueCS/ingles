@@ -16,8 +16,10 @@
 --
 -- REGRAS:
 --   * Nunca inventa valores: campo ausente na conversion-data → NULL.
---   * Orgânico identificável: is_organic derivado de af_status='Organic' (ou, na
---     ausência, media_source ausente/'organic').
+--   * Orgânico SÓ com evidência EXPLÍCITA: is_organic=true apenas quando
+--     af_status='Organic' (ou media_source='organic' literal). Sem af_status e
+--     sem media_source → NULL (desconhecido). NUNCA infere orgânico apenas pela
+--     ausência de media_source.
 --   * Não faz "downgrade" de uma atribuição paga já conhecida (is_organic=false)
 --     para orgânica/desconhecida numa re-leitura posterior.
 --   * Sem PII — a conversion-data do AppsFlyer só carrega campos de atribuição.
@@ -83,8 +85,10 @@ BEGIN
   v_status := NULLIF(c->>'af_status', '');
   v_media  := NULLIF(c->>'media_source', '');
 
-  -- Orgânico quando o AppsFlyer diz que é; senão, quando não há media_source
-  -- paga. Desconhecido (NULL) quando nenhum dos dois chegou.
+  -- Orgânico SÓ com evidência explícita: af_status='Organic', ou media_source
+  -- literalmente 'organic'. media_source paga (ex.: googleadwords_int) → false.
+  -- Sem af_status e sem media_source → NULL. Nunca infere orgânico pela mera
+  -- ausência de media_source.
   v_is_org := CASE
     WHEN v_status IS NOT NULL THEN lower(v_status) = 'organic'
     WHEN v_media  IS NOT NULL THEN lower(v_media) = 'organic'
