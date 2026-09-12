@@ -14,6 +14,7 @@ import {
   isPracticeReminderSupported,
 } from './lib/notifications/practiceReminderService';
 import { useAppsFlyerIdentitySync } from './hooks/useAppsFlyerIdentitySync';
+import { useDeviceProfileSync } from './hooks/useDeviceProfileSync';
 import { supabase } from './lib/supabase';
 import { installAccountDeactivationGuard } from './lib/accountDeactivationGuard';
 import { endSessionAfterAccountDeletion } from './lib/accountSessionCleanup';
@@ -81,6 +82,7 @@ export default function App() {
   useRevenueCatIdentitySync(user?.id);
   useOneSignalIdentitySync(user?.id);
   useAppsFlyerIdentitySync(user?.id);
+  useDeviceProfileSync(user?.id); // runtime platform/app-version → Supabase (independent of AppsFlyer)
   // Behavioral push (streak_risk / abandonment): a tap routes to Home (the push
   // is general — "faça uma atividade", not a specific one) and reports the open
   // (cold-start safe). Separate from the local practice reminder's tap handler.
