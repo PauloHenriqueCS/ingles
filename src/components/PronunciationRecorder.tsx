@@ -17,6 +17,7 @@ import {
 } from '../lib/pronunciationFlow';
 import { ENTITLEMENT_MESSAGES } from '../domain/entitlements/entitlement-messages';
 import { formatDailyRemaining } from '../domain/entitlements/entitlement-formatting';
+import { trackActivityCompleted } from '../lib/analytics/appsFlyerEvents';
 
 interface Props {
   referenceText: string;
@@ -153,7 +154,16 @@ export default function PronunciationRecorder({ referenceText, reviewId }: Props
         // Fresh diary analysis just completed & persisted. This callback only
         // runs during an active flow, so restoring an existing assessment on
         // mount (the statusData effect) never reaches here.
-        if (state.phase === 'completed') celebration.notifyActivityCompleted('pronunciation');
+        if (state.phase === 'completed') {
+          celebration.notifyActivityCompleted('pronunciation');
+          // AppsFlyer funnel (GAP A fix): the diary/writing-phrase pronunciation
+          // path writes to pronunciation_assessments and, until now, never told
+          // the marketing funnel about it — so a user whose FIRST completed
+          // activity was a diary pronunciation got no first_activity_completed.
+          // The standalone trainer (PronunciationTrainingView) already tracks;
+          // this mirrors it. Fire-and-forget, native-only, idempotent server-side.
+          void trackActivityCompleted('pronunciation');
+        }
       },
     );
   }, [reviewId, recorder.audioBlob, recorder.durationMs, pronunciationDisabledByPlan, evaluationsBlocked]);

@@ -75,7 +75,7 @@ describe('Pronunciation training — only the fresh analysis, once', () => {
 describe('Pronunciation diary — only the fresh flow, never the mount-restore', () => {
   it('notifies inside the runAnalysisFlow progress callback on phase === completed', () => {
     expect(pronDiary).toMatch(
-      /if \(state\.phase === 'completed'\) celebration\.notifyActivityCompleted\('pronunciation'\)/,
+      /if \(state\.phase === 'completed'\) \{[\s\S]{0,400}?celebration\.notifyActivityCompleted\('pronunciation'\)/,
     );
   });
   it('the statusData mount-restore effect does NOT contain a celebration call', () => {
