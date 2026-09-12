@@ -17,7 +17,9 @@ vi.mock('appsflyer-capacitor-plugin', () => ({
   AppsFlyer: {
     initSDK: mockInitSDK,
     setCustomerUserId: mockSetCustomerUserId,
+    addListener: () => Promise.resolve({ remove: () => undefined }),
   },
+  AFConstants: { CONVERSION_CALLBACK: 'conversion_callback' },
 }));
 
 import {
