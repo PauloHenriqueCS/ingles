@@ -16,6 +16,11 @@ vi.mock('./appsFlyerClient', () => ({
   isAppsFlyerSupported: () => mockSupported(),
   logAppsFlyerEvent: (...args: unknown[]) => mockLogEvent(...args),
   setAppsFlyerCustomerUserId: (...args: unknown[]) => mockSetCUID(...args),
+  // Attribution capture surface (no conversion data / no AppsFlyer UID in unit
+  // tests → recordAcquisitionAttribution short-circuits before any RPC).
+  getCapturedConversionData: () => null,
+  setAppsFlyerConversionSubscriber: () => undefined,
+  getAppsFlyerUidSafe: () => Promise.resolve(null),
 }));
 
 // Pretend we're on native Android (drives store = play_store for checkout).
@@ -42,14 +47,22 @@ beforeEach(() => {
 });
 
 describe('appsFlyerEvents — web / unsupported (1)', () => {
-  it('does nothing on web: no RPC, no logEvent', async () => {
+  it('on web: no AppsFlyer SDK log and no AppsFlyer funnel RPC (internal telemetry is platform-independent)', async () => {
     mockSupported.mockReturnValue(false);
     await trackRegistrationCompleted();
     await trackActivityCompleted('writing');
     await trackPaywallViewed('gate');
     await trackCheckoutStarted('plus');
-    expect(mockRpc).not.toHaveBeenCalled();
+    // The native AppsFlyer SDK is never touched on web...
     expect(mockLogEvent).not.toHaveBeenCalled();
+    // ...and the AppsFlyer server-authoritative funnel RPCs never run on web.
+    expect(mockRpc).not.toHaveBeenCalledWith('claim_appsflyer_registration');
+    expect(mockRpc).not.toHaveBeenCalledWith('claim_appsflyer_activity_events', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('appsflyer_marketing_allowed');
+    // Internal paywall/checkout funnel telemetry IS recorded in our own DB
+    // regardless of platform (that is the point — measurable without AppsFlyer).
+    expect(mockRpc).toHaveBeenCalledWith('record_paywall_viewed', expect.anything());
+    expect(mockRpc).toHaveBeenCalledWith('record_checkout_started', expect.anything());
   });
 });
 
@@ -145,12 +158,16 @@ describe('ever-paid stop rule (10,11,12)', () => {
     expect(mockLogEvent).toHaveBeenCalledWith('paywall_viewed', { source: 'gate' });
   });
 
-  it('gate is sticky: once blocked, no further RPC round-trips', async () => {
+  it('gate is sticky: the ever-paid gate is queried once and no AppsFlyer event is logged', async () => {
     mockRpc.mockResolvedValue(ok(false));
     await trackPaywallViewed();
     await trackCheckoutStarted('essential');
-    // Exactly one gate call — the cached false short-circuits the second.
-    expect(mockRpc).toHaveBeenCalledTimes(1);
+    // The ever-paid gate is queried at most once — the cached false short-circuits
+    // the second send. (Internal funnel telemetry is separate and intentionally
+    // NOT gated, so total RPC count is not asserted here.)
+    const gateCalls = mockRpc.mock.calls.filter((c) => c[0] === 'appsflyer_marketing_allowed');
+    expect(gateCalls).toHaveLength(1);
+    expect(mockLogEvent).not.toHaveBeenCalled();
   });
 });
 
