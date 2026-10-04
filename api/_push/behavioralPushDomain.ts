@@ -132,9 +132,9 @@ export function countMissedConfiguredDays(
  * environmental gates (entitlement, exclusions, idempotency, dry-run, timezone
  * window) are enforced by the sweep + SQL around this.
  *
- * Rule: eligible iff (a) the user has NOT practiced today AND (b) today is a
- * configured practice weekday. No streak/abandonment gating. `streak` is still
- * returned as a snapshot for analytics.
+ * Rule: eligible iff the user has NOT practiced today — every day of the week,
+ * regardless of the configured practice weekdays. No streak/abandonment gating.
+ * `streak` is still returned as a snapshot for analytics.
  */
 export function decideBehavioralPush(input: BehavioralPushCandidateInput): BehavioralPushDecision {
   const streak = computeWeekdayStreak(input.activeDates, input.localDate, input.activeWeekdays);
@@ -142,12 +142,6 @@ export function decideBehavioralPush(input: BehavioralPushCandidateInput): Behav
   // Already practiced today → never a behavioral push (server-authoritative
   // don't-nag rule). Belt-and-suspenders: the sweep pre-filters these out too.
   if (input.practicedToday) {
-    return { pushType: null, streak, missedStudyDays: 0 };
-  }
-
-  // Only ever send on a CONFIGURED practice day (also enforced in SQL).
-  const todayIsConfigured = input.activeWeekdays.includes(weekdayOf(input.localDate));
-  if (!todayIsConfigured) {
     return { pushType: null, streak, missedStudyDays: 0 };
   }
 

@@ -299,7 +299,7 @@ describe('handleBehavioralPushSweep — behaviour (unchanged rules)', () => {
     expect(sent.p_onesignal_notification_id).toBe('notif-1');
   });
 
-  it('H: force=1 still runs the product gates — entitlement failure blocks the send', async () => {
+  it('H: no entitlement gate — a user without an active plan/trial still gets the push', async () => {
     h.entitlements.mockResolvedValue({
       writing: { enabled: false }, listening: { enabled: false },
       pronunciation: { enabled: false }, conversation: { enabled: false },
@@ -307,12 +307,28 @@ describe('handleBehavioralPushSweep — behaviour (unchanged rules)', () => {
     h.client = makeClient({
       behavioral_push_candidates: (a: any) => ({ data: a.p_after_user_id ? [] : [CANDIDATE], error: null }),
       behavioral_push_claim: () => ({ data: 'claim-1', error: null }),
+      behavioral_push_revalidate: () => ({ data: true, error: null }),
+      behavioral_push_mark: () => ({ data: true, error: null }),
     });
 
     await handleBehavioralPushSweep(req(), res());
-    expect(callsOf(h.client, 'behavioral_push_candidates').length).toBeGreaterThanOrEqual(1);
-    expect(callsOf(h.client, 'behavioral_push_claim')).toHaveLength(0);
+    expect(callsOf(h.client, 'behavioral_push_claim')).toHaveLength(1);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.entitlements).not.toHaveBeenCalled();
+  });
+
+  it('H2: communication block still stops the send (suppression gate kept)', async () => {
+    h.canSend.mockResolvedValue(false);
+    h.client = makeClient({
+      behavioral_push_candidates: (a: any) => ({ data: a.p_after_user_id ? [] : [CANDIDATE], error: null }),
+      behavioral_push_claim: () => ({ data: 'claim-1', error: null }),
+      behavioral_push_revalidate: () => ({ data: true, error: null }),
+      behavioral_push_mark: () => ({ data: true, error: null }),
+    });
+
+    await handleBehavioralPushSweep(req(), res());
     expect(h.send).not.toHaveBeenCalled();
+    expect(markCalls(h.client, 'skipped')[0].args.p_failure_code).toBe('communication_blocked');
   });
 
   it('dry-run mode (flag off): claims + marks dry_run, never calls OneSignal', async () => {
