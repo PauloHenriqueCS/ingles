@@ -66,14 +66,14 @@ describe('decideBehavioralPush — v2 daily practice reminder', () => {
   });
 
   // C. today is not a configured practice day → not eligible (even with a streak).
-  it('C: non-configured day → no push even with a live streak', () => {
+  it('C: every day of the week — a non-configured day still gets the push', () => {
     const d = decideBehavioralPush(
       input({
         localDate: '2026-09-12', // Sat, not in MON_FRI
         activeDates: ['2026-09-07', '2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11'],
       }),
     );
-    expect(d.pushType).toBeNull();
+    expect(d.pushType).toBe('practice_reminder_behavioral');
   });
 
   it('eligibility does NOT depend on streak: streak 0 on a configured day is still eligible', () => {
@@ -117,9 +117,14 @@ describe('decideBehavioralPush — dormancy never excludes (no lookback gate)', 
     expect(d.pushType).toBeNull();
   });
 
-  it('scenario 5: outside active_weekdays → blocked (dormant or not)', () => {
+  it('scenario 5: outside active_weekdays → still eligible (every day of the week)', () => {
     // 2026-09-13 is a Sunday (0), not in MON_FRI.
     const d = decideBehavioralPush(input({ localDate: '2026-09-13', activeDates: ['2026-06-16'] }));
-    expect(d.pushType).toBeNull();
+    expect(d.pushType).toBe('practice_reminder_behavioral');
+  });
+
+  it('scenario 6: never practiced and no configured weekdays → eligible', () => {
+    const d = decideBehavioralPush(input({ localDate: '2026-09-13', activeDates: [], activeWeekdays: [] }));
+    expect(d.pushType).toBe('practice_reminder_behavioral');
   });
 });

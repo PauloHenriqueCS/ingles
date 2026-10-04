@@ -5,8 +5,8 @@
  * function (the project is at 12/12 on Hobby). Authentication (CRON_SECRET) is
  * enforced by the dispatcher before this runs.
  *
- * Flow per candidate: decide type (pure, reuses Home's streak math) → verify
- * entitlement (existing server-authoritative logic) → resolve language + copy →
+ * Flow per candidate: decide type (pure, reuses Home's streak math) → resolve
+ * language + copy →
  * ATOMIC claim (DB unique = last line of defense) → immediate revalidation
  * (race with a 20:00 completion / cooldown) → real send OR dry_run → mark.
  *
@@ -24,7 +24,6 @@ import {
   getOneSignalServerAppId,
   getOneSignalRestApiKey,
 } from '../_env';
-import { getCurrentUserPlanEntitlements } from '../_entitlements/plan-entitlements-service';
 import { canSendCommunication } from '../_account/communication-suppression';
 import { BEHAVIORAL_PUSH, decideBehavioralPush } from './behavioralPushDomain';
 import { selectDailyPushCopy, resolvePushLanguage, type PushCopy } from './behavioralPushCopy';
@@ -188,8 +187,10 @@ async function processCandidate(
   copy: PushCopy,
   stats: SweepStats,
 ): Promise<void> {
-  // 1. Decide (pure). v2: eligible iff not-practiced-today AND today is a
-  //    configured practice weekday. streak is a snapshot only.
+  // 1. Decide (pure): eligible iff not-practiced-today, every day of the week.
+  //    No entitlement gate: users without an active plan/trial also get the
+  //    reminder. Blocks/deactivations are excluded in SQL and by the
+  //    suppression gate below. streak is a snapshot only.
   const decision = decideBehavioralPush({
     userId: row.user_id,
     activeWeekdays: row.active_weekdays ?? [],
@@ -200,23 +201,11 @@ async function processCandidate(
   });
   if (!decision.pushType) return;
 
-  // 2. Entitlement — must have >= 1 accessible practice modality right now.
-  //    Fail closed: if we can't verify, don't send.
-  let canPractice = false;
-  try {
-    const ent = await getCurrentUserPlanEntitlements(row.user_id);
-    canPractice =
-      ent.writing.enabled || ent.listening.enabled || ent.pronunciation.enabled || ent.conversation.enabled;
-  } catch {
-    return;
-  }
-  if (!canPractice) return;
-
-  // 3. Interface language (recorded as a snapshot for analytics only — the copy
+  // 2. Interface language (recorded as a snapshot for analytics only — the copy
   //    itself is the GLOBAL daily rotation, identical for every user today).
   const language = resolvePushLanguage(await resolveUserInterfaceLanguage(supabase, row.user_id));
 
-  // 4. Atomic claim (ON CONFLICT (user_id, local_date) DO NOTHING). Persists the
+  // 3. Atomic claim (ON CONFLICT (user_id, local_date) DO NOTHING). Persists the
   //    exact copy variant + title/body snapshot so the Dashboard can reproduce
   //    the day's message without recomputing the rotation.
   let claimId: string | null = null;
@@ -246,7 +235,7 @@ async function processCandidate(
   if (!claimId) return; // lost the race / already decided today
   stats.claimed++;
 
-  // 5. Immediate revalidation (race with a 20:00 completion). Fresh not-practiced
+  // 4. Immediate revalidation (race with a 20:00 completion). Fresh not-practiced
   //    -today check only — the 72h cooldown was removed.
   try {
     const { data: stillEligible } = await supabase.rpc('behavioral_push_revalidate', {
@@ -264,14 +253,14 @@ async function processCandidate(
     return;
   }
 
-  // 6. Real send vs dry-run.
+  // 5. Real send vs dry-run.
   if (!shouldRealSend(row.user_id, gate)) {
     await mark(supabase, claimId, 'dry_run', {});
     stats.dryRun++;
     return;
   }
 
-  // 7. Suppression gate immediately before the actual send (fails closed).
+  // 6. Suppression gate immediately before the actual send (fails closed).
   const allowed = await canSendCommunication({ userId: row.user_id, channel: 'push', scope: 'marketing' });
   if (!allowed) {
     await mark(supabase, claimId, 'skipped', { failureCode: 'communication_blocked' });
@@ -279,7 +268,7 @@ async function processCandidate(
     return;
   }
 
-  // 8. Send. Only a genuine provider success counts as 'sent'.
+  // 7. Send. Only a genuine provider success counts as 'sent'.
   const result = await sendBehavioralPush({
     appId: gate.appId,
     restApiKey: gate.restApiKey,
