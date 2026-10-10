@@ -4,8 +4,8 @@ import { COMMERCIAL_PLANS, COMMERCIAL_PLAN_ORDER, RECOMMENDED_PLAN_CODE, TRIAL_D
 describe('COMMERCIAL_PLANS.essential', () => {
   const essential = COMMERCIAL_PLANS.essential;
 
-  it('prices at R$ 34,90 (3490 cents)', () => {
-    expect(essential.priceCents).toBe(3490);
+  it('prices at R$ 59,90 (5990 cents)', () => {
+    expect(essential.priceCents).toBe(5990);
   });
 
   it('grants 1 writing / 1 pronunciation / 1 listening per day', () => {
@@ -14,8 +14,8 @@ describe('COMMERCIAL_PLANS.essential', () => {
     expect(essential.listeningPerDay).toBe(1);
   });
 
-  it('grants 30 conversation minutes per month, and allows extra minute packages', () => {
-    expect(essential.conversationMinutesMonthly).toBe(30);
+  it('grants 200 conversation minutes per month, and allows extra minute packages', () => {
+    expect(essential.conversationMinutesMonthly).toBe(200);
     expect(essential.allowsExtraMinutePackages).toBe(true);
   });
 });
@@ -23,8 +23,8 @@ describe('COMMERCIAL_PLANS.essential', () => {
 describe('COMMERCIAL_PLANS.plus', () => {
   const plus = COMMERCIAL_PLANS.plus;
 
-  it('prices at R$ 59,90 (5990 cents)', () => {
-    expect(plus.priceCents).toBe(5990);
+  it('prices at R$ 99,90 (9990 cents)', () => {
+    expect(plus.priceCents).toBe(9990);
   });
 
   it('grants 3 writings / 3 pronunciations / 3 listenings per day', () => {
@@ -33,8 +33,8 @@ describe('COMMERCIAL_PLANS.plus', () => {
     expect(plus.listeningPerDay).toBe(3);
   });
 
-  it('grants 70 conversation minutes per month', () => {
-    expect(plus.conversationMinutesMonthly).toBe(70);
+  it('grants 400 conversation minutes per month', () => {
+    expect(plus.conversationMinutesMonthly).toBe(400);
   });
 
   it('allows extra minute packages, same as Essencial', () => {

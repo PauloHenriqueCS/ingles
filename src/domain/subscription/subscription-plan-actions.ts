@@ -22,7 +22,7 @@ import type { CommercialPlanCode, SubscriptionScreenState } from './subscription
  */
 export type PlanCardAction = 'subscribe' | 'current' | 'upgrade' | 'downgrade' | 'next';
 
-/** Tier ordering by price — essential (R$34,90) < plus (R$59,90). Higher rank
+/** Tier ordering by price — essential (R$59,90) < plus (R$99,90). Higher rank
  *  than the current plan is an upgrade, lower is a downgrade. */
 const PLAN_RANK: Record<CommercialPlanCode, number> = { essential: 1, plus: 2 };
 
