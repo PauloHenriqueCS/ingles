@@ -6,7 +6,7 @@ import { SUBSCRIPTION_MESSAGES } from './subscription-copy';
 describe('buildPlanBenefitLines — essential', () => {
   it('includes the defined monthly conversation minutes line', () => {
     const lines = buildPlanBenefitLines(COMMERCIAL_PLANS.essential, false);
-    expect(lines).toContain('30 minutos de conversação por mês');
+    expect(lines).toContain('200 minutos de conversação por mês');
     expect(lines).toHaveLength(4);
   });
 });
@@ -14,7 +14,7 @@ describe('buildPlanBenefitLines — essential', () => {
 describe('buildPlanBenefitLines — plus', () => {
   it('includes the defined monthly conversation minutes line', () => {
     const lines = buildPlanBenefitLines(COMMERCIAL_PLANS.plus, false);
-    expect(lines).toContain('70 minutos de conversação por mês');
+    expect(lines).toContain('400 minutos de conversação por mês');
     expect(lines).toHaveLength(4);
   });
 
